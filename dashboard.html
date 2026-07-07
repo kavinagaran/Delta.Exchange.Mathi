@@ -434,6 +434,19 @@ tbody td:first-child { text-align: left; }
   letter-spacing: 0.5px; align-self: flex-end; white-space: nowrap;
 }
 .tp-save-btn:hover { background: rgba(255,200,0,0.18); }
+.slot-card {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px;
+  margin-bottom: 14px;
+}
+.slot-card:last-child { margin-bottom: 0; }
+.slot-hd {
+  display: flex; justify-content: space-between; align-items: center;
+  font-size: 0.72rem; letter-spacing: 1px; text-transform: uppercase;
+  color: var(--muted); margin-bottom: 10px; font-weight: 700;
+}
+.slot-time { color: var(--gold); font-size: 0.68rem; }
 .today-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; table-layout: fixed; }
 .today-table th { padding: 8px 12px; color: var(--muted); font-size: 0.7rem;
                   letter-spacing: 1px; text-transform: uppercase; white-space: nowrap;
@@ -517,13 +530,19 @@ tbody td:first-child { text-align: left; }
   <!-- ── Middle ── -->
   <div class="mid-grid">
 
-    <!-- Current Position -->
+    <!-- Current Positions: morning + evening slots -->
     <div class="panel">
-      <div class="panel-hd">Current Position</div>
-      <div id="pos-content">
-        <div class="no-pos">
-          <span class="icon">⏳</span>
-          Connecting…
+      <div class="panel-hd">Trades</div>
+      <div class="slot-card">
+        <div class="slot-hd"><span>🌅 Morning Trade</span><span class="slot-time" id="slot-time-morning">5:45 AM IST</span></div>
+        <div id="pos-content-morning">
+          <div class="no-pos"><span class="icon">⏳</span>Connecting…</div>
+        </div>
+      </div>
+      <div class="slot-card">
+        <div class="slot-hd"><span>🌇 Evening Trade</span><span class="slot-time" id="slot-time-evening">5:35 PM IST</span></div>
+        <div id="pos-content-evening">
+          <div class="no-pos"><span class="icon">⏳</span>Connecting…</div>
         </div>
       </div>
     </div>
@@ -543,8 +562,21 @@ tbody td:first-child { text-align: left; }
         <input id="c-EXIT_H_UTC" type="number" min="0" max="23" placeholder="1">
         <label>Exit Minute IST</label>
         <input id="c-EXIT_M_UTC" type="number" min="0" max="59" placeholder="0">
-        <label>Lots (max 1000)</label>
+        <label>Evening Lots</label>
         <input id="c-STRADDLE_LOTS" type="number" min="1" max="1000" placeholder="1000">
+        <label>Morning Trade</label>
+        <select id="c-MORNING_ENABLED">
+          <option value="true">Enabled</option>
+          <option value="false">Disabled</option>
+        </select>
+        <label>Morning Hour IST</label>
+        <input id="c-MORNING_H_UTC" type="number" min="0" max="23" placeholder="5">
+        <label>Morning Minute IST</label>
+        <input id="c-MORNING_M_UTC" type="number" min="0" max="59" placeholder="45">
+        <label>Morning Lots</label>
+        <input id="c-MORNING_LOTS" type="number" min="1" max="5000" placeholder="2000">
+        <label>Max Trades / Day</label>
+        <input id="c-MAX_TRADES_PER_DAY" type="number" min="1" max="10" placeholder="3">
         <label>Strike Step ($)</label>
         <input id="c-STRIKE_STEP" type="number" min="50" placeholder="200">
         <label>Mode</label>
@@ -665,8 +697,71 @@ const fP = (v, dp=2) => {
 };
 const cls = v => +v >= 0 ? 'c-g' : 'c-r';
 
-// ── Status ──────────────────────────────────────────────────
+// ── Status ──────────────────────────────────────────
 let _lastBtcPrice = null;
+
+const SLOT_META = {
+  morning: { icon: '🌅', name: 'Morning' },
+  evening: { icon: '🌇', name: 'Evening' },
+};
+
+function tpWidgetHtml(slot) {
+  return `
+    <div class="tp-widget">
+      <div style="flex:1">
+        <div style="display:flex;align-items:center;justify-content:space-between">
+          <div class="tp-label">Take Profit Monitor</div>
+          <button class="tp-btn start" id="tp-btn-${slot}" onclick="toggleTpMonitor('${slot}')">START</button>
+        </div>
+        <div class="tp-status stopped" id="tp-status-${slot}" style="margin:4px 0 6px">Checking…</div>
+        <div class="tp-cfg-row">
+          <div class="tp-cfg-field">
+            <label>Target P&L ($)</label>
+            <input id="tp-target-${slot}" type="number" step="1">
+          </div>
+          <div class="tp-cfg-field">
+            <label>Poll (seconds)</label>
+            <input id="tp-poll-${slot}" type="number" step="5" min="10">
+          </div>
+          <button class="tp-save-btn" onclick="saveTpConfig('${slot}')">SAVE</button>
+        </div>
+      </div>
+    </div>`;
+}
+
+function slotCardHtml(s, slot) {
+  if (s && s.status === 'OPEN') {
+    return `
+      <table class="pos-table">
+        <tr><td class="lbl">Symbol</td><td class="val c-b">${s.symbol||'—'}</td></tr>
+        <tr><td class="lbl">Strike</td><td class="val">$${fN(s.strike)}</td></tr>
+        <tr><td class="lbl">Lots</td><td class="val">${s.lots||'—'}</td></tr>
+        <tr><td class="lbl">Entry Mark</td><td class="val">$${fN(s.entry_mark,4)}/BTC</td></tr>
+        <tr><td class="lbl">Current Mark</td><td class="val" style="color:var(--gold)">$${fN(s.current_mark,4)}/BTC</td></tr>
+        <tr><td class="lbl">Total Cost</td><td class="val">$${fN(s.total_cost_usd,2)}</td></tr>
+        <tr><td class="lbl">Settlement</td><td class="val c-m">${(s.settlement||'').replace('T',' ').replace('Z',' UTC')}</td></tr>
+        <tr><td class="lbl">Live P&L</td><td class="val ${cls(s.live_pnl)}">${f$(s.live_pnl)}</td></tr>
+      </table>
+      <button class="squareoff-btn" onclick="squareOff('${slot}')">⏹ SQUARE OFF</button>
+      ${tpWidgetHtml(slot)}`;
+  }
+  if (s && s.status === 'CLOSED') {
+    return `
+      <div class="no-pos">
+        <span class="icon">✅</span>
+        Closed at ${s.exit_time_utc||''} UTC
+        <div class="hint">${s.symbol||''}<br>P&L: <span class="${cls(s.pnl_usd)}">${f$(s.pnl_usd)}</span></div>
+      </div>`;
+  }
+  const when = slot === 'morning' ? '5:45 AM IST (00:15 UTC)' : '5:35 PM IST (12:05 UTC)';
+  return `
+    <div class="no-pos">
+      <span class="icon">⏳</span>
+      Waiting for entry window
+      <div class="hint">Entry: ${when}</div>
+    </div>`;
+}
+
 async function loadStatus() {
   try {
     const s = await fetch('/api/status').then(r => r.json());
@@ -685,75 +780,35 @@ async function loadStatus() {
       _lastBtcPrice = price;
     }
 
-    if (s.status === 'OPEN') {
+    const m = s.morning || {};
+    document.getElementById('pos-content-morning').innerHTML = slotCardHtml(m, 'morning');
+    document.getElementById('pos-content-evening').innerHTML = slotCardHtml(s, 'evening');
+
+    const openSlots = [['morning', m], ['evening', s]].filter(([, v]) => v.status === 'OPEN');
+    if (openSlots.length) {
       pill.className = 'status-pill pill-open';
-      txt.textContent = 'POSITION OPEN';
-      if (s.live_pnl != null) {
-        live.textContent = f$(s.live_pnl);
-        live.style.color = +s.live_pnl >= 0 ? 'var(--green)' : 'var(--red)';
-        lsub.textContent = `mark $${fN(s.current_mark, 2)}/BTC`;
-      }
-      document.getElementById('pos-content').innerHTML = `
-        <table class="pos-table">
-          <tr><td class="lbl">Symbol</td><td class="val c-b">${s.symbol||'—'}</td></tr>
-          <tr><td class="lbl">Strike</td><td class="val">$${fN(s.strike)}</td></tr>
-          <tr><td class="lbl">Lots</td><td class="val">${s.lots||1000}</td></tr>
-          <tr><td class="lbl">Entry Mark</td><td class="val">$${fN(s.entry_mark,4)}/BTC</td></tr>
-          <tr><td class="lbl">Current Mark</td><td class="val" style="color:var(--gold)">$${fN(s.current_mark,4)}/BTC</td></tr>
-          <tr><td class="lbl">BTC at Entry</td><td class="val">$${fN(s.btc_at_entry)}</td></tr>
-          <tr><td class="lbl">Total Cost</td><td class="val">$${fN(s.total_cost_usd,2)}</td></tr>
-          <tr><td class="lbl">Settlement</td><td class="val c-m">${(s.settlement||'').replace('T',' ').replace('Z',' UTC')}</td></tr>
-          <tr><td class="lbl">Live P&L</td>
-              <td class="val ${cls(s.live_pnl)}">${f$(s.live_pnl)}</td></tr>
-        </table>
-        <button class="squareoff-btn" id="squareoff-btn" onclick="squareOff()">
-          ⏹ SQUARE OFF POSITION
-        </button>
-        <div class="tp-widget" id="tp-widget">
-          <div style="flex:1">
-            <div style="display:flex;align-items:center;justify-content:space-between">
-              <div class="tp-label">Take Profit Monitor</div>
-              <button class="tp-btn start" id="tp-btn" onclick="toggleTpMonitor()">START</button>
-            </div>
-            <div class="tp-status stopped" id="tp-status-txt" style="margin:4px 0 6px">Checking…</div>
-            <div class="tp-cfg-row">
-              <div class="tp-cfg-field">
-                <label>Target P&amp;L ($)</label>
-                <input id="tp-target" type="number" step="1" placeholder="105" value="105">
-              </div>
-              <div class="tp-cfg-field">
-                <label>Poll (seconds)</label>
-                <input id="tp-poll" type="number" step="5" min="10" placeholder="30" value="30">
-              </div>
-              <button class="tp-save-btn" onclick="saveTpConfig()">SAVE</button>
-            </div>
-          </div>
-        </div>`;
-    } else if (s.status === 'CLOSED') {
+      txt.textContent = openSlots.length === 2 ? 'BOTH TRADES OPEN'
+        : (openSlots[0][0] === 'morning' ? 'MORNING TRADE OPEN' : 'EVENING TRADE OPEN');
+      const total = openSlots.reduce((a, [, v]) => a + (+v.live_pnl || 0), 0);
+      live.textContent = f$(total);
+      live.style.color = total >= 0 ? 'var(--green)' : 'var(--red)';
+      lsub.textContent = openSlots.map(([k]) => SLOT_META[k].icon + ' ' + SLOT_META[k].name).join('  ');
+    } else if (s.status === 'CLOSED' || m.status === 'CLOSED') {
       pill.className = 'status-pill pill-closed';
-      txt.textContent = 'CLOSED TODAY';
-      live.textContent = f$(s.pnl_usd);
-      live.style.color = +s.pnl_usd >= 0 ? 'var(--green)' : 'var(--red)';
-      lsub.textContent = `closed ${s.exit_time_utc||''} UTC`;
-      document.getElementById('pos-content').innerHTML = `
-        <div class="no-pos">
-          <span class="icon">✅</span>
-          Closed at ${s.exit_time_utc||''} UTC
-          <div class="hint">P&L: <span class="${cls(s.pnl_usd)}">${f$(s.pnl_usd)}</span></div>
-        </div>`;
+      txt.textContent = 'NO OPEN TRADE';
+      const closedPnl = (s.status === 'CLOSED' ? +s.pnl_usd || 0 : 0)
+                      + (m.status === 'CLOSED' ? +m.pnl_usd || 0 : 0);
+      live.textContent = f$(closedPnl);
+      live.style.color = closedPnl >= 0 ? 'var(--green)' : 'var(--red)';
+      lsub.textContent = 'closed today';
     } else {
       pill.className = 'status-pill pill-idle';
       txt.textContent = 'AWAITING ENTRY';
       live.textContent = '—';
       live.style.color = '';
       lsub.textContent = 'no open trade';
-      document.getElementById('pos-content').innerHTML = `
-        <div class="no-pos">
-          <span class="icon">⏳</span>
-          Waiting for entry window
-          <div class="hint">Entry: 5:35 PM IST (12:05 UTC)<br>Exit: 1:00 AM IST (19:30 UTC)</div>
-        </div>`;
     }
+    refreshTpStatus();
   } catch(e) { console.error(e); }
 }
 
@@ -787,6 +842,12 @@ async function loadConfig() {
       const ist = utcToIst(xH.value, xM.value);
       xH.value = ist.h; xM.value = ist.m;
     }
+    const mH = document.getElementById('c-MORNING_H_UTC');
+    const mM = document.getElementById('c-MORNING_M_UTC');
+    if (mH && mM && mH.value !== '') {
+      const ist = utcToIst(mH.value, mM.value);
+      mH.value = ist.h; mM.value = ist.m;
+    }
     updateDryBanner();
   } catch(e) { console.error(e); }
 }
@@ -802,7 +863,7 @@ function updateDryBanner() {
 }
 
 async function saveConfig() {
-  const keys = ['STRADDLE_LOTS','STRIKE_STEP','DRY_RUN'];
+  const keys = ['STRADDLE_LOTS','STRIKE_STEP','DRY_RUN','MORNING_ENABLED','MORNING_LOTS','MAX_TRADES_PER_DAY'];
   const body = {};
   for (const k of keys) {
     const el = document.getElementById('c-' + k);
@@ -820,6 +881,12 @@ async function saveConfig() {
   if (xH && xM) {
     const utc = istToUtc(xH.value, xM.value);
     body['EXIT_H_UTC'] = utc.h; body['EXIT_M_UTC'] = utc.m;
+  }
+  const mH = document.getElementById('c-MORNING_H_UTC');
+  const mM = document.getElementById('c-MORNING_M_UTC');
+  if (mH && mM) {
+    const utc = istToUtc(mH.value, mM.value);
+    body['MORNING_H_UTC'] = utc.h; body['MORNING_M_UTC'] = utc.m;
   }
   try {
     const r = await fetch('/api/config', {
@@ -1005,7 +1072,7 @@ async function loadTodayTrades() {
         ? '<span style="color:var(--green);font-weight:700">OPEN</span><span class="live-badge">LIVE</span>'
         : (+pnl >= 0 ? '<span class="c-g">WIN</span>' : '<span class="c-r">LOSS</span>');
       return `<tr class="${live ? 'live-row' : ''}">
-        <td>${t.symbol||'—'}</td>
+        <td>${t.slot === 'morning' ? '🌅 ' : (t.slot === 'evening' ? '🌇 ' : '')}${t.symbol||'—'}</td>
         <td>$${fN(t.strike)}</td>
         <td>${t.lots||1000}</td>
         <td>$${fN(t.entry_mark,4)}</td>
@@ -1018,27 +1085,20 @@ async function loadTodayTrades() {
 }
 
 // ── Square Off ───────────────────────────────────────────────
-async function squareOff() {
-  const btn = document.getElementById('squareoff-btn');
-  if (!btn) return;
-  if (!confirm('Square off entire position now at market price?')) return;
-  btn.disabled = true;
-  btn.textContent = 'Closing…';
+async function squareOff(slot) {
+  slot = slot || 'evening';
+  if (!confirm(`Square off the ${slot.toUpperCase()} position now at market price?`)) return;
   try {
-    const r = await fetch('/api/square-off', { method: 'POST' });
+    const r = await fetch('/api/square-off?slot=' + slot, { method: 'POST' });
     const d = await r.json();
     if (d.ok) {
-      showToast(`Position closed  P&L: ${d.pnl >= 0 ? '+' : ''}$${d.pnl.toFixed(2)}`, 'ok');
+      showToast(`${SLOT_META[slot].name} closed  P&L: ${d.pnl >= 0 ? '+' : ''}$${d.pnl.toFixed(2)}`, 'ok');
       await loadAll();
     } else {
       showToast('Square off failed: ' + d.error, 'err');
-      btn.disabled = false;
-      btn.textContent = '⬛ SQUARE OFF POSITION';
     }
   } catch(e) {
     showToast('Error: ' + e.message, 'err');
-    btn.disabled = false;
-    btn.textContent = '⬛ SQUARE OFF POSITION';
   }
 }
 
@@ -1132,57 +1192,62 @@ function toggleLogsPanel(e) {
 })();
 
 
-// ── TP Monitor control ───────────────────────────────────────
+// ── TP Monitor control (per slot) ───────────────────────────
 async function refreshTpStatus() {
   try {
     const d = await fetch('/api/tp-monitor').then(r => r.json());
-    const txt = document.getElementById('tp-status-txt');
-    const btn = document.getElementById('tp-btn');
-    if (!txt || !btn) return;
-    if (d.running) {
-      txt.textContent = '● Running';
-      txt.className   = 'tp-status running';
-      btn.textContent = 'STOP';
-      btn.className   = 'tp-btn stop';
-    } else {
-      txt.textContent = '○ Stopped';
-      txt.className   = 'tp-status stopped';
-      btn.textContent = 'START';
-      btn.className   = 'tp-btn start';
+    for (const slot of ['morning', 'evening']) {
+      const cfg = d[slot] || {};
+      const txt = document.getElementById('tp-status-' + slot);
+      const btn = document.getElementById('tp-btn-' + slot);
+      if (!txt || !btn) continue;
+      if (cfg.running) {
+        txt.textContent = '● Running';
+        txt.className   = 'tp-status running';
+        btn.textContent = 'STOP';
+        btn.className   = 'tp-btn stop';
+      } else {
+        txt.textContent = '○ Stopped';
+        txt.className   = 'tp-status stopped';
+        btn.textContent = 'START';
+        btn.className   = 'tp-btn start';
+      }
+      const tgt  = document.getElementById('tp-target-' + slot);
+      const poll = document.getElementById('tp-poll-' + slot);
+      if (tgt  && cfg.target_pnl != null && document.activeElement !== tgt)  tgt.value  = cfg.target_pnl;
+      if (poll && cfg.poll_secs  != null && document.activeElement !== poll) poll.value = cfg.poll_secs;
     }
-    // Pre-fill config inputs with current env values
-    const tgt  = document.getElementById('tp-target');
-    const poll = document.getElementById('tp-poll');
-    if (tgt  && d.target_pnl != null) tgt.value  = d.target_pnl;
-    if (poll && d.poll_secs  != null) poll.value = d.poll_secs;
   } catch(e) {}
 }
 
-async function saveTpConfig() {
-  const tgt  = parseFloat(document.getElementById('tp-target')?.value);
-  const poll = parseInt(document.getElementById('tp-poll')?.value);
-  if (isNaN(tgt) || tgt <= 0)  { showToast('Invalid target P&L', 'err'); return; }
+async function saveTpConfig(slot) {
+  const tgt  = parseFloat(document.getElementById('tp-target-' + slot)?.value);
+  const poll = parseInt(document.getElementById('tp-poll-' + slot)?.value);
+  if (isNaN(tgt) || tgt <= 0)   { showToast('Invalid target P&L', 'err'); return; }
   if (isNaN(poll) || poll < 10) { showToast('Poll interval must be >= 10s', 'err'); return; }
+  const body = slot === 'morning'
+    ? { TP_TARGET_PNL_MORNING: tgt, TP_POLL_SECS_MORNING: poll }
+    : { TP_TARGET_PNL: tgt, TP_POLL_SECS: poll };
   try {
     const d = await fetch('/api/config', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ TP_TARGET_PNL: tgt, TP_POLL_SECS: poll }),
+      body: JSON.stringify(body),
     }).then(r => r.json());
-    if (d.ok) showToast(`Saved — target $${tgt}  poll ${poll}s`, 'ok');
+    if (d.ok) showToast(`${SLOT_META[slot].name} TP saved — target $${tgt}, poll ${poll}s`, 'ok');
     else showToast('Save failed: ' + d.error, 'err');
   } catch(e) { showToast('Error: ' + e.message, 'err'); }
 }
 
-async function toggleTpMonitor() {
-  const btn = document.getElementById('tp-btn');
+async function toggleTpMonitor(slot) {
+  const btn = document.getElementById('tp-btn-' + slot);
   const running = btn && btn.textContent.trim() === 'STOP';
   if (btn) btn.disabled = true;
   try {
-    const url = running ? '/api/tp-monitor/stop' : '/api/tp-monitor/start';
+    const url = '/api/tp-monitor/' + (running ? 'stop' : 'start') + '?slot=' + slot;
     const d   = await fetch(url, { method: 'POST' }).then(r => r.json());
     if (d.ok) {
-      showToast(running ? 'TP monitor stopped' : 'TP monitor started (+$105 target)', 'ok');
+      showToast(`${SLOT_META[slot].name} TP monitor ${running ? 'stopped' : 'started'}`, 'ok');
     } else {
       showToast('Error: ' + d.error, 'err');
     }

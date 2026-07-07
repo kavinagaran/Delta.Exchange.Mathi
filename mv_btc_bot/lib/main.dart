@@ -104,6 +104,16 @@ String fmtNum(dynamic v, {int dp = 0}) {
   return (v as num).toDouble().toStringAsFixed(dp);
 }
 
+class SlotMeta {
+  final String key, name, icon, entryLabel;
+  const SlotMeta(this.key, this.name, this.icon, this.entryLabel);
+}
+
+const kSlots = [
+  SlotMeta('morning', 'Morning', '🌅', '5:45 AM IST'),
+  SlotMeta('evening', 'Evening', '🌇', '5:35 PM IST'),
+];
+
 // ─────────────────────────────────────────────────────────────
 // Shell with bottom navigation
 // ─────────────────────────────────────────────────────────────
@@ -150,7 +160,7 @@ class _HomeShellState extends State<HomeShell> {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Dashboard page
+// Dashboard page — morning + evening slots
 // ─────────────────────────────────────────────────────────────
 class DashboardPage extends StatefulWidget {
   const DashboardPage({super.key});
@@ -160,7 +170,8 @@ class DashboardPage extends StatefulWidget {
 }
 
 class _DashboardPageState extends State<DashboardPage> {
-  Map<String, dynamic> _status = {};
+  Map<String, dynamic> _evening = {};
+  Map<String, dynamic> _morning = {};
   List<dynamic> _todayTrades = [];
   Map<String, dynamic> _tp = {};
   String? _error;
@@ -181,6 +192,9 @@ class _DashboardPageState extends State<DashboardPage> {
     super.dispose();
   }
 
+  Map<String, dynamic> _slotState(String slot) =>
+      slot == 'morning' ? _morning : _evening;
+
   Future<void> _refresh() async {
     try {
       final results = await Future.wait([
@@ -196,7 +210,8 @@ class _DashboardPageState extends State<DashboardPage> {
       if (btc != null) _lastBtc = btc;
       if (!mounted) return;
       setState(() {
-        _status = st;
+        _evening = st;
+        _morning = (st['morning'] as Map<String, dynamic>?) ?? {};
         _todayTrades = results[1] as List<dynamic>;
         _tp = results[2] as Map<String, dynamic>;
         _error = null;
@@ -207,13 +222,13 @@ class _DashboardPageState extends State<DashboardPage> {
     }
   }
 
-  Future<void> _squareOff() async {
+  Future<void> _squareOff(SlotMeta slot) async {
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: kSurf,
-        title: const Text('Square Off?'),
-        content: const Text('Close the entire position now at market price?'),
+        title: Text('Square Off ${slot.name}?'),
+        content: Text('Close the entire ${slot.name.toLowerCase()} position now at market price?'),
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
           TextButton(
@@ -225,10 +240,10 @@ class _DashboardPageState extends State<DashboardPage> {
     );
     if (ok != true) return;
     try {
-      final d = await Api.postJson('/api/square-off');
+      final d = await Api.postJson('/api/square-off?slot=${slot.key}');
       if (!mounted) return;
       final msg = d['ok'] == true
-          ? 'Position closed  P&L: ${fmtUsd(d['pnl'])}'
+          ? '${slot.name} closed  P&L: ${fmtUsd(d['pnl'])}'
           : 'Failed: ${d['error']}';
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: Text(msg),
@@ -241,14 +256,16 @@ class _DashboardPageState extends State<DashboardPage> {
     }
   }
 
-  Future<void> _toggleTp() async {
-    final running = _tp['running'] == true;
+  Future<void> _toggleTp(SlotMeta slot) async {
+    final cfg = (_tp[slot.key] as Map<String, dynamic>?) ?? {};
+    final running = cfg['running'] == true;
     try {
-      final d = await Api.postJson(running ? '/api/tp-monitor/stop' : '/api/tp-monitor/start');
+      final d = await Api.postJson(
+          '/api/tp-monitor/${running ? 'stop' : 'start'}?slot=${slot.key}');
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: Text(d['ok'] == true
-            ? (running ? 'TP monitor stopped' : 'TP monitor started')
+            ? '${slot.name} TP monitor ${running ? 'stopped' : 'started'}'
             : 'Error: ${d['error']}'),
       ));
       _refresh();
@@ -258,14 +275,15 @@ class _DashboardPageState extends State<DashboardPage> {
     }
   }
 
-  Future<void> _editTpConfig() async {
-    final targetCtl = TextEditingController(text: fmtNum(_tp['target_pnl'], dp: 0));
-    final pollCtl = TextEditingController(text: fmtNum(_tp['poll_secs'], dp: 0));
+  Future<void> _editTpConfig(SlotMeta slot) async {
+    final cfg = (_tp[slot.key] as Map<String, dynamic>?) ?? {};
+    final targetCtl = TextEditingController(text: fmtNum(cfg['target_pnl'], dp: 0));
+    final pollCtl = TextEditingController(text: fmtNum(cfg['poll_secs'], dp: 0));
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: kSurf,
-        title: const Text('TP Monitor Config'),
+        title: Text('${slot.icon} ${slot.name} TP Config'),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -288,13 +306,13 @@ class _DashboardPageState extends State<DashboardPage> {
       ),
     );
     if (ok != true) return;
+    final body = slot.key == 'morning'
+        ? {'TP_TARGET_PNL_MORNING': targetCtl.text, 'TP_POLL_SECS_MORNING': pollCtl.text}
+        : {'TP_TARGET_PNL': targetCtl.text, 'TP_POLL_SECS': pollCtl.text};
     try {
-      await Api.postJson('/api/config', {
-        'TP_TARGET_PNL': targetCtl.text,
-        'TP_POLL_SECS': pollCtl.text,
-      });
+      await Api.postJson('/api/config', body);
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('TP config saved')));
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('${slot.name} TP config saved')));
       _refresh();
     } catch (e) {
       if (!mounted) return;
@@ -304,10 +322,10 @@ class _DashboardPageState extends State<DashboardPage> {
 
   @override
   Widget build(BuildContext context) {
-    final st = _status;
-    final open = st['status'] == 'OPEN';
-    final btc = (st['btc_futures_price'] as num?)?.toDouble();
-    final pnl = (st['live_pnl'] as num?)?.toDouble();
+    final btc = (_evening['btc_futures_price'] as num?)?.toDouble();
+    final openSlots = kSlots.where((s) => _slotState(s.key)['status'] == 'OPEN').toList();
+    final totalPnl = openSlots.fold<double>(
+        0, (a, s) => a + (((_slotState(s.key)['live_pnl']) as num?)?.toDouble() ?? 0));
 
     return SafeArea(
       child: RefreshIndicator(
@@ -324,7 +342,10 @@ class _DashboardPageState extends State<DashboardPage> {
                 const Text('MATHI-BOT',
                     style: TextStyle(color: kGreen, fontSize: 22, fontWeight: FontWeight.w800, letterSpacing: 2)),
                 const Spacer(),
-                _StatusPill(status: st['status'] as String? ?? '...'),
+                _StatusPill(
+                  openCount: openSlots.length,
+                  anyClosed: kSlots.any((s) => _slotState(s.key)['status'] == 'CLOSED'),
+                ),
               ],
             ),
             const SizedBox(height: 12),
@@ -355,7 +376,20 @@ class _DashboardPageState extends State<DashboardPage> {
                   ),
                 ),
               ),
-            const SizedBox(height: 16),
+            if (openSlots.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Center(
+                child: Text(
+                  'Combined live P&L: ${fmtUsd(totalPnl)}',
+                  style: TextStyle(
+                    color: totalPnl >= 0 ? kGreen : kRed,
+                    fontWeight: FontWeight.w700,
+                    fontSize: 13,
+                  ),
+                ),
+              ),
+            ],
+            const SizedBox(height: 14),
 
             if (_error != null)
               Card(
@@ -365,61 +399,9 @@ class _DashboardPageState extends State<DashboardPage> {
                 ),
               ),
 
-            // ── Position card ──
-            Card(
-              child: Padding(
-                padding: const EdgeInsets.all(18),
-                child: open ? _openPosition(st, pnl) : _noPosition(st),
-              ),
-            ),
-            const SizedBox(height: 12),
-
-            // ── TP monitor card ──
-            if (open) ...[
-              Card(
-                child: Padding(
-                  padding: const EdgeInsets.all(16),
-                  child: Row(
-                    children: [
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            const Text('TAKE PROFIT MONITOR',
-                                style: TextStyle(color: kMuted, fontSize: 10, letterSpacing: 1.2)),
-                            const SizedBox(height: 4),
-                            Text(
-                              _tp['running'] == true ? '● Running' : '○ Stopped',
-                              style: TextStyle(
-                                color: _tp['running'] == true ? kGreen : kMuted,
-                                fontWeight: FontWeight.w700,
-                              ),
-                            ),
-                            Text(
-                              'Target ${fmtUsd(_tp['target_pnl'], dp: 0)}  ·  every ${fmtNum(_tp['poll_secs'])}s',
-                              style: const TextStyle(color: kMuted, fontSize: 12),
-                            ),
-                          ],
-                        ),
-                      ),
-                      IconButton(
-                        onPressed: _editTpConfig,
-                        icon: const Icon(Icons.tune, color: kGold),
-                      ),
-                      FilledButton(
-                        style: FilledButton.styleFrom(
-                          backgroundColor: _tp['running'] == true
-                              ? kRed.withValues(alpha: 0.15)
-                              : kGreen.withValues(alpha: 0.15),
-                          foregroundColor: _tp['running'] == true ? kRed : kGreen,
-                        ),
-                        onPressed: _toggleTp,
-                        child: Text(_tp['running'] == true ? 'STOP' : 'START'),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
+            // ── Slot cards ──
+            for (final slot in kSlots) ...[
+              _slotCard(slot),
               const SizedBox(height: 12),
             ],
 
@@ -445,8 +427,43 @@ class _DashboardPageState extends State<DashboardPage> {
     );
   }
 
-  Widget _openPosition(Map<String, dynamic> st, double? pnl) {
+  Widget _slotCard(SlotMeta slot) {
+    final st = _slotState(slot.key);
+    final open = st['status'] == 'OPEN';
+    final closed = st['status'] == 'CLOSED';
+    final tpCfg = (_tp[slot.key] as Map<String, dynamic>?) ?? {};
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Text('${slot.icon} ${slot.name.toUpperCase()} TRADE',
+                    style: const TextStyle(color: kMuted, fontSize: 11, letterSpacing: 1.2, fontWeight: FontWeight.w700)),
+                const Spacer(),
+                Text(slot.entryLabel, style: const TextStyle(color: kGold, fontSize: 10)),
+              ],
+            ),
+            const SizedBox(height: 10),
+            if (open)
+              _openBody(slot, st, tpCfg)
+            else if (closed)
+              _closedBody(st)
+            else
+              _idleBody(slot),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _openBody(SlotMeta slot, Map<String, dynamic> st, Map<String, dynamic> tpCfg) {
+    final pnl = (st['live_pnl'] as num?)?.toDouble();
     final pnlColor = pnl == null ? kMuted : (pnl >= 0 ? kGreen : kRed);
+    final tpRunning = tpCfg['running'] == true;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -454,13 +471,12 @@ class _DashboardPageState extends State<DashboardPage> {
           children: [
             Expanded(
               child: Text(st['symbol'] as String? ?? '—',
-                  style: const TextStyle(color: kGold, fontWeight: FontWeight.w700, fontSize: 16)),
+                  style: const TextStyle(color: kGold, fontWeight: FontWeight.w700, fontSize: 15)),
             ),
             Text(fmtUsd(pnl),
-                style: TextStyle(color: pnlColor, fontWeight: FontWeight.w800, fontSize: 24)),
+                style: TextStyle(color: pnlColor, fontWeight: FontWeight.w800, fontSize: 22)),
           ],
         ),
-        const SizedBox(height: 4),
         const Divider(color: kBorder),
         _kv('Strike', '\$${fmtNum(st['strike'])}'),
         _kv('Lots', '${st['lots'] ?? '—'}'),
@@ -468,74 +484,134 @@ class _DashboardPageState extends State<DashboardPage> {
         _kv('Current Mark', fmtUsd(st['current_mark'], dp: 4)),
         _kv('Total Cost', fmtUsd(st['total_cost_usd'])),
         _kv('Settlement', (st['settlement'] as String? ?? '').replaceAll('T', ' ').replaceAll('Z', ' UTC')),
-        const SizedBox(height: 14),
-        SizedBox(
-          width: double.infinity,
-          child: OutlinedButton(
-            style: OutlinedButton.styleFrom(
-              foregroundColor: kRed,
-              side: const BorderSide(color: kRed, width: 1.5),
-              padding: const EdgeInsets.symmetric(vertical: 13),
+        const SizedBox(height: 12),
+        Row(
+          children: [
+            Expanded(
+              child: OutlinedButton(
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: kRed,
+                  side: const BorderSide(color: kRed, width: 1.5),
+                  padding: const EdgeInsets.symmetric(vertical: 11),
+                ),
+                onPressed: () => _squareOff(slot),
+                child: const Text('⏹ SQUARE OFF', style: TextStyle(fontWeight: FontWeight.w700)),
+              ),
             ),
-            onPressed: _squareOff,
-            child: const Text('⏹  SQUARE OFF POSITION',
-                style: TextStyle(fontWeight: FontWeight.w700, letterSpacing: 1)),
+          ],
+        ),
+        const SizedBox(height: 10),
+        Container(
+          padding: const EdgeInsets.all(10),
+          decoration: BoxDecoration(
+            border: Border.all(color: kBorder),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text('TP MONITOR',
+                        style: TextStyle(color: kMuted, fontSize: 9, letterSpacing: 1)),
+                    const SizedBox(height: 2),
+                    Text(
+                      tpRunning ? '● Running' : '○ Stopped',
+                      style: TextStyle(
+                        color: tpRunning ? kGreen : kMuted,
+                        fontWeight: FontWeight.w700,
+                        fontSize: 13,
+                      ),
+                    ),
+                    Text(
+                      'Target ${fmtUsd(tpCfg['target_pnl'], dp: 0)} · ${fmtNum(tpCfg['poll_secs'])}s',
+                      style: const TextStyle(color: kMuted, fontSize: 11),
+                    ),
+                  ],
+                ),
+              ),
+              IconButton(
+                onPressed: () => _editTpConfig(slot),
+                icon: const Icon(Icons.tune, color: kGold, size: 20),
+              ),
+              FilledButton(
+                style: FilledButton.styleFrom(
+                  backgroundColor: tpRunning ? kRed.withValues(alpha: 0.15) : kGreen.withValues(alpha: 0.15),
+                  foregroundColor: tpRunning ? kRed : kGreen,
+                  padding: const EdgeInsets.symmetric(horizontal: 14),
+                ),
+                onPressed: () => _toggleTp(slot),
+                child: Text(tpRunning ? 'STOP' : 'START', style: const TextStyle(fontSize: 12)),
+              ),
+            ],
           ),
         ),
       ],
     );
   }
 
-  Widget _noPosition(Map<String, dynamic> st) {
-    final closed = st['status'] == 'CLOSED';
-    return Column(
+  Widget _closedBody(Map<String, dynamic> st) {
+    final pnl = (st['pnl_usd'] as num?)?.toDouble() ?? 0;
+    return Row(
       children: [
-        Text(closed ? '✅' : '⏳', style: const TextStyle(fontSize: 34)),
-        const SizedBox(height: 8),
-        Text(
-          closed ? 'Closed today  ·  P&L ${fmtUsd(st['pnl_usd'])}' : 'Waiting for entry window',
-          style: TextStyle(
-            color: closed
-                ? (((st['pnl_usd'] as num?)?.toDouble() ?? 0) >= 0 ? kGreen : kRed)
-                : kMuted,
-            fontWeight: FontWeight.w600,
+        const Text('✅', style: TextStyle(fontSize: 22)),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('Closed ${st['exit_time_utc'] ?? ''} UTC · ${st['symbol'] ?? ''}',
+                  style: const TextStyle(color: kMuted, fontSize: 12)),
+              Text('P&L ${fmtUsd(pnl)}',
+                  style: TextStyle(
+                      color: pnl >= 0 ? kGreen : kRed, fontWeight: FontWeight.w700, fontSize: 16)),
+            ],
           ),
         ),
-        const SizedBox(height: 6),
-        Text(
-          'Entry: ${st['entry_ist'] ?? '5:35 PM IST'}\nExit: ${st['exit_ist'] ?? '1:00 AM IST'}',
-          textAlign: TextAlign.center,
-          style: const TextStyle(color: kMuted, fontSize: 12, height: 1.5),
-        ),
+      ],
+    );
+  }
+
+  Widget _idleBody(SlotMeta slot) {
+    return Row(
+      children: [
+        const Text('⏳', style: TextStyle(fontSize: 22)),
+        const SizedBox(width: 10),
+        Text('Waiting for entry — ${slot.entryLabel}',
+            style: const TextStyle(color: kMuted, fontSize: 13)),
       ],
     );
   }
 
   Widget _kv(String k, String v) => Padding(
-        padding: const EdgeInsets.symmetric(vertical: 4),
+        padding: const EdgeInsets.symmetric(vertical: 3),
         child: Row(
           children: [
-            Text(k, style: const TextStyle(color: kMuted, fontSize: 13)),
+            Text(k, style: const TextStyle(color: kMuted, fontSize: 12.5)),
             const Spacer(),
             Text(v,
                 style: const TextStyle(
-                    color: kText, fontSize: 13, fontFeatures: [FontFeature.tabularFigures()])),
+                    color: kText, fontSize: 12.5, fontFeatures: [FontFeature.tabularFigures()])),
           ],
         ),
       );
 }
 
 class _StatusPill extends StatelessWidget {
-  final String status;
-  const _StatusPill({required this.status});
+  final int openCount;
+  final bool anyClosed;
+  const _StatusPill({required this.openCount, required this.anyClosed});
 
   @override
   Widget build(BuildContext context) {
-    final (color, label) = switch (status) {
-      'OPEN' => (kGreen, 'POSITION OPEN'),
-      'CLOSED' => (kGold, 'CLOSED TODAY'),
-      _ => (kMuted, 'AWAITING ENTRY'),
-    };
+    final (color, label) = openCount == 2
+        ? (kGreen, 'BOTH OPEN')
+        : openCount == 1
+            ? (kGreen, 'TRADE OPEN')
+            : anyClosed
+                ? (kGold, 'CLOSED TODAY')
+                : (kMuted, 'AWAITING');
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
       decoration: BoxDecoration(
@@ -556,11 +632,12 @@ class _TradeTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final live = trade['_live'] == true;
+    final slotIcon = trade['slot'] == 'morning' ? '🌅 ' : (trade['slot'] == 'evening' ? '🌇 ' : '');
     final pnl = ((live ? trade['live_pnl'] : trade['pnl_usd']) as num?)?.toDouble();
     final pnlColor = pnl == null ? kMuted : (pnl >= 0 ? kGreen : kRed);
     return Card(
       child: ListTile(
-        title: Text(trade['symbol'] as String? ?? '—',
+        title: Text('$slotIcon${trade['symbol'] ?? '—'}',
             style: TextStyle(
                 color: live ? kGold : kText, fontWeight: FontWeight.w600, fontSize: 14)),
         subtitle: Text(
@@ -709,17 +786,31 @@ class _SettingsPageState extends State<SettingsPage> {
   late final TextEditingController _urlCtl;
   String? _testResult;
   bool _testing = false;
+  Map<String, dynamic> _config = {};
+  bool _configLoaded = false;
 
   @override
   void initState() {
     super.initState();
     _urlCtl = TextEditingController(text: Api.baseUrl);
+    _loadConfig();
   }
 
   @override
   void dispose() {
     _urlCtl.dispose();
     super.dispose();
+  }
+
+  Future<void> _loadConfig() async {
+    try {
+      final d = await Api.getJson('/api/config');
+      if (!mounted) return;
+      setState(() {
+        _config = d as Map<String, dynamic>;
+        _configLoaded = true;
+      });
+    } catch (_) {}
   }
 
   Future<void> _saveAndTest() async {
@@ -730,11 +821,65 @@ class _SettingsPageState extends State<SettingsPage> {
     await Api.saveBaseUrl(_urlCtl.text);
     try {
       final d = await Api.getJson('/api/status');
-      setState(() => _testResult = '✅ Connected — bot status: ${d['status'] ?? 'unknown'}');
+      setState(() => _testResult = '✅ Connected — evening: ${d['status'] ?? '?'}, morning: ${d['morning']?['status'] ?? '—'}');
+      _loadConfig();
     } catch (e) {
       setState(() => _testResult = '❌ Cannot connect: $e');
     } finally {
       setState(() => _testing = false);
+    }
+  }
+
+  Future<void> _editMorningConfig() async {
+    final enabled = (_config['MORNING_ENABLED'] ?? 'true').toString().toLowerCase() != 'false';
+    final lotsCtl = TextEditingController(text: (_config['MORNING_LOTS'] ?? '2000').toString());
+    bool en = enabled;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSt) => AlertDialog(
+          backgroundColor: kSurf,
+          title: const Text('🌅 Morning Trade Config'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              SwitchListTile(
+                title: const Text('Enabled', style: TextStyle(fontSize: 14)),
+                value: en,
+                activeColor: kGreen,
+                contentPadding: EdgeInsets.zero,
+                onChanged: (v) => setSt(() => en = v),
+              ),
+              TextField(
+                controller: lotsCtl,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(labelText: 'Lots'),
+              ),
+              const SizedBox(height: 8),
+              const Text('Entry time: 5:45 AM IST (change via web dashboard)',
+                  style: TextStyle(color: kMuted, fontSize: 11)),
+            ],
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+            TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Save', style: TextStyle(color: kGold))),
+          ],
+        ),
+      ),
+    );
+    if (ok != true) return;
+    try {
+      await Api.postJson('/api/config', {
+        'MORNING_ENABLED': en ? 'true' : 'false',
+        'MORNING_LOTS': lotsCtl.text,
+      });
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Morning config saved — restart bot to apply')));
+      _loadConfig();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
     }
   }
 
@@ -792,6 +937,21 @@ class _SettingsPageState extends State<SettingsPage> {
             ),
           ),
           const SizedBox(height: 16),
+          Card(
+            child: ListTile(
+              leading: const Text('🌅', style: TextStyle(fontSize: 22)),
+              title: const Text('Morning Trade', style: TextStyle(color: kText, fontSize: 14)),
+              subtitle: Text(
+                _configLoaded
+                    ? '${(_config['MORNING_ENABLED'] ?? 'true').toString().toLowerCase() != 'false' ? 'Enabled' : 'Disabled'} · ${_config['MORNING_LOTS'] ?? 2000} lots · 5:45 AM IST'
+                    : 'Loading…',
+                style: const TextStyle(color: kMuted, fontSize: 12),
+              ),
+              trailing: const Icon(Icons.chevron_right, color: kMuted),
+              onTap: _editMorningConfig,
+            ),
+          ),
+          const SizedBox(height: 16),
           const Card(
             child: Padding(
               padding: EdgeInsets.all(16),
@@ -802,7 +962,8 @@ class _SettingsPageState extends State<SettingsPage> {
                   SizedBox(height: 8),
                   Text(
                     'Mathi-bot mobile — MV-BTC daily straddle bot on Delta Exchange India.\n\n'
-                    'Entry 5:35 PM IST · Exit 1:00 AM IST\n'
+                    '🌅 Morning trade: 5:45 AM IST (settles 5:30 PM)\n'
+                    '🌇 Evening trade: 5:35 PM IST (exits 2:30 AM)\n\n'
                     'This app is a remote control for the bot running on your PC.',
                     style: TextStyle(color: kMuted, fontSize: 12, height: 1.5),
                   ),

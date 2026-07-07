@@ -65,13 +65,25 @@ EXIT_WIN_END    = min(EXIT_M_UTC  + 10, 60)  # 10-min window, capped at hour end
 DRY_RUN  = os.getenv("DRY_RUN", "false").lower() in ("1", "true", "yes")
 POLL_SEC = 30
 
+# Morning trade — buys TODAY's contract (settles 12:00 UTC same day)
+MORNING_ENABLED = os.getenv("MORNING_ENABLED", "true").lower() in ("1", "true", "yes")
+MORNING_H_UTC   = int(os.getenv("MORNING_H_UTC", 0))     # 00:15 UTC = 5:45 AM IST
+MORNING_M_UTC   = int(os.getenv("MORNING_M_UTC", 15))
+_morning_lots   = int(os.getenv("MORNING_LOTS", 2000))
+MAX_ORDER_LOTS  = int(os.getenv("MAX_ORDER_LOTS", 5000))  # hard per-order cap
+MORNING_LOTS    = min(_morning_lots, MAX_ORDER_LOTS)
+assert 0 <= MORNING_H_UTC <= 23 and 0 <= MORNING_M_UTC <= 59, "invalid morning time"
+MORNING_WIN_START = MORNING_M_UTC
+MORNING_WIN_END   = min(MORNING_M_UTC + 10, 60)
+
 # Telegram alerts
 TELEGRAM_TOKEN  = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHATID = os.getenv("TELEGRAM_CHAT_ID",   "")
 TELEGRAM_ON     = os.getenv("TELEGRAM_ALERTS", "true").lower() in ("1", "true", "yes")
 
-STATE_FILE   = Path(__file__).parent / "straddle_state.json"
-HISTORY_FILE = Path(__file__).parent / "trade_history.json"
+STATE_FILE         = Path(__file__).parent / "straddle_state.json"
+MORNING_STATE_FILE = Path(__file__).parent / "morning_state.json"
+HISTORY_FILE       = Path(__file__).parent / "trade_history.json"
 
 # ─────────────────────────────────────────────────────────────
 # LOGGING
@@ -161,6 +173,18 @@ def load_state() -> dict | None:
 def clear_state():
     STATE_FILE.unlink(missing_ok=True)
 
+def save_morning_state(state: dict):
+    MORNING_STATE_FILE.write_text(json.dumps(state, indent=2))
+    log.info("State saved → %s", MORNING_STATE_FILE.name)
+
+def load_morning_state() -> dict | None:
+    if MORNING_STATE_FILE.exists():
+        try:
+            return json.loads(MORNING_STATE_FILE.read_text())
+        except Exception:
+            pass
+    return None
+
 def log_trade(state: dict):
     """Append closed trade to trade_history.json for the dashboard."""
     record = {
@@ -214,7 +238,8 @@ def send_telegram(text: str):
 # ─────────────────────────────────────────────────────────────
 # ONE-ORDER-PER-DAY GUARD
 # ─────────────────────────────────────────────────────────────
-MAX_TRADES_PER_DAY = int(os.getenv("MAX_TRADES_PER_DAY", 2))
+# Default 3: morning scheduled + evening scheduled + one manual
+MAX_TRADES_PER_DAY = int(os.getenv("MAX_TRADES_PER_DAY", 3))
 
 
 def already_traded_today() -> bool:
@@ -343,9 +368,9 @@ def get_mv_mark(symbol: str) -> float:
 # ORDER MANAGEMENT
 # ─────────────────────────────────────────────────────────────
 def place_market_order(product_id: int, symbol: str, side: str, size: int) -> dict:
-    # Hard safety check — never exceed 1000 lots
-    if size > 1000:
-        raise ValueError(f"Order size {size} exceeds hard cap of 1000 lots. Aborting.")
+    # Hard safety check — never exceed the configured per-order cap
+    if size > MAX_ORDER_LOTS:
+        raise ValueError(f"Order size {size} exceeds hard cap of {MAX_ORDER_LOTS} lots. Aborting.")
 
     if DRY_RUN:
         log.info("[DRY-RUN] %s %d lots  %s  id=%d", side.upper(), size, symbol, product_id)
@@ -431,6 +456,81 @@ def check_api_access():
         f"IPv6 » <code>{ip6}</code>\n"
         "⚠️ TP monitor, exit and entry orders will FAIL until fixed."
     )
+
+# ─────────────────────────────────────────────────────────────
+# MORNING ENTRY JOB  —  00:15 UTC  (5:45 AM IST)
+# Buys TODAY's contract (settles 12:00 UTC same day).
+# ─────────────────────────────────────────────────────────────
+def morning_entry_job():
+    log.info("=" * 64)
+    log.info("MORNING ENTRY  %s UTC  (%s)",
+             datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
+             _ist_label(MORNING_H_UTC, MORNING_M_UTC))
+
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    # Once-per-day guard for the morning slot
+    ms = load_morning_state()
+    if ms and ms.get("entry_date") == today:
+        log.info("Morning trade already recorded today (status=%s). Skipping.",
+                 ms.get("status", ""))
+        return
+
+    contract = get_mv_contract(today)
+    if not contract:
+        raise LookupError(f"No live BTC MV contract found for {today}.")
+    product_id   = contract["id"]
+    symbol       = contract["symbol"]
+    strike       = float(contract.get("strike_price",    0))
+    contract_val = float(contract.get("contract_value", 0.001))
+    settlement   = contract.get("settlement_time", "")
+
+    btc_price  = get_btc_price()
+    entry_mark = get_mv_mark(symbol)
+    total_cost = entry_mark * contract_val * MORNING_LOTS
+
+    log.info("Symbol      : %s", symbol)
+    log.info("Strike      : $%.0f  |  BTC mark: $%.2f", strike, btc_price)
+    log.info("Settlement  : %s", settlement)
+    log.info("Entry mark  : $%.4f/BTC", entry_mark)
+    log.info("Lots        : %d  |  Total premium: $%.2f", MORNING_LOTS, total_cost)
+
+    order = place_market_order(product_id, symbol, "buy", MORNING_LOTS)
+    fill  = float(order.get("result", {}).get("average_fill_price") or entry_mark)
+
+    now = datetime.now(timezone.utc)
+    save_morning_state({
+        "slot":           "morning",
+        "status":         "OPEN",
+        "entry_date":     today,
+        "entry_time_utc": now.strftime("%H:%M:%S"),
+        "symbol":         symbol,
+        "product_id":     product_id,
+        "strike":         strike,
+        "settlement":     settlement,
+        "contract_value": contract_val,
+        "lots":           MORNING_LOTS,
+        "entry_mark":     round(fill, 4),
+        "btc_at_entry":   round(btc_price, 2),
+        "total_cost_usd": round(fill * contract_val * MORNING_LOTS, 2),
+        "order_id":       order.get("result", {}).get("id"),
+        "entry_trigger":  "morning_scheduled",
+    })
+
+    send_telegram(
+        f"🌅 <b>MORNING STRADDLE OPENED — MATHI</b>\n"
+        f"<code>{'━' * 24}</code>\n"
+        f"Symbol  » <code>{symbol}</code>\n"
+        f"Strike  » <code>${strike:,.0f}</code>\n"
+        f"Lots    » <code>{MORNING_LOTS:,}</code>\n"
+        f"Entry   » <code>${fill:.4f} / BTC</code>\n"
+        f"Cost    » <code>${fill * contract_val * MORNING_LOTS:,.2f}</code>\n"
+        f"BTC     » <code>${btc_price:,.2f}</code>\n"
+        f"Settles » <code>{settlement.replace('T', ' ').replace('Z', ' UTC')}</code>\n"
+        f"Mode    » <code>{'DRY-RUN ⚠' if DRY_RUN else 'LIVE ●'}</code>"
+    )
+    log.info("Morning straddle opened: %d lots %s @ $%.4f", MORNING_LOTS, symbol, fill)
+
 
 # ─────────────────────────────────────────────────────────────
 # ENTRY JOB  —  12:05 UTC  (5:35 PM IST)
@@ -600,6 +700,9 @@ def _ist_label(h_utc: int, m_utc: int) -> str:
 def main():
     log.info("=" * 64)
     log.info("Delta MV Straddle Bot")
+    log.info("  Morning: %02d:%02d UTC (%s)  lots=%d  enabled=%s",
+             MORNING_H_UTC, MORNING_M_UTC,
+             _ist_label(MORNING_H_UTC, MORNING_M_UTC), MORNING_LOTS, MORNING_ENABLED)
     log.info("  Entry  : %02d:%02d UTC (%s)", ENTRY_H_UTC, ENTRY_M_UTC,
              _ist_label(ENTRY_H_UTC, ENTRY_M_UTC))
     log.info("  Exit   : %02d:%02d UTC (%s)", EXIT_H_UTC, EXIT_M_UTC,
@@ -613,9 +716,10 @@ def main():
         log.info("Resuming open position: %s  (entered %s UTC, lots=%d)",
                  state.get("symbol"), state.get("entry_time_utc"), state.get("lots"))
 
-    fired_entry = False
-    fired_exit  = False
-    last_day    = None
+    fired_entry   = False
+    fired_exit    = False
+    fired_morning = False
+    last_day      = None
 
     while True:
         try:
@@ -625,10 +729,23 @@ def main():
 
             # Reset daily flags on new UTC day
             if today != last_day:
-                fired_entry = False
-                fired_exit  = False
-                last_day    = today
+                fired_entry   = False
+                fired_exit    = False
+                fired_morning = False
+                last_day      = today
                 log.info("New UTC day: %s — daily flags reset.", today)
+
+            # MORNING ENTRY TRIGGER  00:15–00:24 UTC (5:45 AM IST)
+            in_morning_window = (MORNING_ENABLED
+                                 and h == MORNING_H_UTC
+                                 and MORNING_WIN_START <= m < MORNING_WIN_END)
+            if in_morning_window and not fired_morning:
+                fired_morning = True
+                try:
+                    morning_entry_job()
+                except Exception as exc:
+                    log.exception("Morning entry job failed")
+                    send_telegram(f"⚠️ <b>MORNING ENTRY FAILED — MATHI</b>\n<code>{exc}</code>")
 
             # ENTRY TRIGGER  12:05–12:14 UTC
             in_entry_window = (h == ENTRY_H_UTC

@@ -53,14 +53,17 @@ def _exchange_pnl(product_id: int):
         pass
     return None
 
-BASE         = Path(__file__).parent
-STATE_FILE   = BASE / "straddle_state.json"
-HISTORY_FILE = BASE / "trade_history.json"
-BACKTEST_CSV = BASE / "backtest_mv_2026_daywise.csv"
-ENV_FILE     = BASE / ".env"
-TP_PID_FILE  = BASE / "tp_monitor.pid"
+BASE               = Path(__file__).parent
+STATE_FILE         = BASE / "straddle_state.json"
+MORNING_STATE_FILE = BASE / "morning_state.json"
+HISTORY_FILE       = BASE / "trade_history.json"
+BACKTEST_CSV       = BASE / "backtest_mv_2026_daywise.csv"
+ENV_FILE           = BASE / ".env"
 
-_tp_proc: subprocess.Popen | None = None
+SLOT_STATE = {"evening": STATE_FILE, "morning": MORNING_STATE_FILE}
+SLOT_PID   = {"evening": BASE / "tp_monitor.pid", "morning": BASE / "tp_monitor_morning.pid"}
+
+_tp_procs: dict = {"evening": None, "morning": None}
 
 
 def _pid_alive(pid: int) -> bool:
@@ -79,21 +82,22 @@ def _pid_alive(pid: int) -> bool:
         ctypes.windll.kernel32.CloseHandle(h)
 
 
-def _tp_running() -> bool:
-    global _tp_proc
-    if _tp_proc is not None:
-        if _tp_proc.poll() is None:
+def _tp_running(slot: str = "evening") -> bool:
+    proc = _tp_procs.get(slot)
+    if proc is not None:
+        if proc.poll() is None:
             return True
-        _tp_proc = None
+        _tp_procs[slot] = None
     # Fallback: check PID file (survives dashboard restart)
-    if TP_PID_FILE.exists():
+    pid_file = SLOT_PID[slot]
+    if pid_file.exists():
         try:
-            pid = int(TP_PID_FILE.read_text().strip())
+            pid = int(pid_file.read_text().strip())
             if _pid_alive(pid):
                 return True
         except (ValueError, OSError):
             pass
-        TP_PID_FILE.unlink(missing_ok=True)
+        pid_file.unlink(missing_ok=True)
     return False
 
 # Keys the dashboard is allowed to read/write
@@ -102,6 +106,9 @@ CONFIG_KEYS = [
     "ENTRY_H_UTC", "ENTRY_M_UTC", "EXIT_H_UTC", "EXIT_M_UTC",
     "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "TELEGRAM_ALERTS",
     "TP_TARGET_PNL", "TP_POLL_SECS",
+    "MORNING_ENABLED", "MORNING_LOTS", "MORNING_H_UTC", "MORNING_M_UTC",
+    "TP_TARGET_PNL_MORNING", "TP_POLL_SECS_MORNING",
+    "MAX_TRADES_PER_DAY",
 ]
 
 app = Flask(__name__, static_folder=str(BASE), static_url_path="/static")
@@ -159,61 +166,76 @@ def index():
 
 _last_sync = 0.0
 
-def _sync_state_from_exchange(state: dict) -> dict:
-    """Adopt any open MV-BTC position from the exchange that the local state
-    file doesn't reflect (e.g. manually placed orders), so the dashboard
-    always shows reality. Throttled to one authenticated call per 30s."""
+def _state_matches(state: dict, pid: int, size: int, entry: float) -> bool:
+    return (state.get("status") == "OPEN"
+            and int(state.get("product_id", 0) or 0) == pid
+            and int(state.get("lots", 0) or 0) == size
+            and abs(float(state.get("entry_mark", 0) or 0) - entry) < 0.01)
+
+
+def _sync_states_from_exchange() -> None:
+    """Adopt open MV-BTC positions from the exchange into the correct slot
+    (entries before 11:00 UTC -> morning, else evening) so manually placed
+    trades always show. Throttled to one authenticated call per 30s."""
     global _last_sync
     if not API_KEY or not API_SECRET or time.time() - _last_sync < 30:
-        return state
+        return
     _last_sync = time.time()
     try:
         hdrs = _sign("GET", "/v2/positions/margined")
         r = req.get(f"{API_BASE}/v2/positions/margined", headers=hdrs, timeout=6)
-        live = [p for p in r.json().get("result", [])
+        data = r.json()
+        if not data.get("success"):
+            return
+        live = [p for p in data.get("result", [])
                 if float(p.get("size", 0)) != 0
                 and str(p.get("product_symbol", "")).startswith("MV-BTC")]
-        if not live:
-            return state
-        p     = live[0]
-        pid   = int(p["product_id"])
-        size  = int(float(p["size"]))
-        entry = float(p.get("entry_price") or 0)
-        # Already in sync?
-        if (state.get("status") == "OPEN"
-                and int(state.get("product_id", 0)) == pid
-                and int(state.get("lots", 0)) == size
-                and abs(float(state.get("entry_mark", 0)) - entry) < 0.01):
-            return state
-        # Fetch product details for strike/settlement/contract value
-        pr = req.get(f"{API_BASE}/v2/products/{pid}", timeout=6).json().get("result", {})
-        cv = float(pr.get("contract_value") or 0.001)
-        created = str(p.get("created_at", ""))
-        state = {
-            "status":         "OPEN",
-            "entry_date":     created[:10] or datetime.now(timezone.utc).strftime("%Y-%m-%d"),
-            "entry_time_utc": created[11:19],
-            "symbol":         pr.get("symbol", p.get("product_symbol", "")),
-            "product_id":     pid,
-            "strike":         float(pr.get("strike_price") or 0),
-            "settlement":     pr.get("settlement_time", ""),
-            "contract_value": cv,
-            "lots":           size,
-            "entry_mark":     entry,
-            "btc_at_entry":   state.get("btc_at_entry", 0),
-            "total_cost_usd": round(entry * cv * size, 2),
-            "entry_trigger":  "exchange_sync",
-        }
-        STATE_FILE.write_text(json.dumps(state, indent=2), encoding="utf-8")
+        states = {slot: _load_json(f, {}) for slot, f in SLOT_STATE.items()}
+        for p in live:
+            pid   = int(p["product_id"])
+            size  = int(float(p["size"]))
+            entry = float(p.get("entry_price") or 0)
+            if any(_state_matches(s, pid, size, entry) for s in states.values()):
+                continue
+            created = str(p.get("created_at", ""))
+            try:
+                hour = int(created[11:13])
+            except ValueError:
+                hour = 12
+            slot = "morning" if hour < 11 else "evening"
+            # Don't clobber a different live position already in that slot
+            other = states[slot]
+            if other.get("status") == "OPEN" and int(other.get("product_id", 0) or 0) != pid:
+                slot = "evening" if slot == "morning" else "morning"
+                other = states[slot]
+                if other.get("status") == "OPEN" and int(other.get("product_id", 0) or 0) != pid:
+                    continue
+            pr = req.get(f"{API_BASE}/v2/products/{pid}", timeout=6).json().get("result", {})
+            cv = float(pr.get("contract_value") or 0.001)
+            new_state = {
+                "slot":           slot,
+                "status":         "OPEN",
+                "entry_date":     created[:10] or datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+                "entry_time_utc": created[11:19],
+                "symbol":         pr.get("symbol", p.get("product_symbol", "")),
+                "product_id":     pid,
+                "strike":         float(pr.get("strike_price") or 0),
+                "settlement":     pr.get("settlement_time", ""),
+                "contract_value": cv,
+                "lots":           size,
+                "entry_mark":     entry,
+                "btc_at_entry":   0,
+                "total_cost_usd": round(entry * cv * size, 2),
+                "entry_trigger":  "exchange_sync",
+            }
+            SLOT_STATE[slot].write_text(json.dumps(new_state, indent=2), encoding="utf-8")
+            states[slot] = new_state
     except Exception:
         pass
-    return state
 
 
-@app.route("/api/status")
-def api_status():
-    state = _load_json(STATE_FILE, {})
-    state = _sync_state_from_exchange(state)
+def _enrich_live(state: dict) -> dict:
+    """Attach current_mark and live_pnl to an OPEN state dict."""
     if state.get("status") == "OPEN":
         symbol = state.get("symbol", "")
         try:
@@ -227,6 +249,15 @@ def api_status():
         except Exception:
             state["current_mark"] = None
             state["live_pnl"]     = None
+    return state
+
+
+@app.route("/api/status")
+def api_status():
+    _sync_states_from_exchange()
+    state   = _enrich_live(_load_json(STATE_FILE, {}))
+    morning = _enrich_live(_load_json(MORNING_STATE_FILE, {}))
+    state["morning"] = morning
     # BTC futures (perpetual) live price
     try:
         r_btc = req.get(
@@ -249,30 +280,25 @@ def api_today_trades():
     today = date.today().isoformat()
     trades  = _load_json(HISTORY_FILE, [])
     state   = _load_json(STATE_FILE, {})
-    today_t = [t for t in trades if t.get("entry_date", "") == today]
-    # Include current open position as a live row with real-time mark & P&L
-    if state.get("status") == "OPEN" and state.get("entry_date", "") == today:
-        state["_live"] = True
-        try:
-            symbol = state.get("symbol", "")
-            r = req.get(f"{API_BASE}/v2/tickers/{symbol}", timeout=4)
-            mark = float(r.json().get("result", {}).get("mark_price") or 0)
-            em   = float(state.get("entry_mark", 0))
-            cv   = float(state.get("contract_value", 0.001))
-            lots = int(state.get("lots", 1000))
-            state["current_mark"] = round(mark, 4)
-            state["live_pnl"]     = round((mark - em) * cv * lots, 2)
-        except Exception:
-            pass
-        today_t = [state] + today_t
+    today_t = [t for t in trades if (t.get("entry_date") or t.get("date", "")) == today]
+    # Include any open slot position as a live row with real-time mark & P&L
+    for slot in ("morning", "evening"):
+        s = _load_json(SLOT_STATE[slot], {})
+        if s.get("status") == "OPEN" and s.get("entry_date", "") == today:
+            s["_live"] = True
+            s["slot"]  = slot
+            s = _enrich_live(s)
+            today_t = [s] + today_t
     return jsonify(today_t)
 
 
 @app.route("/api/square-off", methods=["POST"])
 def api_square_off():
-    state = _load_json(STATE_FILE, {})
+    slot       = _slot_arg()
+    state_file = SLOT_STATE[slot]
+    state      = _load_json(state_file, {})
     if state.get("status") != "OPEN":
-        return jsonify({"ok": False, "error": "No open position"}), 400
+        return jsonify({"ok": False, "error": f"No open {slot} position"}), 400
 
     product_id = int(state.get("product_id", 0))
     symbol     = state.get("symbol", "")
@@ -325,7 +351,7 @@ def api_square_off():
                 "exit_trigger":  "manual_squareoff",
             })
             # Save state and log trade
-            STATE_FILE.write_text(
+            state_file.write_text(
                 __import__("json").dumps(state, indent=2), encoding="utf-8")
             trades   = _load_json(HISTORY_FILE, [])
             if not isinstance(trades, list):
@@ -341,67 +367,87 @@ def api_square_off():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+def _slot_arg() -> str:
+    slot = request.args.get("slot", "")
+    if not slot:
+        slot = (request.get_json(silent=True) or {}).get("slot", "")
+    return slot if slot in SLOT_STATE else "evening"
+
+
+def _tp_env(slot: str):
+    if slot == "morning":
+        keys, dflt = ("TP_TARGET_PNL_MORNING", "TP_POLL_SECS_MORNING"), (300.0, 30)
+    else:
+        keys, dflt = ("TP_TARGET_PNL", "TP_POLL_SECS"), (105.0, 30)
+    try:
+        target = float(os.getenv(keys[0]) or dflt[0])
+    except ValueError:
+        target = dflt[0]
+    try:
+        poll = int(float(os.getenv(keys[1]) or dflt[1]))
+    except ValueError:
+        poll = dflt[1]
+    return target, poll
+
+
 @app.route("/api/tp-monitor", methods=["GET"])
 def tp_monitor_status():
-    try:
-        target = float(os.getenv("TP_TARGET_PNL") or 105)
-    except ValueError:
-        target = 105.0
-    try:
-        poll = int(float(os.getenv("TP_POLL_SECS") or 30))
-    except ValueError:
-        poll = 30
-    return jsonify({
-        "running":    _tp_running(),
-        "target_pnl": target,
-        "poll_secs":  poll,
-    })
+    out = {}
+    for slot in ("morning", "evening"):
+        target, poll = _tp_env(slot)
+        out[slot] = {"running": _tp_running(slot), "target_pnl": target, "poll_secs": poll}
+    # Back-compat top-level fields = evening
+    out.update(out["evening"])
+    return jsonify(out)
 
 
 @app.route("/api/tp-monitor/start", methods=["POST"])
 def tp_monitor_start():
-    global _tp_proc
-    if _tp_running():
-        return jsonify({"ok": False, "error": "Already running"}), 400
-    state = _load_json(STATE_FILE, {})
+    slot = _slot_arg()
+    if _tp_running(slot):
+        return jsonify({"ok": False, "error": f"{slot} monitor already running"}), 400
+    state = _load_json(SLOT_STATE[slot], {})
     if state.get("status") != "OPEN":
-        return jsonify({"ok": False, "error": "No open position to monitor"}), 400
+        return jsonify({"ok": False, "error": f"No open {slot} position to monitor"}), 400
     script = BASE / "tp_monitor.py"
     if not script.exists():
         return jsonify({"ok": False, "error": "tp_monitor.py not found"}), 404
-    _tp_proc = subprocess.Popen(
-        [sys.executable, str(script)],
+    proc = subprocess.Popen(
+        [sys.executable, str(script), "--slot", slot],
         cwd=str(BASE),
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    TP_PID_FILE.write_text(str(_tp_proc.pid))
-    return jsonify({"ok": True, "pid": _tp_proc.pid})
+    _tp_procs[slot] = proc
+    SLOT_PID[slot].write_text(str(proc.pid))
+    return jsonify({"ok": True, "slot": slot, "pid": proc.pid})
 
 
 @app.route("/api/tp-monitor/stop", methods=["POST"])
 def tp_monitor_stop():
-    global _tp_proc
+    slot = _slot_arg()
     stopped = False
-    if _tp_proc is not None and _tp_proc.poll() is None:
-        _tp_proc.terminate()
+    proc = _tp_procs.get(slot)
+    if proc is not None and proc.poll() is None:
+        proc.terminate()
         try:
-            _tp_proc.wait(timeout=5)
+            proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
-            _tp_proc.kill()
-        _tp_proc = None
+            proc.kill()
+        _tp_procs[slot] = None
         stopped = True
-    if TP_PID_FILE.exists():
+    pid_file = SLOT_PID[slot]
+    if pid_file.exists():
         try:
-            pid = int(TP_PID_FILE.read_text().strip())
-            os.kill(pid, 15)   # SIGTERM
+            pid = int(pid_file.read_text().strip())
+            os.kill(pid, 15)   # SIGTERM (TerminateProcess on Windows)
             stopped = True
         except Exception:
             pass
-        TP_PID_FILE.unlink(missing_ok=True)
+        pid_file.unlink(missing_ok=True)
     if not stopped:
-        return jsonify({"ok": False, "error": "Monitor is not running"}), 400
-    return jsonify({"ok": True})
+        return jsonify({"ok": False, "error": f"{slot} monitor is not running"}), 400
+    return jsonify({"ok": True, "slot": slot})
 
 
 @app.route("/api/logs")
