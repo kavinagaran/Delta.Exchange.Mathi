@@ -1,0 +1,148 @@
+//@version=5
+strategy("BTC Straddle", shorttitle="BTC Straddle", overlay=false, initial_capital=1000000, default_qty_type=strategy.fixed, default_qty_value=1, calc_on_every_tick=false, process_orders_on_close=false)
+
+// ================================================================
+// INPUTS
+// ================================================================
+i_lots        = input.int(1000,   "Lots",                           group="Position", minval=1)
+i_contract    = input.float(0.001,"Contract Size (BTC/lot)",        group="Position", step=0.0001, minval=0.0001)
+i_iv          = input.float(18.0, "Market IV %",                    group="Pricing",  minval=0.5, step=0.5) / 100.0
+i_strike_step = input.int(200,    "Strike Rounding ($)",            group="Pricing",  minval=1)
+i_entry_h     = input.int(12,     "Entry Hour UTC (12=5:30 PM IST)",group="Timing",   minval=0, maxval=23)
+i_exit_h      = input.int(19,     "Exit Hour UTC  (19=1 AM IST)",   group="Timing",   minval=0, maxval=23)
+i_t_entry_h   = input.float(24.0, "Hours to Expiry at Entry",       group="Timing",   minval=1.0)
+i_labels      = input.bool(true,  "Show trade labels",              group="Display")
+
+t_hold   = float(i_exit_h - i_entry_h)
+t_exit_h = i_t_entry_h - t_hold
+
+// ================================================================
+// BLACK-SCHOLES  — normal CDF via Abramowitz & Stegun
+// ================================================================
+ncdf(x) =>
+    z    = math.abs(x)
+    t    = 1.0 / (1.0 + 0.2316419 * z)
+    poly = t * (0.319381530 + t * (-0.356563782 + t * (1.781477937 + t * (-1.821255978 + t * 1.330274429))))
+    pdf  = math.exp(-0.5 * z * z) / math.sqrt(2.0 * math.pi)
+    n    = 1.0 - pdf * poly
+    x >= 0.0 ? n : 1.0 - n
+
+bs_straddle(S, K, T_h, sig) =>
+    T_yr    = T_h / 8760.0
+    s       = math.max(sig, 0.0001)
+    sqT     = math.sqrt(math.max(T_yr, 0.0000001))
+    d1      = (math.log(S / K) + 0.5 * s * s * T_yr) / (s * sqT)
+    d2      = d1 - s * sqT
+    call_v  = S * ncdf(d1)  - K * ncdf(d2)
+    put_v   = K * ncdf(-d2) - S * ncdf(-d1)
+    T_yr > 0.0000001 ? call_v + put_v : math.abs(S - K)
+
+// ================================================================
+// TIME CONDITIONS  — run on BTCUSD 1H chart, chart timezone = UTC
+// ================================================================
+utc_h    = hour(time, "UTC")
+is_1h    = timeframe.in_seconds() == 3600
+is_entry = is_1h and utc_h == i_entry_h and minute == 0
+is_exit  = is_1h and utc_h == i_exit_h  and minute == 0
+
+// ================================================================
+// STATE
+// ================================================================
+var float v_btc_entry  = na
+var float v_strike     = na
+var float v_prem0      = na
+var float v_cum_pnl    = 0.0
+var float v_peak       = 0.0
+var float v_max_dd     = 0.0
+var int   v_trades     = 0
+var int   v_wins       = 0
+var float v_sum_win    = 0.0
+var float v_sum_los    = 0.0
+
+// ================================================================
+// ENTRY  —  12:00 UTC  (5:30 PM IST)
+// ================================================================
+if is_entry and na(v_btc_entry)
+    s0   = open
+    k    = math.round(s0 / i_strike_step) * i_strike_step
+    prem = bs_straddle(s0, k, i_t_entry_h, i_iv)
+    cost = prem * i_contract * i_lots
+    v_btc_entry := s0
+    v_strike    := k
+    v_prem0     := prem
+    strategy.entry("Straddle", strategy.long, qty=1, comment="BUY")
+    if i_labels
+        lbl = "BUY STRADDLE | BTC $" + str.tostring(math.round(s0), "#,###") + " | K $" + str.tostring(math.round(k), "#,###") + " | Prem $" + str.tostring(prem, "#.00") + " | Cost $" + str.tostring(cost, "#,###.00")
+        label.new(bar_index, v_cum_pnl, lbl, style=label.style_label_up, color=color.new(color.blue, 10), textcolor=color.white, size=size.small)
+
+// ================================================================
+// EXIT  —  19:00 UTC  (12:30 AM IST, approx 1 AM IST)
+// ================================================================
+if is_exit and not na(v_btc_entry)
+    s_ex      = open
+    mark      = bs_straddle(s_ex, v_strike, t_exit_h, i_iv)
+    trade_pnl = (mark - v_prem0) * i_contract * i_lots
+    move_pct  = (s_ex - v_btc_entry) / v_btc_entry * 100.0
+    v_cum_pnl := v_cum_pnl + trade_pnl
+    v_trades  := v_trades  + 1
+    v_peak    := math.max(v_peak, v_cum_pnl)
+    v_max_dd  := math.min(v_max_dd, v_cum_pnl - v_peak)
+    if trade_pnl > 0
+        v_wins    := v_wins + 1
+        v_sum_win := v_sum_win + trade_pnl
+    else
+        v_sum_los := v_sum_los + trade_pnl
+    strategy.close("Straddle", comment=(trade_pnl >= 0 ? "WIN" : "LOSS") + " $" + str.tostring(math.round(trade_pnl, 2)))
+    if i_labels
+        sgn = trade_pnl >= 0 ? "+" : ""
+        lbl = "SELL | BTC $" + str.tostring(math.round(s_ex), "#,###") + " | Move " + str.tostring(move_pct, "#.00") + "% | P&L " + sgn + "$" + str.tostring(trade_pnl, "#,###.00") + " | Cum $" + str.tostring(v_cum_pnl, "#,###.00")
+        lbl_col = trade_pnl >= 0 ? color.new(color.teal, 10) : color.new(color.red, 20)
+        label.new(bar_index, v_cum_pnl, lbl, style=label.style_label_down, color=lbl_col, textcolor=color.white, size=size.small)
+    v_btc_entry := na
+    v_strike    := na
+    v_prem0     := na
+
+// ================================================================
+// PLOTS  — Cumulative P&L is the correct metric (ignore Strategy Equity)
+// ================================================================
+pnl_col = v_cum_pnl >= 0 ? color.new(color.teal, 0) : color.new(color.red, 0)
+plot(v_cum_pnl, "Cumulative P&L ($)", color=pnl_col, linewidth=2)
+plot(v_max_dd,  "Max Drawdown ($)",   color=color.new(color.orange, 30), linewidth=1, style=plot.style_area)
+hline(0, "Zero", color=color.new(color.gray, 40), linestyle=hline.style_dashed)
+bgcolor(is_entry ? color.new(color.blue, 88) : na, title="Entry bar")
+bgcolor(is_exit  ? color.new(color.teal, 88) : na, title="Exit bar")
+
+// ================================================================
+// STATS TABLE
+// ================================================================
+var table T = table.new(position.top_right, 2, 10, bgcolor=color.new(#0d1117, 65), border_color=color.new(color.gray, 55), border_width=1, frame_color=color.new(color.gray, 25), frame_width=1)
+
+if barstate.islast
+    n_loss = v_trades - v_wins
+    wr     = v_trades > 0 ? v_wins / v_trades * 100.0 : 0.0
+    avg_w  = v_wins  > 0  ? v_sum_win / v_wins  : 0.0
+    avg_l  = n_loss  > 0  ? v_sum_los / n_loss   : 0.0
+    rr     = avg_l != 0.0 ? math.abs(avg_w / avg_l) : 0.0
+    lc     = color.new(color.gray,  0)
+    vc     = color.new(color.white, 0)
+    table.cell(T, 0, 0, "BTC ATM STRADDLE",  text_color=color.white, text_size=size.normal, text_halign=text.align_left,  bgcolor=color.new(color.blue, 50))
+    table.cell(T, 1, 0, str.tostring(i_lots) + " lots | IV " + str.tostring(i_iv * 100, "#.0") + "%", text_color=color.white, text_size=size.normal, text_halign=text.align_right, bgcolor=color.new(color.blue, 50))
+    table.cell(T, 0, 1, "Trades",    text_color=lc, text_size=size.small, text_halign=text.align_left)
+    table.cell(T, 1, 1, str.tostring(v_trades), text_color=vc, text_size=size.small, text_halign=text.align_right)
+    table.cell(T, 0, 2, "Win Rate",  text_color=lc, text_size=size.small, text_halign=text.align_left)
+    table.cell(T, 1, 2, str.tostring(wr, "#.1") + "% (" + str.tostring(v_wins) + "W / " + str.tostring(n_loss) + "L)", text_color=vc, text_size=size.small, text_halign=text.align_right)
+    nc = v_cum_pnl >= 0 ? color.teal : color.red
+    table.cell(T, 0, 3, "Net P&L",  text_color=lc, text_size=size.small, text_halign=text.align_left)
+    table.cell(T, 1, 3, "$" + str.tostring(v_cum_pnl, "#,###.00"), text_color=nc, text_size=size.small, text_halign=text.align_right)
+    table.cell(T, 0, 4, "Max DD",   text_color=lc, text_size=size.small, text_halign=text.align_left)
+    table.cell(T, 1, 4, "$" + str.tostring(v_max_dd, "#,###.00"), text_color=color.orange, text_size=size.small, text_halign=text.align_right)
+    table.cell(T, 0, 5, "Avg Win",  text_color=lc, text_size=size.small, text_halign=text.align_left)
+    table.cell(T, 1, 5, "$" + str.tostring(avg_w, "#,###.00"), text_color=color.teal, text_size=size.small, text_halign=text.align_right)
+    table.cell(T, 0, 6, "Avg Loss", text_color=lc, text_size=size.small, text_halign=text.align_left)
+    table.cell(T, 1, 6, "$" + str.tostring(avg_l, "#,###.00"), text_color=color.red, text_size=size.small, text_halign=text.align_right)
+    table.cell(T, 0, 7, "R:R",      text_color=lc, text_size=size.small, text_halign=text.align_left)
+    table.cell(T, 1, 7, str.tostring(rr, "#.00") + "x", text_color=vc, text_size=size.small, text_halign=text.align_right)
+    table.cell(T, 0, 8, "Contract", text_color=lc, text_size=size.small, text_halign=text.align_left)
+    table.cell(T, 1, 8, str.tostring(i_contract) + " BTC/lot", text_color=vc, text_size=size.small, text_halign=text.align_right)
+    table.cell(T, 0, 9, "NOTE",     text_color=color.yellow, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(T, 1, 9, "Use Cumul P&L plot — ignore Strategy Equity", text_color=color.yellow, text_size=size.tiny, text_halign=text.align_right)

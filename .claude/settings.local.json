@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(Select-String -Path \"D:\\\\LocalGIT\\\\Delta.Exchange\\\\logs\\\\delta_bot.log\" -Pattern \"Signal: BULLISH|Signal: BEARISH|Placing order|BUY|SELL|bullish|bearish\" -CaseSensitive | Select-Object -Last 20 | ForEach-Object { $_.Line })",
+      "PowerShell(Start-Process python -ArgumentList '\"D:\\\\LocalGIT\\\\Delta 4PM Strangle\\\\strangle_4pm_bot.py\"' -WorkingDirectory \"D:\\\\LocalGIT\\\\Delta 4PM Strangle\" -WindowStyle Normal)"
+    ]
+  }
+}

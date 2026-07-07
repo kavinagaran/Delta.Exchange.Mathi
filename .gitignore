@@ -1,0 +1,23 @@
+# Secrets — never commit
+.env
+*.env
+
+# Runtime state / logs
+logs/
+*.log
+*.pid
+straddle_state.json
+__pycache__/
+*.pyc
+
+# Flutter/Android build artifacts
+mv_btc_bot/build/
+mv_btc_bot/.dart_tool/
+mv_btc_bot/.idea/
+mv_btc_bot/android/.gradle/
+mv_btc_bot/android/local.properties
+mv_btc_bot/ios/Flutter/ephemeral/
+mv_btc_bot/linux/flutter/ephemeral/
+mv_btc_bot/macos/Flutter/ephemeral/
+mv_btc_bot/windows/flutter/ephemeral/
+mv_btc_bot/.flutter-plugins*
