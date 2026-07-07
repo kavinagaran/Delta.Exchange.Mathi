@@ -76,6 +76,13 @@ assert 0 <= MORNING_H_UTC <= 23 and 0 <= MORNING_M_UTC <= 59, "invalid morning t
 MORNING_WIN_START = MORNING_M_UTC
 MORNING_WIN_END   = min(MORNING_M_UTC + 10, 60)
 
+# Morning exit — default 11:30 UTC (5:00 PM IST), 30 min before settlement
+MORNING_EXIT_H_UTC = int(os.getenv("MORNING_EXIT_H_UTC", 11))
+MORNING_EXIT_M_UTC = int(os.getenv("MORNING_EXIT_M_UTC", 30))
+assert 0 <= MORNING_EXIT_H_UTC <= 23 and 0 <= MORNING_EXIT_M_UTC <= 59, "invalid morning exit time"
+MORNING_EXIT_WIN_START = MORNING_EXIT_M_UTC
+MORNING_EXIT_WIN_END   = min(MORNING_EXIT_M_UTC + 10, 60)
+
 # Telegram alerts
 TELEGRAM_TOKEN  = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHATID = os.getenv("TELEGRAM_CHAT_ID",   "")
@@ -601,18 +608,35 @@ def entry_job():
     )
 
 # ─────────────────────────────────────────────────────────────
-# EXIT JOB  —  19:30 UTC  (1:00 AM IST)
+# EXIT JOBS — shared close logic for both slots
 # ─────────────────────────────────────────────────────────────
 def exit_job():
+    """Evening exit — configured via EXIT_H_UTC / EXIT_M_UTC."""
     log.info("=" * 64)
-    log.info("EXIT   %s UTC  (1:00 AM IST)",
-             datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"))
-
+    log.info("EXIT   %s UTC  (%s)",
+             datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
+             _ist_label(EXIT_H_UTC, EXIT_M_UTC))
     state = load_state()
     if not state or state.get("status") != "OPEN":
-        log.info("No open position — nothing to close.")
+        log.info("No open evening position — nothing to close.")
         return
+    _close_position_job(state, save_state, "EVENING")
 
+
+def morning_exit_job():
+    """Morning exit — configured via MORNING_EXIT_H_UTC / MORNING_EXIT_M_UTC."""
+    log.info("=" * 64)
+    log.info("MORNING EXIT  %s UTC  (%s)",
+             datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
+             _ist_label(MORNING_EXIT_H_UTC, MORNING_EXIT_M_UTC))
+    state = load_morning_state()
+    if not state or state.get("status") != "OPEN":
+        log.info("No open morning position — nothing to close.")
+        return
+    _close_position_job(state, save_morning_state, "MORNING")
+
+
+def _close_position_job(state: dict, save_fn, label: str):
     product_id   = state["product_id"]
     symbol       = state["symbol"]
     entry_mark   = state.get("entry_mark",    0)
@@ -663,18 +687,20 @@ def exit_job():
         "btc_move_pct":   round(btc_move,  4),
         "exit_mark":      exit_mark,
         "pnl_usd":        round(pnl_usd,   4),
+        "exit_trigger":   f"scheduled_exit_{label.lower()}",
     })
-    save_state(state)
+    save_fn(state)
     log_trade(state)
-    log.info("Straddle CLOSED. Daily P&L: $%.2f", pnl_usd)
+    log.info("%s straddle CLOSED. P&L: $%.2f", label, pnl_usd)
 
     _win   = pnl_usd >= 0
     _icon  = "✅" if _win else "❌"
     _label = "WIN" if _win else "LOSS"
     _sign  = "+" if _win else ""
     _arrow = "▲" if btc_move >= 0 else "▼"
+    _slot_icon = "🌅" if label == "MORNING" else "🌇"
     send_telegram(
-        f"{_icon} <b>EXIT — {_label}  {_sign}${abs(pnl_usd):.2f}</b>\n"
+        f"{_icon} <b>{_slot_icon} {label} EXIT — {_label}  {_sign}${abs(pnl_usd):.2f}</b>\n"
         f"<code>{'━' * 24}</code>\n"
         f"Symbol  » <code>{symbol}</code>\n"
         f"Entry   » <code>${entry_mark:.4f} / BTC</code>\n"
@@ -703,6 +729,9 @@ def main():
     log.info("  Morning: %02d:%02d UTC (%s)  lots=%d  enabled=%s",
              MORNING_H_UTC, MORNING_M_UTC,
              _ist_label(MORNING_H_UTC, MORNING_M_UTC), MORNING_LOTS, MORNING_ENABLED)
+    log.info("  M-Exit : %02d:%02d UTC (%s)",
+             MORNING_EXIT_H_UTC, MORNING_EXIT_M_UTC,
+             _ist_label(MORNING_EXIT_H_UTC, MORNING_EXIT_M_UTC))
     log.info("  Entry  : %02d:%02d UTC (%s)", ENTRY_H_UTC, ENTRY_M_UTC,
              _ist_label(ENTRY_H_UTC, ENTRY_M_UTC))
     log.info("  Exit   : %02d:%02d UTC (%s)", EXIT_H_UTC, EXIT_M_UTC,
@@ -716,10 +745,11 @@ def main():
         log.info("Resuming open position: %s  (entered %s UTC, lots=%d)",
                  state.get("symbol"), state.get("entry_time_utc"), state.get("lots"))
 
-    fired_entry   = False
-    fired_exit    = False
-    fired_morning = False
-    last_day      = None
+    fired_entry        = False
+    fired_exit         = False
+    fired_morning      = False
+    fired_morning_exit = False
+    last_day           = None
 
     while True:
         try:
@@ -729,10 +759,11 @@ def main():
 
             # Reset daily flags on new UTC day
             if today != last_day:
-                fired_entry   = False
-                fired_exit    = False
-                fired_morning = False
-                last_day      = today
+                fired_entry        = False
+                fired_exit         = False
+                fired_morning      = False
+                fired_morning_exit = False
+                last_day           = today
                 log.info("New UTC day: %s — daily flags reset.", today)
 
             # MORNING ENTRY TRIGGER  00:15–00:24 UTC (5:45 AM IST)
@@ -746,6 +777,18 @@ def main():
                 except Exception as exc:
                     log.exception("Morning entry job failed")
                     send_telegram(f"⚠️ <b>MORNING ENTRY FAILED — MATHI</b>\n<code>{exc}</code>")
+
+            # MORNING EXIT TRIGGER  11:30–11:39 UTC (5:00 PM IST)
+            in_morning_exit = (MORNING_ENABLED
+                               and h == MORNING_EXIT_H_UTC
+                               and MORNING_EXIT_WIN_START <= m < MORNING_EXIT_WIN_END)
+            if in_morning_exit and not fired_morning_exit:
+                fired_morning_exit = True
+                try:
+                    morning_exit_job()
+                except Exception as exc:
+                    log.exception("Morning exit job failed")
+                    send_telegram(f"⚠️ <b>MORNING EXIT FAILED — MATHI</b>\n<code>{exc}</code>")
 
             # ENTRY TRIGGER  12:05–12:14 UTC
             in_entry_window = (h == ENTRY_H_UTC

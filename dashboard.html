@@ -573,6 +573,10 @@ tbody td:first-child { text-align: left; }
         <input id="c-MORNING_H_UTC" type="number" min="0" max="23" placeholder="5">
         <label>Morning Minute IST</label>
         <input id="c-MORNING_M_UTC" type="number" min="0" max="59" placeholder="45">
+        <label>Morning Exit Hour IST</label>
+        <input id="c-MORNING_EXIT_H_UTC" type="number" min="0" max="23" placeholder="17">
+        <label>Morning Exit Minute IST</label>
+        <input id="c-MORNING_EXIT_M_UTC" type="number" min="0" max="59" placeholder="0">
         <label>Morning Lots</label>
         <input id="c-MORNING_LOTS" type="number" min="1" max="5000" placeholder="2000">
         <label>Max Trades / Day</label>
@@ -848,6 +852,12 @@ async function loadConfig() {
       const ist = utcToIst(mH.value, mM.value);
       mH.value = ist.h; mM.value = ist.m;
     }
+    const meH = document.getElementById('c-MORNING_EXIT_H_UTC');
+    const meM = document.getElementById('c-MORNING_EXIT_M_UTC');
+    if (meH && meM && meH.value !== '') {
+      const ist = utcToIst(meH.value, meM.value);
+      meH.value = ist.h; meM.value = ist.m;
+    }
     updateDryBanner();
   } catch(e) { console.error(e); }
 }
@@ -887,6 +897,12 @@ async function saveConfig() {
   if (mH && mM) {
     const utc = istToUtc(mH.value, mM.value);
     body['MORNING_H_UTC'] = utc.h; body['MORNING_M_UTC'] = utc.m;
+  }
+  const meH = document.getElementById('c-MORNING_EXIT_H_UTC');
+  const meM = document.getElementById('c-MORNING_EXIT_M_UTC');
+  if (meH && meM) {
+    const utc = istToUtc(meH.value, meM.value);
+    body['MORNING_EXIT_H_UTC'] = utc.h; body['MORNING_EXIT_M_UTC'] = utc.m;
   }
   try {
     const r = await fetch('/api/config', {

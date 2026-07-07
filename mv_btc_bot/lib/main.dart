@@ -830,9 +830,26 @@ class _SettingsPageState extends State<SettingsPage> {
     }
   }
 
+  // IST <-> UTC minute-of-day conversions (IST = UTC + 5:30)
+  static (int, int) _utcToIst(int h, int m) {
+    final t = (h * 60 + m + 330) % 1440;
+    return (t ~/ 60, t % 60);
+  }
+
+  static (int, int) _istToUtc(int h, int m) {
+    final t = ((h * 60 + m - 330) % 1440 + 1440) % 1440;
+    return (t ~/ 60, t % 60);
+  }
+
   Future<void> _editMorningConfig() async {
     final enabled = (_config['MORNING_ENABLED'] ?? 'true').toString().toLowerCase() != 'false';
     final lotsCtl = TextEditingController(text: (_config['MORNING_LOTS'] ?? '2000').toString());
+    final (exH, exM) = _utcToIst(
+      int.tryParse((_config['MORNING_EXIT_H_UTC'] ?? '11').toString()) ?? 11,
+      int.tryParse((_config['MORNING_EXIT_M_UTC'] ?? '30').toString()) ?? 30,
+    );
+    final exitHCtl = TextEditingController(text: exH.toString());
+    final exitMCtl = TextEditingController(text: exM.toString());
     bool en = enabled;
     final ok = await showDialog<bool>(
       context: context,
@@ -855,8 +872,27 @@ class _SettingsPageState extends State<SettingsPage> {
                 keyboardType: TextInputType.number,
                 decoration: const InputDecoration(labelText: 'Lots'),
               ),
+              Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: exitHCtl,
+                      keyboardType: TextInputType.number,
+                      decoration: const InputDecoration(labelText: 'Exit Hour (IST)'),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: TextField(
+                      controller: exitMCtl,
+                      keyboardType: TextInputType.number,
+                      decoration: const InputDecoration(labelText: 'Exit Min (IST)'),
+                    ),
+                  ),
+                ],
+              ),
               const SizedBox(height: 8),
-              const Text('Entry time: 5:45 AM IST (change via web dashboard)',
+              const Text('Entry: 5:45 AM IST · settles 5:30 PM if not exited',
                   style: TextStyle(color: kMuted, fontSize: 11)),
             ],
           ),
@@ -868,10 +904,15 @@ class _SettingsPageState extends State<SettingsPage> {
       ),
     );
     if (ok != true) return;
+    final ih = int.tryParse(exitHCtl.text) ?? 17;
+    final im = int.tryParse(exitMCtl.text) ?? 0;
+    final (uh, um) = _istToUtc(ih, im);
     try {
       await Api.postJson('/api/config', {
         'MORNING_ENABLED': en ? 'true' : 'false',
         'MORNING_LOTS': lotsCtl.text,
+        'MORNING_EXIT_H_UTC': uh.toString(),
+        'MORNING_EXIT_M_UTC': um.toString(),
       });
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
