@@ -1093,7 +1093,7 @@ async function loadTodayTrades() {
         <td>${t.lots||1000}</td>
         <td>$${fN(t.entry_mark,4)}</td>
         <td>${exit}</td>
-        <td class="${cls}">${pnl != null ? (pnl>=0?'+':'')+f$(pnl) : '—'}</td>
+        <td class="${cls}">${pnl != null ? f$(pnl) : '—'}</td>
         <td>${status}</td>
       </tr>`;
     }).join('');
