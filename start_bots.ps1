@@ -17,14 +17,30 @@
 $dir = "D:\AI\Delta.Exchange.Mathi"
 $py  = "C:\Program Files\Python314\python.exe"
 
+$log = Join-Path $dir "logs\watchdog_starts.log"
+$ts  = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+
+# Port 5001 should have exactly one owner. If a stale/duplicate process is
+# also bound there (e.g. an old instance that never got replaced when code
+# changed), kill every PID on that port and let the checks below relaunch
+# a single fresh dashboard.py with current code. Running as SYSTEM here
+# means this can clean up processes a normal user session can't touch.
+$portOwners = Get-NetTCPConnection -LocalPort 5001 -ErrorAction SilentlyContinue |
+              Select-Object -ExpandProperty OwningProcess -Unique
+if ($portOwners.Count -gt 1) {
+  foreach ($portPid in $portOwners) {
+    Stop-Process -Id $portPid -Force -ErrorAction SilentlyContinue
+  }
+  Add-Content $log "$ts  cleared $($portOwners.Count) conflicting processes on port 5001: $($portOwners -join ',')"
+  Start-Sleep -Seconds 1
+}
+
 $procs = Get-WmiObject Win32_Process -Filter "name='python.exe'" |
          Select-Object -ExpandProperty CommandLine
 
 $botRunning  = $procs | Where-Object { $_ -like "*Delta_Straddle_Live*" }
-$dashRunning = $procs | Where-Object { $_ -like "*dashboard.py*" -and $_ -like "*Delta.Exchange.Mathi*" }
-
-$log = Join-Path $dir "logs\watchdog_starts.log"
-$ts  = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+$dashRunning = (-not ($portOwners.Count -gt 1)) -and
+               ($procs | Where-Object { $_ -like "*dashboard.py*" -and $_ -like "*Delta.Exchange.Mathi*" })
 
 function Start-Detached($exe, $scriptArgs, $workDir, $outFile) {
   $cmdLine = "cmd.exe /c `"`"$exe`" $scriptArgs >> `"$outFile`" 2>&1`""

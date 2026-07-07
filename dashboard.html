@@ -485,9 +485,6 @@ tbody td:first-child { text-align: left; }
     <span id="status-text">Loading…</span>
   </div>
   <div class="nav-time" id="nav-time"></div>
-  <button class="btn-import" onclick="importBacktest()" title="Load 2026 backtest simulation into history">
-    ⬇ Import Backtest
-  </button>
   <button class="btn-sm" onclick="loadAll()">↻ Refresh</button>
 </nav>
 
@@ -937,7 +934,7 @@ async function loadTrades() {
 
     if (!trades.length) {
       document.getElementById('tbl-body').innerHTML =
-        '<tr class="empty-row"><td colspan="11">No trades yet — run the bot or click "Import Backtest"</td></tr>';
+        '<tr class="empty-row"><td colspan="11">No trades yet</td></tr>';
       return;
     }
 
@@ -1040,19 +1037,6 @@ function drawChart(trades) {
 }
 
 // ── Import backtest ─────────────────────────────────────────
-async function importBacktest() {
-  try {
-    const r = await fetch('/api/import-backtest', { method: 'POST' });
-    const d = await r.json();
-    if (d.ok) {
-      toast(`Imported ${d.added} backtest days (${d.total} total)`, 'ok');
-      loadTrades();
-    } else {
-      toast(d.error || 'Import failed', 'err');
-    }
-  } catch(e) { toast('Error: ' + e.message, 'err'); }
-}
-
 // ── Helpers ─────────────────────────────────────────────────
 function toast(msg, type='ok') {
   const el = document.getElementById('toast');

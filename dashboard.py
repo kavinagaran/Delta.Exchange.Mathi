@@ -4,7 +4,6 @@ Run  : python dashboard.py
 Open : http://localhost:5001
 """
 
-import csv
 import hashlib
 import hmac
 import json
@@ -57,7 +56,6 @@ BASE               = Path(__file__).parent
 STATE_FILE         = BASE / "straddle_state.json"
 MORNING_STATE_FILE = BASE / "morning_state.json"
 HISTORY_FILE       = BASE / "trade_history.json"
-BACKTEST_CSV       = BASE / "backtest_mv_2026_daywise.csv"
 ENV_FILE           = BASE / ".env"
 
 SLOT_STATE = {"evening": STATE_FILE, "morning": MORNING_STATE_FILE}
@@ -330,8 +328,10 @@ def api_status():
 
 @app.route("/api/today-trades")
 def api_today_trades():
-    from datetime import date
-    today = date.today().isoformat()
+    # entry_date is always stored as a UTC calendar date (see save_state
+    # etc. in the bot) — must compare against UTC "today", not local date,
+    # or this mismatches for ~5.5h every day around the IST/UTC day boundary.
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     trades  = _load_json(HISTORY_FILE, [])
     state   = _load_json(STATE_FILE, {})
     today_t = [t for t in trades if (t.get("entry_date") or t.get("date", "")) == today]
@@ -583,45 +583,6 @@ def test_telegram():
         return jsonify({"ok": False, "error": result.get("description", "Telegram API error")}), 400
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
-
-
-@app.route("/api/import-backtest", methods=["POST"])
-def import_backtest():
-    """Populate trade_history.json from the 2026 backtest CSV (simulated trades)."""
-    if not BACKTEST_CSV.exists():
-        return jsonify({"ok": False, "error": "backtest CSV not found"}), 404
-
-    existing = _load_json(HISTORY_FILE, [])
-    existing_dates = {r.get("date") for r in existing}
-    added = 0
-
-    with open(BACKTEST_CSV, newline="", encoding="utf-8") as f:
-        for row in csv.DictReader(f):
-            d = row.get("date", "")
-            if d in existing_dates:
-                continue
-            existing.append({
-                "date":         d,
-                "symbol":       f"MV-BTC-{row.get('strike','0')}-SIM",
-                "strike":       float(row.get("strike", 0)),
-                "lots":         1000,
-                "entry_mark":   float(row.get("prem_entry", 0)),
-                "exit_mark":    float(row.get("prem_exit",  0)),
-                "btc_entry":    float(row.get("btc_entry",  0)),
-                "btc_exit":     float(row.get("btc_exit",   0)),
-                "btc_move_pct": float(row.get("btc_move_pct", 0)),
-                "pnl_usd":      float(row.get("pnl_usd",   0)),
-                "cost_usd":     float(row.get("cost_usd",   0)),
-                "entry_time":   "12:05:00",
-                "exit_time":    "19:30:00",
-                "source":       "backtest",
-            })
-            existing_dates.add(d)
-            added += 1
-
-    existing.sort(key=lambda r: r.get("date", ""))
-    HISTORY_FILE.write_text(json.dumps(existing, indent=2), encoding="utf-8")
-    return jsonify({"ok": True, "added": added, "total": len(existing)})
 
 
 # ─────────────────────────────────────────────────────────────
