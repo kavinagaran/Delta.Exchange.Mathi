@@ -174,6 +174,51 @@ def _state_matches(state: dict, pid: int, size: int, entry: float) -> bool:
             and abs(float(state.get("entry_mark", 0) or 0) - entry) < 0.01)
 
 
+def _reconcile_stale_close(slot: str, state: dict, live_pids: set) -> dict:
+    """If a slot's on-disk state says OPEN but that position no longer exists
+    on the exchange (closed while the dashboard/bot was down, or by a manual
+    trade this process never saw), close it out using the real fill from
+    order history instead of leaving stale data blocking future syncs."""
+    pid = int(state.get("product_id", 0) or 0)
+    if state.get("status") != "OPEN" or pid == 0 or pid in live_pids:
+        return state
+    try:
+        hdrs = _sign("GET", "/v2/orders/history", "?page_size=20")
+        r = req.get(f"{API_BASE}/v2/orders/history", params={"page_size": 20}, headers=hdrs, timeout=6)
+        orders = r.json().get("result", [])
+        sells = [o for o in orders
+                 if o.get("product_id") == pid and o.get("side") == "sell"
+                 and o.get("state") == "closed" and o.get("average_fill_price")]
+        if not sells:
+            return state  # Can't reconcile yet — leave as-is, try again next sync
+        sells.sort(key=lambda o: str(o.get("created_at", "")), reverse=True)
+        fill    = sells[0]
+        exit_mk = float(fill["average_fill_price"])
+        cv      = float(state.get("contract_value", 0.001))
+        lots    = int(state.get("lots", 0))
+        entry   = float(state.get("entry_mark", 0))
+        pnl     = round((exit_mk - entry) * cv * lots, 2)
+        state.update({
+            "status":        "CLOSED",
+            "exit_time_utc": str(fill.get("created_at", ""))[11:19],
+            "exit_mark":      exit_mk,
+            "pnl_usd":        pnl,
+            "exit_trigger":   "reconciled_stale",
+        })
+        SLOT_STATE[slot].write_text(json.dumps(state, indent=2), encoding="utf-8")
+        hist = _load_json(HISTORY_FILE, [])
+        if isinstance(hist, list):
+            rec = {**state, "date": state.get("entry_date", ""), "cost_usd": state.get("total_cost_usd", 0)}
+            dup = any(h.get("symbol") == rec["symbol"] and h.get("entry_time") == rec.get("entry_time_utc")
+                      for h in hist)
+            if not dup:
+                hist.append(rec)
+                HISTORY_FILE.write_text(json.dumps(hist, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+    return state
+
+
 def _sync_states_from_exchange() -> None:
     """Adopt open MV-BTC positions from the exchange into the correct slot
     (entries before 11:00 UTC -> morning, else evening) so manually placed
@@ -191,7 +236,9 @@ def _sync_states_from_exchange() -> None:
         live = [p for p in data.get("result", [])
                 if float(p.get("size", 0)) != 0
                 and str(p.get("product_symbol", "")).startswith("MV-BTC")]
+        live_pids = {int(p["product_id"]) for p in live}
         states = {slot: _load_json(f, {}) for slot, f in SLOT_STATE.items()}
+        states = {slot: _reconcile_stale_close(slot, s, live_pids) for slot, s in states.items()}
         for p in live:
             pid   = int(p["product_id"])
             size  = int(float(p["size"]))
