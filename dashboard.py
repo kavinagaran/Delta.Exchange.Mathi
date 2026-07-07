@@ -18,7 +18,7 @@ from pathlib import Path
 
 import requests as req
 from dotenv import load_dotenv, set_key
-from flask import Flask, jsonify, request, abort
+from flask import Flask, jsonify, request, abort, send_file
 
 # Force IPv4 — Delta's whitelist holds our IPv4; IPv6 rotates and gets rejected
 import socket as _socket
@@ -204,12 +204,14 @@ def _sync_states_from_exchange() -> None:
             except ValueError:
                 hour = 12
             slot = "morning" if hour < 11 else "evening"
-            # Don't clobber a different live position already in that slot
+            # Don't clobber: (1) different open position in slot, or (2) just-closed position in slot
             other = states[slot]
-            if other.get("status") == "OPEN" and int(other.get("product_id", 0) or 0) != pid:
+            if (other.get("status") == "OPEN" and int(other.get("product_id", 0) or 0) != pid) \
+               or (other.get("status") == "CLOSED" and other.get("exit_time_utc")):  # Recent close
                 slot = "evening" if slot == "morning" else "morning"
                 other = states[slot]
-                if other.get("status") == "OPEN" and int(other.get("product_id", 0) or 0) != pid:
+                if (other.get("status") == "OPEN" and int(other.get("product_id", 0) or 0) != pid) \
+                   or (other.get("status") == "CLOSED" and other.get("exit_time_utc")):
                     continue
             pr = req.get(f"{API_BASE}/v2/products/{pid}", timeout=6).json().get("result", {})
             cv = float(pr.get("contract_value") or 0.001)
@@ -449,6 +451,14 @@ def tp_monitor_stop():
     if not stopped:
         return jsonify({"ok": False, "error": f"{slot} monitor is not running"}), 400
     return jsonify({"ok": True, "slot": slot})
+
+
+@app.route("/download/apk")
+def download_apk():
+    apk = BASE / "mv_btc_bot" / "build" / "app" / "outputs" / "flutter-apk" / "app-release.apk"
+    if not apk.exists():
+        abort(404)
+    return send_file(str(apk), as_attachment=True, download_name="mathi-bot.apk")
 
 
 @app.route("/api/logs")

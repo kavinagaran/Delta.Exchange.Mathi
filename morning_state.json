@@ -1,0 +1,20 @@
+{
+  "slot": "morning",
+  "status": "CLOSED",
+  "entry_date": "2026-07-07",
+  "entry_time_utc": "11:59:57",
+  "symbol": "MV-BTC-63200-080726",
+  "product_id": 141647,
+  "strike": 63200.0,
+  "settlement": "2026-07-08T12:00:00Z",
+  "contract_value": 0.001,
+  "lots": 1000,
+  "entry_mark": 490.0,
+  "btc_at_entry": 0,
+  "total_cost_usd": 971.0,
+  "entry_trigger": "exchange_sync",
+  "exit_time_utc": "11:30:26",
+  "exit_mark": 176.9581,
+  "pnl_usd": -313.04,
+  "exit_trigger": "scheduled_exit_morning"
+}
