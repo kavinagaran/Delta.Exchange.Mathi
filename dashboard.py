@@ -247,10 +247,14 @@ def _sync_states_from_exchange() -> None:
                 continue
             created = str(p.get("created_at", ""))
             try:
-                hour = int(created[11:13])
-            except ValueError:
-                hour = 12
-            slot = "morning" if hour < 11 else "evening"
+                # Bucket by IST time-of-day, not raw UTC hour — IST is UTC+5:30,
+                # so a trade at e.g. 22:54 UTC is 04:24 IST the *next* day (morning),
+                # not "evening" as a naive UTC-hour check would conclude.
+                h_utc, m_utc = int(created[11:13]), int(created[14:16])
+                ist_hour = ((h_utc * 60 + m_utc + 330) % 1440) // 60
+            except (ValueError, IndexError):
+                ist_hour = 12
+            slot = "morning" if ist_hour < 11 else "evening"
             # Don't clobber: (1) different open position in slot, or (2) just-closed position in slot
             other = states[slot]
             if (other.get("status") == "OPEN" and int(other.get("product_id", 0) or 0) != pid) \

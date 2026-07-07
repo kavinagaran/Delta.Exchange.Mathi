@@ -739,11 +739,15 @@ def main():
     log.info("  Lots   : %d  |  DRY-RUN: %s", LOTS, DRY_RUN)
     log.info("=" * 64)
 
-    # On restart, show any open position
+    # On restart, show any open positions
     state = load_state()
     if state and state.get("status") == "OPEN":
-        log.info("Resuming open position: %s  (entered %s UTC, lots=%d)",
+        log.info("Resuming open EVENING position: %s  (entered %s UTC, lots=%d)",
                  state.get("symbol"), state.get("entry_time_utc"), state.get("lots"))
+    m_state = load_morning_state()
+    if m_state and m_state.get("status") == "OPEN":
+        log.info("Resuming open MORNING position: %s  (entered %s UTC, lots=%d)",
+                 m_state.get("symbol"), m_state.get("entry_time_utc"), m_state.get("lots"))
 
     fired_entry        = False
     fired_exit         = False
