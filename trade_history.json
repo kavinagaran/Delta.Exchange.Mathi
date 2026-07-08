@@ -104,5 +104,20 @@
     "exit_time": "12:14:13",
     "exit_trigger": "manual_exchange_close",
     "slot": "evening"
+  },
+  {
+    "date": "2026-07-07",
+    "entry_date": "2026-07-07",
+    "symbol": "MV-BTC-63600-080726",
+    "strike": 63600.0,
+    "lots": 2250,
+    "entry_mark": 594.8888888888889,
+    "exit_mark": 827.0,
+    "pnl_usd": 522.25,
+    "cost_usd": 1338.5,
+    "entry_time": "22:54:59",
+    "exit_time": "02:09:48",
+    "exit_trigger": "take_profit_morning",
+    "slot": "morning"
   }
 ]

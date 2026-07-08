@@ -541,6 +541,100 @@ def api_trades():
     return jsonify(_load_json(HISTORY_FILE, []))
 
 
+_product_cache: dict = {}   # product_id -> {"contract_value": float, "symbol": str}
+
+def _product_info(product_id: int) -> dict:
+    if product_id in _product_cache:
+        return _product_cache[product_id]
+    try:
+        pr = req.get(f"{API_BASE}/v2/products/{product_id}", timeout=6).json().get("result", {})
+        info = {"contract_value": float(pr.get("contract_value") or 0.001),
+                "symbol": pr.get("symbol", "")}
+    except Exception:
+        info = {"contract_value": 0.001, "symbol": ""}
+    _product_cache[product_id] = info
+    return info
+
+
+@app.route("/api/all-positions")
+def api_all_positions():
+    """Every currently open position on the Delta account — MV straddles,
+    calls/puts, perpetual futures, anything — not just what the bot tracks."""
+    if not API_KEY or not API_SECRET:
+        return jsonify([])
+    try:
+        hdrs = _sign("GET", "/v2/positions/margined")
+        r = req.get(f"{API_BASE}/v2/positions/margined", headers=hdrs, timeout=8)
+        data = r.json()
+        if not data.get("success"):
+            return jsonify([])
+        out = []
+        for p in data.get("result", []):
+            size = float(p.get("size", 0))
+            if size == 0:
+                continue
+            product_id = int(p.get("product_id"))
+            symbol     = p.get("product_symbol", "")
+            entry      = float(p.get("entry_price") or 0)
+            cv         = _product_info(product_id)["contract_value"]
+            try:
+                tk   = req.get(f"{API_BASE}/v2/tickers/{symbol}", timeout=6).json().get("result", {})
+                mark = float(tk.get("mark_price") or 0)
+            except Exception:
+                mark = 0.0
+            pnl = (mark - entry) * cv * size   # signed size handles long vs short
+            out.append({
+                "symbol":       symbol,
+                "product_id":   product_id,
+                "side":         "LONG" if size > 0 else "SHORT",
+                "size":         abs(size),
+                "entry_price":  entry,
+                "mark_price":   mark,
+                "live_pnl":     round(pnl, 2),
+            })
+        return jsonify(out)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/all-orders-today")
+def api_all_orders_today():
+    """Every filled order today (IST calendar day) across all products."""
+    if not API_KEY or not API_SECRET:
+        return jsonify([])
+    try:
+        hdrs = _sign("GET", "/v2/orders/history", "?page_size=200")
+        r = req.get(f"{API_BASE}/v2/orders/history", params={"page_size": 200},
+                    headers=hdrs, timeout=10)
+        data = r.json()
+        if not data.get("success"):
+            return jsonify([])
+        today_ist = (datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)).strftime("%Y-%m-%d")
+        out = []
+        for o in data.get("result", []):
+            if o.get("state") != "closed" or not o.get("average_fill_price"):
+                continue
+            created = str(o.get("created_at", ""))[:19]
+            try:
+                dt_utc  = datetime.strptime(created, "%Y-%m-%dT%H:%M:%S")
+                ist_day = (dt_utc + timedelta(hours=5, minutes=30)).strftime("%Y-%m-%d")
+            except ValueError:
+                continue
+            if ist_day != today_ist:
+                continue
+            out.append({
+                "time_utc":   created,
+                "symbol":     o.get("product_symbol", ""),
+                "side":       o.get("side", ""),
+                "size":       o.get("size"),
+                "avg_price":  float(o.get("average_fill_price")),
+            })
+        out.sort(key=lambda x: x["time_utc"], reverse=True)
+        return jsonify(out)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/summary")
 def api_summary():
     trades = _load_json(HISTORY_FILE, [])

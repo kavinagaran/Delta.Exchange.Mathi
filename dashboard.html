@@ -623,6 +623,48 @@ tbody td:first-child { text-align: left; }
     </div>
   </div>
 
+  <!-- ── All Delta Positions & Orders (every product: MV / Call / Put / futures) ── -->
+  <div class="panel">
+    <div class="panel-hd foldable" id="allpos-panel-hd" onclick="toggleAllPosPanel()" title="Click to expand/collapse">All Delta Positions &amp; Orders<span class="fold-chevron">&#9660;</span></div>
+    <div class="fold-body" id="allpos-fold-body">
+      <div style="margin:2px 0 14px;color:var(--muted);font-size:0.72rem;letter-spacing:0.5px;text-transform:uppercase">Open Positions — any product</div>
+      <div class="tbl-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Symbol</th>
+              <th>Side</th>
+              <th>Size</th>
+              <th>Entry</th>
+              <th>Mark</th>
+              <th>Live P&amp;L</th>
+            </tr>
+          </thead>
+          <tbody id="allpos-body">
+            <tr class="empty-row"><td colspan="6">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div style="margin:20px 0 14px;color:var(--muted);font-size:0.72rem;letter-spacing:0.5px;text-transform:uppercase">Today's Fills — any product</div>
+      <div class="tbl-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Time (UTC)</th>
+              <th>Symbol</th>
+              <th>Side</th>
+              <th>Size</th>
+              <th>Avg Price</th>
+            </tr>
+          </thead>
+          <tbody id="allorders-body">
+            <tr class="empty-row"><td colspan="5">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
   <!-- ── Trade History ── -->
   <div class="panel">
     <div class="panel-hd foldable" id="history-panel-hd" onclick="toggleHistoryPanel()" title="Click to expand/collapse">Trade History<span class="fold-chevron">&#9660;</span></div>
@@ -1121,8 +1163,46 @@ async function loadLogs() {
   } catch(e) { console.error('loadLogs:', e); }
 }
 
+async function loadAllPositions() {
+  try {
+    const [positions, orders] = await Promise.all([
+      fetch('/api/all-positions').then(r => r.json()),
+      fetch('/api/all-orders-today').then(r => r.json()),
+    ]);
+
+    const posBody = document.getElementById('allpos-body');
+    if (!Array.isArray(positions) || !positions.length) {
+      posBody.innerHTML = '<tr class="empty-row"><td colspan="6">No open positions</td></tr>';
+    } else {
+      posBody.innerHTML = positions.map(p => `
+        <tr>
+          <td>${p.symbol}</td>
+          <td class="${p.side === 'LONG' ? 'c-g' : 'c-r'}">${p.side}</td>
+          <td>${fN(p.size)}</td>
+          <td>$${fN(p.entry_price, 4)}</td>
+          <td>$${fN(p.mark_price, 4)}</td>
+          <td class="${cls(p.live_pnl)}">${f$(p.live_pnl)}</td>
+        </tr>`).join('');
+    }
+
+    const ordBody = document.getElementById('allorders-body');
+    if (!Array.isArray(orders) || !orders.length) {
+      ordBody.innerHTML = '<tr class="empty-row"><td colspan="5">No fills today</td></tr>';
+    } else {
+      ordBody.innerHTML = orders.map(o => `
+        <tr>
+          <td>${o.time_utc}</td>
+          <td>${o.symbol}</td>
+          <td class="${o.side === 'buy' ? 'c-g' : 'c-r'}">${(o.side||'').toUpperCase()}</td>
+          <td>${fN(o.size)}</td>
+          <td>$${fN(o.avg_price, 4)}</td>
+        </tr>`).join('');
+    }
+  } catch(e) { console.error('loadAllPositions:', e); }
+}
+
 async function loadAll() {
-  await Promise.all([loadStatus(), loadTrades(), loadConfig(), loadLogs(), loadTodayTrades()]); refreshTpStatus();
+  await Promise.all([loadStatus(), loadTrades(), loadConfig(), loadLogs(), loadTodayTrades(), loadAllPositions()]); refreshTpStatus();
 }
 
 loadAll();
@@ -1143,6 +1223,19 @@ function toggleChartPanel() {
     hd.classList.remove('collapsed');
   }
   try { localStorage.setItem('chart-panel-open', open ? '0' : '1'); } catch(e) {}
+}
+function toggleAllPosPanel() {
+  const hd   = document.getElementById('allpos-panel-hd');
+  const body = document.getElementById('allpos-fold-body');
+  const open = !body.classList.contains('collapsed');
+  if (open) {
+    body.classList.add('collapsed');
+    hd.classList.add('collapsed');
+  } else {
+    body.classList.remove('collapsed');
+    hd.classList.remove('collapsed');
+  }
+  try { localStorage.setItem('allpos-panel-open', open ? '0' : '1'); } catch(e) {}
 }
 function toggleHistoryPanel() {
   const hd   = document.getElementById('history-panel-hd');
@@ -1181,6 +1274,11 @@ function toggleLogsPanel(e) {
     if (localStorage.getItem('history-panel-open') === '0') {
       const hd   = document.getElementById('history-panel-hd');
       const body = document.getElementById('history-fold-body');
+      if (hd && body) { hd.classList.add('collapsed'); body.classList.add('collapsed'); }
+    }
+    if (localStorage.getItem('allpos-panel-open') === '0') {
+      const hd   = document.getElementById('allpos-panel-hd');
+      const body = document.getElementById('allpos-fold-body');
       if (hd && body) { hd.classList.add('collapsed'); body.classList.add('collapsed'); }
     }
     if (localStorage.getItem('logs-panel-open') === '0') {
