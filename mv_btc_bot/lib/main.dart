@@ -191,6 +191,7 @@ class _DashboardPageState extends State<DashboardPage> {
   Map<String, dynamic> _morning = {};
   List<dynamic> _todayTrades = [];
   Map<String, dynamic> _tp = {};
+  Map<String, dynamic> _wallet = {};
   String? _error;
   Timer? _timer;
   double? _lastBtc;
@@ -218,6 +219,7 @@ class _DashboardPageState extends State<DashboardPage> {
         Api.getJson('/api/status'),
         Api.getJson('/api/today-trades'),
         Api.getJson('/api/tp-monitor'),
+        Api.getJson('/api/wallet').catchError((_) => <String, dynamic>{}),
       ]);
       final st = results[0] as Map<String, dynamic>;
       final btc = (st['btc_futures_price'] as num?)?.toDouble();
@@ -231,6 +233,7 @@ class _DashboardPageState extends State<DashboardPage> {
         _morning = (st['morning'] as Map<String, dynamic>?) ?? {};
         _todayTrades = results[1] as List<dynamic>;
         _tp = results[2] as Map<String, dynamic>;
+        _wallet = (results[3] as Map<String, dynamic>?) ?? {};
         _error = null;
       });
     } catch (e) {
@@ -393,6 +396,21 @@ class _DashboardPageState extends State<DashboardPage> {
                   ),
                 ),
               ),
+            if (_wallet['usd_balance'] != null) ...[
+              const SizedBox(height: 8),
+              Center(
+                child: Text(
+                  '💰 \$${(_wallet['usd_balance'] as num).toStringAsFixed(2)}'
+                  '${_wallet['inr_balance'] != null ? '  ·  ₹${(_wallet['inr_balance'] as num).round()}' : ''}',
+                  style: const TextStyle(
+                    color: kGold,
+                    fontWeight: FontWeight.w700,
+                    fontSize: 13,
+                    fontFeatures: [FontFeature.tabularFigures()],
+                  ),
+                ),
+              ),
+            ],
             if (openSlots.isNotEmpty) ...[
               const SizedBox(height: 8),
               Center(
@@ -815,6 +833,7 @@ class _ConfigsPageState extends State<ConfigsPage> {
   bool _morningEnabled = true;
   bool _morningExitEnabled = true;
   bool _telegramAlerts = true;
+  bool _dynamicLots = true;
   bool _loading = true;
   bool _saving = false;
   String? _error;
@@ -878,6 +897,7 @@ class _ConfigsPageState extends State<ConfigsPage> {
       _morningEnabled     = _envBool(d['MORNING_ENABLED']);
       _morningExitEnabled = _envBool(d['MORNING_EXIT_ENABLED']);
       _telegramAlerts     = _envBool(d['TELEGRAM_ALERTS']);
+      _dynamicLots        = _envBool(d['DYNAMIC_LOTS']);
       setState(() => _loading = false);
     } catch (e) {
       setState(() { _loading = false; _error = 'Cannot load config: $e'; });
@@ -891,6 +911,7 @@ class _ConfigsPageState extends State<ConfigsPage> {
       'MORNING_ENABLED':      _morningEnabled ? 'true' : 'false',
       'MORNING_EXIT_ENABLED': _morningExitEnabled ? 'true' : 'false',
       'TELEGRAM_ALERTS':      _telegramAlerts ? 'true' : 'false',
+      'DYNAMIC_LOTS':         _dynamicLots ? 'true' : 'false',
     };
     for (final k in _numKeys) {
       final v = _ctl[k]!.text.trim();
@@ -1034,6 +1055,9 @@ class _ConfigsPageState extends State<ConfigsPage> {
                         subtitle: 'No real orders when enabled'),
                     _switchTile('Telegram Alerts', _telegramAlerts,
                         (v) => setState(() => _telegramAlerts = v)),
+                    _switchTile('Dynamic Lots', _dynamicLots,
+                        (v) => setState(() => _dynamicLots = v),
+                        subtitle: 'At entry, buy max(configured, affordable with balance)'),
                     _numField('MAX_TRADES_PER_DAY', 'Max trades per day'),
                     _numField('STRIKE_STEP', 'Strike step (\$)'),
                   ],

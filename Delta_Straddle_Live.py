@@ -72,6 +72,8 @@ MORNING_M_UTC   = int(os.getenv("MORNING_M_UTC", 15))
 _morning_lots   = int(os.getenv("MORNING_LOTS", 2000))
 MAX_ORDER_LOTS  = int(os.getenv("MAX_ORDER_LOTS", 5000))  # hard per-order cap
 MORNING_LOTS    = min(_morning_lots, MAX_ORDER_LOTS)
+# Dynamic sizing: buy max(configured, affordable-with-balance) at entry time
+DYNAMIC_LOTS    = os.getenv("DYNAMIC_LOTS", "true").lower() in ("1", "true", "yes")
 assert 0 <= MORNING_H_UTC <= 23 and 0 <= MORNING_M_UTC <= 59, "invalid morning time"
 MORNING_WIN_START = MORNING_M_UTC
 MORNING_WIN_END   = min(MORNING_M_UTC + 10, 60)
@@ -408,6 +410,37 @@ def get_mv_position(product_id: int) -> dict | None:
             return pos
     return None
 
+def get_available_usd() -> float:
+    data = _retry(_get, "/v2/wallet/balances", auth=True)
+    for w in data.get("result", []):
+        if w.get("asset_symbol") == "USD":
+            return float(w.get("available_balance") or 0)
+    return 0.0
+
+def _effective_lots(configured: int, mark: float, contract_val: float, label: str) -> int:
+    """Dynamic lot sizing: how many lots the available balance can buy at the
+    current mark (with a 2% fee/slippage buffer). Per spec we buy whichever is
+    HIGHER — configured or affordable — capped at MAX_ORDER_LOTS. Falls back
+    to the configured size if the balance check fails."""
+    if not DYNAMIC_LOTS:
+        return configured
+    try:
+        bal  = get_available_usd()
+        cost = mark * contract_val
+        afford = int((bal * 0.98) / cost) if cost > 0 else 0
+    except Exception as e:
+        log.warning("%s: balance check failed (%s) — using configured %d lots.",
+                    label, e, configured)
+        return configured
+    lots = min(max(configured, afford), MAX_ORDER_LOTS)
+    log.info("%s lot sizing: configured=%d  affordable=%d  (bal $%.2f, $%.4f/lot)  -> using %d",
+             label, configured, afford, bal, cost, lots)
+    if afford < configured:
+        log.warning("%s: balance only covers %d of the configured %d lots — "
+                    "order may be rejected for insufficient margin.",
+                    label, afford, configured)
+    return max(lots, 1)
+
 # ─────────────────────────────────────────────────────────────
 # API / IP WATCHDOG — detects whitelisted-IP lockout
 # ─────────────────────────────────────────────────────────────
@@ -498,15 +531,16 @@ def morning_entry_job():
 
     btc_price  = get_btc_price()
     entry_mark = get_mv_mark(symbol)
-    total_cost = entry_mark * contract_val * MORNING_LOTS
+    lots       = _effective_lots(MORNING_LOTS, entry_mark, contract_val, "MORNING")
+    total_cost = entry_mark * contract_val * lots
 
     log.info("Symbol      : %s", symbol)
     log.info("Strike      : $%.0f  |  BTC mark: $%.2f", strike, btc_price)
     log.info("Settlement  : %s", settlement)
     log.info("Entry mark  : $%.4f/BTC", entry_mark)
-    log.info("Lots        : %d  |  Total premium: $%.2f", MORNING_LOTS, total_cost)
+    log.info("Lots        : %d  |  Total premium: $%.2f", lots, total_cost)
 
-    order = place_market_order(product_id, symbol, "buy", MORNING_LOTS)
+    order = place_market_order(product_id, symbol, "buy", lots)
     fill  = float(order.get("result", {}).get("average_fill_price") or entry_mark)
 
     now = datetime.now(timezone.utc)
@@ -520,10 +554,10 @@ def morning_entry_job():
         "strike":         strike,
         "settlement":     settlement,
         "contract_value": contract_val,
-        "lots":           MORNING_LOTS,
+        "lots":           lots,
         "entry_mark":     round(fill, 4),
         "btc_at_entry":   round(btc_price, 2),
-        "total_cost_usd": round(fill * contract_val * MORNING_LOTS, 2),
+        "total_cost_usd": round(fill * contract_val * lots, 2),
         "order_id":       order.get("result", {}).get("id"),
         "entry_trigger":  "morning_scheduled",
     })
@@ -533,14 +567,14 @@ def morning_entry_job():
         f"<code>{'━' * 24}</code>\n"
         f"Symbol  » <code>{symbol}</code>\n"
         f"Strike  » <code>${strike:,.0f}</code>\n"
-        f"Lots    » <code>{MORNING_LOTS:,}</code>\n"
+        f"Lots    » <code>{lots:,}</code>\n"
         f"Entry   » <code>${fill:.4f} / BTC</code>\n"
-        f"Cost    » <code>${fill * contract_val * MORNING_LOTS:,.2f}</code>\n"
+        f"Cost    » <code>${fill * contract_val * lots:,.2f}</code>\n"
         f"BTC     » <code>${btc_price:,.2f}</code>\n"
         f"Settles » <code>{settlement.replace('T', ' ').replace('Z', ' UTC')}</code>\n"
         f"Mode    » <code>{'DRY-RUN ⚠' if DRY_RUN else 'LIVE ●'}</code>"
     )
-    log.info("Morning straddle opened: %d lots %s @ $%.4f", MORNING_LOTS, symbol, fill)
+    log.info("Morning straddle opened: %d lots %s @ $%.4f", lots, symbol, fill)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -566,17 +600,18 @@ def entry_job():
     # Market snapshot
     btc_price  = get_btc_price()
     entry_mark = get_mv_mark(symbol)
-    total_cost = entry_mark * contract_val * LOTS
+    lots       = _effective_lots(LOTS, entry_mark, contract_val, "EVENING")
+    total_cost = entry_mark * contract_val * lots
 
     log.info("Symbol      : %s", symbol)
     log.info("Product ID  : %d", product_id)
     log.info("Strike      : $%.0f  |  BTC mark: $%.2f", strike, btc_price)
     log.info("Settlement  : %s", settlement)
     log.info("Entry mark  : $%.4f/BTC  ($%.4f/lot)", entry_mark, entry_mark * contract_val)
-    log.info("Lots        : %d  |  Total premium: $%.2f", LOTS, total_cost)
+    log.info("Lots        : %d  |  Total premium: $%.2f", lots, total_cost)
 
     # Place the single buy order
-    order = place_market_order(product_id, symbol, "buy", LOTS)
+    order = place_market_order(product_id, symbol, "buy", lots)
 
     # Persist — this is what prevents any second order today
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -589,13 +624,13 @@ def entry_job():
         "strike":         strike,
         "settlement":     settlement,
         "contract_value": contract_val,
-        "lots":           LOTS,
+        "lots":           lots,
         "entry_mark":     entry_mark,
         "btc_at_entry":   btc_price,
         "total_cost_usd": round(total_cost, 4),
         "order_id":       order.get("result", {}).get("id"),
     })
-    log.info("Straddle OPEN. Waiting for exit at %02d:%02d UTC (1:00 AM IST).",
+    log.info("Straddle OPEN. Waiting for exit at %02d:%02d UTC.",
              EXIT_H_UTC, EXIT_M_UTC)
 
     send_telegram(
@@ -603,7 +638,7 @@ def entry_job():
         f"<code>{'━' * 24}</code>\n"
         f"Symbol  » <code>{symbol}</code>\n"
         f"Strike  » <code>${strike:,.0f}</code>\n"
-        f"Lots    » <code>{LOTS:,}</code>\n"
+        f"Lots    » <code>{lots:,}</code>\n"
         f"Premium » <code>${entry_mark:.4f} / BTC</code>\n"
         f"Cost    » <code>${total_cost:.2f}</code>\n"
         f"BTC     » <code>${btc_price:,.2f}</code>\n"

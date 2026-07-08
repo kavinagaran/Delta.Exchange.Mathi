@@ -118,6 +118,7 @@ CONFIG_KEYS = [
     "TP_TARGET_PNL", "TP_POLL_SECS",
     "MORNING_ENABLED", "MORNING_LOTS", "MORNING_H_UTC", "MORNING_M_UTC",
     "MORNING_EXIT_ENABLED", "MORNING_EXIT_H_UTC", "MORNING_EXIT_M_UTC",
+    "DYNAMIC_LOTS",
     "TP_TARGET_PNL_MORNING", "TP_POLL_SECS_MORNING",
     "MAX_TRADES_PER_DAY",
 ]
@@ -711,6 +712,50 @@ def _product_info(product_id: int) -> dict:
         info = {"contract_value": 0.001, "symbol": ""}
     _product_cache[product_id] = info
     return info
+
+
+_fx_cache = {"rate": 0.0, "ts": 0.0}
+
+def _usd_inr_rate() -> float:
+    """USD->INR, cached for an hour (display-only, precision not critical)."""
+    if _fx_cache["rate"] and time.time() - _fx_cache["ts"] < 3600:
+        return _fx_cache["rate"]
+    try:
+        r = req.get("https://open.er-api.com/v6/latest/USD", timeout=8).json()
+        rate = float(r.get("rates", {}).get("INR") or 0)
+        if rate > 0:
+            _fx_cache.update(rate=rate, ts=time.time())
+        return rate
+    except Exception:
+        return _fx_cache["rate"]
+
+
+@app.route("/api/wallet")
+def api_wallet():
+    """Account value in USD and INR."""
+    if not API_KEY or not API_SECRET:
+        return jsonify({"error": "no api credentials"}), 503
+    try:
+        hdrs = _sign("GET", "/v2/wallet/balances")
+        r = req.get(f"{API_BASE}/v2/wallet/balances", headers=hdrs, timeout=8)
+        data = r.json()
+        if not data.get("success"):
+            return jsonify({"error": data.get("error", "wallet fetch failed")}), 502
+        usd_balance = usd_available = 0.0
+        for w in data.get("result", []):
+            if w.get("asset_symbol") == "USD":
+                usd_balance   = float(w.get("balance") or 0)
+                usd_available = float(w.get("available_balance") or 0)
+                break
+        rate = _usd_inr_rate()
+        return jsonify({
+            "usd_balance":   round(usd_balance, 2),
+            "usd_available": round(usd_available, 2),
+            "inr_balance":   round(usd_balance * rate, 2) if rate else None,
+            "usd_inr_rate":  round(rate, 2) if rate else None,
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/all-positions")
