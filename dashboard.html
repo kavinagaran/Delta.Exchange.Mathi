@@ -570,6 +570,11 @@ tbody td:first-child { text-align: left; }
         <input id="c-MORNING_H_UTC" type="number" min="0" max="23" placeholder="5">
         <label>Morning Minute IST</label>
         <input id="c-MORNING_M_UTC" type="number" min="0" max="59" placeholder="45">
+        <label>Morning Exit</label>
+        <select id="c-MORNING_EXIT_ENABLED">
+          <option value="true">Enabled</option>
+          <option value="false">Disabled</option>
+        </select>
         <label>Morning Exit Hour IST</label>
         <input id="c-MORNING_EXIT_H_UTC" type="number" min="0" max="23" placeholder="17">
         <label>Morning Exit Minute IST</label>
@@ -894,7 +899,7 @@ function updateDryBanner() {
 }
 
 async function saveConfig() {
-  const keys = ['STRADDLE_LOTS','STRIKE_STEP','DRY_RUN','MORNING_ENABLED','MORNING_LOTS','MAX_TRADES_PER_DAY'];
+  const keys = ['STRADDLE_LOTS','STRIKE_STEP','DRY_RUN','MORNING_ENABLED','MORNING_EXIT_ENABLED','MORNING_LOTS','MAX_TRADES_PER_DAY'];
   const body = {};
   for (const k of keys) {
     const el = document.getElementById('c-' + k);

@@ -76,7 +76,10 @@ assert 0 <= MORNING_H_UTC <= 23 and 0 <= MORNING_M_UTC <= 59, "invalid morning t
 MORNING_WIN_START = MORNING_M_UTC
 MORNING_WIN_END   = min(MORNING_M_UTC + 10, 60)
 
-# Morning exit — default 11:30 UTC (5:00 PM IST), 30 min before settlement
+# Morning exit — default 11:30 UTC (5:00 PM IST), 30 min before settlement.
+# MORNING_EXIT_ENABLED=false disables the scheduled exit entirely — the
+# morning position then closes only via TP monitor, square-off, or settlement.
+MORNING_EXIT_ENABLED = os.getenv("MORNING_EXIT_ENABLED", "true").lower() in ("1", "true", "yes")
 MORNING_EXIT_H_UTC = int(os.getenv("MORNING_EXIT_H_UTC", 11))
 MORNING_EXIT_M_UTC = int(os.getenv("MORNING_EXIT_M_UTC", 30))
 assert 0 <= MORNING_EXIT_H_UTC <= 23 and 0 <= MORNING_EXIT_M_UTC <= 59, "invalid morning exit time"
@@ -729,9 +732,10 @@ def main():
     log.info("  Morning: %02d:%02d UTC (%s)  lots=%d  enabled=%s",
              MORNING_H_UTC, MORNING_M_UTC,
              _ist_label(MORNING_H_UTC, MORNING_M_UTC), MORNING_LOTS, MORNING_ENABLED)
-    log.info("  M-Exit : %02d:%02d UTC (%s)",
-             MORNING_EXIT_H_UTC, MORNING_EXIT_M_UTC,
-             _ist_label(MORNING_EXIT_H_UTC, MORNING_EXIT_M_UTC))
+    log.info("  M-Exit : %s",
+             ("%02d:%02d UTC (%s)" % (MORNING_EXIT_H_UTC, MORNING_EXIT_M_UTC,
+                                       _ist_label(MORNING_EXIT_H_UTC, MORNING_EXIT_M_UTC)))
+             if MORNING_EXIT_ENABLED else "DISABLED (TP/settlement only)")
     log.info("  Entry  : %02d:%02d UTC (%s)", ENTRY_H_UTC, ENTRY_M_UTC,
              _ist_label(ENTRY_H_UTC, ENTRY_M_UTC))
     log.info("  Exit   : %02d:%02d UTC (%s)", EXIT_H_UTC, EXIT_M_UTC,
@@ -782,8 +786,9 @@ def main():
                     log.exception("Morning entry job failed")
                     send_telegram(f"⚠️ <b>MORNING ENTRY FAILED — MATHI</b>\n<code>{exc}</code>")
 
-            # MORNING EXIT TRIGGER  11:30–11:39 UTC (5:00 PM IST)
+            # MORNING EXIT TRIGGER (skipped when MORNING_EXIT_ENABLED=false)
             in_morning_exit = (MORNING_ENABLED
+                               and MORNING_EXIT_ENABLED
                                and h == MORNING_EXIT_H_UTC
                                and MORNING_EXIT_WIN_START <= m < MORNING_EXIT_WIN_END)
             if in_morning_exit and not fired_morning_exit:
