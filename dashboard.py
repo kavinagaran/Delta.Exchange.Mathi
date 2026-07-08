@@ -764,6 +764,43 @@ def get_config():
     return jsonify({k: os.getenv(k, "") for k in CONFIG_KEYS})
 
 
+def _restart_tp_monitor(slot: str) -> bool:
+    """Stop and respawn a slot's TP monitor so freshly saved targets apply.
+    Only called for monitors that are already running."""
+    proc = _tp_procs.get(slot)
+    if proc is not None and proc.poll() is None:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        _tp_procs[slot] = None
+    pid_file = SLOT_PID[slot]
+    if pid_file.exists():
+        try:
+            os.kill(int(pid_file.read_text().strip()), 15)
+        except Exception:
+            pass
+        pid_file.unlink(missing_ok=True)
+    script = BASE / "tp_monitor.py"
+    state  = _load_json(SLOT_STATE[slot], {})
+    if state.get("status") != "OPEN" or not script.exists():
+        return False
+    proc = subprocess.Popen(
+        [sys.executable, str(script), "--slot", slot],
+        cwd=str(BASE), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    _tp_procs[slot] = proc
+    pid_file.write_text(str(proc.pid))
+    return True
+
+
+_TP_KEYS_BY_SLOT = {
+    "evening": {"TP_TARGET_PNL", "TP_POLL_SECS"},
+    "morning": {"TP_TARGET_PNL_MORNING", "TP_POLL_SECS_MORNING"},
+}
+
+
 @app.route("/api/config", methods=["POST"])
 def set_config():
     data = request.json or {}
@@ -782,7 +819,14 @@ def set_config():
             lines.append(f"{key} = {val}")
     ENV_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
     load_dotenv(override=True)
-    return jsonify({"ok": True})
+    # The bot watches .env and reloads itself; running TP monitors don't,
+    # so bounce any whose slot's targets just changed.
+    tp_restarted = []
+    for slot, keys in _TP_KEYS_BY_SLOT.items():
+        if keys & set(data) and _tp_running(slot):
+            if _restart_tp_monitor(slot):
+                tp_restarted.append(slot)
+    return jsonify({"ok": True, "tp_restarted": tp_restarted})
 
 
 @app.route("/api/test-telegram", methods=["POST"])

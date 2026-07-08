@@ -94,6 +94,7 @@ TELEGRAM_ON     = os.getenv("TELEGRAM_ALERTS", "true").lower() in ("1", "true", 
 STATE_FILE         = Path(__file__).parent / "straddle_state.json"
 MORNING_STATE_FILE = Path(__file__).parent / "morning_state.json"
 HISTORY_FILE       = Path(__file__).parent / "trade_history.json"
+ENV_FILE           = Path(__file__).parent / ".env"
 
 # ─────────────────────────────────────────────────────────────
 # LOGGING
@@ -758,6 +759,7 @@ def main():
     fired_morning      = False
     fired_morning_exit = False
     last_day           = None
+    env_mtime          = ENV_FILE.stat().st_mtime if ENV_FILE.exists() else 0
 
     while True:
         try:
@@ -820,6 +822,19 @@ def main():
                 except Exception as exc:
                     log.exception("Exit job failed")
                     send_telegram(f"⚠️ <b>EXIT FAILED</b>\n<code>{exc}</code>")
+
+            # CONFIG WATCH — when .env changes (dashboard/app save, manual
+            # edit), reload the whole process so new settings apply without
+            # anyone having to restart the service by hand. os.execv replaces
+            # this process in place; daily-fire guards are state-file backed,
+            # so a reload inside a trigger window can't double-fire orders.
+            if ENV_FILE.exists():
+                env_mt = ENV_FILE.stat().st_mtime
+                if env_mt != env_mtime and time.time() - env_mt > 2:
+                    log.info("Config change detected in .env — reloading bot with new settings.")
+                    send_telegram("🔄 <b>CONFIG CHANGED — BOT RELOADED (MATHI)</b>\n"
+                                  "New settings are now in effect.")
+                    os.execv(sys.executable, [sys.executable] + sys.argv)
 
             # Heartbeat every 10 min — reports both slots
             if m % 10 == 0 and now.second < POLL_SEC:
