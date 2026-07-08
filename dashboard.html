@@ -968,7 +968,7 @@ async function saveConfig() {
       body: JSON.stringify(body)
     });
     const d = await r.json();
-    if (d.ok) { toast('Configuration saved!', 'ok'); updateDryBanner(); }
+    if (d.ok) { toast('Configuration saved!', 'ok'); updateDryBanner(); loadConfig(); }
     else toast('Save failed', 'err');
   } catch(e) { toast('Error: ' + e.message, 'err'); }
 }
@@ -1271,10 +1271,13 @@ async function loadWallet() {
 }
 
 async function loadAll() {
-  await Promise.all([loadStatus(), loadTrades(), loadConfig(), loadLogs(), loadTodayTrades(), loadAllPositions(), loadWallet()]); refreshTpStatus();
+  // loadConfig deliberately NOT here: the 10s refresher was overwriting
+  // fields (e.g. the Mode select) mid-edit, making config impossible to change.
+  await Promise.all([loadStatus(), loadTrades(), loadLogs(), loadTodayTrades(), loadAllPositions(), loadWallet()]); refreshTpStatus();
 }
 
 loadAll();
+loadConfig();
 setInterval(loadAll, 10000);
 setInterval(updateClock, 1000);
 updateClock();
