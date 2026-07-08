@@ -12,7 +12,7 @@ import os
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 import requests as req
@@ -326,19 +326,31 @@ def api_status():
 
 
 
+def _ist_calendar_date(date_str: str, time_str: str) -> str:
+    """IST (UTC+5:30) calendar date a UTC (date, time-of-day) pair falls on.
+    Users think in IST "today", but entry_date/entry_time are always stored
+    in UTC, so a straight string compare against a UTC or IST "today" is
+    wrong for whichever side of the actual moment doesn't match — this
+    converts the trade's own timestamp before comparing calendar dates."""
+    try:
+        dt_utc = datetime.strptime(f"{date_str} {time_str or '00:00:00'}", "%Y-%m-%d %H:%M:%S")
+        return (dt_utc + timedelta(hours=5, minutes=30)).strftime("%Y-%m-%d")
+    except (ValueError, TypeError):
+        return date_str
+
+
 @app.route("/api/today-trades")
 def api_today_trades():
-    # entry_date is always stored as a UTC calendar date (see save_state
-    # etc. in the bot) — must compare against UTC "today", not local date,
-    # or this mismatches for ~5.5h every day around the IST/UTC day boundary.
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today_ist = (datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)).strftime("%Y-%m-%d")
     trades  = _load_json(HISTORY_FILE, [])
     state   = _load_json(STATE_FILE, {})
-    today_t = [t for t in trades if (t.get("entry_date") or t.get("date", "")) == today]
+    today_t = [t for t in trades
+               if _ist_calendar_date(t.get("entry_date") or t.get("date", ""),
+                                      t.get("entry_time") or t.get("entry_time_utc", "")) == today_ist]
     # Include any open slot position as a live row with real-time mark & P&L
     for slot in ("morning", "evening"):
         s = _load_json(SLOT_STATE[slot], {})
-        if s.get("status") == "OPEN" and s.get("entry_date", "") == today:
+        if s.get("status") == "OPEN" and _ist_calendar_date(s.get("entry_date", ""), s.get("entry_time_utc", "")) == today_ist:
             s["_live"] = True
             s["slot"]  = slot
             s = _enrich_live(s)
@@ -591,6 +603,6 @@ def test_telegram():
 if __name__ == "__main__":
     print("=" * 50)
     print("  MV-BTC Straddle Dashboard")
-    print("  http://localhost:5000")
+    print("  http://localhost:5001")
     print("=" * 50)
     app.run(host="0.0.0.0", port=5001, debug=False)
