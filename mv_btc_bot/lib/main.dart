@@ -130,6 +130,14 @@ const kSlots = [
   SlotMeta('evening', 'Evening', '🌇', '5:35 PM IST'),
 ];
 
+/// Same IST boundary the exchange-sync classifier uses: before 11:00 IST
+/// belongs to the morning slot's trading window, after to the evening's.
+String manualSlotNow() {
+  final now = DateTime.now().toUtc();
+  final istMin = (now.hour * 60 + now.minute + 330) % 1440;
+  return istMin < 660 ? 'morning' : 'evening';
+}
+
 // ─────────────────────────────────────────────────────────────
 // Shell with bottom navigation
 // ─────────────────────────────────────────────────────────────
@@ -278,14 +286,37 @@ class _DashboardPageState extends State<DashboardPage> {
 
   Future<void> _manualEntry(SlotMeta slot, String side) async {
     final isBuy = side == 'buy';
+    Map<String, dynamic> p;
+    try {
+      p = await Api.getJson('/api/manual-entry/preview?slot=${slot.key}') as Map<String, dynamic>;
+      if (p['ok'] != true) throw Exception(p['error'] ?? 'preview failed');
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('Cannot fetch straddle preview: $e')));
+      return;
+    }
+    if (!mounted) return;
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: kSurf,
         title: Text(isBuy ? '▲ Buy Straddle?' : '▼ Sell Straddle?'),
-        content: Text(isBuy
-            ? 'BUY (long) the current ATM straddle for the ${slot.name} slot at market price, using configured/dynamic lot sizing?'
-            : 'SELL-TO-OPEN (short) the current ATM straddle for the ${slot.name} slot — collect premium, profits if BTC stays near the strike?'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(isBuy
+                ? 'BUY (long) at market — ${slot.name} slot'
+                : 'SELL-TO-OPEN (short, collect premium) at market — ${slot.name} slot'),
+            const SizedBox(height: 12),
+            _previewRow('Contract', '${p['symbol']}'),
+            _previewRow('Strike', '\$${(p['strike'] as num).toStringAsFixed(0)}'),
+            _previewRow('Mark', '\$${(p['mark'] as num).toStringAsFixed(2)} / BTC'),
+            _previewRow('Lots', '${p['lots']}'),
+            _previewRow('Value', '~\$${(p['est_value'] as num).toStringAsFixed(0)}'),
+          ],
+        ),
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
           TextButton(
@@ -312,6 +343,21 @@ class _DashboardPageState extends State<DashboardPage> {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
     }
   }
+
+  Widget _previewRow(String k, String v) => Padding(
+        padding: const EdgeInsets.symmetric(vertical: 2),
+        child: Row(
+          children: [
+            SizedBox(width: 80, child: Text(k, style: const TextStyle(color: kMuted, fontSize: 12.5))),
+            Expanded(
+              child: Text(v,
+                  style: const TextStyle(
+                      color: kText, fontSize: 13, fontWeight: FontWeight.w600,
+                      fontFeatures: [FontFeature.tabularFigures()])),
+            ),
+          ],
+        ),
+      );
 
   Widget _manualButtons(SlotMeta slot) => Padding(
         padding: const EdgeInsets.only(top: 10),
@@ -555,10 +601,10 @@ class _DashboardPageState extends State<DashboardPage> {
               _openBody(slot, st, tpCfg)
             else if (closed) ...[
               _closedBody(st),
-              _manualButtons(slot),
+              if (slot.key == manualSlotNow()) _manualButtons(slot),
             ] else ...[
               _idleBody(slot),
-              _manualButtons(slot),
+              if (slot.key == manualSlotNow()) _manualButtons(slot),
             ],
           ],
         ),

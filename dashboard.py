@@ -532,6 +532,33 @@ def _manual_entry_lots(slot: str, mark: float, cv: float) -> int:
         return min(configured, max_lots)
 
 
+@app.route("/api/manual-entry/preview")
+def api_manual_entry_preview():
+    """What a manual buy/sell would do right now: contract, strike, sizing."""
+    slot = _slot_arg()
+    contract = _current_atm_mv()
+    if not contract:
+        return jsonify({"ok": False, "error": "No live MV contract found"}), 502
+    symbol = contract["symbol"]
+    cv     = float(contract.get("contract_value") or 0.001)
+    try:
+        mark = float(req.get(f"{API_BASE}/v2/tickers/{symbol}", timeout=6)
+                     .json().get("result", {}).get("mark_price") or 0)
+    except Exception:
+        mark = 0.0
+    lots = _manual_entry_lots(slot, mark, cv)
+    return jsonify({
+        "ok":         True,
+        "slot":       slot,
+        "symbol":     symbol,
+        "strike":     float(contract.get("strike_price") or 0),
+        "mark":       round(mark, 4),
+        "lots":       lots,
+        "est_value":  round(mark * cv * lots, 2),
+        "settlement": contract.get("settlement_time", ""),
+    })
+
+
 @app.route("/api/manual-entry", methods=["POST"])
 def api_manual_entry():
     """BUY (long) or SELL (short-to-open) the current ATM straddle for a slot.
