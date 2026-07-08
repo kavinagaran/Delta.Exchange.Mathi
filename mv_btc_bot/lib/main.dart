@@ -60,23 +60,38 @@ class MathiBotApp extends StatelessWidget {
 // API client
 // ─────────────────────────────────────────────────────────────
 class Api {
-  static String baseUrl = 'http://192.168.1.8:5001';
+  static String baseUrl = 'http://13.207.78.56:5001';
+  static String user = 'mathi';
+  static String pass = '';
+
+  static Map<String, String> get _headers => {
+        'Content-Type': 'application/json',
+        if (pass.isNotEmpty)
+          'Authorization': 'Basic ${base64Encode(utf8.encode('$user:$pass'))}',
+      };
 
   static Future<void> loadBaseUrl() async {
     final prefs = await SharedPreferences.getInstance();
     baseUrl = prefs.getString('server_url') ?? baseUrl;
+    user = prefs.getString('server_user') ?? user;
+    pass = prefs.getString('server_pass') ?? pass;
   }
 
-  static Future<void> saveBaseUrl(String url) async {
+  static Future<void> saveBaseUrl(String url, String u, String p) async {
     baseUrl = url.trim().replaceAll(RegExp(r'/+$'), '');
+    user = u.trim();
+    pass = p;
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('server_url', baseUrl);
+    await prefs.setString('server_user', user);
+    await prefs.setString('server_pass', pass);
   }
 
   static Future<dynamic> getJson(String path) async {
     final r = await http
-        .get(Uri.parse('$baseUrl$path'))
+        .get(Uri.parse('$baseUrl$path'), headers: _headers)
         .timeout(const Duration(seconds: 8));
+    if (r.statusCode == 401) throw Exception('Login failed — check username/password in Settings');
     return jsonDecode(r.body);
   }
 
@@ -84,10 +99,11 @@ class Api {
     final r = await http
         .post(
           Uri.parse('$baseUrl$path'),
-          headers: {'Content-Type': 'application/json'},
+          headers: _headers,
           body: body == null ? null : jsonEncode(body),
         )
         .timeout(const Duration(seconds: 20));
+    if (r.statusCode == 401) throw Exception('Login failed — check username/password in Settings');
     return jsonDecode(r.body);
   }
 }
@@ -784,6 +800,8 @@ class SettingsPage extends StatefulWidget {
 
 class _SettingsPageState extends State<SettingsPage> {
   late final TextEditingController _urlCtl;
+  late final TextEditingController _userCtl;
+  late final TextEditingController _passCtl;
   String? _testResult;
   bool _testing = false;
   Map<String, dynamic> _config = {};
@@ -793,12 +811,16 @@ class _SettingsPageState extends State<SettingsPage> {
   void initState() {
     super.initState();
     _urlCtl = TextEditingController(text: Api.baseUrl);
+    _userCtl = TextEditingController(text: Api.user);
+    _passCtl = TextEditingController(text: Api.pass);
     _loadConfig();
   }
 
   @override
   void dispose() {
     _urlCtl.dispose();
+    _userCtl.dispose();
+    _passCtl.dispose();
     super.dispose();
   }
 
@@ -818,7 +840,7 @@ class _SettingsPageState extends State<SettingsPage> {
       _testing = true;
       _testResult = null;
     });
-    await Api.saveBaseUrl(_urlCtl.text);
+    await Api.saveBaseUrl(_urlCtl.text, _userCtl.text, _passCtl.text);
     try {
       final d = await Api.getJson('/api/status');
       setState(() => _testResult = '✅ Connected — evening: ${d['status'] ?? '?'}, morning: ${d['morning']?['status'] ?? '—'}');
@@ -951,9 +973,34 @@ class _SettingsPageState extends State<SettingsPage> {
                     keyboardType: TextInputType.url,
                     style: const TextStyle(fontFamily: 'monospace'),
                     decoration: InputDecoration(
-                      hintText: 'http://192.168.1.8:5001',
+                      hintText: 'http://13.207.78.56:5001',
                       border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
                     ),
+                  ),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: TextField(
+                          controller: _userCtl,
+                          decoration: InputDecoration(
+                            labelText: 'Username',
+                            border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: TextField(
+                          controller: _passCtl,
+                          obscureText: true,
+                          decoration: InputDecoration(
+                            labelText: 'Password',
+                            border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                          ),
+                        ),
+                      ),
+                    ],
                   ),
                   const SizedBox(height: 12),
                   SizedBox(
