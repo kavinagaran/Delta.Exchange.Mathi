@@ -91,8 +91,8 @@ def get_exchange_size(product_id):
         return None
 
 
-def place_sell(product_id, symbol, size):
-    payload = {"product_id": product_id, "size": size, "side": "sell", "order_type": "market_order"}
+def place_order(product_id, symbol, side, size):
+    payload = {"product_id": product_id, "size": size, "side": side, "order_type": "market_order"}
     body    = json.dumps(payload, separators=(",", ":"))
     hdrs    = _sign("POST", "/v2/orders", "", body)
     r       = requests.post(f"{BASE_URL}/v2/orders", data=body, headers=hdrs, timeout=15)
@@ -153,11 +153,13 @@ def close_position(state, mark, pnl):
     product_id = state["product_id"]
     symbol     = state["symbol"]
     lots       = state["lots"]
+    is_short   = state.get("side") == "short"
+    close_side = "buy" if is_short else "sell"
 
-    # Never sell blind — verify the position still exists on the exchange.
+    # Never close blind — verify the position still exists on the exchange.
     live_size = get_exchange_size(product_id)
     if live_size is None:
-        log.warning("Cannot verify position — skipping sell this cycle.")
+        log.warning("Cannot verify position — skipping close this cycle.")
         return False
     if live_size == 0:
         log.info("Position already closed on exchange — marking state CLOSED, monitor done.")
@@ -168,15 +170,17 @@ def close_position(state, mark, pnl):
         })
         STATE_FILE.write_text(json.dumps(state, indent=2), encoding="utf-8")
         return True
-    lots = live_size
+    lots = abs(live_size)
 
-    log.info("TP HIT — P&L $%.2f  mark $%.4f  selling %d lots...", pnl, mark, lots)
-    result = place_sell(product_id, symbol, lots)
+    log.info("TP HIT — P&L $%.2f  mark $%.4f  %sing %d lots to close...",
+             pnl, mark, close_side, lots)
+    result = place_order(product_id, symbol, close_side, lots)
     if result.get("success"):
         o    = result.get("result", {})
         fill = float(o.get("average_fill_price") or mark)
         cv   = float(state.get("contract_value", 0.001))
-        real = round((fill - float(state["entry_mark"])) * cv * lots, 2)
+        sign = -1 if is_short else 1
+        real = round((fill - float(state["entry_mark"])) * cv * lots * sign, 2)
         state.update({
             "status":        "CLOSED",
             "exit_time_utc": time.strftime("%H:%M:%S", time.gmtime()),
@@ -219,9 +223,11 @@ def main():
     entry_mark = float(state["entry_mark"])
     lots       = int(state["lots"])
     cv         = float(state.get("contract_value", 0.001))
+    sign       = -1 if state.get("side") == "short" else 1
 
-    log.info("Symbol: %s  entry=%.4f  lots=%d  target_pnl=$%.2f",
-             symbol, entry_mark, lots, TARGET_PNL)
+    log.info("Symbol: %s  entry=%.4f  lots=%d  side=%s  target_pnl=$%.2f",
+             symbol, entry_mark, lots,
+             "SHORT" if sign < 0 else "LONG", TARGET_PNL)
 
     while True:
         try:
@@ -231,7 +237,7 @@ def main():
                 break
 
             mark = get_mark(symbol)
-            pnl  = (mark - entry_mark) * cv * lots
+            pnl  = (mark - entry_mark) * cv * lots * sign
 
             log.info("mark=%.4f  pnl=$%.2f  target=$%.2f", mark, pnl, TARGET_PNL)
 

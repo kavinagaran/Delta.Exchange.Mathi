@@ -456,6 +456,22 @@ tbody td:first-child { text-align: left; }
   color: var(--muted); margin-bottom: 10px; font-weight: 700;
 }
 .slot-time { color: var(--gold); font-size: 0.68rem; }
+.manual-btn-row { display: flex; gap: 10px; margin-top: 12px; }
+.manual-btn {
+  flex: 1; padding: 9px 0; border-radius: 8px; cursor: pointer;
+  font-weight: 700; font-size: 0.78rem; letter-spacing: 1px;
+  border: 1px solid; background: transparent; transition: all 0.15s;
+}
+.manual-btn.buy  { color: var(--green); border-color: var(--green); }
+.manual-btn.buy:hover  { background: rgba(0,255,135,0.12); }
+.manual-btn.sell { color: var(--red); border-color: var(--red); }
+.manual-btn.sell:hover { background: rgba(255,45,110,0.12); }
+.side-badge {
+  padding: 1px 8px; border-radius: 10px; font-size: 0.62rem;
+  font-weight: 800; letter-spacing: 1px; margin-left: 8px;
+}
+.side-badge.long  { color: var(--green); border: 1px solid var(--green); }
+.side-badge.short { color: var(--red);  border: 1px solid var(--red); }
 .today-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; table-layout: fixed; }
 .today-table th { padding: 8px 12px; color: var(--muted); font-size: 0.7rem;
                   letter-spacing: 1px; text-transform: uppercase; white-space: nowrap;
@@ -778,7 +794,7 @@ function slotCardHtml(s, slot) {
   if (s && s.status === 'OPEN') {
     return `
       <table class="pos-table">
-        <tr><td class="lbl">Symbol</td><td class="val c-b">${s.symbol||'—'}</td></tr>
+        <tr><td class="lbl">Symbol</td><td class="val c-b">${s.symbol||'—'}<span class="side-badge ${s.side === 'short' ? 'short' : 'long'}">${s.side === 'short' ? 'SHORT' : 'LONG'}</span></td></tr>
         <tr><td class="lbl">Strike</td><td class="val">$${fN(s.strike)}</td></tr>
         <tr><td class="lbl">Lots</td><td class="val">${s.lots||'—'}</td></tr>
         <tr><td class="lbl">Entry Mark</td><td class="val">$${fN(s.entry_mark,4)}/BTC</td></tr>
@@ -796,7 +812,11 @@ function slotCardHtml(s, slot) {
         <span class="icon">✅</span>
         Closed at ${s.exit_time_utc||''} UTC
         <div class="hint">${s.symbol||''}<br>P&L: <span class="${cls(s.pnl_usd)}">${f$(s.pnl_usd)}</span></div>
-      </div>`;
+      </div>
+    <div class="manual-btn-row">
+      <button class="manual-btn buy" onclick="manualEntry('${slot}','buy')">&#9650; BUY STRADDLE</button>
+      <button class="manual-btn sell" onclick="manualEntry('${slot}','sell')">&#9660; SELL STRADDLE</button>
+    </div>`;
   }
   const when = slot === 'morning' ? '5:45 AM IST (00:15 UTC)' : '5:35 PM IST (12:05 UTC)';
   return `
@@ -804,6 +824,10 @@ function slotCardHtml(s, slot) {
       <span class="icon">⏳</span>
       Waiting for entry window
       <div class="hint">Entry: ${when}</div>
+    </div>
+    <div class="manual-btn-row">
+      <button class="manual-btn buy" onclick="manualEntry('${slot}','buy')">&#9650; BUY STRADDLE</button>
+      <button class="manual-btn sell" onclick="manualEntry('${slot}','sell')">&#9660; SELL STRADDLE</button>
     </div>`;
 }
 
@@ -1129,6 +1153,27 @@ async function loadTodayTrades() {
 }
 
 // ── Square Off ───────────────────────────────────────────────
+async function manualEntry(slot, side) {
+  const verb = side === 'buy' ? 'BUY (long)' : 'SELL (short — collect premium)';
+  if (!confirm(`${verb} the current ATM straddle for the ${slot.toUpperCase()} slot?\nUses configured/dynamic lot sizing at market price.`)) return;
+  try {
+    const r = await fetch('/api/manual-entry?slot=' + slot, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({side}),
+    });
+    const d = await r.json();
+    if (d.ok) {
+      showToast(`${side.toUpperCase()} filled: ${d.lots} lots ${d.symbol} @ $${(+d.fill).toFixed(2)}`, 'ok');
+      await loadAll();
+    } else {
+      showToast('Order failed: ' + JSON.stringify(d.error), 'err');
+    }
+  } catch(e) {
+    showToast('Error: ' + e.message, 'err');
+  }
+}
+
 async function squareOff(slot) {
   slot = slot || 'evening';
   if (!confirm(`Square off the ${slot.toUpperCase()} position now at market price?`)) return;

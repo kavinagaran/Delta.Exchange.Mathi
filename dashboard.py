@@ -197,9 +197,11 @@ def index():
 _last_sync = 0.0
 
 def _state_matches(state: dict, pid: int, size: int, entry: float) -> bool:
+    side = "short" if size < 0 else "long"
     return (state.get("status") == "OPEN"
             and int(state.get("product_id", 0) or 0) == pid
-            and int(state.get("lots", 0) or 0) == size
+            and int(state.get("lots", 0) or 0) == abs(size)
+            and state.get("side", "long") == side
             and abs(float(state.get("entry_mark", 0) or 0) - entry) < 0.01)
 
 
@@ -298,6 +300,7 @@ def _sync_states_from_exchange() -> None:
             new_state = {
                 "slot":           slot,
                 "status":         "OPEN",
+                "side":           "short" if size < 0 else "long",
                 "entry_date":     created[:10] or datetime.now(timezone.utc).strftime("%Y-%m-%d"),
                 "entry_time_utc": created[11:19],
                 "symbol":         pr.get("symbol", p.get("product_symbol", "")),
@@ -305,10 +308,10 @@ def _sync_states_from_exchange() -> None:
                 "strike":         float(pr.get("strike_price") or 0),
                 "settlement":     pr.get("settlement_time", ""),
                 "contract_value": cv,
-                "lots":           size,
+                "lots":           abs(size),
                 "entry_mark":     entry,
                 "btc_at_entry":   0,
-                "total_cost_usd": round(entry * cv * size, 2),
+                "total_cost_usd": round(entry * cv * abs(size), 2),
                 "entry_trigger":  "exchange_sync",
             }
             SLOT_STATE[slot].write_text(json.dumps(new_state, indent=2), encoding="utf-8")
@@ -318,7 +321,7 @@ def _sync_states_from_exchange() -> None:
 
 
 def _enrich_live(state: dict) -> dict:
-    """Attach current_mark and live_pnl to an OPEN state dict."""
+    """Attach current_mark and live_pnl to an OPEN state dict (side-aware)."""
     if state.get("status") == "OPEN":
         symbol = state.get("symbol", "")
         try:
@@ -327,8 +330,9 @@ def _enrich_live(state: dict) -> dict:
             cval = float(state.get("contract_value", 0.001))
             lots = int(state.get("lots", 1000))
             em   = float(state.get("entry_mark", 0))
+            sign = -1 if state.get("side") == "short" else 1
             state["current_mark"] = round(mark, 4)
-            state["live_pnl"]     = round((mark - em) * cval * lots, 2) if mark else None
+            state["live_pnl"]     = round((mark - em) * cval * lots * sign, 2) if mark else None
         except Exception:
             state["current_mark"] = None
             state["live_pnl"]     = None
@@ -418,17 +422,20 @@ def api_square_off():
         if live_size == 0:
             return jsonify({"ok": False, "error": "Position not found on exchange — may have already been closed."}), 400
 
-        # Use actual exchange size (may differ from state)
-        lots = live_size
+        # Use actual exchange size; negative size = short position
+        is_short   = live_size < 0 or state.get("side") == "short"
+        close_side = "buy" if is_short else "sell"
+        pnl_sign   = -1 if is_short else 1
+        lots       = abs(live_size)
 
         # Get current mark for P&L
         ticker = req.get(f"{API_BASE}/v2/tickers/{symbol}", timeout=5).json()
         mark   = float(ticker.get("result", {}).get("mark_price") or 0)
 
-        # Place market sell
+        # Place market close order (sell for long, buy-back for short)
         import json as _json
         payload = {"product_id": product_id, "size": lots,
-                   "side": "sell", "order_type": "market_order"}
+                   "side": close_side, "order_type": "market_order"}
         body    = _json.dumps(payload, separators=(",", ":"))
         hdrs    = _sign("POST", "/v2/orders", "", body)
         r       = req.post(f"{API_BASE}/v2/orders", data=body, headers=hdrs, timeout=15)
@@ -437,7 +444,7 @@ def api_square_off():
         if result.get("success"):
             o       = result.get("result", {})
             fill    = float(o.get("average_fill_price") or mark)
-            pnl     = round((fill - entry_mark) * cval * lots, 2)
+            pnl     = round((fill - entry_mark) * cval * lots * pnl_sign, 2)
             state.update({
                 "status":        "CLOSED",
                 "exit_time_utc": __import__("datetime").datetime.now(
@@ -469,6 +476,142 @@ def _slot_arg() -> str:
     if not slot:
         slot = (request.get_json(silent=True) or {}).get("slot", "")
     return slot if slot in SLOT_STATE else "evening"
+
+
+def _send_telegram(text: str) -> None:
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    chat  = os.getenv("TELEGRAM_CHAT_ID", "")
+    if not token or not chat:
+        return
+    try:
+        req.post(f"https://api.telegram.org/bot{token}/sendMessage",
+                 json={"chat_id": chat, "text": text, "parse_mode": "HTML"}, timeout=8)
+    except Exception:
+        pass
+
+
+def _current_atm_mv() -> dict | None:
+    """The live MV-BTC contract with the nearest settlement whose strike is
+    closest to the current BTC price — i.e. 'the current straddle'."""
+    try:
+        spot = float(req.get(f"{API_BASE}/v2/tickers/BTCUSD", timeout=6)
+                     .json().get("result", {}).get("mark_price") or 0)
+        prods = req.get(f"{API_BASE}/v2/products",
+                        params={"contract_types": "move_options", "states": "live"},
+                        timeout=8).json().get("result", [])
+        mv = [p for p in prods if str(p.get("symbol", "")).startswith("MV-BTC")
+              and p.get("settlement_time")]
+        if not mv or spot <= 0:
+            return None
+        nearest = min(p.get("settlement_time") for p in mv)
+        batch   = [p for p in mv if p.get("settlement_time") == nearest]
+        return min(batch, key=lambda p: abs(float(p.get("strike_price") or 0) - spot))
+    except Exception:
+        return None
+
+
+def _manual_entry_lots(slot: str, mark: float, cv: float) -> int:
+    """Usual sizing: slot's configured lots, upgraded by dynamic sizing
+    (max of configured and affordable-with-balance) when DYNAMIC_LOTS is on."""
+    configured = int(os.getenv("MORNING_LOTS", 2000) if slot == "morning"
+                     else os.getenv("STRADDLE_LOTS", 800))
+    max_lots = int(os.getenv("MAX_ORDER_LOTS", 5000))
+    if os.getenv("DYNAMIC_LOTS", "true").lower() not in ("1", "true", "yes"):
+        return min(configured, max_lots)
+    try:
+        hdrs = _sign("GET", "/v2/wallet/balances")
+        data = req.get(f"{API_BASE}/v2/wallet/balances", headers=hdrs, timeout=8).json()
+        bal = 0.0
+        for w in data.get("result", []):
+            if w.get("asset_symbol") == "USD":
+                bal = float(w.get("available_balance") or 0)
+                break
+        afford = int((bal * 0.98) / (mark * cv)) if mark > 0 else 0
+        return max(min(max(configured, afford), max_lots), 1)
+    except Exception:
+        return min(configured, max_lots)
+
+
+@app.route("/api/manual-entry", methods=["POST"])
+def api_manual_entry():
+    """BUY (long) or SELL (short-to-open) the current ATM straddle for a slot.
+    Only allowed when the slot has no open position; afterwards the position
+    is BAU — TP monitor, square-off, scheduled exits all apply."""
+    slot = _slot_arg()
+    data = request.get_json(silent=True) or {}
+    side = (data.get("side") or request.args.get("side") or "").lower()
+    if side not in ("buy", "sell"):
+        return jsonify({"ok": False, "error": "side must be buy or sell"}), 400
+    if not API_KEY or not API_SECRET:
+        return jsonify({"ok": False, "error": "API credentials not configured"}), 400
+
+    state_file = SLOT_STATE[slot]
+    state      = _load_json(state_file, {})
+    if state.get("status") == "OPEN":
+        return jsonify({"ok": False, "error": f"{slot} already has an open position"}), 400
+
+    contract = _current_atm_mv()
+    if not contract:
+        return jsonify({"ok": False, "error": "No live MV contract found"}), 502
+    pid    = int(contract["id"])
+    symbol = contract["symbol"]
+    cv     = float(contract.get("contract_value") or 0.001)
+    try:
+        mark = float(req.get(f"{API_BASE}/v2/tickers/{symbol}", timeout=6)
+                     .json().get("result", {}).get("mark_price") or 0)
+    except Exception:
+        mark = 0.0
+    lots = _manual_entry_lots(slot, mark, cv)
+
+    try:
+        import json as _json
+        payload = {"product_id": pid, "size": lots, "side": side, "order_type": "market_order"}
+        body    = _json.dumps(payload, separators=(",", ":"))
+        hdrs    = _sign("POST", "/v2/orders", "", body)
+        result  = req.post(f"{API_BASE}/v2/orders", data=body, headers=hdrs, timeout=15).json()
+        if not result.get("success"):
+            return jsonify({"ok": False, "error": result.get("error", result)}), 400
+
+        o    = result.get("result", {})
+        fill = float(o.get("average_fill_price") or mark)
+        now  = datetime.now(timezone.utc)
+        pos_side = "long" if side == "buy" else "short"
+        new_state = {
+            "slot":           slot,
+            "status":         "OPEN",
+            "side":           pos_side,
+            "entry_date":     now.strftime("%Y-%m-%d"),
+            "entry_time_utc": now.strftime("%H:%M:%S"),
+            "symbol":         symbol,
+            "product_id":     pid,
+            "strike":         float(contract.get("strike_price") or 0),
+            "settlement":     contract.get("settlement_time", ""),
+            "contract_value": cv,
+            "lots":           lots,
+            "entry_mark":     round(fill, 4),
+            "btc_at_entry":   0,
+            "total_cost_usd": round(fill * cv * lots, 2),
+            "order_id":       o.get("id"),
+            "entry_trigger":  f"manual_{side}",
+        }
+        state_file.write_text(json.dumps(new_state, indent=2), encoding="utf-8")
+
+        icon  = "🌅" if slot == "morning" else "🌇"
+        label = "LONG (bought)" if side == "buy" else "SHORT (sold to open)"
+        _send_telegram(
+            f"🖐 <b>MANUAL {side.upper()} — {icon} {slot.upper()} (MATHI)</b>\n"
+            f"<code>{'━' * 24}</code>\n"
+            f"Symbol  » <code>{symbol}</code>\n"
+            f"Side    » <code>{label}</code>\n"
+            f"Lots    » <code>{lots:,}</code>\n"
+            f"Fill    » <code>${fill:.4f} / BTC</code>\n"
+            f"Value   » <code>${fill * cv * lots:,.2f}</code>\n"
+            f"Settles » <code>{str(contract.get('settlement_time', '')).replace('T', ' ').replace('Z', ' UTC')}</code>"
+        )
+        return jsonify({"ok": True, "slot": slot, "side": pos_side, "symbol": symbol,
+                        "lots": lots, "fill": fill, "order_id": o.get("id")})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 def _tp_env(slot: str):

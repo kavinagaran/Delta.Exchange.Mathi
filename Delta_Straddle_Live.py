@@ -692,8 +692,14 @@ def _close_position_job(state: dict, save_fn, label: str):
         log.info("Exchange position: %d lots of %s", actual_size, symbol)
         if actual_size == 0:
             log.warning("No open position found on exchange for %s — may have been closed manually.", symbol)
-        elif actual_size != lots:
+        elif abs(actual_size) != lots:
             log.warning("Position mismatch: expected %d lots, found %d. Using exchange figure.", lots, actual_size)
+
+    # Long positions have positive exchange size, shorts negative
+    is_short   = state.get("side") == "short" or actual_size < 0
+    pnl_sign   = -1 if is_short else 1
+    close_side = "buy" if is_short else "sell"
+    close_size = abs(actual_size)
 
     # Snapshot exit mark
     exit_mark  = get_mv_mark(symbol)
@@ -702,10 +708,11 @@ def _close_position_job(state: dict, save_fn, label: str):
     btc_move   = (btc_exit - btc_entry) / btc_entry * 100 if btc_entry else 0
 
     if entry_mark > 0 and exit_mark > 0:
-        pnl_per_btc = exit_mark - entry_mark
-        pnl_usd     = pnl_per_btc * contract_val * actual_size
+        pnl_per_btc = (exit_mark - entry_mark) * pnl_sign
+        pnl_usd     = pnl_per_btc * contract_val * close_size
         ret_pct     = pnl_per_btc / entry_mark * 100
-        log.info("Entry mark  : $%.4f/BTC  |  Exit mark: $%.4f/BTC", entry_mark, exit_mark)
+        log.info("Entry mark  : $%.4f/BTC  |  Exit mark: $%.4f/BTC  (%s)",
+                 entry_mark, exit_mark, "SHORT" if is_short else "LONG")
         log.info("BTC move    : %.2f%%  ($%.0f -> $%.0f)", btc_move, btc_entry, btc_exit)
         log.info("P&L         : $%.2f  (%+.1f%%)", pnl_usd, ret_pct)
     else:
@@ -713,10 +720,10 @@ def _close_position_job(state: dict, save_fn, label: str):
         exit_mark = 0.0
 
     # Close position
-    if actual_size > 0:
-        place_market_order(product_id, symbol, "sell", actual_size)
+    if close_size > 0:
+        place_market_order(product_id, symbol, close_side, close_size)
     else:
-        log.warning("Size is 0 — no sell order placed.")
+        log.warning("Size is 0 — no close order placed.")
 
     # Update state
     state.update({

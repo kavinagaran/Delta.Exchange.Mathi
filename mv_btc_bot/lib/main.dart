@@ -276,6 +276,74 @@ class _DashboardPageState extends State<DashboardPage> {
     }
   }
 
+  Future<void> _manualEntry(SlotMeta slot, String side) async {
+    final isBuy = side == 'buy';
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: kSurf,
+        title: Text(isBuy ? '▲ Buy Straddle?' : '▼ Sell Straddle?'),
+        content: Text(isBuy
+            ? 'BUY (long) the current ATM straddle for the ${slot.name} slot at market price, using configured/dynamic lot sizing?'
+            : 'SELL-TO-OPEN (short) the current ATM straddle for the ${slot.name} slot — collect premium, profits if BTC stays near the strike?'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: Text(isBuy ? 'BUY' : 'SELL',
+                style: TextStyle(color: isBuy ? kGreen : kRed, fontWeight: FontWeight.bold)),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    try {
+      final d = await Api.postJson('/api/manual-entry?slot=${slot.key}', {'side': side});
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(d['ok'] == true
+            ? '${side.toUpperCase()} filled: ${d['lots']} lots ${d['symbol']} @ \$${(d['fill'] as num).toStringAsFixed(2)}'
+            : 'Order failed: ${d['error']}'),
+        backgroundColor: d['ok'] == true ? const Color(0xFF0A3524) : const Color(0xFF3A0F1E),
+      ));
+      _refresh();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
+    }
+  }
+
+  Widget _manualButtons(SlotMeta slot) => Padding(
+        padding: const EdgeInsets.only(top: 10),
+        child: Row(
+          children: [
+            Expanded(
+              child: OutlinedButton(
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: kGreen,
+                  side: const BorderSide(color: kGreen, width: 1.5),
+                  padding: const EdgeInsets.symmetric(vertical: 10),
+                ),
+                onPressed: () => _manualEntry(slot, 'buy'),
+                child: const Text('▲ BUY', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 12)),
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: OutlinedButton(
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: kRed,
+                  side: const BorderSide(color: kRed, width: 1.5),
+                  padding: const EdgeInsets.symmetric(vertical: 10),
+                ),
+                onPressed: () => _manualEntry(slot, 'sell'),
+                child: const Text('▼ SELL', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 12)),
+              ),
+            ),
+          ],
+        ),
+      );
+
   Future<void> _toggleTp(SlotMeta slot) async {
     final cfg = (_tp[slot.key] as Map<String, dynamic>?) ?? {};
     final running = cfg['running'] == true;
@@ -485,10 +553,13 @@ class _DashboardPageState extends State<DashboardPage> {
             const SizedBox(height: 10),
             if (open)
               _openBody(slot, st, tpCfg)
-            else if (closed)
-              _closedBody(st)
-            else
+            else if (closed) ...[
+              _closedBody(st),
+              _manualButtons(slot),
+            ] else ...[
               _idleBody(slot),
+              _manualButtons(slot),
+            ],
           ],
         ),
       ),
@@ -505,8 +576,27 @@ class _DashboardPageState extends State<DashboardPage> {
         Row(
           children: [
             Expanded(
-              child: Text(st['symbol'] as String? ?? '—',
-                  style: const TextStyle(color: kGold, fontWeight: FontWeight.w700, fontSize: 15)),
+              child: Row(
+                children: [
+                  Flexible(
+                    child: Text(st['symbol'] as String? ?? '—',
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(color: kGold, fontWeight: FontWeight.w700, fontSize: 15)),
+                  ),
+                  const SizedBox(width: 6),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: st['side'] == 'short' ? kRed : kGreen),
+                    ),
+                    child: Text(st['side'] == 'short' ? 'SHORT' : 'LONG',
+                        style: TextStyle(
+                            color: st['side'] == 'short' ? kRed : kGreen,
+                            fontSize: 9, fontWeight: FontWeight.w800, letterSpacing: 1)),
+                  ),
+                ],
+              ),
             ),
             Text(fmtUsd(pnl),
                 style: TextStyle(color: pnlColor, fontWeight: FontWeight.w800, fontSize: 22)),
