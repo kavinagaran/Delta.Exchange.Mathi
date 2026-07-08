@@ -1023,13 +1023,15 @@ def set_config():
     for key, val in data.items():
         if key not in CONFIG_KEYS:
             continue
+        # Replace EVERY matching line, not just the first: append scripts had
+        # produced duplicate keys, and since dotenv takes the LAST occurrence,
+        # replacing only the first made saves silently ineffective.
         replaced = False
         for i, line in enumerate(lines):
             stripped = line.strip()
             if stripped.startswith(key + "=") or stripped.startswith(key + " ="):
                 lines[i] = f"{key} = {val}"
                 replaced = True
-                break
         if not replaced:
             lines.append(f"{key} = {val}")
     ENV_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
