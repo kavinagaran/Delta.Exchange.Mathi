@@ -22,3 +22,7 @@ mv_btc_bot/linux/flutter/ephemeral/
 mv_btc_bot/macos/Flutter/ephemeral/
 mv_btc_bot/windows/flutter/ephemeral/
 mv_btc_bot/.flutter-plugins*
+
+# SSH keys — never commit
+*.pem
+*.ppk
