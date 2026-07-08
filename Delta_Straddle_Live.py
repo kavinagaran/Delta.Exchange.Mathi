@@ -821,13 +821,15 @@ def main():
                     log.exception("Exit job failed")
                     send_telegram(f"⚠️ <b>EXIT FAILED</b>\n<code>{exc}</code>")
 
-            # Heartbeat every 10 min
+            # Heartbeat every 10 min — reports both slots
             if m % 10 == 0 and now.second < POLL_SEC:
-                st    = load_state()
-                label = st.get("status",  "NONE") if st else "NONE"
-                sym   = st.get("symbol",  "—")    if st else "—"
-                log.info("Heartbeat %s UTC  status=%-6s  %s",
-                         now.strftime("%H:%M"), label, sym)
+                def _slot_desc(s):
+                    if not s or not s.get("status") or s.get("status") == "IDLE":
+                        return "idle"
+                    return f"{s.get('status', '?')} {s.get('symbol', '?')} x{s.get('lots', '?')}"
+                log.info("Heartbeat %s UTC  morning[%s]  evening[%s]",
+                         now.strftime("%H:%M"),
+                         _slot_desc(load_morning_state()), _slot_desc(load_state()))
                 check_api_access()
 
         except Exception:
