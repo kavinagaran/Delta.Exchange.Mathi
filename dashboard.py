@@ -112,6 +112,24 @@ CONFIG_KEYS = [
 
 app = Flask(__name__, static_folder=str(BASE), static_url_path="/static")
 
+# Optional HTTP Basic Auth — active only when DASH_PASS is set in .env.
+# Unset on the home-LAN Windows box (no login prompt there); set on the
+# public cloud server, where an unauthenticated dashboard would let anyone
+# who finds the port square off live positions.
+DASH_USER = os.getenv("DASH_USER", "mathi")
+DASH_PASS = os.getenv("DASH_PASS", "")
+
+@app.before_request
+def _basic_auth_gate():
+    if not DASH_PASS:
+        return None
+    a = request.authorization
+    if a and a.username == DASH_USER and a.password == DASH_PASS:
+        return None
+    from flask import Response
+    return Response("Authentication required", 401,
+                    {"WWW-Authenticate": 'Basic realm="Mathi Bot"'})
+
 
 # ─────────────────────────────────────────────────────────────
 # HELPERS
