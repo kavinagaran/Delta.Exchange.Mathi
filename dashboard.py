@@ -536,9 +536,136 @@ def api_logs():
         return jsonify({"lines": []})
 
 
+def _parse_strike(symbol: str):
+    """Best-effort strike extraction from a Delta symbol, e.g.
+    'C-BTC-63000-080726' or 'MV-BTC-62800-080726' -> 63000 / 62800."""
+    parts = symbol.split("-")
+    for p in parts:
+        if p.isdigit():
+            return float(p)
+    return None
+
+
+def _reconstruct_trades_from_orders(orders: list, skip_prefixes=("MV-BTC",)) -> list:
+    """Rebuild flat-to-flat round-trip trades (entry -> full close) from raw
+    fills, for any product Delta reports — calls, puts, futures, etc.
+    Handles same-direction adds (weighted-avg entry), partial closes
+    (realized P&L accrues, entry price unchanged), and reversals (a close
+    that overshoots flat immediately opens a new cycle the other way).
+    Symbols in skip_prefixes are excluded because they're already tracked
+    precisely elsewhere (the bot's own MV straddle log)."""
+    fills = []
+    for o in orders:
+        if o.get("state") != "closed" or not o.get("average_fill_price"):
+            continue
+        symbol = o.get("product_symbol", "")
+        if not symbol or symbol.startswith(skip_prefixes):
+            continue
+        try:
+            fills.append({
+                "symbol":     symbol,
+                "product_id": o.get("product_id"),
+                "side":       o.get("side", ""),
+                "size":       float(o.get("size", 0)),
+                "price":      float(o.get("average_fill_price")),
+                "time":       str(o.get("created_at", ""))[:19],
+            })
+        except (TypeError, ValueError):
+            continue
+    fills.sort(key=lambda f: f["time"])
+
+    state: dict = {}
+    trades = []
+    for f in fills:
+        symbol = f["symbol"]
+        delta  = f["size"] if f["side"] == "buy" else -f["size"]
+        st = state.get(symbol)
+
+        if st is None or st["net_size"] == 0:
+            state[symbol] = {
+                "net_size": delta, "entry_price": f["price"], "entry_time": f["time"],
+                "realized_pnl": 0.0, "exit_notional": 0.0, "exit_qty": 0.0,
+                "product_id": f["product_id"],
+            }
+            continue
+
+        cv = _product_info(st["product_id"])["contract_value"] if st["product_id"] else 0.001
+
+        if (delta > 0) == (st["net_size"] > 0):
+            old_abs, add_abs = abs(st["net_size"]), abs(delta)
+            st["entry_price"] = (st["entry_price"] * old_abs + f["price"] * add_abs) / (old_abs + add_abs)
+            st["net_size"] += delta
+            continue
+
+        old_abs, reduce_abs = abs(st["net_size"]), abs(delta)
+        matched = min(old_abs, reduce_abs)
+        sign    = 1 if st["net_size"] > 0 else -1
+        st["realized_pnl"]  += (f["price"] - st["entry_price"]) * cv * matched * sign
+        st["exit_notional"] += f["price"] * matched
+        st["exit_qty"]      += matched
+        st["net_size"]      += delta
+
+        if abs(st["net_size"]) < 1e-9:
+            exit_avg = st["exit_notional"] / st["exit_qty"] if st["exit_qty"] else f["price"]
+            trades.append({
+                "date":       st["entry_time"][:10],
+                "entry_date": st["entry_time"][:10],
+                "symbol":     symbol,
+                "strike":     _parse_strike(symbol),
+                "lots":       old_abs,
+                "side":       "LONG" if sign > 0 else "SHORT",
+                "entry_mark": round(st["entry_price"], 4),
+                "exit_mark":  round(exit_avg, 4),
+                "pnl_usd":    round(st["realized_pnl"], 2),
+                "entry_time": st["entry_time"][11:],
+                "exit_time":  f["time"][11:],
+            })
+            leftover = reduce_abs - old_abs
+            if leftover > 1e-9:
+                new_sign = -1 if f["side"] == "sell" else 1
+                state[symbol] = {
+                    "net_size": leftover * new_sign, "entry_price": f["price"], "entry_time": f["time"],
+                    "realized_pnl": 0.0, "exit_notional": 0.0, "exit_qty": 0.0,
+                    "product_id": f["product_id"],
+                }
+            else:
+                state[symbol] = {"net_size": 0, "entry_price": 0, "entry_time": "",
+                                  "realized_pnl": 0.0, "exit_notional": 0.0, "exit_qty": 0.0,
+                                  "product_id": st["product_id"]}
+    return trades
+
+
+def _fetch_non_mv_trades() -> list:
+    """Closed round-trip trades for every non-MV product (calls, puts,
+    futures) the account has traded, reconstructed from order history."""
+    if not API_KEY or not API_SECRET:
+        return []
+    try:
+        hdrs = _sign("GET", "/v2/orders/history", "?page_size=500")
+        r = req.get(f"{API_BASE}/v2/orders/history", params={"page_size": 500},
+                    headers=hdrs, timeout=15)
+        data = r.json()
+        if not data.get("success"):
+            return []
+        return _reconstruct_trades_from_orders(data.get("result", []))
+    except Exception:
+        return []
+
+
+def _all_trades_merged() -> list:
+    """Bot-tracked MV straddle trades (precise, from trade_history.json)
+    plus reconstructed non-MV trades (calls/puts/futures), sorted by date."""
+    mv_trades = _load_json(HISTORY_FILE, [])
+    other     = _fetch_non_mv_trades()
+    merged    = mv_trades + other
+    merged.sort(key=lambda t: (t.get("entry_date") or t.get("date", ""),
+                                t.get("entry_time", "")))
+    return merged
+
+
 @app.route("/api/trades")
 def api_trades():
-    return jsonify(_load_json(HISTORY_FILE, []))
+    return jsonify(_all_trades_merged())
 
 
 _product_cache: dict = {}   # product_id -> {"contract_value": float, "symbol": str}
@@ -597,48 +724,9 @@ def api_all_positions():
         return jsonify({"error": str(e)}), 500
 
 
-@app.route("/api/all-orders-today")
-def api_all_orders_today():
-    """Every filled order today (IST calendar day) across all products."""
-    if not API_KEY or not API_SECRET:
-        return jsonify([])
-    try:
-        hdrs = _sign("GET", "/v2/orders/history", "?page_size=200")
-        r = req.get(f"{API_BASE}/v2/orders/history", params={"page_size": 200},
-                    headers=hdrs, timeout=10)
-        data = r.json()
-        if not data.get("success"):
-            return jsonify([])
-        today_ist = (datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)).strftime("%Y-%m-%d")
-        out = []
-        for o in data.get("result", []):
-            if o.get("state") != "closed" or not o.get("average_fill_price"):
-                continue
-            created = str(o.get("created_at", ""))[:19]
-            try:
-                dt_utc  = datetime.strptime(created, "%Y-%m-%dT%H:%M:%S")
-                ist_day = (dt_utc + timedelta(hours=5, minutes=30)).strftime("%Y-%m-%d")
-            except ValueError:
-                continue
-            if ist_day != today_ist:
-                continue
-            out.append({
-                "time_utc":   created,
-                "symbol":     o.get("product_symbol", ""),
-                "side":       o.get("side", ""),
-                "size":       o.get("size"),
-                "avg_price":  float(o.get("average_fill_price")),
-            })
-        out.sort(key=lambda x: x["time_utc"], reverse=True)
-        return jsonify(out)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
 @app.route("/api/summary")
 def api_summary():
-    trades = _load_json(HISTORY_FILE, [])
-    return jsonify(_pnl_stats(trades))
+    return jsonify(_pnl_stats(_all_trades_merged()))
 
 
 @app.route("/api/config", methods=["GET"])
