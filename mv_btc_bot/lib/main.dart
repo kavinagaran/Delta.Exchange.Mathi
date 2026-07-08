@@ -158,7 +158,7 @@ class _HomeShellState extends State<HomeShell> {
     return Scaffold(
       body: IndexedStack(
         index: _tab,
-        children: const [DashboardPage(), LogsPage(), SettingsPage()],
+        children: const [DashboardPage(), LogsPage(), ConfigsPage(), SettingsPage()],
       ),
       bottomNavigationBar: NavigationBar(
         backgroundColor: kSurf,
@@ -168,6 +168,7 @@ class _HomeShellState extends State<HomeShell> {
         destinations: const [
           NavigationDestination(icon: Icon(Icons.dashboard_outlined), selectedIcon: Icon(Icons.dashboard, color: kGreen), label: 'Dashboard'),
           NavigationDestination(icon: Icon(Icons.receipt_long_outlined), selectedIcon: Icon(Icons.receipt_long, color: kGreen), label: 'Logs'),
+          NavigationDestination(icon: Icon(Icons.tune_outlined), selectedIcon: Icon(Icons.tune, color: kGreen), label: 'Configs'),
           NavigationDestination(icon: Icon(Icons.settings_outlined), selectedIcon: Icon(Icons.settings, color: kGreen), label: 'Settings'),
         ],
       ),
@@ -789,6 +790,324 @@ class _LogsPageState extends State<LogsPage> {
 }
 
 // ─────────────────────────────────────────────────────────────
+// Configs page — every bot setting, grouped; times shown in IST
+// ─────────────────────────────────────────────────────────────
+(int, int) utcToIst(int h, int m) {
+  final t = (h * 60 + m + 330) % 1440;
+  return (t ~/ 60, t % 60);
+}
+
+(int, int) istToUtc(int h, int m) {
+  final t = ((h * 60 + m - 330) % 1440 + 1440) % 1440;
+  return (t ~/ 60, t % 60);
+}
+
+class ConfigsPage extends StatefulWidget {
+  const ConfigsPage({super.key});
+
+  @override
+  State<ConfigsPage> createState() => _ConfigsPageState();
+}
+
+class _ConfigsPageState extends State<ConfigsPage> {
+  final Map<String, TextEditingController> _ctl = {};
+  bool _dryRun = false;
+  bool _morningEnabled = true;
+  bool _morningExitEnabled = true;
+  bool _telegramAlerts = true;
+  bool _loading = true;
+  bool _saving = false;
+  String? _error;
+
+  // Text-field keys (times handled separately as IST pairs)
+  static const _numKeys = [
+    'STRADDLE_LOTS', 'MORNING_LOTS', 'MAX_TRADES_PER_DAY', 'STRIKE_STEP',
+    'TP_TARGET_PNL', 'TP_POLL_SECS', 'TP_TARGET_PNL_MORNING', 'TP_POLL_SECS_MORNING',
+  ];
+  static const _timePairs = {
+    'entry':        ('ENTRY_H_UTC', 'ENTRY_M_UTC'),
+    'exit':         ('EXIT_H_UTC', 'EXIT_M_UTC'),
+    'morning':      ('MORNING_H_UTC', 'MORNING_M_UTC'),
+    'morning_exit': ('MORNING_EXIT_H_UTC', 'MORNING_EXIT_M_UTC'),
+  };
+
+  @override
+  void initState() {
+    super.initState();
+    for (final k in _numKeys) {
+      _ctl[k] = TextEditingController();
+    }
+    for (final pair in _timePairs.keys) {
+      _ctl['${pair}_h'] = TextEditingController();
+      _ctl['${pair}_m'] = TextEditingController();
+    }
+    _load();
+  }
+
+  @override
+  void dispose() {
+    for (final c in _ctl.values) {
+      c.dispose();
+    }
+    super.dispose();
+  }
+
+  bool _envBool(dynamic v, {bool dflt = true}) {
+    final s = (v ?? '').toString().trim().toLowerCase();
+    if (s.isEmpty) return dflt;
+    return s == '1' || s == 'true' || s == 'yes';
+  }
+
+  Future<void> _load() async {
+    setState(() { _loading = true; _error = null; });
+    try {
+      final d = await Api.getJson('/api/config') as Map<String, dynamic>;
+      for (final k in _numKeys) {
+        _ctl[k]!.text = (d[k] ?? '').toString();
+      }
+      _timePairs.forEach((pair, keys) {
+        final h = int.tryParse((d[keys.$1] ?? '').toString());
+        final m = int.tryParse((d[keys.$2] ?? '').toString());
+        if (h != null && m != null) {
+          final (ih, im) = utcToIst(h, m);
+          _ctl['${pair}_h']!.text = ih.toString();
+          _ctl['${pair}_m']!.text = im.toString().padLeft(2, '0');
+        }
+      });
+      _dryRun             = _envBool(d['DRY_RUN'], dflt: false);
+      _morningEnabled     = _envBool(d['MORNING_ENABLED']);
+      _morningExitEnabled = _envBool(d['MORNING_EXIT_ENABLED']);
+      _telegramAlerts     = _envBool(d['TELEGRAM_ALERTS']);
+      setState(() => _loading = false);
+    } catch (e) {
+      setState(() { _loading = false; _error = 'Cannot load config: $e'; });
+    }
+  }
+
+  Future<void> _save() async {
+    setState(() => _saving = true);
+    final body = <String, dynamic>{
+      'DRY_RUN':              _dryRun ? 'true' : 'false',
+      'MORNING_ENABLED':      _morningEnabled ? 'true' : 'false',
+      'MORNING_EXIT_ENABLED': _morningExitEnabled ? 'true' : 'false',
+      'TELEGRAM_ALERTS':      _telegramAlerts ? 'true' : 'false',
+    };
+    for (final k in _numKeys) {
+      final v = _ctl[k]!.text.trim();
+      if (v.isNotEmpty) body[k] = v;
+    }
+    _timePairs.forEach((pair, keys) {
+      final h = int.tryParse(_ctl['${pair}_h']!.text);
+      final m = int.tryParse(_ctl['${pair}_m']!.text);
+      if (h != null && m != null) {
+        final (uh, um) = istToUtc(h, m);
+        body[keys.$1] = uh.toString();
+        body[keys.$2] = um.toString();
+      }
+    });
+    try {
+      final d = await Api.postJson('/api/config', body);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(d['ok'] == true
+            ? 'Saved ✓ — restart the bot service to apply times/lots'
+            : 'Save failed: ${d['error']}'),
+        backgroundColor: d['ok'] == true ? const Color(0xFF0A3524) : const Color(0xFF3A0F1E),
+      ));
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  Widget _section(String title) => Padding(
+        padding: const EdgeInsets.only(left: 4, top: 18, bottom: 8),
+        child: Text(title,
+            style: const TextStyle(color: kMuted, fontSize: 11, letterSpacing: 1.5)),
+      );
+
+  Widget _numField(String key, String label) => Padding(
+        padding: const EdgeInsets.symmetric(vertical: 6),
+        child: TextField(
+          controller: _ctl[key],
+          keyboardType: TextInputType.number,
+          decoration: InputDecoration(
+            labelText: label,
+            isDense: true,
+            border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+          ),
+        ),
+      );
+
+  Widget _timeField(String pair, String label) => Padding(
+        padding: const EdgeInsets.symmetric(vertical: 6),
+        child: Row(
+          children: [
+            Expanded(
+              flex: 3,
+              child: Text(label, style: const TextStyle(color: kText, fontSize: 13.5)),
+            ),
+            Expanded(
+              flex: 2,
+              child: TextField(
+                controller: _ctl['${pair}_h'],
+                keyboardType: TextInputType.number,
+                textAlign: TextAlign.center,
+                decoration: InputDecoration(
+                  labelText: 'HH', isDense: true,
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                ),
+              ),
+            ),
+            const Padding(
+              padding: EdgeInsets.symmetric(horizontal: 6),
+              child: Text(':', style: TextStyle(color: kMuted, fontSize: 18)),
+            ),
+            Expanded(
+              flex: 2,
+              child: TextField(
+                controller: _ctl['${pair}_m'],
+                keyboardType: TextInputType.number,
+                textAlign: TextAlign.center,
+                decoration: InputDecoration(
+                  labelText: 'MM', isDense: true,
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                ),
+              ),
+            ),
+            const SizedBox(width: 6),
+            const Text('IST', style: TextStyle(color: kGold, fontSize: 11)),
+          ],
+        ),
+      );
+
+  Widget _switchTile(String label, bool value, ValueChanged<bool> onChanged, {String? subtitle}) =>
+      SwitchListTile(
+        title: Text(label, style: const TextStyle(fontSize: 14)),
+        subtitle: subtitle == null
+            ? null
+            : Text(subtitle, style: const TextStyle(color: kMuted, fontSize: 11)),
+        value: value,
+        activeColor: kGreen,
+        contentPadding: EdgeInsets.zero,
+        onChanged: onChanged,
+      );
+
+  @override
+  Widget build(BuildContext context) {
+    if (_loading) {
+      return const SafeArea(
+          child: Center(child: CircularProgressIndicator(color: kGreen)));
+    }
+    return SafeArea(
+      child: RefreshIndicator(
+        color: kGreen,
+        onRefresh: _load,
+        child: ListView(
+          padding: const EdgeInsets.all(16),
+          children: [
+            Row(
+              children: [
+                const Text('CONFIGS',
+                    style: TextStyle(color: kMuted, fontSize: 12, letterSpacing: 1.5)),
+                const Spacer(),
+                IconButton(onPressed: _load, icon: const Icon(Icons.refresh, color: kGreen)),
+              ],
+            ),
+            if (_error != null)
+              Card(
+                child: Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Text(_error!, style: const TextStyle(color: kRed)),
+                ),
+              ),
+
+            _section('BOT'),
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(16, 6, 16, 10),
+                child: Column(
+                  children: [
+                    _switchTile('Dry Run', _dryRun, (v) => setState(() => _dryRun = v),
+                        subtitle: 'No real orders when enabled'),
+                    _switchTile('Telegram Alerts', _telegramAlerts,
+                        (v) => setState(() => _telegramAlerts = v)),
+                    _numField('MAX_TRADES_PER_DAY', 'Max trades per day'),
+                    _numField('STRIKE_STEP', 'Strike step (\$)'),
+                  ],
+                ),
+              ),
+            ),
+
+            _section('🌅 MORNING TRADE'),
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(16, 6, 16, 10),
+                child: Column(
+                  children: [
+                    _switchTile('Enabled', _morningEnabled,
+                        (v) => setState(() => _morningEnabled = v)),
+                    _numField('MORNING_LOTS', 'Lots'),
+                    _timeField('morning', 'Entry time'),
+                    _switchTile('Scheduled Exit', _morningExitEnabled,
+                        (v) => setState(() => _morningExitEnabled = v),
+                        subtitle: 'Off = close via TP / settlement only'),
+                    _timeField('morning_exit', 'Exit time'),
+                    _numField('TP_TARGET_PNL_MORNING', 'TP target (\$)'),
+                    _numField('TP_POLL_SECS_MORNING', 'TP poll (seconds)'),
+                  ],
+                ),
+              ),
+            ),
+
+            _section('🌇 EVENING TRADE'),
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(16, 6, 16, 10),
+                child: Column(
+                  children: [
+                    _numField('STRADDLE_LOTS', 'Lots'),
+                    _timeField('entry', 'Entry time'),
+                    _timeField('exit', 'Exit time'),
+                    _numField('TP_TARGET_PNL', 'TP target (\$)'),
+                    _numField('TP_POLL_SECS', 'TP poll (seconds)'),
+                  ],
+                ),
+              ),
+            ),
+
+            const SizedBox(height: 20),
+            SizedBox(
+              width: double.infinity,
+              child: FilledButton(
+                style: FilledButton.styleFrom(
+                  backgroundColor: kGreen.withValues(alpha: 0.15),
+                  foregroundColor: kGreen,
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                ),
+                onPressed: _saving ? null : _save,
+                child: Text(_saving ? 'Saving…' : 'SAVE ALL CONFIGS',
+                    style: const TextStyle(fontWeight: FontWeight.w700, letterSpacing: 1)),
+              ),
+            ),
+            const SizedBox(height: 8),
+            const Center(
+              child: Text(
+                'Time/lot changes need a bot restart to take effect',
+                style: TextStyle(color: kMuted, fontSize: 11),
+              ),
+            ),
+            const SizedBox(height: 24),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
 // Settings page
 // ─────────────────────────────────────────────────────────────
 class SettingsPage extends StatefulWidget {
@@ -804,8 +1123,6 @@ class _SettingsPageState extends State<SettingsPage> {
   late final TextEditingController _passCtl;
   String? _testResult;
   bool _testing = false;
-  Map<String, dynamic> _config = {};
-  bool _configLoaded = false;
 
   @override
   void initState() {
@@ -813,7 +1130,6 @@ class _SettingsPageState extends State<SettingsPage> {
     _urlCtl = TextEditingController(text: Api.baseUrl);
     _userCtl = TextEditingController(text: Api.user);
     _passCtl = TextEditingController(text: Api.pass);
-    _loadConfig();
   }
 
   @override
@@ -822,17 +1138,6 @@ class _SettingsPageState extends State<SettingsPage> {
     _userCtl.dispose();
     _passCtl.dispose();
     super.dispose();
-  }
-
-  Future<void> _loadConfig() async {
-    try {
-      final d = await Api.getJson('/api/config');
-      if (!mounted) return;
-      setState(() {
-        _config = d as Map<String, dynamic>;
-        _configLoaded = true;
-      });
-    } catch (_) {}
   }
 
   Future<void> _saveAndTest() async {
@@ -844,105 +1149,10 @@ class _SettingsPageState extends State<SettingsPage> {
     try {
       final d = await Api.getJson('/api/status');
       setState(() => _testResult = '✅ Connected — evening: ${d['status'] ?? '?'}, morning: ${d['morning']?['status'] ?? '—'}');
-      _loadConfig();
     } catch (e) {
       setState(() => _testResult = '❌ Cannot connect: $e');
     } finally {
       setState(() => _testing = false);
-    }
-  }
-
-  // IST <-> UTC minute-of-day conversions (IST = UTC + 5:30)
-  static (int, int) _utcToIst(int h, int m) {
-    final t = (h * 60 + m + 330) % 1440;
-    return (t ~/ 60, t % 60);
-  }
-
-  static (int, int) _istToUtc(int h, int m) {
-    final t = ((h * 60 + m - 330) % 1440 + 1440) % 1440;
-    return (t ~/ 60, t % 60);
-  }
-
-  Future<void> _editMorningConfig() async {
-    final enabled = (_config['MORNING_ENABLED'] ?? 'true').toString().toLowerCase() != 'false';
-    final lotsCtl = TextEditingController(text: (_config['MORNING_LOTS'] ?? '2000').toString());
-    final (exH, exM) = _utcToIst(
-      int.tryParse((_config['MORNING_EXIT_H_UTC'] ?? '11').toString()) ?? 11,
-      int.tryParse((_config['MORNING_EXIT_M_UTC'] ?? '30').toString()) ?? 30,
-    );
-    final exitHCtl = TextEditingController(text: exH.toString());
-    final exitMCtl = TextEditingController(text: exM.toString());
-    bool en = enabled;
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setSt) => AlertDialog(
-          backgroundColor: kSurf,
-          title: const Text('🌅 Morning Trade Config'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              SwitchListTile(
-                title: const Text('Enabled', style: TextStyle(fontSize: 14)),
-                value: en,
-                activeColor: kGreen,
-                contentPadding: EdgeInsets.zero,
-                onChanged: (v) => setSt(() => en = v),
-              ),
-              TextField(
-                controller: lotsCtl,
-                keyboardType: TextInputType.number,
-                decoration: const InputDecoration(labelText: 'Lots'),
-              ),
-              Row(
-                children: [
-                  Expanded(
-                    child: TextField(
-                      controller: exitHCtl,
-                      keyboardType: TextInputType.number,
-                      decoration: const InputDecoration(labelText: 'Exit Hour (IST)'),
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: TextField(
-                      controller: exitMCtl,
-                      keyboardType: TextInputType.number,
-                      decoration: const InputDecoration(labelText: 'Exit Min (IST)'),
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 8),
-              const Text('Entry: 5:45 AM IST · settles 5:30 PM if not exited',
-                  style: TextStyle(color: kMuted, fontSize: 11)),
-            ],
-          ),
-          actions: [
-            TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
-            TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Save', style: TextStyle(color: kGold))),
-          ],
-        ),
-      ),
-    );
-    if (ok != true) return;
-    final ih = int.tryParse(exitHCtl.text) ?? 17;
-    final im = int.tryParse(exitMCtl.text) ?? 0;
-    final (uh, um) = _istToUtc(ih, im);
-    try {
-      await Api.postJson('/api/config', {
-        'MORNING_ENABLED': en ? 'true' : 'false',
-        'MORNING_LOTS': lotsCtl.text,
-        'MORNING_EXIT_H_UTC': uh.toString(),
-        'MORNING_EXIT_M_UTC': um.toString(),
-      });
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Morning config saved — restart bot to apply')));
-      _loadConfig();
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
     }
   }
 
@@ -1022,21 +1232,6 @@ class _SettingsPageState extends State<SettingsPage> {
                   ],
                 ],
               ),
-            ),
-          ),
-          const SizedBox(height: 16),
-          Card(
-            child: ListTile(
-              leading: const Text('🌅', style: TextStyle(fontSize: 22)),
-              title: const Text('Morning Trade', style: TextStyle(color: kText, fontSize: 14)),
-              subtitle: Text(
-                _configLoaded
-                    ? '${(_config['MORNING_ENABLED'] ?? 'true').toString().toLowerCase() != 'false' ? 'Enabled' : 'Disabled'} · ${_config['MORNING_LOTS'] ?? 2000} lots · 5:45 AM IST'
-                    : 'Loading…',
-                style: const TextStyle(color: kMuted, fontSize: 12),
-              ),
-              trailing: const Icon(Icons.chevron_right, color: kMuted),
-              onTap: _editMorningConfig,
             ),
           ),
           const SizedBox(height: 16),
