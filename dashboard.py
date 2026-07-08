@@ -797,6 +797,33 @@ def test_telegram():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+def _revive_tp_monitors():
+    """TP monitors are dashboard-spawned subprocesses, so a host reboot kills
+    them while their PID files and OPEN state survive. On startup, respawn any
+    monitor that was running (stale PID file) and still has an open position —
+    without this, a reboot silently drops take-profit protection."""
+    script = BASE / "tp_monitor.py"
+    for slot, pid_file in SLOT_PID.items():
+        if not pid_file.exists():
+            continue
+        try:
+            if _pid_alive(int(pid_file.read_text().strip())):
+                continue          # survived (not a reboot) — leave it be
+        except (ValueError, OSError):
+            pass
+        pid_file.unlink(missing_ok=True)
+        state = _load_json(SLOT_STATE[slot], {})
+        if state.get("status") != "OPEN" or not script.exists():
+            continue
+        proc = subprocess.Popen(
+            [sys.executable, str(script), "--slot", slot],
+            cwd=str(BASE), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        _tp_procs[slot] = proc
+        pid_file.write_text(str(proc.pid))
+        print(f"Revived {slot} TP monitor (pid {proc.pid}) after restart")
+
+
 # ─────────────────────────────────────────────────────────────
 # MAIN
 # ─────────────────────────────────────────────────────────────
@@ -805,4 +832,5 @@ if __name__ == "__main__":
     print("  MV-BTC Straddle Dashboard")
     print("  http://localhost:5001")
     print("=" * 50)
+    _revive_tp_monitors()
     app.run(host="0.0.0.0", port=5001, debug=False)
