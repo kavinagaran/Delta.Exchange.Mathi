@@ -65,19 +65,31 @@ _tp_procs: dict = {"evening": None, "morning": None}
 
 
 def _pid_alive(pid: int) -> bool:
-    """Windows-safe process existence check (os.kill(pid, 0) terminates on Windows)."""
-    import ctypes
-    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-    STILL_ACTIVE = 259
-    h = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
-    if not h:
-        return False
+    """Cross-platform process existence check. On Windows os.kill(pid, 0)
+    can terminate the target, so use the Win32 API there; on POSIX,
+    signal 0 is the standard no-op liveness probe."""
+    if os.name == "nt":
+        import ctypes
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        STILL_ACTIVE = 259
+        h = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not h:
+            return False
+        try:
+            code = ctypes.c_ulong()
+            ok = ctypes.windll.kernel32.GetExitCodeProcess(h, ctypes.byref(code))
+            return bool(ok) and code.value == STILL_ACTIVE
+        finally:
+            ctypes.windll.kernel32.CloseHandle(h)
     try:
-        code = ctypes.c_ulong()
-        ok = ctypes.windll.kernel32.GetExitCodeProcess(h, ctypes.byref(code))
-        return bool(ok) and code.value == STILL_ACTIVE
-    finally:
-        ctypes.windll.kernel32.CloseHandle(h)
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True   # exists, owned by someone else
+    except OSError:
+        return False
 
 
 def _tp_running(slot: str = "evening") -> bool:
