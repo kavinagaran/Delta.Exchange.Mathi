@@ -792,10 +792,20 @@ function tpWidgetHtml(slot) {
 }
 
 function slotCardHtml(s, slot) {
+  if (s && s.status === 'OPEN' && s.dry_run) {
+    // DRY-RUN phantom: no real order was placed, so no real numbers exist to
+    // show — never display simulated $ figures as if they were real money.
+    return `
+      <div class="no-pos">
+        <span class="icon">⚠</span>
+        SIMULATED entry — no real order was placed
+        <div class="hint">${s.symbol||''} · Mode was DRY RUN at entry time</div>
+      </div>`;
+  }
   if (s && s.status === 'OPEN') {
     return `
       <table class="pos-table">
-        <tr><td class="lbl">Symbol</td><td class="val c-b">${s.symbol||'—'}<span class="side-badge ${s.side === 'short' ? 'short' : 'long'}">${s.side === 'short' ? 'SHORT' : 'LONG'}</span>${s.dry_run ? '<span class="side-badge sim">⚠ SIMULATED</span>' : ''}</td></tr>
+        <tr><td class="lbl">Symbol</td><td class="val c-b">${s.symbol||'—'}<span class="side-badge ${s.side === 'short' ? 'short' : 'long'}">${s.side === 'short' ? 'SHORT' : 'LONG'}</span></td></tr>
         <tr><td class="lbl">Strike</td><td class="val">$${fN(s.strike)}</td></tr>
         <tr><td class="lbl">Lots</td><td class="val">${s.lots||'—'}</td></tr>
         <tr><td class="lbl">Entry Mark</td><td class="val">$${fN(s.entry_mark,4)}/BTC</td></tr>
@@ -807,11 +817,19 @@ function slotCardHtml(s, slot) {
       <button class="squareoff-btn" onclick="squareOff('${slot}')">⏹ SQUARE OFF</button>
       ${tpWidgetHtml(slot)}`;
   }
+  if (s && s.status === 'CLOSED' && s.dry_run) {
+    return `
+      <div class="no-pos">
+        <span class="icon">⚠</span>
+        SIMULATED — no real trade occurred
+        <div class="hint">${s.symbol||''}</div>
+      </div>${manualBtnsFor(slot)}`;
+  }
   if (s && s.status === 'CLOSED') {
     return `
       <div class="no-pos">
         <span class="icon">✅</span>
-        Closed at ${s.exit_time_utc||''} UTC${s.dry_run ? ' <span class="side-badge sim">⚠ SIMULATED</span>' : ''}
+        Closed at ${s.exit_time_utc||''} UTC
         <div class="hint">${s.symbol||''}<br>P&L: <span class="${cls(s.pnl_usd)}">${f$(s.pnl_usd)}</span></div>
       </div>${manualBtnsFor(slot)}`;
   }
@@ -846,7 +864,11 @@ async function loadStatus() {
     document.getElementById('pos-content-morning').innerHTML = slotCardHtml(m, 'morning');
     document.getElementById('pos-content-evening').innerHTML = slotCardHtml(s, 'evening');
 
-    const openSlots = [['morning', m], ['evening', s]].filter(([, v]) => v.status === 'OPEN');
+    // Simulated (dry-run) slots never contribute a real $ figure to the
+    // top-level tiles — only genuine exchange positions count as "open".
+    const allOpen  = [['morning', m], ['evening', s]].filter(([, v]) => v.status === 'OPEN');
+    const openSlots = allOpen.filter(([, v]) => !v.dry_run);
+    const simSlots  = allOpen.filter(([, v]) => v.dry_run);
     if (openSlots.length) {
       pill.className = 'status-pill pill-open';
       txt.textContent = openSlots.length === 2 ? 'BOTH TRADES OPEN'
@@ -855,11 +877,17 @@ async function loadStatus() {
       live.textContent = f$(total);
       live.style.color = total >= 0 ? 'var(--green)' : 'var(--red)';
       lsub.textContent = openSlots.map(([k]) => SLOT_META[k].icon + ' ' + SLOT_META[k].name).join('  ');
-    } else if (s.status === 'CLOSED' || m.status === 'CLOSED') {
+    } else if (simSlots.length) {
+      pill.className = 'status-pill pill-idle';
+      txt.textContent = 'SIMULATED ONLY';
+      live.textContent = '—';
+      live.style.color = '';
+      lsub.textContent = 'no real position open';
+    } else if ((s.status === 'CLOSED' && !s.dry_run) || (m.status === 'CLOSED' && !m.dry_run)) {
       pill.className = 'status-pill pill-closed';
       txt.textContent = 'NO OPEN TRADE';
-      const closedPnl = (s.status === 'CLOSED' ? +s.pnl_usd || 0 : 0)
-                      + (m.status === 'CLOSED' ? +m.pnl_usd || 0 : 0);
+      const closedPnl = (s.status === 'CLOSED' && !s.dry_run ? +s.pnl_usd || 0 : 0)
+                      + (m.status === 'CLOSED' && !m.dry_run ? +m.pnl_usd || 0 : 0);
       live.textContent = f$(closedPnl);
       live.style.color = closedPnl >= 0 ? 'var(--green)' : 'var(--red)';
       lsub.textContent = 'closed today';
@@ -999,19 +1027,31 @@ async function loadTrades() {
       return;
     }
 
-    // Cumulative
+    // Cumulative — dry-run rows never contributed real money, so they must
+    // never move the running total either.
     let cum = 0;
     const withCum = trades.map(t => {
-      cum += +(t.pnl_usd || 0);
+      if (!t.dry_run) cum += +(t.pnl_usd || 0);
       return { ...t, cum };
     });
 
     // Table newest first
     const rows = [...withCum].reverse().map(t => {
+      const isBacktest = t.source === 'backtest';
+      if (t.dry_run) {
+        return `<tr>
+          <td>${t.date||'—'}</td>
+          <td class="c-b">${t.symbol||'—'}</td>
+          <td>$${fN(t.strike)}</td>
+          <td>—</td><td>—</td><td>—</td><td>—</td><td>—</td>
+          <td>—</td>
+          <td class="${cls(+t.cum)}">${f$(+t.cum)}</td>
+          <td><span class="badge bs">⚠ SIMULATED</span></td>
+        </tr>`;
+      }
       const pnl  = +(t.pnl_usd || 0);
       const cumV = +t.cum;
       const mv   = +(t.btc_move_pct || 0);
-      const isSim = t.source === 'backtest' || t.dry_run;
       return `<tr>
         <td>${t.date||'—'}</td>
         <td class="c-b">${t.symbol||'—'}</td>
@@ -1023,7 +1063,7 @@ async function loadTrades() {
         <td>$${fN(t.exit_mark,2)}</td>
         <td class="${cls(pnl)}">${f$(pnl)}</td>
         <td class="${cls(cumV)}">${f$(cumV)}</td>
-        <td>${pnl>=0 ? '<span class="badge bw">WIN</span>' : '<span class="badge bl">LOSS</span>'}${isSim ? ' <span class="badge bs">SIM</span>' : ''}</td>
+        <td>${pnl>=0 ? '<span class="badge bw">WIN</span>' : '<span class="badge bl">LOSS</span>'}${isBacktest ? ' <span class="badge bs">SIM</span>' : ''}</td>
       </tr>`;
     }).join('');
     document.getElementById('tbl-body').innerHTML = rows;
@@ -1126,6 +1166,19 @@ async function loadTodayTrades() {
     }
     body.innerHTML = rows.map(t => {
       const live   = t._live;
+      // DRY-RUN rows never had a real order placed -- no real numbers exist,
+      // so no $ figures are shown for them anywhere, only a SIMULATED marker.
+      if (t.dry_run) {
+        return `<tr>
+          <td>${t.slot === 'morning' ? '🌅 ' : (t.slot === 'evening' ? '🌇 ' : '')}${t.symbol||'—'}</td>
+          <td>$${fN(t.strike)}</td>
+          <td>—</td>
+          <td>—</td>
+          <td>—</td>
+          <td>—</td>
+          <td><span class="side-badge sim">⚠ SIMULATED</span></td>
+        </tr>`;
+      }
       const pnl    = live ? t.live_pnl : t.pnl_usd;
       const cls    = pnl != null ? (+pnl >= 0 ? 'c-g' : 'c-r') : '';
       const exit   = live ? (t.current_mark ? '$' + fN(t.current_mark,4) : '—') : '$' + fN(t.exit_mark,4);
@@ -1133,7 +1186,7 @@ async function loadTodayTrades() {
         ? '<span style="color:var(--green);font-weight:700">OPEN</span><span class="live-badge">LIVE</span>'
         : (+pnl >= 0 ? '<span class="c-g">WIN</span>' : '<span class="c-r">LOSS</span>');
       return `<tr class="${live ? 'live-row' : ''}">
-        <td>${t.slot === 'morning' ? '🌅 ' : (t.slot === 'evening' ? '🌇 ' : '')}${t.symbol||'—'}${t.dry_run ? ' <span class="side-badge sim">SIM</span>' : ''}</td>
+        <td>${t.slot === 'morning' ? '🌅 ' : (t.slot === 'evening' ? '🌇 ' : '')}${t.symbol||'—'}</td>
         <td>$${fN(t.strike)}</td>
         <td>${t.lots||1000}</td>
         <td>$${fN(t.entry_mark,4)}</td>

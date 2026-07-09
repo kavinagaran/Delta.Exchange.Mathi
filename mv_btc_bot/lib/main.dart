@@ -605,7 +605,10 @@ class _DashboardPageState extends State<DashboardPage> {
               ],
             ),
             const SizedBox(height: 10),
-            if (open)
+            if (st['dry_run'] == true) ...[
+              _simulatedBody(st),
+              if (!open && slot.key == manualSlotNow()) _manualButtons(slot),
+            ] else if (open)
               _openBody(slot, st, tpCfg)
             else if (closed) ...[
               _closedBody(st),
@@ -617,6 +620,28 @@ class _DashboardPageState extends State<DashboardPage> {
           ],
         ),
       ),
+    );
+  }
+
+  Widget _simulatedBody(Map<String, dynamic> st) {
+    // DRY-RUN: no real order was ever placed, so there are no real numbers
+    // to show -- never display simulated $ figures as if they were real money.
+    return Row(
+      children: [
+        const Text('⚠', style: TextStyle(fontSize: 22, color: kGold)),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('SIMULATED — no real order was placed',
+                  style: TextStyle(color: kGold, fontWeight: FontWeight.w700, fontSize: 13)),
+              Text('${st['symbol'] ?? ''} · Mode was DRY RUN at entry time',
+                  style: const TextStyle(color: kMuted, fontSize: 11)),
+            ],
+          ),
+        ),
+      ],
     );
   }
 
@@ -649,20 +674,6 @@ class _DashboardPageState extends State<DashboardPage> {
                             color: st['side'] == 'short' ? kRed : kGreen,
                             fontSize: 9, fontWeight: FontWeight.w800, letterSpacing: 1)),
                   ),
-                  if (st['dry_run'] == true) ...[
-                    const SizedBox(width: 6),
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
-                      decoration: BoxDecoration(
-                        borderRadius: BorderRadius.circular(8),
-                        border: Border.all(color: kGold),
-                        color: kGold.withValues(alpha: 0.08),
-                      ),
-                      child: const Text('⚠ SIMULATED',
-                          style: TextStyle(
-                              color: kGold, fontSize: 9, fontWeight: FontWeight.w800, letterSpacing: 1)),
-                    ),
-                  ],
                 ],
               ),
             ),
@@ -754,9 +765,8 @@ class _DashboardPageState extends State<DashboardPage> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text('Closed ${st['exit_time_utc'] ?? ''} UTC · ${st['symbol'] ?? ''}'
-                  '${st['dry_run'] == true ? '  ⚠ SIMULATED' : ''}',
-                  style: TextStyle(color: st['dry_run'] == true ? kGold : kMuted, fontSize: 12)),
+              Text('Closed ${st['exit_time_utc'] ?? ''} UTC · ${st['symbol'] ?? ''}',
+                  style: const TextStyle(color: kMuted, fontSize: 12)),
               Text('P&L ${fmtUsd(pnl)}',
                   style: TextStyle(
                       color: pnl >= 0 ? kGreen : kRed, fontWeight: FontWeight.w700, fontSize: 16)),
@@ -828,14 +838,36 @@ class _TradeTile extends StatelessWidget {
     final live = trade['_live'] == true;
     final isDryRun = trade['dry_run'] == true;
     final slotIcon = trade['slot'] == 'morning' ? '🌅 ' : (trade['slot'] == 'evening' ? '🌇 ' : '');
+
+    // DRY-RUN: no real order was placed, so no real numbers exist to show.
+    if (isDryRun) {
+      return Card(
+        child: ListTile(
+          title: Text('$slotIcon${trade['symbol'] ?? '—'}',
+              style: const TextStyle(color: kGold, fontWeight: FontWeight.w600, fontSize: 14)),
+          subtitle: const Text('No real order was placed',
+              style: TextStyle(color: kMuted, fontSize: 12)),
+          trailing: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: kGold),
+              color: kGold.withValues(alpha: 0.08),
+            ),
+            child: const Text('⚠ SIMULATED',
+                style: TextStyle(color: kGold, fontSize: 10, fontWeight: FontWeight.w800)),
+          ),
+        ),
+      );
+    }
+
     final pnl = ((live ? trade['live_pnl'] : trade['pnl_usd']) as num?)?.toDouble();
     final pnlColor = pnl == null ? kMuted : (pnl >= 0 ? kGreen : kRed);
     return Card(
       child: ListTile(
-        title: Text('$slotIcon${trade['symbol'] ?? '—'}${isDryRun ? '  ⚠ SIM' : ''}',
+        title: Text('$slotIcon${trade['symbol'] ?? '—'}',
             style: TextStyle(
-                color: isDryRun ? kGold : (live ? kGold : kText),
-                fontWeight: FontWeight.w600, fontSize: 14)),
+                color: live ? kGold : kText, fontWeight: FontWeight.w600, fontSize: 14)),
         subtitle: Text(
           '${trade['lots'] ?? ''} lots  ·  entry ${fmtUsd(trade['entry_mark'], dp: 4)}',
           style: const TextStyle(color: kMuted, fontSize: 12),
