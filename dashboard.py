@@ -255,9 +255,10 @@ def _reconcile_stale_close(slot: str, state: dict, live_pids: set) -> dict:
 
 
 def _sync_states_from_exchange() -> None:
-    """Adopt open MV-BTC positions from the exchange into the correct slot
-    (entries before 11:00 UTC -> morning, else evening) so manually placed
-    trades always show. Throttled to one authenticated call per 30s."""
+    """Adopt open MV-BTC straddle AND single-leg call/put positions from the
+    exchange into the correct slot (entries before 11:00 UTC -> morning, else
+    evening) so manually placed trades always show, straddle or not.
+    Throttled to one authenticated call per 30s."""
     global _last_sync
     if not API_KEY or not API_SECRET or time.time() - _last_sync < 30:
         return
@@ -270,7 +271,7 @@ def _sync_states_from_exchange() -> None:
             return
         live = [p for p in data.get("result", [])
                 if float(p.get("size", 0)) != 0
-                and str(p.get("product_symbol", "")).startswith("MV-BTC")]
+                and str(p.get("product_symbol", "")).startswith(("MV-BTC", "C-BTC", "P-BTC"))]
         live_pids = {int(p["product_id"]) for p in live}
         states = {slot: _load_json(f, {}) for slot, f in SLOT_STATE.items()}
         states = {slot: _reconcile_stale_close(slot, s, live_pids) for slot, s in states.items()}
@@ -870,11 +871,19 @@ def _fetch_non_mv_trades() -> list:
 
 
 def _all_trades_merged() -> list:
-    """Bot-tracked MV straddle trades (precise, from trade_history.json)
-    plus reconstructed non-MV trades (calls/puts/futures), sorted by date."""
-    mv_trades = _load_json(HISTORY_FILE, [])
-    other     = _fetch_non_mv_trades()
-    merged    = mv_trades + other
+    """Bot-tracked trades (precise, from trade_history.json -- now includes
+    manually-placed single-leg calls/puts once exchange-sync adopts them into
+    a slot) plus reconstructed trades for anything Delta shows that the bot
+    never adopted (e.g. futures, or a leg closed before the next sync ran).
+    Deduped on (symbol, date, entry_time) so an adopted position doesn't
+    appear twice once reconstruction also picks up its fills."""
+    mv_trades    = _load_json(HISTORY_FILE, [])
+    tracked_keys = {(t.get("symbol"), t.get("date") or t.get("entry_date", ""), t.get("entry_time"))
+                    for t in mv_trades}
+    other = [t for t in _fetch_non_mv_trades()
+             if (t.get("symbol"), t.get("date") or t.get("entry_date", ""), t.get("entry_time"))
+             not in tracked_keys]
+    merged = mv_trades + other
     merged.sort(key=lambda t: (t.get("entry_date") or t.get("date", ""),
                                 t.get("entry_time", "")))
     return merged
