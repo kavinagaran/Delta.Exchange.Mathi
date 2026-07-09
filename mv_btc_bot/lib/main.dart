@@ -315,6 +315,13 @@ class _DashboardPageState extends State<DashboardPage> {
             _previewRow('Mark', '\$${(p['mark'] as num).toStringAsFixed(2)} / BTC'),
             _previewRow('Lots', '${p['lots']}'),
             _previewRow('Value', '~\$${(p['est_value'] as num).toStringAsFixed(0)}'),
+            if (p['dry_run'] == true) ...[
+              const SizedBox(height: 10),
+              const Text(
+                '⚠ Mode is DRY RUN — this will be SIMULATED, no real order will be placed.',
+                style: TextStyle(color: kGold, fontSize: 12, fontWeight: FontWeight.w600),
+              ),
+            ],
           ],
         ),
         actions: [
@@ -331,9 +338,10 @@ class _DashboardPageState extends State<DashboardPage> {
     try {
       final d = await Api.postJson('/api/manual-entry?slot=${slot.key}', {'side': side});
       if (!mounted) return;
+      final simTag = d['dry_run'] == true ? ' (SIMULATED)' : '';
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: Text(d['ok'] == true
-            ? '${side.toUpperCase()} filled: ${d['lots']} lots ${d['symbol']} @ \$${(d['fill'] as num).toStringAsFixed(2)}'
+            ? '${side.toUpperCase()} filled$simTag: ${d['lots']} lots ${d['symbol']} @ \$${(d['fill'] as num).toStringAsFixed(2)}'
             : 'Order failed: ${d['error']}'),
         backgroundColor: d['ok'] == true ? const Color(0xFF0A3524) : const Color(0xFF3A0F1E),
       ));
@@ -641,6 +649,20 @@ class _DashboardPageState extends State<DashboardPage> {
                             color: st['side'] == 'short' ? kRed : kGreen,
                             fontSize: 9, fontWeight: FontWeight.w800, letterSpacing: 1)),
                   ),
+                  if (st['dry_run'] == true) ...[
+                    const SizedBox(width: 6),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: kGold),
+                        color: kGold.withValues(alpha: 0.08),
+                      ),
+                      child: const Text('⚠ SIMULATED',
+                          style: TextStyle(
+                              color: kGold, fontSize: 9, fontWeight: FontWeight.w800, letterSpacing: 1)),
+                    ),
+                  ],
                 ],
               ),
             ),
@@ -732,8 +754,9 @@ class _DashboardPageState extends State<DashboardPage> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text('Closed ${st['exit_time_utc'] ?? ''} UTC · ${st['symbol'] ?? ''}',
-                  style: const TextStyle(color: kMuted, fontSize: 12)),
+              Text('Closed ${st['exit_time_utc'] ?? ''} UTC · ${st['symbol'] ?? ''}'
+                  '${st['dry_run'] == true ? '  ⚠ SIMULATED' : ''}',
+                  style: TextStyle(color: st['dry_run'] == true ? kGold : kMuted, fontSize: 12)),
               Text('P&L ${fmtUsd(pnl)}',
                   style: TextStyle(
                       color: pnl >= 0 ? kGreen : kRed, fontWeight: FontWeight.w700, fontSize: 16)),
@@ -803,14 +826,16 @@ class _TradeTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final live = trade['_live'] == true;
+    final isDryRun = trade['dry_run'] == true;
     final slotIcon = trade['slot'] == 'morning' ? '🌅 ' : (trade['slot'] == 'evening' ? '🌇 ' : '');
     final pnl = ((live ? trade['live_pnl'] : trade['pnl_usd']) as num?)?.toDouble();
     final pnlColor = pnl == null ? kMuted : (pnl >= 0 ? kGreen : kRed);
     return Card(
       child: ListTile(
-        title: Text('$slotIcon${trade['symbol'] ?? '—'}',
+        title: Text('$slotIcon${trade['symbol'] ?? '—'}${isDryRun ? '  ⚠ SIM' : ''}',
             style: TextStyle(
-                color: live ? kGold : kText, fontWeight: FontWeight.w600, fontSize: 14)),
+                color: isDryRun ? kGold : (live ? kGold : kText),
+                fontWeight: FontWeight.w600, fontSize: 14)),
         subtitle: Text(
           '${trade['lots'] ?? ''} lots  ·  entry ${fmtUsd(trade['entry_mark'], dp: 4)}',
           style: const TextStyle(color: kMuted, fontSize: 12),

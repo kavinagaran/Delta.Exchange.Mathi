@@ -214,6 +214,7 @@ def log_trade(state: dict):
         "cost_usd":     state.get("total_cost_usd", 0),
         "entry_time":   state.get("entry_time_utc", ""),
         "exit_time":    state.get("exit_time_utc", ""),
+        "dry_run":      state.get("dry_run", False),
     }
     history = []
     if HISTORY_FILE.exists():
@@ -380,16 +381,25 @@ def get_mv_mark(symbol: str) -> float:
 # ─────────────────────────────────────────────────────────────
 # ORDER MANAGEMENT
 # ─────────────────────────────────────────────────────────────
-def place_market_order(product_id: int, symbol: str, side: str, size: int) -> dict:
+def place_market_order(product_id: int, symbol: str, side: str, size: int,
+                       force_real: bool = False) -> dict:
+    """force_real=True bypasses DRY_RUN. Used for CLOSING an existing position —
+    DRY_RUN must only ever gate opening NEW exposure, never faking the close of
+    a position that may be real. Faking a close (as the old exit code did)
+    marks state CLOSED and sends a "closed" alert while the real exchange
+    position sits open and unmanaged — the exact bug that caused a live
+    2395-lot position to go untracked for 6+ hours on 2026-07-09."""
     # Hard safety check — never exceed the configured per-order cap
     if size > MAX_ORDER_LOTS:
         raise ValueError(f"Order size {size} exceeds hard cap of {MAX_ORDER_LOTS} lots. Aborting.")
 
-    if DRY_RUN:
+    if DRY_RUN and not force_real:
         log.info("[DRY-RUN] %s %d lots  %s  id=%d", side.upper(), size, symbol, product_id)
         return {"result": {"id": 0, "state": "dry_run"}}
 
-    log.info("ORDER: %s  %d lots  %s  (product_id=%d)", side.upper(), size, symbol, product_id)
+    log.info("ORDER: %s  %d lots  %s  (product_id=%d)%s",
+             side.upper(), size, symbol, product_id,
+             "  [force_real: DRY_RUN bypassed for close]" if (DRY_RUN and force_real) else "")
     payload = {
         "product_id": product_id,
         "size":        size,
@@ -398,6 +408,10 @@ def place_market_order(product_id: int, symbol: str, side: str, size: int) -> di
     }
     resp  = _retry(_post, "/v2/orders", payload)
     order = resp.get("result", {})
+    # A 200 response with success:false (or no order id) is NOT a fill — never
+    # let a caller silently treat a rejected order as a completed one.
+    if not resp.get("success") or not order.get("id"):
+        raise RuntimeError(f"Order rejected or incomplete for {symbol}: {resp}")
     log.info("  Filled: order_id=%s  state=%s  avg_price=%s",
              order.get("id"), order.get("state"),
              order.get("average_fill_price", "pending"))
@@ -560,6 +574,7 @@ def morning_entry_job():
         "total_cost_usd": round(fill * contract_val * lots, 2),
         "order_id":       order.get("result", {}).get("id"),
         "entry_trigger":  "morning_scheduled",
+        "dry_run":        DRY_RUN,
     })
 
     send_telegram(
@@ -629,6 +644,7 @@ def entry_job():
         "btc_at_entry":   btc_price,
         "total_cost_usd": round(total_cost, 4),
         "order_id":       order.get("result", {}).get("id"),
+        "dry_run":        DRY_RUN,
     })
     log.info("Straddle OPEN. Waiting for exit at %02d:%02d UTC.",
              EXIT_H_UTC, EXIT_M_UTC)
@@ -682,18 +698,17 @@ def _close_position_job(state: dict, save_fn, label: str):
     contract_val = state.get("contract_value", 0.001)
     lots         = state["lots"]
 
-    # Verify position on exchange (skip in DRY RUN — no real position exists)
-    if DRY_RUN:
-        actual_size = lots
-        log.info("[DRY-RUN] Assuming %d lots of %s (no exchange check)", actual_size, symbol)
-    else:
-        position    = get_mv_position(product_id)
-        actual_size = int(float(position["size"])) if position else 0
-        log.info("Exchange position: %d lots of %s", actual_size, symbol)
-        if actual_size == 0:
-            log.warning("No open position found on exchange for %s — may have been closed manually.", symbol)
-        elif abs(actual_size) != lots:
-            log.warning("Position mismatch: expected %d lots, found %d. Using exchange figure.", lots, actual_size)
+    # ALWAYS verify against the real exchange — regardless of DRY_RUN. DRY_RUN
+    # gates opening new exposure, not the honesty of an exit: a scheduled exit
+    # must never assume a position exists (or fake-close one) without checking.
+    position    = get_mv_position(product_id)
+    actual_size = int(float(position["size"])) if position else 0
+    log.info("Exchange position: %d lots of %s", actual_size, symbol)
+    if actual_size == 0:
+        log.warning("No open position found on exchange for %s — nothing to close "
+                    "(may have been a DRY-RUN-only entry, or already closed manually).", symbol)
+    elif abs(actual_size) != lots:
+        log.warning("Position mismatch: expected %d lots, found %d. Using exchange figure.", lots, actual_size)
 
     # Long positions have positive exchange size, shorts negative
     is_short   = state.get("side") == "short" or actual_size < 0
@@ -719,9 +734,10 @@ def _close_position_job(state: dict, save_fn, label: str):
         pnl_usd   = 0.0
         exit_mark = 0.0
 
-    # Close position
+    # Close position — force_real=True: never let DRY_RUN fake the close of a
+    # position that was actually verified open on the exchange above.
     if close_size > 0:
-        place_market_order(product_id, symbol, close_side, close_size)
+        place_market_order(product_id, symbol, close_side, close_size, force_real=True)
     else:
         log.warning("Size is 0 — no close order placed.")
 

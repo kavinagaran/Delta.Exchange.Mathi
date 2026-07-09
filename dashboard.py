@@ -157,7 +157,11 @@ def _load_json(path: Path, default):
 
 
 def _pnl_stats(trades: list) -> dict:
-    pnls   = [float(t.get("pnl_usd", 0)) for t in trades if t.get("pnl_usd") is not None]
+    # DRY-RUN trades produced no real money outcome — never let a simulated
+    # result contribute to real performance stats (same principle as
+    # excluding imported backtest rows).
+    pnls   = [float(t.get("pnl_usd", 0)) for t in trades
+              if t.get("pnl_usd") is not None and not t.get("dry_run")]
     if not pnls:
         return {}
     wins   = [p for p in pnls if p >= 0]
@@ -556,6 +560,7 @@ def api_manual_entry_preview():
         "lots":       lots,
         "est_value":  round(mark * cv * lots, 2),
         "settlement": contract.get("settlement_time", ""),
+        "dry_run":    os.getenv("DRY_RUN", "false").lower() in ("1", "true", "yes"),
     })
 
 
@@ -590,16 +595,25 @@ def api_manual_entry():
         mark = 0.0
     lots = _manual_entry_lots(slot, mark, cv)
 
-    try:
-        import json as _json
-        payload = {"product_id": pid, "size": lots, "side": side, "order_type": "market_order"}
-        body    = _json.dumps(payload, separators=(",", ":"))
-        hdrs    = _sign("POST", "/v2/orders", "", body)
-        result  = req.post(f"{API_BASE}/v2/orders", data=body, headers=hdrs, timeout=15).json()
-        if not result.get("success"):
-            return jsonify({"ok": False, "error": result.get("error", result)}), 400
+    # Manual entries must respect Mode the same way the scheduled bot does —
+    # previously this always fired a REAL order regardless of the DRY RUN
+    # toggle, so "simulating" via the Mode switch gave no real protection
+    # against an accidental click on Buy/Sell.
+    is_dry_run = os.getenv("DRY_RUN", "false").lower() in ("1", "true", "yes")
 
-        o    = result.get("result", {})
+    try:
+        if is_dry_run:
+            o = {"id": 0, "average_fill_price": mark}
+        else:
+            import json as _json
+            payload = {"product_id": pid, "size": lots, "side": side, "order_type": "market_order"}
+            body    = _json.dumps(payload, separators=(",", ":"))
+            hdrs    = _sign("POST", "/v2/orders", "", body)
+            result  = req.post(f"{API_BASE}/v2/orders", data=body, headers=hdrs, timeout=15).json()
+            if not result.get("success") or not (result.get("result") or {}).get("id"):
+                return jsonify({"ok": False, "error": result.get("error", result)}), 400
+            o = result.get("result", {})
+
         fill = float(o.get("average_fill_price") or mark)
         now  = datetime.now(timezone.utc)
         pos_side = "long" if side == "buy" else "short"
@@ -620,13 +634,15 @@ def api_manual_entry():
             "total_cost_usd": round(fill * cv * lots, 2),
             "order_id":       o.get("id"),
             "entry_trigger":  f"manual_{side}",
+            "dry_run":        is_dry_run,
         }
         state_file.write_text(json.dumps(new_state, indent=2), encoding="utf-8")
 
         icon  = "🌅" if slot == "morning" else "🌇"
         label = "LONG (bought)" if side == "buy" else "SHORT (sold to open)"
+        mode  = " — DRY-RUN ⚠ (simulated, no real order)" if is_dry_run else ""
         _send_telegram(
-            f"🖐 <b>MANUAL {side.upper()} — {icon} {slot.upper()} (MATHI)</b>\n"
+            f"🖐 <b>MANUAL {side.upper()} — {icon} {slot.upper()} (MATHI)</b>{mode}\n"
             f"<code>{'━' * 24}</code>\n"
             f"Symbol  » <code>{symbol}</code>\n"
             f"Side    » <code>{label}</code>\n"
@@ -636,7 +652,7 @@ def api_manual_entry():
             f"Settles » <code>{str(contract.get('settlement_time', '')).replace('T', ' ').replace('Z', ' UTC')}</code>"
         )
         return jsonify({"ok": True, "slot": slot, "side": pos_side, "symbol": symbol,
-                        "lots": lots, "fill": fill, "order_id": o.get("id")})
+                        "lots": lots, "fill": fill, "order_id": o.get("id"), "dry_run": is_dry_run})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 

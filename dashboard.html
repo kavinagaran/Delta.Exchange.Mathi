@@ -472,6 +472,7 @@ tbody td:first-child { text-align: left; }
 }
 .side-badge.long  { color: var(--green); border: 1px solid var(--green); }
 .side-badge.short { color: var(--red);  border: 1px solid var(--red); }
+.side-badge.sim   { color: var(--gold); border: 1px solid var(--gold); background: rgba(255,200,0,0.08); }
 .today-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; table-layout: fixed; }
 .today-table th { padding: 8px 12px; color: var(--muted); font-size: 0.7rem;
                   letter-spacing: 1px; text-transform: uppercase; white-space: nowrap;
@@ -794,7 +795,7 @@ function slotCardHtml(s, slot) {
   if (s && s.status === 'OPEN') {
     return `
       <table class="pos-table">
-        <tr><td class="lbl">Symbol</td><td class="val c-b">${s.symbol||'—'}<span class="side-badge ${s.side === 'short' ? 'short' : 'long'}">${s.side === 'short' ? 'SHORT' : 'LONG'}</span></td></tr>
+        <tr><td class="lbl">Symbol</td><td class="val c-b">${s.symbol||'—'}<span class="side-badge ${s.side === 'short' ? 'short' : 'long'}">${s.side === 'short' ? 'SHORT' : 'LONG'}</span>${s.dry_run ? '<span class="side-badge sim">⚠ SIMULATED</span>' : ''}</td></tr>
         <tr><td class="lbl">Strike</td><td class="val">$${fN(s.strike)}</td></tr>
         <tr><td class="lbl">Lots</td><td class="val">${s.lots||'—'}</td></tr>
         <tr><td class="lbl">Entry Mark</td><td class="val">$${fN(s.entry_mark,4)}/BTC</td></tr>
@@ -810,7 +811,7 @@ function slotCardHtml(s, slot) {
     return `
       <div class="no-pos">
         <span class="icon">✅</span>
-        Closed at ${s.exit_time_utc||''} UTC
+        Closed at ${s.exit_time_utc||''} UTC${s.dry_run ? ' <span class="side-badge sim">⚠ SIMULATED</span>' : ''}
         <div class="hint">${s.symbol||''}<br>P&L: <span class="${cls(s.pnl_usd)}">${f$(s.pnl_usd)}</span></div>
       </div>${manualBtnsFor(slot)}`;
   }
@@ -1010,7 +1011,7 @@ async function loadTrades() {
       const pnl  = +(t.pnl_usd || 0);
       const cumV = +t.cum;
       const mv   = +(t.btc_move_pct || 0);
-      const isSim = t.source === 'backtest';
+      const isSim = t.source === 'backtest' || t.dry_run;
       return `<tr>
         <td>${t.date||'—'}</td>
         <td class="c-b">${t.symbol||'—'}</td>
@@ -1132,7 +1133,7 @@ async function loadTodayTrades() {
         ? '<span style="color:var(--green);font-weight:700">OPEN</span><span class="live-badge">LIVE</span>'
         : (+pnl >= 0 ? '<span class="c-g">WIN</span>' : '<span class="c-r">LOSS</span>');
       return `<tr class="${live ? 'live-row' : ''}">
-        <td>${t.slot === 'morning' ? '🌅 ' : (t.slot === 'evening' ? '🌇 ' : '')}${t.symbol||'—'}</td>
+        <td>${t.slot === 'morning' ? '🌅 ' : (t.slot === 'evening' ? '🌇 ' : '')}${t.symbol||'—'}${t.dry_run ? ' <span class="side-badge sim">SIM</span>' : ''}</td>
         <td>$${fN(t.strike)}</td>
         <td>${t.lots||1000}</td>
         <td>$${fN(t.entry_mark,4)}</td>
@@ -1178,6 +1179,9 @@ async function manualEntry(slot, side) {
     `Mark:     $${(+p.mark).toFixed(2)} / BTC\n` +
     `Lots:     ${(+p.lots).toLocaleString('en-US')}\n` +
     `Value:    ~$${(+p.est_value).toLocaleString('en-US', {maximumFractionDigits: 0})}\n\n` +
+    (p.dry_run
+      ? `⚠ Mode is DRY RUN — this will be SIMULATED, no real order will be placed.\n\n`
+      : '') +
     `Place market ${side.toUpperCase()} order?`;
   if (!confirm(msg)) return;
   try {
@@ -1188,7 +1192,8 @@ async function manualEntry(slot, side) {
     });
     const d = await r.json();
     if (d.ok) {
-      showToast(`${side.toUpperCase()} filled: ${d.lots} lots ${d.symbol} @ $${(+d.fill).toFixed(2)}`, 'ok');
+      const simTag = d.dry_run ? ' (SIMULATED)' : '';
+      showToast(`${side.toUpperCase()} filled${simTag}: ${d.lots} lots ${d.symbol} @ $${(+d.fill).toFixed(2)}`, 'ok');
       await loadAll();
     } else {
       showToast('Order failed: ' + JSON.stringify(d.error), 'err');
