@@ -222,6 +222,8 @@ input, select {
 }
 input:focus, select:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
 .form-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 14px; }
+.form-grid.two { grid-template-columns: 1fr 1fr; }   /* fixed pairs: entry|exit stay on one line */
+input[type="time"] { font-variant-numeric: tabular-nums; }
 
 .banner {
   border-radius: 8px; padding: 10px 15px; font-size: 13px; font-weight: 600;

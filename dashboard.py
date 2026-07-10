@@ -634,9 +634,21 @@ def api_status():
         state["btc_futures_price"] = float(r_btc.json().get("result", {}).get("mark_price") or 0)
     except Exception:
         state["btc_futures_price"] = None
-    # IST info helper for the UI
-    state["entry_ist"] = "5:35 PM IST  (12:05 UTC)"
-    state["exit_ist"]  = "1:00 AM IST  (19:30 UTC)"
+    # IST schedule strings for the UI, computed from the live .env config
+    def _ist_str(h_key, m_key, dflt_h, dflt_m):
+        try:
+            h, m = int(os.getenv(h_key) or dflt_h), int(os.getenv(m_key) or dflt_m)
+        except ValueError:
+            h, m = dflt_h, dflt_m
+        t = (h * 60 + m + 330) % 1440
+        hh, mm = divmod(t, 60)
+        return f"{(hh + 11) % 12 + 1}:{mm:02d} {'PM' if hh >= 12 else 'AM'} IST"
+    state["entry_ist"]         = _ist_str("ENTRY_H_UTC", "ENTRY_M_UTC", 12, 5)
+    state["exit_ist"]          = _ist_str("EXIT_H_UTC", "EXIT_M_UTC", 19, 30)
+    state["morning_entry_ist"] = _ist_str("MORNING_H_UTC", "MORNING_M_UTC", 0, 15)
+    state["morning_exit_ist"]  = (_ist_str("MORNING_EXIT_H_UTC", "MORNING_EXIT_M_UTC", 11, 30)
+                                  if os.getenv("MORNING_EXIT_ENABLED", "false").lower() in ("1", "true", "yes")
+                                  else "TP / settlement only")
     return jsonify(state)
 
 

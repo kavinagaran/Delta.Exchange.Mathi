@@ -110,7 +110,8 @@ async function loadSlots() {
   const evening = { ...st }; delete evening.morning;
   document.getElementById('slot-morning').innerHTML = slotHtml(st.morning, 'morning', tp);
   document.getElementById('slot-evening').innerHTML = slotHtml(evening, 'evening', tp);
-  if (st.entry_ist) document.getElementById('when-evening').textContent = st.entry_ist.split('(')[0].trim();
+  if (st.morning_entry_ist) document.getElementById('when-morning').textContent = 'entry ' + st.morning_entry_ist;
+  if (st.entry_ist)         document.getElementById('when-evening').textContent = 'entry ' + st.entry_ist;
 }
 
 /* ── Stat tiles ─────────────────────────────────────────── */

@@ -23,36 +23,33 @@
 <div class="grid cols-2">
   <div class="card">
     <div class="card-hd">🌅 Morning Slot</div>
-    <div class="card-bd form-grid">
+    <div class="card-bd form-grid two">
       <label class="fld"><span>Enabled</span>
         <select id="c-MORNING_ENABLED"><option value="true">Yes</option><option value="false">No</option></select>
       </label>
       <label class="fld"><span>Lots</span><input id="c-MORNING_LOTS" type="number" min="1" max="5000"></label>
-      <label class="fld"><span>Entry hour (UTC)</span><input id="c-MORNING_H_UTC" type="number" min="0" max="23"></label>
-      <label class="fld"><span>Entry min (UTC)</span><input id="c-MORNING_M_UTC" type="number" min="0" max="59"></label>
+      <label class="fld"><span>Entry time (IST)</span><input id="t-morning-entry" type="time" step="60"></label>
+      <label class="fld"><span>Exit time (IST)</span><input id="t-morning-exit" type="time" step="60"></label>
       <label class="fld"><span>Scheduled exit</span>
         <select id="c-MORNING_EXIT_ENABLED"><option value="true">Enabled</option><option value="false">Disabled (TP/settlement only)</option></select>
       </label>
-      <label class="fld"><span>Exit hour (UTC)</span><input id="c-MORNING_EXIT_H_UTC" type="number" min="0" max="23"></label>
-      <label class="fld"><span>Exit min (UTC)</span><input id="c-MORNING_EXIT_M_UTC" type="number" min="0" max="59"></label>
+      <label class="fld"><span>&nbsp;</span><span class="hint" style="display:block;padding:9px 0" id="utc-morning"></span></label>
       <label class="fld"><span>TP target $</span><input id="c-TP_TARGET_PNL_MORNING" type="number"></label>
       <label class="fld"><span>TP poll secs</span><input id="c-TP_POLL_SECS_MORNING" type="number" min="10"></label>
     </div>
-    <div class="card-bd hint" id="ist-morning" style="padding-top:0"></div>
   </div>
 
   <div class="card">
     <div class="card-hd">🌇 Evening Slot</div>
-    <div class="card-bd form-grid">
+    <div class="card-bd form-grid two">
       <label class="fld"><span>Lots</span><input id="c-STRADDLE_LOTS" type="number" min="1" max="5000"></label>
-      <label class="fld"><span>Entry hour (UTC)</span><input id="c-ENTRY_H_UTC" type="number" min="0" max="23"></label>
-      <label class="fld"><span>Entry min (UTC)</span><input id="c-ENTRY_M_UTC" type="number" min="0" max="59"></label>
-      <label class="fld"><span>Exit hour (UTC)</span><input id="c-EXIT_H_UTC" type="number" min="0" max="23"></label>
-      <label class="fld"><span>Exit min (UTC)</span><input id="c-EXIT_M_UTC" type="number" min="0" max="59"></label>
+      <label class="fld"><span>&nbsp;</span><span></span></label>
+      <label class="fld"><span>Entry time (IST)</span><input id="t-evening-entry" type="time" step="60"></label>
+      <label class="fld"><span>Exit time (IST)</span><input id="t-evening-exit" type="time" step="60"></label>
       <label class="fld"><span>TP target $</span><input id="c-TP_TARGET_PNL" type="number"></label>
       <label class="fld"><span>TP poll secs</span><input id="c-TP_POLL_SECS" type="number" min="10"></label>
+      <label class="fld" style="grid-column:1/-1"><span>&nbsp;</span><span class="hint" style="display:block" id="utc-evening"></span></label>
     </div>
-    <div class="card-bd hint" id="ist-evening" style="padding-top:0"></div>
   </div>
 </div>
 
@@ -76,26 +73,45 @@
 
 {% block scripts %}
 <script>
-const KEYS = ['DRY_RUN','STRADDLE_LOTS','STRIKE_STEP','ENTRY_H_UTC','ENTRY_M_UTC','EXIT_H_UTC','EXIT_M_UTC',
+const KEYS = ['DRY_RUN','STRADDLE_LOTS','STRIKE_STEP',
   'TELEGRAM_BOT_TOKEN','TELEGRAM_CHAT_ID','TELEGRAM_ALERTS','TP_TARGET_PNL','TP_POLL_SECS',
-  'MORNING_ENABLED','MORNING_LOTS','MORNING_H_UTC','MORNING_M_UTC',
-  'MORNING_EXIT_ENABLED','MORNING_EXIT_H_UTC','MORNING_EXIT_M_UTC',
+  'MORNING_ENABLED','MORNING_LOTS','MORNING_EXIT_ENABLED',
   'DYNAMIC_LOTS','TP_TARGET_PNL_MORNING','TP_POLL_SECS_MORNING','MAX_TRADES_PER_DAY'];
+
+/* Times are edited in IST but the bot's .env stores UTC (IST = UTC+5:30). */
+const TIME_FIELDS = {
+  't-morning-entry': ['MORNING_H_UTC', 'MORNING_M_UTC'],
+  't-morning-exit':  ['MORNING_EXIT_H_UTC', 'MORNING_EXIT_M_UTC'],
+  't-evening-entry': ['ENTRY_H_UTC', 'ENTRY_M_UTC'],
+  't-evening-exit':  ['EXIT_H_UTC', 'EXIT_M_UTC'],
+};
+const pad = n => String(n).padStart(2, '0');
+const utcToIstHHMM = (h, m) => {
+  const t = (h * 60 + m + 330) % 1440;
+  return `${pad(Math.floor(t / 60))}:${pad(t % 60)}`;
+};
+const istHHMMToUtc = v => {
+  const [h, m] = v.split(':').map(Number);
+  const t = (h * 60 + m - 330 + 1440) % 1440;
+  return [Math.floor(t / 60), t % 60];
+};
 
 function dryBanner() {
   const on = document.getElementById('c-DRY_RUN').value === 'true';
   document.getElementById('dry-banner').style.display = on ? 'flex' : 'none';
 }
 
-function istHints() {
-  const pair = (h, m) => {
-    const H = +document.getElementById(h).value, M = +document.getElementById(m).value;
-    return (isNaN(H) || isNaN(M)) ? '—' : utcToIst(`${H}:${M}:00`);
+function utcHints() {
+  const utcOf = id => {
+    const v = document.getElementById(id).value;
+    if (!v) return '—';
+    const [h, m] = istHHMMToUtc(v);
+    return `${pad(h)}:${pad(m)}`;
   };
-  document.getElementById('ist-morning').textContent =
-    `IST: entry ${pair('c-MORNING_H_UTC','c-MORNING_M_UTC')} · exit ${pair('c-MORNING_EXIT_H_UTC','c-MORNING_EXIT_M_UTC')}`;
-  document.getElementById('ist-evening').textContent =
-    `IST: entry ${pair('c-ENTRY_H_UTC','c-ENTRY_M_UTC')} · exit ${pair('c-EXIT_H_UTC','c-EXIT_M_UTC')}`;
+  document.getElementById('utc-morning').textContent =
+    `UTC: entry ${utcOf('t-morning-entry')} · exit ${utcOf('t-morning-exit')}`;
+  document.getElementById('utc-evening').textContent =
+    `UTC equivalents: entry ${utcOf('t-evening-entry')} · exit ${utcOf('t-evening-exit')}`;
 }
 
 async function loadConfig() {
@@ -107,8 +123,12 @@ async function loadConfig() {
     if (el.tagName === 'SELECT') v = ['1','true','yes'].includes(v.toLowerCase()) ? 'true' : 'false';
     el.value = v;
   }
+  for (const [id, [hk, mk]] of Object.entries(TIME_FIELDS)) {
+    const h = parseInt(cfg[hk], 10), m = parseInt(cfg[mk], 10);
+    if (!isNaN(h) && !isNaN(m)) document.getElementById(id).value = utcToIstHHMM(h, m);
+  }
   dryBanner();
-  istHints();
+  utcHints();
 }
 
 async function saveConfig() {
@@ -116,6 +136,13 @@ async function saveConfig() {
   for (const k of KEYS) {
     const el = document.getElementById('c-' + k);
     if (el && el.value !== '') body[k] = el.value;
+  }
+  for (const [id, [hk, mk]] of Object.entries(TIME_FIELDS)) {
+    const v = document.getElementById(id).value;
+    if (!v) continue;
+    const [h, m] = istHHMMToUtc(v);
+    body[hk] = String(h);
+    body[mk] = String(m);
   }
   const d = await jpost('/api/config', body);
   if (d.ok) toast('Configuration saved — bot reloads within ~30 s' +
@@ -129,7 +156,7 @@ async function testTelegram() {
   else toast('Telegram test failed: ' + (d.error || ''), 'err');
 }
 
-document.addEventListener('input', e => { if (/_[HM]_UTC$/.test(e.target.id || '')) istHints(); });
+document.addEventListener('input', e => { if ((e.target.id || '').startsWith('t-')) utcHints(); });
 loadConfig();
 </script>
 {% endblock %}
