@@ -40,10 +40,6 @@
       </label>
       <label class="fld"><span>Entry time (IST)</span><input id="t-morning-entry" type="time" step="60"></label>
       <label class="fld"><span>Exit time (IST)</span><input id="t-morning-exit" type="time" step="60"></label>
-      <label class="fld"><span>TP target $ (profit)</span><input id="c-TP_TARGET_PNL_MORNING" type="number" min="0"></label>
-      <label class="fld"><span>SL target $ (max loss, 0 = off)</span><input id="c-SL_TARGET_PNL_MORNING" type="number" min="0"></label>
-      <label class="fld"><span>TSL $ (give-back from peak, 0 = off)</span><input id="c-TSL_TARGET_PNL_MORNING" type="number" min="0"></label>
-      <label class="fld"><span>TP/SL poll secs</span><input id="c-TP_POLL_SECS_MORNING" type="number" min="10"></label>
       <label class="fld" style="grid-column:1/-1"><span class="hint" id="utc-morning"></span></label>
     </div>
   </div>
@@ -66,10 +62,6 @@
       </label>
       <label class="fld"><span>Entry time (IST)</span><input id="t-evening-entry" type="time" step="60"></label>
       <label class="fld"><span>Exit time (IST)</span><input id="t-evening-exit" type="time" step="60"></label>
-      <label class="fld"><span>TP target $ (profit)</span><input id="c-TP_TARGET_PNL" type="number" min="0"></label>
-      <label class="fld"><span>SL target $ (max loss, 0 = off)</span><input id="c-SL_TARGET_PNL" type="number" min="0"></label>
-      <label class="fld"><span>TSL $ (give-back from peak, 0 = off)</span><input id="c-TSL_TARGET_PNL" type="number" min="0"></label>
-      <label class="fld"><span>TP/SL poll secs</span><input id="c-TP_POLL_SECS" type="number" min="10"></label>
       <label class="fld" style="grid-column:1/-1"><span class="hint" id="utc-evening"></span></label>
     </div>
   </div>
@@ -95,12 +87,13 @@
 
 {% block scripts %}
 <script>
+// TP/SL/TSL and poll are deliberately NOT here — the monitor is configured
+// on the Overview page, on the running trade's own card.
 const KEYS = ['DRY_RUN','STRADDLE_LOTS','STRIKE_STEP','EVENING_ENABLED','EVENING_EXIT_ENABLED',
-  'EVENING_SIDE','MORNING_SIDE','SL_TARGET_PNL','SL_TARGET_PNL_MORNING',
-  'TSL_TARGET_PNL','TSL_TARGET_PNL_MORNING',
-  'TELEGRAM_BOT_TOKEN','TELEGRAM_CHAT_ID','TELEGRAM_ALERTS','TP_TARGET_PNL','TP_POLL_SECS',
+  'EVENING_SIDE','MORNING_SIDE',
+  'TELEGRAM_BOT_TOKEN','TELEGRAM_CHAT_ID','TELEGRAM_ALERTS',
   'MORNING_ENABLED','MORNING_LOTS','MORNING_EXIT_ENABLED',
-  'DYNAMIC_LOTS','TP_TARGET_PNL_MORNING','TP_POLL_SECS_MORNING','MAX_TRADES_PER_DAY'];
+  'DYNAMIC_LOTS','MAX_TRADES_PER_DAY'];
 
 /* Times are edited in IST but the bot's .env stores UTC (IST = UTC+5:30). */
 const TIME_FIELDS = {

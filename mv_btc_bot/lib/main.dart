@@ -915,7 +915,7 @@ class _DashboardPageState extends State<DashboardPage> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Text('TP MONITOR',
+                    const Text('TP / SL / TSL MONITOR',
                         style: TextStyle(color: kMuted, fontSize: 9, letterSpacing: 1)),
                     const SizedBox(height: 2),
                     Text(
@@ -927,7 +927,10 @@ class _DashboardPageState extends State<DashboardPage> {
                       ),
                     ),
                     Text(
-                      'Target ${fmtUsd(tpCfg['target_pnl'], dp: 0)} · ${fmtNum(tpCfg['poll_secs'])}s',
+                      'TP ${fmtUsd(tpCfg['target_pnl'], dp: 0)}'
+                      ' · SL ${((tpCfg['sl_pnl'] as num?) ?? 0) > 0 ? fmtUsd(tpCfg['sl_pnl'], dp: 0) : 'off'}'
+                      ' · TSL ${((tpCfg['tsl_pnl'] as num?) ?? 0) > 0 ? fmtUsd(tpCfg['tsl_pnl'], dp: 0) : 'off'}'
+                      ' · ${fmtNum(tpCfg['poll_secs'])}s',
                       style: const TextStyle(color: kMuted, fontSize: 11),
                     ),
                   ],
@@ -1233,11 +1236,11 @@ class _ConfigsPageState extends State<ConfigsPage> {
   bool _saving = false;
   String? _error;
 
-  // Text-field keys (times handled separately as IST pairs)
+  // Text-field keys (times handled separately as IST pairs).
+  // TP/SL/TSL and poll are deliberately NOT here — the monitor is configured
+  // on the Dashboard tab, on the running trade's own card.
   static const _numKeys = [
     'STRADDLE_LOTS', 'MORNING_LOTS', 'MAX_TRADES_PER_DAY', 'STRIKE_STEP',
-    'TP_TARGET_PNL', 'TP_POLL_SECS', 'TP_TARGET_PNL_MORNING', 'TP_POLL_SECS_MORNING',
-    'SL_TARGET_PNL', 'TSL_TARGET_PNL', 'SL_TARGET_PNL_MORNING', 'TSL_TARGET_PNL_MORNING',
   ];
   static const _timePairs = {
     'entry':        ('ENTRY_H_UTC', 'ENTRY_M_UTC'),
@@ -1504,10 +1507,6 @@ class _ConfigsPageState extends State<ConfigsPage> {
                         (v) => setState(() => _morningExitEnabled = v),
                         subtitle: 'Off = close via TP/SL / settlement only'),
                     _timeField('morning_exit', 'Exit time'),
-                    _numField('TP_TARGET_PNL_MORNING', 'TP target (\$)'),
-                    _numField('SL_TARGET_PNL_MORNING', 'SL target (\$, 0 = off)'),
-                    _numField('TSL_TARGET_PNL_MORNING', 'Trailing SL (\$, 0 = off)'),
-                    _numField('TP_POLL_SECS_MORNING', 'TP/SL poll (seconds)'),
                   ],
                 ),
               ),
@@ -1528,10 +1527,6 @@ class _ConfigsPageState extends State<ConfigsPage> {
                         (v) => setState(() => _eveningExitEnabled = v),
                         subtitle: 'Off = close via TP/SL / settlement only'),
                     _timeField('exit', 'Exit time'),
-                    _numField('TP_TARGET_PNL', 'TP target (\$)'),
-                    _numField('SL_TARGET_PNL', 'SL target (\$, 0 = off)'),
-                    _numField('TSL_TARGET_PNL', 'Trailing SL (\$, 0 = off)'),
-                    _numField('TP_POLL_SECS', 'TP/SL poll (seconds)'),
                   ],
                 ),
               ),
