@@ -275,8 +275,13 @@ class _LoginScreenState extends State<LoginScreen> {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                const Center(child: Text('⚡', style: TextStyle(fontSize: 40))),
-                const SizedBox(height: 8),
+                Center(
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(20),
+                    child: Image.asset('assets/logo.png', width: 88, height: 88),
+                  ),
+                ),
+                const SizedBox(height: 12),
                 const Center(
                   child: Text('NITHI-BOT',
                       style: TextStyle(color: kGreen, fontSize: 26,
@@ -284,7 +289,7 @@ class _LoginScreenState extends State<LoginScreen> {
                 ),
                 const SizedBox(height: 4),
                 const Center(
-                  child: Text('MV-BTC Straddle · Delta Exchange India',
+                  child: Text('BTC Trade Made Bit Easy',
                       style: TextStyle(color: kMuted, fontSize: 12)),
                 ),
                 const SizedBox(height: 30),
@@ -677,8 +682,11 @@ class _DashboardPageState extends State<DashboardPage> {
             // ── Header ──
             Row(
               children: [
-                const Text('⚡', style: TextStyle(fontSize: 20)),
-                const SizedBox(width: 6),
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(8),
+                  child: Image.asset('assets/logo.png', width: 28, height: 28),
+                ),
+                const SizedBox(width: 8),
                 const Text('NITHI-BOT',
                     style: TextStyle(color: kGreen, fontSize: 22, fontWeight: FontWeight.w800, letterSpacing: 2)),
                 const Spacer(),
