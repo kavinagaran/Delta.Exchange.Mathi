@@ -232,12 +232,20 @@ input:focus, select:focus { outline: 2px solid var(--accent-soft); border-color:
 .banner.info { background: var(--accent-soft); color: var(--accent-dark); }
 
 /* ── TP monitor row ─────────────────────────────────────── */
+/* Everything (status text, inputs, buttons) shares one 36px control row,
+   bottom-aligned under the field labels, so nothing floats at odd heights. */
 .tp-row {
-  display: flex; align-items: end; gap: 10px; flex-wrap: wrap;
+  display: flex; align-items: flex-end; gap: 10px; flex-wrap: wrap;
   margin-top: 14px; padding-top: 14px; border-top: 1px dashed var(--border);
 }
 .tp-row .fld { width: 110px; }
-.tp-state { font-size: 12px; font-weight: 650; }
+.tp-row .fld input { height: 36px; }
+.tp-row .btn { height: 36px; padding-top: 0; padding-bottom: 0; }
+.tp-state {
+  font-size: 12px; font-weight: 650;
+  height: 36px; display: inline-flex; align-items: center;
+  margin-right: auto;
+}
 .tp-state.on  { color: var(--pos); }
 .tp-state.off { color: var(--muted); }
 
