@@ -643,24 +643,32 @@ def _reconcile_stale_close(slot: str, state: dict, live_pids: set) -> dict:
         hdrs = _sign("GET", "/v2/orders/history", "?page_size=20")
         r = req.get(f"{API_BASE}/v2/orders/history", params={"page_size": 20}, headers=hdrs, timeout=6)
         orders = r.json().get("result", [])
-        sells = [o for o in orders
-                 if o.get("product_id") == pid and o.get("side") == "sell"
+        # A LONG closes with a SELL fill; a SHORT closes with a BUY fill.
+        # Looking only at sells (as this used to) attributed a short's exit
+        # to one of its own opening sells — wrong price, wrong P&L, and the
+        # real buy-back order never appeared anywhere.
+        is_short   = state.get("side") == "short"
+        close_side = "buy" if is_short else "sell"
+        fills = [o for o in orders
+                 if o.get("product_id") == pid and o.get("side") == close_side
                  and o.get("state") == "closed" and o.get("average_fill_price")]
-        if not sells:
+        if not fills:
             return state  # Can't reconcile yet — leave as-is, try again next sync
-        sells.sort(key=lambda o: str(o.get("created_at", "")), reverse=True)
-        fill    = sells[0]
+        fills.sort(key=lambda o: str(o.get("created_at", "")), reverse=True)
+        fill    = fills[0]
         exit_mk = float(fill["average_fill_price"])
         cv      = float(state.get("contract_value", 0.001))
         lots    = int(state.get("lots", 0))
         entry   = float(state.get("entry_mark", 0))
-        pnl     = round((exit_mk - entry) * cv * lots, 2)
+        sign    = -1 if is_short else 1
+        pnl     = round((exit_mk - entry) * cv * lots * sign, 2)
         state.update({
             "status":        "CLOSED",
             "exit_time_utc": str(fill.get("created_at", ""))[11:19],
             "exit_mark":      exit_mk,
             "pnl_usd":        pnl,
             "exit_trigger":   "reconciled_stale",
+            "exit_order_id":  fill.get("id"),
         })
         _slot_file(slot).write_text(json.dumps(state, indent=2), encoding="utf-8")
         hist = _load_json(_hist_file(), [])
