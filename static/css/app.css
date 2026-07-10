@@ -222,8 +222,20 @@ input, select {
 }
 input:focus, select:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
 .form-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 14px; }
-.form-grid.two { grid-template-columns: 1fr 1fr; }   /* fixed pairs: entry|exit stay on one line */
+.form-grid.two   { grid-template-columns: 1fr 1fr; }   /* fixed pairs: entry|exit stay on one line */
+.form-grid.three { grid-template-columns: 1fr 1fr 1fr; }
+@media (max-width: 900px) { .form-grid.three { grid-template-columns: 1fr; } }
 input[type="time"] { font-variant-numeric: tabular-nums; }
+
+/* Form sections: titled groups inside a card, separated by a soft rule */
+.form-sec + .form-sec { margin-top: 20px; padding-top: 18px; border-top: 1px dashed var(--border); }
+.form-sec + .btn-row  { margin-top: 22px; }
+.form-sec-title {
+  font-size: 11.5px; font-weight: 650; color: var(--muted);
+  letter-spacing: .06em; text-transform: uppercase; margin-bottom: 12px;
+}
+.fld-hint { display: block; margin-top: 5px; font-size: 11.5px; font-weight: 400; font-style: normal; color: var(--muted); }
+input.mono { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12.5px; }
 
 .banner {
   border-radius: 8px; padding: 10px 15px; font-size: 13px; font-weight: 600;

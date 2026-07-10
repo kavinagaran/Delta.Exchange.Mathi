@@ -18,22 +18,54 @@
 <div class="card">
   <div class="card-hd" id="form-title">Add account</div>
   <div class="card-bd">
-    <div class="form-grid">
-      <label class="fld"><span>Account holder name</span><input id="a-display" placeholder="e.g. Mathi"></label>
-      <label class="fld"><span>Username (login)</span><input id="a-username" autocomplete="off" placeholder="e.g. mathi"></label>
-      <label class="fld"><span>Password {% if true %}<span class="hint" id="pw-hint"></span>{% endif %}</span><input id="a-password" type="password" autocomplete="new-password"></label>
-      <label class="fld"><span>Delta API Key</span><input id="a-key" autocomplete="off" placeholder="leave blank to keep existing"></label>
-      <label class="fld"><span>Delta API Secret</span><input id="a-secret" type="password" autocomplete="new-password" placeholder="leave blank to keep existing"></label>
+
+    <div class="form-sec">
+      <div class="form-sec-title">Sign-in details</div>
+      <div class="form-grid three">
+        <label class="fld">
+          <span>Account holder name</span>
+          <input id="a-display" placeholder="e.g. Mathi">
+          <em class="fld-hint">Shown in the "Welcome Back" greeting</em>
+        </label>
+        <label class="fld">
+          <span>Username</span>
+          <input id="a-username" autocomplete="off" placeholder="e.g. mathi">
+          <em class="fld-hint">Used to sign in to this dashboard</em>
+        </label>
+        <label class="fld">
+          <span>Password</span>
+          <input id="a-password" type="password" autocomplete="new-password">
+          <em class="fld-hint" id="pw-hint">Required for a new account</em>
+        </label>
+      </div>
     </div>
+
+    <div class="form-sec">
+      <div class="form-sec-title">Delta Exchange API credentials</div>
+      <div class="form-grid two">
+        <label class="fld">
+          <span>API Key</span>
+          <input id="a-key" autocomplete="off" class="mono">
+          <em class="fld-hint" id="key-hint"></em>
+        </label>
+        <label class="fld">
+          <span>API Secret</span>
+          <input id="a-secret" type="password" autocomplete="new-password" class="mono">
+          <em class="fld-hint" id="secret-hint"></em>
+        </label>
+      </div>
+      <p class="hint" style="margin-top:10px">
+        Create keys on Delta Exchange India → Settings → API Keys, with <b>Read</b> + <b>Trade</b>
+        permission and this server's IP (<span class="mono">13.207.78.56</span>) whitelisted.
+      </p>
+    </div>
+
     <div class="btn-row">
       <button class="btn" onclick="saveAccount()">Save account</button>
       <button class="btn secondary" onclick="testKeys()">Test connection</button>
       <button class="btn secondary" onclick="resetForm()" id="cancel-btn" style="display:none">Cancel edit</button>
     </div>
-    <p class="hint" style="margin-top:12px">
-      API keys are created on Delta Exchange India → Settings → API Keys. The key must have <b>Read</b> +
-      <b>Trade</b> permission and this server's IP (<span class="mono">13.207.78.56</span>) whitelisted.
-    </p>
+
   </div>
 </div>
 {% endblock %}
@@ -65,9 +97,9 @@ function editAccount(username, display) {
   document.getElementById('a-username').disabled = true;
   document.getElementById('a-display').value = display;
   document.getElementById('a-password').value = '';
-  document.getElementById('pw-hint').textContent = '(leave blank to keep current)';
-  document.getElementById('a-key').value = '';
-  document.getElementById('a-secret').value = '';
+  document.getElementById('pw-hint').textContent = 'Leave blank to keep the current password';
+  document.getElementById('key-hint').textContent = 'Leave blank to keep the existing key';
+  document.getElementById('secret-hint').textContent = 'Leave blank to keep the existing secret';
   document.getElementById('cancel-btn').style.display = '';
   window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
 }
@@ -76,7 +108,9 @@ function resetForm() {
   editing = null;
   document.getElementById('form-title').textContent = 'Add account';
   document.getElementById('a-username').disabled = false;
-  document.getElementById('pw-hint').textContent = '';
+  document.getElementById('pw-hint').textContent = 'Required for a new account';
+  document.getElementById('key-hint').textContent = '';
+  document.getElementById('secret-hint').textContent = '';
   document.getElementById('cancel-btn').style.display = 'none';
   for (const id of ['a-display', 'a-username', 'a-password', 'a-key', 'a-secret'])
     document.getElementById(id).value = '';
