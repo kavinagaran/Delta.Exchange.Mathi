@@ -132,7 +132,7 @@ a { color: var(--accent); text-decoration: none; }
 .card + .card, .grid + .card, .card + .grid { margin-top: 18px; }
 
 .grid { display: grid; gap: 18px; }
-.grid.cols-2 { grid-template-columns: 1fr 1fr; }
+.grid.cols-2 { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
 @media (max-width: 900px) {
   .grid.cols-2 { grid-template-columns: 1fr; }
   .sidebar { width: 64px; }
@@ -222,8 +222,8 @@ input, select {
 }
 input:focus, select:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
 .form-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 14px; }
-.form-grid.two   { grid-template-columns: 1fr 1fr; }   /* fixed pairs: entry|exit stay on one line */
-.form-grid.three { grid-template-columns: 1fr 1fr 1fr; }
+.form-grid.two   { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }   /* fixed pairs: entry|exit stay on one line */
+.form-grid.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 @media (max-width: 900px) { .form-grid.three { grid-template-columns: 1fr; } }
 input[type="time"] { font-variant-numeric: tabular-nums; }
 
@@ -260,7 +260,7 @@ input.mono { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; fon
 }
 .tp-spacer { margin-left: auto; }
 .pill.mini { padding: 3px 10px; font-size: 10.5px; }
-.tp-fields { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+.tp-fields { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
 .tp-fields input { height: 34px; }
 .tp-note { margin-top: 9px; font-size: 11px; color: var(--muted); }
 @media (max-width: 1100px) { .tp-fields { grid-template-columns: 1fr 1fr; } }
