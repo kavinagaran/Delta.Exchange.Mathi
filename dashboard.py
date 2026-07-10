@@ -917,6 +917,13 @@ def _all_trades_merged() -> list:
     tracked_keys = {_key(t) for t in mv_trades}
     other = [t for t in _fetch_non_mv_trades() if _key(t) not in tracked_keys]
     merged = mv_trades + other
+    for t in merged:
+        # Older records (square-offs, resumed states) carry only entry_date /
+        # entry_time_utc — normalize so every consumer (table, chart) can rely
+        # on date & entry_time being present.
+        t.setdefault("date", t.get("entry_date", ""))
+        t.setdefault("entry_time", t.get("entry_time_utc", ""))
+        t.setdefault("exit_time", t.get("exit_time_utc", ""))
     merged.sort(key=lambda t: (t.get("entry_date") or t.get("date", ""),
                                 t.get("entry_time", "")))
     return merged

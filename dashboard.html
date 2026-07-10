@@ -1074,10 +1074,22 @@ async function loadTrades() {
 
 // ── Chart ───────────────────────────────────────────────────
 function drawChart(trades) {
-  if (!trades.length) return;
-  const labels = trades.map(t => t.date);
-  const daily  = trades.map(t => +(t.pnl_usd || 0));
-  const cumu   = trades.map(t => +t.cum);
+  // One bar per calendar DAY (summed across that day's trades), not per
+  // trade — plotting per-trade repeated the same date across many bars and
+  // rows lacking a date rendered as broken unlabeled bars. DRY-RUN rows
+  // carry no real money and are excluded entirely.
+  const byDay = new Map();
+  for (const t of trades) {
+    if (t.dry_run) continue;
+    const d = t.date || t.entry_date;
+    if (!d) continue;
+    byDay.set(d, (byDay.get(d) || 0) + (+(t.pnl_usd || 0)));
+  }
+  if (!byDay.size) return;
+  const labels = [...byDay.keys()].sort();
+  const daily  = labels.map(d => +byDay.get(d).toFixed(2));
+  let run = 0;
+  const cumu = daily.map(v => +(run += v).toFixed(2));
   const barColors  = daily.map(v => v >= 0 ? 'rgba(0,255,135,0.55)' : 'rgba(255,45,110,0.55)');
   const barBorders = daily.map(v => v >= 0 ? '#00ff87' : '#ff2d6e');
 
