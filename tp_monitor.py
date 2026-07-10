@@ -1,9 +1,11 @@
 """
 tp_monitor.py — Take-profit monitor for MV-BTC positions.
-Usage:  python tp_monitor.py [--slot morning|evening]   (default: evening)
+Usage:  python tp_monitor.py [--slot morning|evening] [--user <username>]
 
-Watches the slot's state file and market price; closes the position at
-the configured profit target. Slot config (.env):
+Watches one user's slot state file (users/<username>/) and market price;
+closes the position at the configured profit target using THAT user's own
+Delta API keys (users/<username>/account.json, .env keys as fallback).
+Slot config (.env):
   evening: TP_TARGET_PNL, TP_POLL_SECS
   morning: TP_TARGET_PNL_MORNING, TP_POLL_SECS_MORNING
 """
@@ -19,34 +21,46 @@ _u3c.allowed_gai_family = lambda: socket.AF_INET
 BASE_DIR = Path(__file__).parent
 load_dotenv(BASE_DIR / ".env")
 
-SLOT = "evening"
-if "--slot" in sys.argv:
-    try:
-        SLOT = sys.argv[sys.argv.index("--slot") + 1].strip().lower()
-    except IndexError:
-        pass
+
+def _arg(flag: str, default: str) -> str:
+    if flag in sys.argv:
+        try:
+            return sys.argv[sys.argv.index(flag) + 1].strip().lower()
+        except IndexError:
+            pass
+    return default
+
+
+SLOT = _arg("--slot", "evening")
 if SLOT not in ("morning", "evening"):
     print(f"Invalid slot: {SLOT}")
     sys.exit(1)
 
-API_KEY    = os.getenv("API_KEY", "")
-API_SECRET = os.getenv("API_SECRET", "")
+USER     = _arg("--user", os.getenv("BOT_USER", os.getenv("DASH_USER", "mathi")))
+USER_DIR = BASE_DIR / "users" / USER
+
+# The monitored account's own credentials; .env keys as fallback
+try:
+    _acct = json.loads((USER_DIR / "account.json").read_text(encoding="utf-8"))
+except Exception:
+    _acct = {}
+API_KEY    = _acct.get("api_key")    or os.getenv("API_KEY", "")
+API_SECRET = _acct.get("api_secret") or os.getenv("API_SECRET", "")
 BASE_URL   = os.getenv("BASE_URL", "https://api.india.delta.exchange")
 TG_TOKEN   = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TG_CHAT    = os.getenv("TELEGRAM_CHAT_ID", "")
 
 if SLOT == "morning":
-    STATE_FILE = BASE_DIR / "morning_state.json"
+    STATE_FILE = USER_DIR / "morning_state.json"
     TARGET_PNL = float(os.getenv("TP_TARGET_PNL_MORNING") or 300)
     POLL_SECS  = int(float(os.getenv("TP_POLL_SECS_MORNING") or 30))
-    LOG_NAME   = "tp_monitor_morning.log"
 else:
-    STATE_FILE = BASE_DIR / "straddle_state.json"
+    STATE_FILE = USER_DIR / "straddle_state.json"
     TARGET_PNL = float(os.getenv("TP_TARGET_PNL") or 105)
     POLL_SECS  = int(float(os.getenv("TP_POLL_SECS") or 30))
-    LOG_NAME   = "tp_monitor.log"
+LOG_NAME = f"tp_{USER}_{SLOT}.log"
 
-HISTORY_FILE = BASE_DIR / "trade_history.json"
+HISTORY_FILE = USER_DIR / "trade_history.json"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -57,7 +71,7 @@ logging.basicConfig(
         logging.FileHandler(BASE_DIR / "logs" / LOG_NAME, encoding="utf-8"),
     ],
 )
-log = logging.getLogger(f"tp_monitor[{SLOT}]")
+log = logging.getLogger(f"tp_monitor[{USER}/{SLOT}]")
 
 
 def _sign(method, path, query="", body=""):
@@ -193,7 +207,7 @@ def close_position(state, mark, pnl):
 
         label = "🌅 MORNING" if SLOT == "morning" else "🌇 EVENING"
         send_telegram(
-            f"✅ <b>TAKE PROFIT HIT — {label} (MATHI)</b>\n"
+            f"✅ <b>TAKE PROFIT HIT — {label} ({USER.upper()})</b>\n"
             f"<code>{'━' * 24}</code>\n"
             f"Symbol  » <code>{symbol}</code>\n"
             f"Lots    » <code>{lots:,}</code>\n"
@@ -205,14 +219,14 @@ def close_position(state, mark, pnl):
         return True
     else:
         log.error("SELL FAILED: %s", result)
-        send_telegram(f"⚠️ <b>TP SELL FAILED — {SLOT.upper()} (MATHI)</b>\n<code>{result}</code>")
+        send_telegram(f"⚠️ <b>TP SELL FAILED — {SLOT.upper()} ({USER.upper()})</b>\n<code>{result}</code>")
         return False
 
 
 def main():
     log.info("=" * 56)
-    log.info("TP Monitor [%s] started  target=+$%.2f  poll=%ds  state=%s",
-             SLOT, TARGET_PNL, POLL_SECS, STATE_FILE.name)
+    log.info("TP Monitor [%s/%s] started  target=+$%.2f  poll=%ds  state=%s",
+             USER, SLOT, TARGET_PNL, POLL_SECS, STATE_FILE)
 
     state = load_state()
     if state.get("status") != "OPEN":

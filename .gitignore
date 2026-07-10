@@ -1,8 +1,10 @@
-# Secrets — never commit
+# Secrets & per-user data — never commit
 .env
 *.env
 accounts.json
+accounts.json.migrated
 .dash_secret
+users/
 
 # Runtime state / logs
 logs/

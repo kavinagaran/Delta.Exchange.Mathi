@@ -9,7 +9,9 @@ import hmac
 import json
 import math
 import os
+import re
 import secrets
+import shutil
 import subprocess
 import sys
 import time
@@ -33,13 +35,12 @@ API_SECRET = os.getenv("API_SECRET", "")
 API_BASE   = os.getenv("BASE_URL", "https://api.india.delta.exchange")
 
 def _sign(method, path, query="", body="", key=None, secret=None):
-    """Delta HMAC headers. Defaults to the PRIMARY (.env) credentials — the
-    account the bot actually trades. Everything that touches bot slot state
-    (sync, square-off, manual entry, TP) must stay on these defaults; only
-    account-scoped views (wallet, positions, trade reconstruction) pass the
-    logged-in account's keys explicitly via _active_creds()."""
-    key    = key or API_KEY
-    secret = secret or API_SECRET
+    """Delta HMAC headers. Defaults to the ACTIVE account's credentials —
+    the logged-in user's own keys (users/<name>/account.json), falling back
+    to the .env keys for Basic-auth clients and non-request contexts. Every
+    account is a full trading account scoped to its own folder."""
+    if not key or not secret:
+        key, secret = _active_creds()
     ts  = str(int(time.time()))
     msg = method + ts + path + query + body
     sig = hmac.new(secret.encode(), msg.encode(), hashlib.sha256).hexdigest()
@@ -61,16 +62,12 @@ def _exchange_pnl(product_id: int):
         pass
     return None
 
-BASE               = Path(__file__).parent
-STATE_FILE         = BASE / "straddle_state.json"
-MORNING_STATE_FILE = BASE / "morning_state.json"
-HISTORY_FILE       = BASE / "trade_history.json"
-ENV_FILE           = BASE / ".env"
+BASE     = Path(__file__).parent
+ENV_FILE = BASE / ".env"
 
-SLOT_STATE = {"evening": STATE_FILE, "morning": MORNING_STATE_FILE}
-SLOT_PID   = {"evening": BASE / "tp_monitor.pid", "morning": BASE / "tp_monitor_morning.pid"}
+SLOTS = ("morning", "evening")
 
-_tp_procs: dict = {"evening": None, "morning": None}
+_tp_procs: dict = {}   # "<user>:<slot>" -> subprocess.Popen
 
 
 def _pid_alive(pid: int) -> bool:
@@ -101,14 +98,19 @@ def _pid_alive(pid: int) -> bool:
         return False
 
 
-def _tp_running(slot: str = "evening") -> bool:
-    proc = _tp_procs.get(slot)
+def _pid_file(user: str, slot: str) -> Path:
+    return USERS_DIR / user / f"tp_{slot}.pid"
+
+
+def _tp_running(user: str, slot: str) -> bool:
+    key  = f"{user}:{slot}"
+    proc = _tp_procs.get(key)
     if proc is not None:
         if proc.poll() is None:
             return True
-        _tp_procs[slot] = None
+        _tp_procs[key] = None
     # Fallback: check PID file (survives dashboard restart)
-    pid_file = SLOT_PID[slot]
+    pid_file = _pid_file(user, slot)
     if pid_file.exists():
         try:
             pid = int(pid_file.read_text().strip())
@@ -118,6 +120,22 @@ def _tp_running(slot: str = "evening") -> bool:
             pass
         pid_file.unlink(missing_ok=True)
     return False
+
+
+def _spawn_tp(user: str, slot: str):
+    """Start a TP monitor for a user's slot; returns the Popen or None."""
+    script = BASE / "tp_monitor.py"
+    if not script.exists():
+        return None
+    proc = subprocess.Popen(
+        [sys.executable, str(script), "--slot", slot, "--user", user],
+        cwd=str(BASE), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    _tp_procs[f"{user}:{slot}"] = proc
+    pf = _pid_file(user, slot)
+    pf.parent.mkdir(parents=True, exist_ok=True)
+    pf.write_text(str(proc.pid))
+    return proc
 
 # Keys the dashboard is allowed to read/write
 CONFIG_KEYS = [
@@ -145,22 +163,47 @@ app.secret_key = _SECRET_FILE.read_text(encoding="utf-8").strip()
 app.permanent_session_lifetime = timedelta(days=30)
 
 # ─────────────────────────────────────────────────────────────
-# ACCOUNTS & AUTH
+# ACCOUNTS & AUTH — one folder per user
 #
-# accounts.json (gitignored) holds the dashboard users, each with their own
-# Delta API key/secret so the dashboard can show any account's wallet,
-# positions and trades. The BOT always trades the PRIMARY account (the .env
-# keys) — a logged-in secondary account gets account-scoped views but slot
-# state, square-off and manual entry remain tied to the bot's own account.
+# users/<username>/ (gitignored) holds everything belonging to an account:
+#   account.json          credentials: display name, password hash, API keys
+#   straddle_state.json   that user's evening slot
+#   morning_state.json    that user's morning slot
+#   trade_history.json    that user's closed trades
+#   tp_evening.pid / tp_morning.pid   their TP monitor PIDs
+#
+# EVERY account is a full (primary) account: whoever is logged in trades
+# with their own Delta keys against their own state files. The scheduled
+# bot engine (Delta_Straddle_Live.py) runs on BOT_USER's folder and keys.
 #
 # The Android app keeps using HTTP Basic (DASH_USER/DASH_PASS from .env) on
-# /api/* — that path must never break.
+# /api/* — that path must never break; it maps to DASH_USER's account.
 # ─────────────────────────────────────────────────────────────
 # Default must stay "mathi" — the Android app hardcodes it for Basic auth.
 DASH_USER = os.getenv("DASH_USER", "mathi")
 DASH_PASS = os.getenv("DASH_PASS", "")
+BOT_USER  = os.getenv("BOT_USER", DASH_USER)   # account the scheduled bot trades
 
-ACCOUNTS_FILE = BASE / "accounts.json"
+USERS_DIR = BASE / "users"
+_LEGACY_ACCOUNTS_FILE = BASE / "accounts.json"
+
+_USERNAME_RE = re.compile(r"^[a-z0-9_-]{2,24}$")
+
+_DATA_FILES = ("straddle_state.json", "morning_state.json", "trade_history.json")
+
+
+def _safe_user(username: str) -> str:
+    """Usernames become directory names — reject anything path-unsafe."""
+    u = (username or "").strip().lower()
+    return u if _USERNAME_RE.match(u) else ""
+
+
+def _udir(username: str) -> Path:
+    return USERS_DIR / _safe_user(username)
+
+
+def _account_file(username: str) -> Path:
+    return _udir(username) / "account.json"
 
 
 def _hash_pw(password: str, salt: str = "") -> str:
@@ -177,33 +220,64 @@ def _verify_pw(password: str, stored: str) -> bool:
         return False
 
 
+def _save_account(acct: dict) -> None:
+    d = _udir(acct["username"])
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "account.json").write_text(json.dumps(acct, indent=2), encoding="utf-8")
+
+
+def _bootstrap_users() -> None:
+    """One-time setup/migration of the users/ tree:
+    1. Migrate legacy accounts.json entries into users/<name>/account.json.
+    2. Or, on a truly fresh install, create BOT_USER's account from .env.
+    3. Move the legacy repo-root state/history files into BOT_USER's folder
+       (they always belonged to the bot's account)."""
+    USERS_DIR.mkdir(exist_ok=True)
+    legacy = _load_json(_LEGACY_ACCOUNTS_FILE, None)
+    if isinstance(legacy, dict):
+        legacy = legacy.get("accounts", [])
+    if legacy:
+        for a in legacy:
+            a.pop("primary", None)          # every account is primary now
+            if _safe_user(a.get("username", "")) and not _account_file(a["username"]).exists():
+                _save_account(a)
+        _LEGACY_ACCOUNTS_FILE.rename(_LEGACY_ACCOUNTS_FILE.with_suffix(".json.migrated"))
+    if not _account_file(BOT_USER).exists():
+        _save_account({
+            "username":     _safe_user(BOT_USER) or "mathi",
+            "display_name": os.getenv("ACCOUNT_NAME", BOT_USER.capitalize()),
+            "pw_hash":      _hash_pw(DASH_PASS or BOT_USER),
+            "api_key":      API_KEY,
+            "api_secret":   API_SECRET,
+        })
+    for name in _DATA_FILES:
+        src, dst = BASE / name, _udir(BOT_USER) / name
+        if src.exists() and not dst.exists():
+            shutil.move(str(src), str(dst))
+
+
 def _load_accounts() -> list:
-    data = _load_json(ACCOUNTS_FILE, None)
-    if isinstance(data, dict):
-        data = data.get("accounts", [])
-    if data:
-        return data
-    # Bootstrap: first run creates the primary account from .env so the
-    # existing server credentials keep working unchanged.
-    primary = {
-        "username":     DASH_USER,
-        "display_name": os.getenv("ACCOUNT_NAME", DASH_USER.capitalize()),
-        "pw_hash":      _hash_pw(DASH_PASS or DASH_USER),
-        "api_key":      API_KEY,
-        "api_secret":   API_SECRET,
-        "primary":      True,
-    }
-    _save_accounts([primary])
-    return [primary]
-
-
-def _save_accounts(accounts: list) -> None:
-    ACCOUNTS_FILE.write_text(json.dumps(accounts, indent=2), encoding="utf-8")
+    if not USERS_DIR.exists() or _LEGACY_ACCOUNTS_FILE.exists() \
+       or not _account_file(BOT_USER).exists():
+        _bootstrap_users()
+    out = []
+    for d in sorted(USERS_DIR.iterdir()):
+        acct = _load_json(d / "account.json", None)
+        if isinstance(acct, dict) and acct.get("username"):
+            out.append(acct)
+    return out
 
 
 def _find_account(username: str) -> dict | None:
-    return next((a for a in _load_accounts()
-                 if a.get("username", "").lower() == (username or "").lower()), None)
+    u = _safe_user(username)
+    if not u:
+        return None
+    acct = _load_json(_account_file(u), None)
+    if not (isinstance(acct, dict) and acct.get("username")):
+        # Bootstrap path (first request ever may look up the login user)
+        acct = next((a for a in _load_accounts()
+                     if a.get("username", "").lower() == u), None)
+    return acct
 
 
 def _session_account() -> dict | None:
@@ -212,21 +286,34 @@ def _session_account() -> dict | None:
     return None
 
 
-def _active_creds() -> tuple:
-    """(api_key, api_secret) for account-scoped views: the logged-in
-    account's keys when a session user has them, else the primary .env keys
-    (Basic-auth clients like the Android app land here)."""
+def _active_user() -> str:
+    """The account all data/creds are scoped to for this request: the
+    session user, else DASH_USER (Basic-auth Android app, local dev)."""
     acct = _session_account()
+    return acct["username"] if acct else (_safe_user(DASH_USER) or "mathi")
+
+
+def _active_creds() -> tuple:
+    """(api_key, api_secret) of the active account; .env keys as fallback."""
+    acct = _session_account() or _find_account(DASH_USER)
     if acct and acct.get("api_key") and acct.get("api_secret"):
         return acct["api_key"], acct["api_secret"]
     return API_KEY, API_SECRET
 
 
-def _is_primary_session() -> bool:
-    """True when the active viewer is the bot's own (primary) account —
-    Basic-auth clients and no-password local dev count as primary."""
-    acct = _session_account()
-    return acct is None or bool(acct.get("primary"))
+# Per-request data paths — every user has their own slot state and history.
+def _user_dir() -> Path:
+    d = _udir(_active_user())
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _slot_file(slot: str) -> Path:
+    return _user_dir() / ("morning_state.json" if slot == "morning" else "straddle_state.json")
+
+
+def _hist_file() -> Path:
+    return _user_dir() / "trade_history.json"
 
 
 @app.before_request
@@ -241,7 +328,7 @@ def _auth_gate():
     # Path 2: browser session
     if session.get("user") and _find_account(session["user"]):
         return None
-    if not DASH_PASS and not ACCOUNTS_FILE.exists():
+    if not DASH_PASS and not USERS_DIR.exists():
         return None   # local dev box with no password configured
     if request.path.startswith("/api/") or request.path.startswith("/download/"):
         return jsonify({"error": "authentication required"}), 401
@@ -275,10 +362,10 @@ def api_me():
     if acct:
         return jsonify({"username":     acct["username"],
                         "display_name": acct.get("display_name", acct["username"]),
-                        "primary":      bool(acct.get("primary"))})
+                        "bot":          acct["username"] == _safe_user(BOT_USER)})
     return jsonify({"username": DASH_USER,
                     "display_name": os.getenv("ACCOUNT_NAME", DASH_USER.capitalize()),
-                    "primary": True})
+                    "bot": True})
 
 
 def _mask(s: str) -> str:
@@ -292,31 +379,25 @@ def api_accounts_list():
         "display_name": a.get("display_name", ""),
         "api_key":      _mask(a.get("api_key", "")),
         "has_secret":   bool(a.get("api_secret")),
-        "primary":      bool(a.get("primary")),
+        "bot":          a.get("username", "").lower() == _safe_user(BOT_USER),
     } for a in _load_accounts()])
 
 
 @app.route("/api/accounts", methods=["POST"])
 def api_accounts_save():
-    """Create or update an account. Only the primary account may manage
-    accounts; anyone may update their own password/keys."""
+    """Create or update an account. Every account is a full (primary)
+    account trading its own keys against its own data folder."""
     data = request.get_json(silent=True) or {}
-    username = (data.get("username") or "").strip()
+    username = _safe_user(data.get("username", ""))
     if not username:
-        return jsonify({"ok": False, "error": "username is required"}), 400
-    me = _session_account()
-    editing_self = me is not None and me["username"].lower() == username.lower()
-    if not _is_primary_session() and not editing_self:
-        return jsonify({"ok": False, "error": "Only the primary account can manage other accounts"}), 403
-
-    accounts = _load_accounts()
-    acct = next((a for a in accounts if a.get("username", "").lower() == username.lower()), None)
+        return jsonify({"ok": False,
+                        "error": "Username must be 2-24 chars: a-z, 0-9, - or _"}), 400
+    acct   = _find_account(username)
     is_new = acct is None
     if is_new:
         if not data.get("password"):
             return jsonify({"ok": False, "error": "password is required for a new account"}), 400
-        acct = {"username": username, "primary": False}
-        accounts.append(acct)
+        acct = {"username": username}
     if data.get("display_name"):
         acct["display_name"] = data["display_name"].strip()
     if data.get("password"):
@@ -326,22 +407,23 @@ def api_accounts_save():
         acct["api_key"] = data["api_key"].strip()
     if data.get("api_secret"):
         acct["api_secret"] = data["api_secret"].strip()
-    _save_accounts(accounts)
+    _save_account(acct)
     return jsonify({"ok": True, "created": is_new})
 
 
 @app.route("/api/accounts/<username>", methods=["DELETE"])
 def api_accounts_delete(username):
-    if not _is_primary_session():
-        return jsonify({"ok": False, "error": "Only the primary account can delete accounts"}), 403
-    accounts = _load_accounts()
-    acct = next((a for a in accounts if a.get("username", "").lower() == username.lower()), None)
+    username = _safe_user(username)
+    acct = _find_account(username)
     if not acct:
         return jsonify({"ok": False, "error": "No such account"}), 404
-    if acct.get("primary"):
-        return jsonify({"ok": False, "error": "The primary (bot) account cannot be deleted"}), 400
-    accounts.remove(acct)
-    _save_accounts(accounts)
+    if username == _safe_user(BOT_USER):
+        return jsonify({"ok": False, "error": "The bot engine's account cannot be deleted"}), 400
+    if _session_account() and _session_account()["username"] == username:
+        return jsonify({"ok": False, "error": "You cannot delete the account you are signed in as"}), 400
+    # Remove only the login (account.json); trade data stays on disk so
+    # history is never silently destroyed.
+    _account_file(username).unlink(missing_ok=True)
     return jsonify({"ok": True})
 
 
@@ -440,11 +522,10 @@ def render_page(page=""):
         page_title=title,
         display_name=(acct or {}).get("display_name",
                        os.getenv("ACCOUNT_NAME", DASH_USER.capitalize())),
-        is_primary=_is_primary_session(),
     )
 
 
-_last_sync = 0.0
+_last_sync: dict = {}   # username -> last exchange-sync epoch
 
 def _state_matches(state: dict, pid: int, size: int, entry: float) -> bool:
     side = "short" if size < 0 else "long"
@@ -511,8 +592,8 @@ def _reconcile_stale_close(slot: str, state: dict, live_pids: set) -> dict:
             "pnl_usd":        pnl,
             "exit_trigger":   "reconciled_stale",
         })
-        SLOT_STATE[slot].write_text(json.dumps(state, indent=2), encoding="utf-8")
-        hist = _load_json(HISTORY_FILE, [])
+        _slot_file(slot).write_text(json.dumps(state, indent=2), encoding="utf-8")
+        hist = _load_json(_hist_file(), [])
         if isinstance(hist, list):
             rec = {**state, "date": state.get("entry_date", ""),
                    "entry_time": state.get("entry_time_utc", ""),
@@ -523,21 +604,24 @@ def _reconcile_stale_close(slot: str, state: dict, live_pids: set) -> dict:
                       for h in hist)
             if not dup:
                 hist.append(rec)
-                HISTORY_FILE.write_text(json.dumps(hist, indent=2), encoding="utf-8")
+                _hist_file().write_text(json.dumps(hist, indent=2), encoding="utf-8")
     except Exception:
         pass
     return state
 
 
 def _sync_states_from_exchange() -> None:
-    """Adopt open MV-BTC straddle AND single-leg call/put positions from the
-    exchange into the correct slot (entries before 11:00 UTC -> morning, else
-    evening) so manually placed trades always show, straddle or not.
-    Throttled to one authenticated call per 30s."""
-    global _last_sync
-    if not API_KEY or not API_SECRET or time.time() - _last_sync < 30:
+    """Adopt the ACTIVE user's open MV-BTC straddle AND single-leg call/put
+    positions from the exchange into the correct slot (entries before 11:00
+    UTC -> morning, else evening) so manually placed trades always show.
+    Throttled to one authenticated call per user per 30s."""
+    key, secret = _active_creds()
+    if not key or not secret:
         return
-    _last_sync = time.time()
+    user = _active_user()
+    if time.time() - _last_sync.get(user, 0) < 30:
+        return
+    _last_sync[user] = time.time()
     try:
         hdrs = _sign("GET", "/v2/positions/margined")
         r = req.get(f"{API_BASE}/v2/positions/margined", headers=hdrs, timeout=6)
@@ -548,7 +632,7 @@ def _sync_states_from_exchange() -> None:
                 if float(p.get("size", 0)) != 0
                 and str(p.get("product_symbol", "")).startswith(("MV-BTC", "C-BTC", "P-BTC"))]
         live_pids = {int(p["product_id"]) for p in live}
-        states = {slot: _load_json(f, {}) for slot, f in SLOT_STATE.items()}
+        states = {slot: _load_json(_slot_file(slot), {}) for slot in SLOTS}
         states = {slot: _reconcile_stale_close(slot, s, live_pids) for slot, s in states.items()}
         for p in live:
             pid   = int(p["product_id"])
@@ -595,7 +679,7 @@ def _sync_states_from_exchange() -> None:
                 "total_cost_usd": round(entry * cv * abs(size), 2),
                 "entry_trigger":  "exchange_sync",
             }
-            SLOT_STATE[slot].write_text(json.dumps(new_state, indent=2), encoding="utf-8")
+            _slot_file(slot).write_text(json.dumps(new_state, indent=2), encoding="utf-8")
             states[slot] = new_state
     except Exception:
         pass
@@ -623,8 +707,8 @@ def _enrich_live(state: dict) -> dict:
 @app.route("/api/status")
 def api_status():
     _sync_states_from_exchange()
-    state   = _enrich_live(_load_json(STATE_FILE, {}))
-    morning = _enrich_live(_load_json(MORNING_STATE_FILE, {}))
+    state   = _enrich_live(_load_json(_slot_file("evening"), {}))
+    morning = _enrich_live(_load_json(_slot_file("morning"), {}))
     state["morning"] = morning
     # BTC futures (perpetual) live price
     try:
@@ -672,14 +756,13 @@ def _ist_calendar_date(date_str: str, time_str: str) -> str:
 @app.route("/api/today-trades")
 def api_today_trades():
     today_ist = (datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)).strftime("%Y-%m-%d")
-    trades  = _load_json(HISTORY_FILE, [])
-    state   = _load_json(STATE_FILE, {})
+    trades  = _load_json(_hist_file(), [])
     today_t = [t for t in trades
                if _ist_calendar_date(t.get("entry_date") or t.get("date", ""),
                                       t.get("entry_time") or t.get("entry_time_utc", "")) == today_ist]
     # Include any open slot position as a live row with real-time mark & P&L
-    for slot in ("morning", "evening"):
-        s = _load_json(SLOT_STATE[slot], {})
+    for slot in SLOTS:
+        s = _load_json(_slot_file(slot), {})
         if s.get("status") == "OPEN" and _ist_calendar_date(s.get("entry_date", ""), s.get("entry_time_utc", "")) == today_ist:
             s["_live"] = True
             s["slot"]  = slot
@@ -691,7 +774,7 @@ def api_today_trades():
 @app.route("/api/square-off", methods=["POST"])
 def api_square_off():
     slot       = _slot_arg()
-    state_file = SLOT_STATE[slot]
+    state_file = _slot_file(slot)
     state      = _load_json(state_file, {})
     if state.get("status") != "OPEN":
         return jsonify({"ok": False, "error": f"No open {slot} position"}), 400
@@ -702,7 +785,8 @@ def api_square_off():
     entry_mark = float(state.get("entry_mark", 0))
     cval       = float(state.get("contract_value", 0.001))
 
-    if not API_KEY or not API_SECRET:
+    key, secret = _active_creds()
+    if not key or not secret:
         return jsonify({"ok": False, "error": "API credentials not configured"}), 400
 
     try:
@@ -752,11 +836,11 @@ def api_square_off():
             # Save state and log trade
             state_file.write_text(
                 __import__("json").dumps(state, indent=2), encoding="utf-8")
-            trades   = _load_json(HISTORY_FILE, [])
+            trades   = _load_json(_hist_file(), [])
             if not isinstance(trades, list):
                 trades = []
             trades.append(state)
-            HISTORY_FILE.write_text(
+            _hist_file().write_text(
                 __import__("json").dumps(trades, indent=2), encoding="utf-8")
             return jsonify({"ok": True, "pnl": pnl, "fill": fill,
                             "order_id": o.get("id")})
@@ -770,7 +854,7 @@ def _slot_arg() -> str:
     slot = request.args.get("slot", "")
     if not slot:
         slot = (request.get_json(silent=True) or {}).get("slot", "")
-    return slot if slot in SLOT_STATE else "evening"
+    return slot if slot in SLOTS else "evening"
 
 
 def _send_telegram(text: str) -> None:
@@ -865,10 +949,11 @@ def api_manual_entry():
     side = (data.get("side") or request.args.get("side") or "").lower()
     if side not in ("buy", "sell"):
         return jsonify({"ok": False, "error": "side must be buy or sell"}), 400
-    if not API_KEY or not API_SECRET:
+    key, secret = _active_creds()
+    if not key or not secret:
         return jsonify({"ok": False, "error": "API credentials not configured"}), 400
 
-    state_file = SLOT_STATE[slot]
+    state_file = _slot_file(slot)
     state      = _load_json(state_file, {})
     if state.get("status") == "OPEN":
         return jsonify({"ok": False, "error": f"{slot} already has an open position"}), 400
@@ -933,7 +1018,7 @@ def api_manual_entry():
         label = "LONG (bought)" if side == "buy" else "SHORT (sold to open)"
         mode  = " — DRY-RUN ⚠ (simulated, no real order)" if is_dry_run else ""
         _send_telegram(
-            f"🖐 <b>MANUAL {side.upper()} — {icon} {slot.upper()} (NITHI-BOT)</b>{mode}\n"
+            f"🖐 <b>MANUAL {side.upper()} — {icon} {slot.upper()} ({_active_user().upper()})</b>{mode}\n"
             f"<code>{'━' * 24}</code>\n"
             f"Symbol  » <code>{symbol}</code>\n"
             f"Side    » <code>{label}</code>\n"
@@ -966,10 +1051,11 @@ def _tp_env(slot: str):
 
 @app.route("/api/tp-monitor", methods=["GET"])
 def tp_monitor_status():
+    user = _active_user()
     out = {}
-    for slot in ("morning", "evening"):
+    for slot in SLOTS:
         target, poll = _tp_env(slot)
-        out[slot] = {"running": _tp_running(slot), "target_pnl": target, "poll_secs": poll}
+        out[slot] = {"running": _tp_running(user, slot), "target_pnl": target, "poll_secs": poll}
     # Back-compat top-level fields = evening
     out.update(out["evening"])
     return jsonify(out)
@@ -978,39 +1064,34 @@ def tp_monitor_status():
 @app.route("/api/tp-monitor/start", methods=["POST"])
 def tp_monitor_start():
     slot = _slot_arg()
-    if _tp_running(slot):
+    user = _active_user()
+    if _tp_running(user, slot):
         return jsonify({"ok": False, "error": f"{slot} monitor already running"}), 400
-    state = _load_json(SLOT_STATE[slot], {})
+    state = _load_json(_slot_file(slot), {})
     if state.get("status") != "OPEN":
         return jsonify({"ok": False, "error": f"No open {slot} position to monitor"}), 400
-    script = BASE / "tp_monitor.py"
-    if not script.exists():
+    proc = _spawn_tp(user, slot)
+    if proc is None:
         return jsonify({"ok": False, "error": "tp_monitor.py not found"}), 404
-    proc = subprocess.Popen(
-        [sys.executable, str(script), "--slot", slot],
-        cwd=str(BASE),
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    _tp_procs[slot] = proc
-    SLOT_PID[slot].write_text(str(proc.pid))
     return jsonify({"ok": True, "slot": slot, "pid": proc.pid})
 
 
 @app.route("/api/tp-monitor/stop", methods=["POST"])
 def tp_monitor_stop():
     slot = _slot_arg()
+    user = _active_user()
     stopped = False
-    proc = _tp_procs.get(slot)
+    key  = f"{user}:{slot}"
+    proc = _tp_procs.get(key)
     if proc is not None and proc.poll() is None:
         proc.terminate()
         try:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             proc.kill()
-        _tp_procs[slot] = None
+        _tp_procs[key] = None
         stopped = True
-    pid_file = SLOT_PID[slot]
+    pid_file = _pid_file(user, slot)
     if pid_file.exists():
         try:
             pid = int(pid_file.read_text().strip())
@@ -1164,23 +1245,19 @@ def _fetch_reconstructed_trades(skip_prefixes=("MV-BTC",)) -> list:
 
 
 def _all_trades_merged() -> list:
-    """Primary account: bot-tracked trades (precise, from trade_history.json)
-    plus reconstructed trades for anything Delta shows that the bot never
-    adopted, deduped on (symbol, date, entry_time). A secondary logged-in
-    account has no bot log — its history is fully reconstructed from its own
-    order history instead."""
+    """The active user's tracked trades (their trade_history.json — written
+    by the bot engine, square-offs, TP monitors and stale-close reconciling)
+    plus trades reconstructed from their own Delta order history for anything
+    never tracked, deduped on (symbol, date, entry_time)."""
     def _key(t: dict) -> tuple:
         # Bot/reconcile records store entry_time_utc; reconstructed ones
         # store entry_time — same value, either name must match.
         return (t.get("symbol"),
                 t.get("date") or t.get("entry_date", ""),
                 t.get("entry_time") or t.get("entry_time_utc", ""))
-    if _is_primary_session():
-        mv_trades    = _load_json(HISTORY_FILE, [])
-        tracked_keys = {_key(t) for t in mv_trades}
-        other = [t for t in _fetch_reconstructed_trades() if _key(t) not in tracked_keys]
-    else:
-        mv_trades, other = [], _fetch_reconstructed_trades(skip_prefixes=())
+    mv_trades    = _load_json(_hist_file(), [])
+    tracked_keys = {_key(t) for t in mv_trades}
+    other = [t for t in _fetch_reconstructed_trades() if _key(t) not in tracked_keys]
     merged = mv_trades + other
     for t in merged:
         # Older records (square-offs, resumed states) carry only entry_date /
@@ -1311,35 +1388,30 @@ def get_config():
     return jsonify({k: os.getenv(k, "") for k in CONFIG_KEYS})
 
 
-def _restart_tp_monitor(slot: str) -> bool:
-    """Stop and respawn a slot's TP monitor so freshly saved targets apply.
-    Only called for monitors that are already running."""
-    proc = _tp_procs.get(slot)
+def _restart_tp_monitor(user: str, slot: str) -> bool:
+    """Stop and respawn a user's slot TP monitor so freshly saved targets
+    apply. Only called for monitors that are already running."""
+    key  = f"{user}:{slot}"
+    proc = _tp_procs.get(key)
     if proc is not None and proc.poll() is None:
         proc.terminate()
         try:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             proc.kill()
-        _tp_procs[slot] = None
-    pid_file = SLOT_PID[slot]
+        _tp_procs[key] = None
+    pid_file = _pid_file(user, slot)
     if pid_file.exists():
         try:
             os.kill(int(pid_file.read_text().strip()), 15)
         except Exception:
             pass
         pid_file.unlink(missing_ok=True)
-    script = BASE / "tp_monitor.py"
-    state  = _load_json(SLOT_STATE[slot], {})
-    if state.get("status") != "OPEN" or not script.exists():
+    state = _load_json(USERS_DIR / user / ("morning_state.json" if slot == "morning"
+                                           else "straddle_state.json"), {})
+    if state.get("status") != "OPEN":
         return False
-    proc = subprocess.Popen(
-        [sys.executable, str(script), "--slot", slot],
-        cwd=str(BASE), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
-    _tp_procs[slot] = proc
-    pid_file.write_text(str(proc.pid))
-    return True
+    return _spawn_tp(user, slot) is not None
 
 
 _TP_KEYS_BY_SLOT = {
@@ -1369,11 +1441,12 @@ def set_config():
     ENV_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
     load_dotenv(override=True)
     # The bot watches .env and reloads itself; running TP monitors don't,
-    # so bounce any whose slot's targets just changed.
+    # so bounce any of the active user's monitors whose targets just changed.
+    user = _active_user()
     tp_restarted = []
     for slot, keys in _TP_KEYS_BY_SLOT.items():
-        if keys & set(data) and _tp_running(slot):
-            if _restart_tp_monitor(slot):
+        if keys & set(data) and _tp_running(user, slot):
+            if _restart_tp_monitor(user, slot):
                 tp_restarted.append(slot)
     return jsonify({"ok": True, "tp_restarted": tp_restarted})
 
@@ -1404,29 +1477,33 @@ def test_telegram():
 
 def _revive_tp_monitors():
     """TP monitors are dashboard-spawned subprocesses, so a host reboot kills
-    them while their PID files and OPEN state survive. On startup, respawn any
-    monitor that was running (stale PID file) and still has an open position —
-    without this, a reboot silently drops take-profit protection."""
-    script = BASE / "tp_monitor.py"
-    for slot, pid_file in SLOT_PID.items():
-        if not pid_file.exists():
+    them while their PID files and OPEN state survive. On startup, walk every
+    user's folder and respawn any monitor whose PID file is stale but whose
+    slot is still OPEN — without this, a reboot silently drops take-profit
+    protection."""
+    if not USERS_DIR.exists():
+        return
+    for udir in USERS_DIR.iterdir():
+        if not (udir / "account.json").exists():
             continue
-        try:
-            if _pid_alive(int(pid_file.read_text().strip())):
-                continue          # survived (not a reboot) — leave it be
-        except (ValueError, OSError):
-            pass
-        pid_file.unlink(missing_ok=True)
-        state = _load_json(SLOT_STATE[slot], {})
-        if state.get("status") != "OPEN" or not script.exists():
-            continue
-        proc = subprocess.Popen(
-            [sys.executable, str(script), "--slot", slot],
-            cwd=str(BASE), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-        _tp_procs[slot] = proc
-        pid_file.write_text(str(proc.pid))
-        print(f"Revived {slot} TP monitor (pid {proc.pid}) after restart")
+        user = udir.name
+        for slot in SLOTS:
+            pid_file = _pid_file(user, slot)
+            if not pid_file.exists():
+                continue
+            try:
+                if _pid_alive(int(pid_file.read_text().strip())):
+                    continue      # survived (not a reboot) — leave it be
+            except (ValueError, OSError):
+                pass
+            pid_file.unlink(missing_ok=True)
+            state = _load_json(udir / ("morning_state.json" if slot == "morning"
+                                       else "straddle_state.json"), {})
+            if state.get("status") != "OPEN":
+                continue
+            proc = _spawn_tp(user, slot)
+            if proc:
+                print(f"Revived {user}/{slot} TP monitor (pid {proc.pid}) after restart")
 
 
 # ─────────────────────────────────────────────────────────────

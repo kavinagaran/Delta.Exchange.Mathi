@@ -101,10 +101,26 @@ TELEGRAM_TOKEN  = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHATID = os.getenv("TELEGRAM_CHAT_ID",   "")
 TELEGRAM_ON     = os.getenv("TELEGRAM_ALERTS", "true").lower() in ("1", "true", "yes")
 
-STATE_FILE         = Path(__file__).parent / "straddle_state.json"
-MORNING_STATE_FILE = Path(__file__).parent / "morning_state.json"
-HISTORY_FILE       = Path(__file__).parent / "trade_history.json"
+# Every account has its own data folder (users/<name>/) shared with the
+# dashboard. The scheduled bot engine trades BOT_USER's account; its state
+# and history live in that user's folder.
+BOT_USER = os.getenv("BOT_USER", os.getenv("DASH_USER", "mathi"))
+DATA_DIR = Path(__file__).parent / "users" / BOT_USER
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+STATE_FILE         = DATA_DIR / "straddle_state.json"
+MORNING_STATE_FILE = DATA_DIR / "morning_state.json"
+HISTORY_FILE       = DATA_DIR / "trade_history.json"
 ENV_FILE           = Path(__file__).parent / ".env"
+
+# One-time migration: these files used to live in the repo root — move them
+# into the bot account's folder if they're still there.
+import shutil as _shutil
+for _f in ("straddle_state.json", "morning_state.json", "trade_history.json"):
+    _src = Path(__file__).parent / _f
+    _dst = DATA_DIR / _f
+    if _src.exists() and not _dst.exists():
+        _shutil.move(str(_src), str(_dst))
 
 # ─────────────────────────────────────────────────────────────
 # LOGGING

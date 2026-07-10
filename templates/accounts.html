@@ -1,14 +1,14 @@
 {% extends "base.html" %}
 
 {% block content %}
-<div class="banner info">The bot always trades the <b>primary</b> account (its keys live in the server's .env). Additional accounts get their own dashboard login — after signing in, they see <em>their</em> wallet, positions and trade history.</div>
+<div class="banner info">Every account is a full trading account: sign in and the whole dashboard — positions, trades, manual Buy/Sell, square-off, TP monitors — runs on <b>your</b> Delta API keys, with your data kept in your own folder on the server. The scheduled auto-trade engine runs on the account marked <b>BOT ENGINE</b>.</div>
 
 <div class="card">
   <div class="card-hd">Accounts</div>
   <div class="tbl-wrap">
     <table>
       <thead><tr>
-        <th>Name</th><th>Username</th><th>API Key</th><th>Secret</th><th>Role</th><th style="width:180px"></th>
+        <th>Name</th><th>Username</th><th>API Key</th><th>Secret</th><th></th><th style="width:180px"></th>
       </tr></thead>
       <tbody id="acct-body"><tr class="empty-row"><td colspan="6">Loading…</td></tr></tbody>
     </table>
@@ -82,10 +82,10 @@ async function loadAccounts() {
       <td>${esc(a.username)}</td>
       <td class="mono">${esc(a.api_key || '—')}</td>
       <td>${a.has_secret ? '<span class="badge win">set</span>' : '<span class="badge loss">missing</span>'}</td>
-      <td>${a.primary ? '<span class="badge live">PRIMARY · bot</span>' : '<span class="badge sim">viewer</span>'}</td>
+      <td>${a.bot ? '<span class="badge live">BOT ENGINE</span>' : ''}</td>
       <td>
         <button class="btn secondary sm" onclick="editAccount('${esc(a.username)}', '${esc(a.display_name || '')}')">Edit</button>
-        ${a.primary ? '' : `<button class="btn danger sm" onclick="delAccount('${esc(a.username)}')">Delete</button>`}
+        ${a.bot ? '' : `<button class="btn danger sm" onclick="delAccount('${esc(a.username)}')">Delete</button>`}
       </td>
     </tr>`).join('');
 }
