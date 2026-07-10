@@ -209,6 +209,31 @@ def _state_matches(state: dict, pid: int, size: int, entry: float) -> bool:
             and abs(float(state.get("entry_mark", 0) or 0) - entry) < 0.01)
 
 
+def _closed_blocks_adoption(other: dict, created: str) -> bool:
+    """Should a CLOSED slot record block a new exchange position (created at
+    `created`, ISO UTC) from being adopted into that slot?  Only while the new
+    position isn't provably newer than the close — a close that happened
+    before the new trade was even opened is pure history (already recorded in
+    trade_history.json) and must not strand the slot. Blocking on *any*
+    exit_time_utc, as this used to, left a live manual trade invisible on
+    2026-07-09 once both slots held same-day closes."""
+    if other.get("status") != "CLOSED" or not other.get("exit_time_utc"):
+        return False
+    try:
+        entry_dt = datetime.strptime(
+            f"{other.get('entry_date', '')} {other.get('entry_time_utc') or '00:00:00'}",
+            "%Y-%m-%d %H:%M:%S")
+        exit_dt = datetime.combine(
+            entry_dt.date(),
+            datetime.strptime(other["exit_time_utc"], "%H:%M:%S").time())
+        if exit_dt < entry_dt:
+            exit_dt += timedelta(days=1)  # exit rolled past midnight UTC
+        created_dt = datetime.strptime(created[:19], "%Y-%m-%dT%H:%M:%S")
+        return created_dt <= exit_dt
+    except (ValueError, TypeError):
+        return True  # can't prove the new position is newer — keep protecting
+
+
 def _reconcile_stale_close(slot: str, state: dict, live_pids: set) -> dict:
     """If a slot's on-disk state says OPEN but that position no longer exists
     on the exchange (closed while the dashboard/bot was down, or by a manual
@@ -243,8 +268,12 @@ def _reconcile_stale_close(slot: str, state: dict, live_pids: set) -> dict:
         SLOT_STATE[slot].write_text(json.dumps(state, indent=2), encoding="utf-8")
         hist = _load_json(HISTORY_FILE, [])
         if isinstance(hist, list):
-            rec = {**state, "date": state.get("entry_date", ""), "cost_usd": state.get("total_cost_usd", 0)}
-            dup = any(h.get("symbol") == rec["symbol"] and h.get("entry_time") == rec.get("entry_time_utc")
+            rec = {**state, "date": state.get("entry_date", ""),
+                   "entry_time": state.get("entry_time_utc", ""),
+                   "exit_time":  state.get("exit_time_utc", ""),
+                   "cost_usd":   state.get("total_cost_usd", 0)}
+            dup = any(h.get("symbol") == rec["symbol"]
+                      and (h.get("entry_time") or h.get("entry_time_utc")) == rec["entry_time"]
                       for h in hist)
             if not dup:
                 hist.append(rec)
@@ -291,14 +320,15 @@ def _sync_states_from_exchange() -> None:
             except (ValueError, IndexError):
                 ist_hour = 12
             slot = "morning" if ist_hour < 11 else "evening"
-            # Don't clobber: (1) different open position in slot, or (2) just-closed position in slot
+            # Don't clobber: (1) a different open position in the slot, or
+            # (2) a close that isn't provably older than this position.
             other = states[slot]
             if (other.get("status") == "OPEN" and int(other.get("product_id", 0) or 0) != pid) \
-               or (other.get("status") == "CLOSED" and other.get("exit_time_utc")):  # Recent close
+               or _closed_blocks_adoption(other, created):
                 slot = "evening" if slot == "morning" else "morning"
                 other = states[slot]
                 if (other.get("status") == "OPEN" and int(other.get("product_id", 0) or 0) != pid) \
-                   or (other.get("status") == "CLOSED" and other.get("exit_time_utc")):
+                   or _closed_blocks_adoption(other, created):
                     continue
             pr = req.get(f"{API_BASE}/v2/products/{pid}", timeout=6).json().get("result", {})
             cv = float(pr.get("contract_value") or 0.001)
@@ -877,12 +907,15 @@ def _all_trades_merged() -> list:
     never adopted (e.g. futures, or a leg closed before the next sync ran).
     Deduped on (symbol, date, entry_time) so an adopted position doesn't
     appear twice once reconstruction also picks up its fills."""
+    def _key(t: dict) -> tuple:
+        # Bot/reconcile records store entry_time_utc; reconstructed ones
+        # store entry_time — same value, either name must match.
+        return (t.get("symbol"),
+                t.get("date") or t.get("entry_date", ""),
+                t.get("entry_time") or t.get("entry_time_utc", ""))
     mv_trades    = _load_json(HISTORY_FILE, [])
-    tracked_keys = {(t.get("symbol"), t.get("date") or t.get("entry_date", ""), t.get("entry_time"))
-                    for t in mv_trades}
-    other = [t for t in _fetch_non_mv_trades()
-             if (t.get("symbol"), t.get("date") or t.get("entry_date", ""), t.get("entry_time"))
-             not in tracked_keys]
+    tracked_keys = {_key(t) for t in mv_trades}
+    other = [t for t in _fetch_non_mv_trades() if _key(t) not in tracked_keys]
     merged = mv_trades + other
     merged.sort(key=lambda t: (t.get("entry_date") or t.get("date", ""),
                                 t.get("entry_time", "")))
