@@ -4,16 +4,18 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Sign in · NITHI-BOT</title>
+<link rel="icon" type="image/png" href="/static/img/favicon.png?v={{ asset_v('img/favicon.png') }}">
 <link rel="stylesheet" href="/static/css/app.css?v={{ asset_v('css/app.css') }}">
 </head>
 <body class="login-body">
 
 <form class="login-card" id="login-form" autocomplete="on">
   <div class="brandline">
-    <div class="logo" style="width:40px;height:40px;border-radius:10px;background:linear-gradient(135deg,#2563eb,#7c3aed);display:grid;place-items:center;color:#fff;font-weight:700;font-size:18px">N</div>
+    <img src="/static/img/logo.png?v={{ asset_v('img/logo.png') }}" alt="NITHI-BOT logo"
+         style="width:44px;height:44px;border-radius:10px;object-fit:cover">
     <h1>NITHI-BOT</h1>
   </div>
-  <div class="tag">MV-BTC Straddle · Delta Exchange India</div>
+  <div class="tag">BTC Trade Made Bit Easy</div>
 
   <div class="login-err" id="err"></div>
 

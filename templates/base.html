@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{ page_title }} · NITHI-BOT</title>
+<link rel="icon" type="image/png" href="/static/img/favicon.png?v={{ asset_v('img/favicon.png') }}">
 <link rel="stylesheet" href="/static/css/app.css?v={{ asset_v('css/app.css') }}">
 <script src="/static/js/app.js?v={{ asset_v('js/app.js') }}"></script>
 {% block head %}{% endblock %}
@@ -13,10 +14,10 @@
 
   <aside class="sidebar">
     <div class="brand">
-      <div class="logo">N</div>
+      <img class="logo" src="/static/img/logo.png?v={{ asset_v('img/logo.png') }}" alt="NITHI-BOT logo">
       <div>
         <div class="name">NITHI-BOT</div>
-        <div class="sub">MV-BTC STRADDLE</div>
+        <div class="sub">BTC Trade Made Bit Easy</div>
       </div>
     </div>
 
