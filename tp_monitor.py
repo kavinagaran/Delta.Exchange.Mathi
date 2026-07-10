@@ -67,12 +67,14 @@ def _f(key, default=0.0):
 if SLOT == "morning":
     STATE_FILE = USER_DIR / "morning_state.json"
     TARGET_PNL = _f("TP_TARGET_PNL_MORNING", 300)
-    SL_PNL     = abs(_f("SL_TARGET_PNL_MORNING", 0))   # 0 = stop-loss disabled
+    SL_PNL     = abs(_f("SL_TARGET_PNL_MORNING", 0))    # 0 = stop-loss disabled
+    TSL_PNL    = abs(_f("TSL_TARGET_PNL_MORNING", 0))   # 0 = trailing stop disabled
     POLL_SECS  = int(_f("TP_POLL_SECS_MORNING", 30))
 else:
     STATE_FILE = USER_DIR / "straddle_state.json"
     TARGET_PNL = _f("TP_TARGET_PNL", 105)
-    SL_PNL     = abs(_f("SL_TARGET_PNL", 0))            # 0 = stop-loss disabled
+    SL_PNL     = abs(_f("SL_TARGET_PNL", 0))             # 0 = stop-loss disabled
+    TSL_PNL    = abs(_f("TSL_TARGET_PNL", 0))            # 0 = trailing stop disabled
     POLL_SECS  = int(_f("TP_POLL_SECS", 30))
 LOG_NAME = f"tp_{USER}_{SLOT}.log"
 
@@ -203,7 +205,7 @@ def close_position(state, mark, pnl, reason="take_profit"):
         return True
     lots = abs(live_size)
 
-    tag = "TP" if reason == "take_profit" else "SL"
+    tag = {"take_profit": "TP", "stop_loss": "SL", "trailing_stop": "TSL"}.get(reason, "TP")
     log.info("%s HIT — P&L $%.2f  mark $%.4f  %sing %d lots to close...",
              tag, pnl, mark, close_side, lots)
     result = place_order(product_id, symbol, close_side, lots)
@@ -224,9 +226,11 @@ def close_position(state, mark, pnl, reason="take_profit"):
         append_history(state)
 
         label = "🌅 MORNING" if SLOT == "morning" else "🌇 EVENING"
-        head  = (f"✅ <b>TAKE PROFIT HIT — {label} ({USER.upper()})</b>"
-                 if reason == "take_profit" else
-                 f"🛑 <b>STOP LOSS HIT — {label} ({USER.upper()})</b>")
+        head  = {
+            "take_profit":   f"✅ <b>TAKE PROFIT HIT — {label} ({USER.upper()})</b>",
+            "stop_loss":     f"🛑 <b>STOP LOSS HIT — {label} ({USER.upper()})</b>",
+            "trailing_stop": f"🔻 <b>TRAILING STOP HIT — {label} ({USER.upper()})</b>",
+        }.get(reason, f"✅ <b>{tag} — {label} ({USER.upper()})</b>")
         psign = "+" if real >= 0 else "-"
         send_telegram(
             f"{head}\n"
@@ -247,9 +251,10 @@ def close_position(state, mark, pnl, reason="take_profit"):
 
 def main():
     log.info("=" * 56)
-    log.info("TP/SL Monitor [%s/%s] started  tp=+$%.2f  sl=%s  poll=%ds  state=%s",
+    log.info("TP/SL Monitor [%s/%s] started  tp=+$%.2f  sl=%s  tsl=%s  poll=%ds  state=%s",
              USER, SLOT, TARGET_PNL,
              f"-${SL_PNL:.2f}" if SL_PNL > 0 else "off",
+             f"peak-${TSL_PNL:.2f}" if TSL_PNL > 0 else "off",
              POLL_SECS, STATE_FILE)
 
     state = load_state()
@@ -267,6 +272,11 @@ def main():
              symbol, entry_mark, lots,
              "SHORT" if sign < 0 else "LONG", TARGET_PNL)
 
+    # Trailing stop: trail from the best P&L seen since the monitor started.
+    # Peak starts at 0 (entry), so before any profit a TSL of $X behaves like
+    # a fixed SL of $X; once P&L runs up, the floor rises with it.
+    peak_pnl = 0.0
+
     while True:
         try:
             state = load_state()
@@ -276,13 +286,21 @@ def main():
 
             mark = get_mark(symbol)
             pnl  = (mark - entry_mark) * cv * lots * sign
+            peak_pnl = max(peak_pnl, pnl)
 
-            log.info("mark=%.4f  pnl=$%.2f  tp=$%.2f  sl=%s", mark, pnl, TARGET_PNL,
-                     f"-${SL_PNL:.2f}" if SL_PNL > 0 else "off")
+            log.info("mark=%.4f  pnl=$%.2f  peak=$%.2f  tp=$%.2f  sl=%s  tsl=%s",
+                     mark, pnl, peak_pnl, TARGET_PNL,
+                     f"-${SL_PNL:.2f}" if SL_PNL > 0 else "off",
+                     f"${peak_pnl - TSL_PNL:.2f}" if TSL_PNL > 0 else "off")
 
             if pnl >= TARGET_PNL:
                 if close_position(state, mark, pnl, "take_profit"):
                     log.info("Monitor done (take profit).")
+                    break
+            elif TSL_PNL > 0 and pnl <= peak_pnl - TSL_PNL:
+                if close_position(state, mark, pnl, "trailing_stop"):
+                    log.info("Monitor done (trailing stop: peak $%.2f, gave back $%.2f).",
+                             peak_pnl, peak_pnl - pnl)
                     break
             elif SL_PNL > 0 and pnl <= -SL_PNL:
                 if close_position(state, mark, pnl, "stop_loss"):
