@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign in · NITHI-BOT</title>
+<link rel="stylesheet" href="/static/css/app.css">
+</head>
+<body class="login-body">
+
+<form class="login-card" id="login-form" autocomplete="on">
+  <div class="brandline">
+    <div class="logo" style="width:40px;height:40px;border-radius:10px;background:linear-gradient(135deg,#2563eb,#7c3aed);display:grid;place-items:center;color:#fff;font-weight:700;font-size:18px">N</div>
+    <h1>NITHI-BOT</h1>
+  </div>
+  <div class="tag">MV-BTC Straddle · Delta Exchange India</div>
+
+  <div class="login-err" id="err"></div>
+
+  <label class="fld">
+    <span>Username</span>
+    <input id="username" name="username" autocomplete="username" required autofocus>
+  </label>
+  <label class="fld">
+    <span>Password</span>
+    <input id="password" name="password" type="password" autocomplete="current-password" required>
+  </label>
+
+  <button class="btn" type="submit" style="width:100%;margin-top:8px;padding:10px">Sign in</button>
+</form>
+
+<script>
+document.getElementById('login-form').addEventListener('submit', async e => {
+  e.preventDefault();
+  const err = document.getElementById('err');
+  err.style.display = 'none';
+  const btn = e.target.querySelector('button');
+  btn.disabled = true;
+  try {
+    const r = await fetch('/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        username: document.getElementById('username').value.trim(),
+        password: document.getElementById('password').value,
+      }),
+    });
+    const d = await r.json();
+    if (d.ok) { location.href = '/'; return; }
+    err.textContent = d.error || 'Sign-in failed';
+    err.style.display = 'block';
+  } catch (ex) {
+    err.textContent = 'Network error — is the server up?';
+    err.style.display = 'block';
+  }
+  btn.disabled = false;
+});
+</script>
+</body>
+</html>

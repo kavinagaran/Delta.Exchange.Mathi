@@ -1,6 +1,8 @@
 # Secrets — never commit
 .env
 *.env
+accounts.json
+.dash_secret
 
 # Runtime state / logs
 logs/

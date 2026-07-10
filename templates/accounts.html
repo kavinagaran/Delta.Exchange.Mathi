@@ -1,0 +1,124 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="banner info">The bot always trades the <b>primary</b> account (its keys live in the server's .env). Additional accounts get their own dashboard login — after signing in, they see <em>their</em> wallet, positions and trade history.</div>
+
+<div class="card">
+  <div class="card-hd">Accounts</div>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr>
+        <th>Name</th><th>Username</th><th>API Key</th><th>Secret</th><th>Role</th><th style="width:180px"></th>
+      </tr></thead>
+      <tbody id="acct-body"><tr class="empty-row"><td colspan="6">Loading…</td></tr></tbody>
+    </table>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-hd" id="form-title">Add account</div>
+  <div class="card-bd">
+    <div class="form-grid">
+      <label class="fld"><span>Account holder name</span><input id="a-display" placeholder="e.g. Mathi"></label>
+      <label class="fld"><span>Username (login)</span><input id="a-username" autocomplete="off" placeholder="e.g. mathi"></label>
+      <label class="fld"><span>Password {% if true %}<span class="hint" id="pw-hint"></span>{% endif %}</span><input id="a-password" type="password" autocomplete="new-password"></label>
+      <label class="fld"><span>Delta API Key</span><input id="a-key" autocomplete="off" placeholder="leave blank to keep existing"></label>
+      <label class="fld"><span>Delta API Secret</span><input id="a-secret" type="password" autocomplete="new-password" placeholder="leave blank to keep existing"></label>
+    </div>
+    <div class="btn-row">
+      <button class="btn" onclick="saveAccount()">Save account</button>
+      <button class="btn secondary" onclick="testKeys()">Test connection</button>
+      <button class="btn secondary" onclick="resetForm()" id="cancel-btn" style="display:none">Cancel edit</button>
+    </div>
+    <p class="hint" style="margin-top:12px">
+      API keys are created on Delta Exchange India → Settings → API Keys. The key must have <b>Read</b> +
+      <b>Trade</b> permission and this server's IP (<span class="mono">13.207.78.56</span>) whitelisted.
+    </p>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let editing = null;
+
+async function loadAccounts() {
+  const rows = await jget('/api/accounts');
+  document.getElementById('acct-body').innerHTML = rows.map(a => `
+    <tr>
+      <td><b>${esc(a.display_name || a.username)}</b></td>
+      <td>${esc(a.username)}</td>
+      <td class="mono">${esc(a.api_key || '—')}</td>
+      <td>${a.has_secret ? '<span class="badge win">set</span>' : '<span class="badge loss">missing</span>'}</td>
+      <td>${a.primary ? '<span class="badge live">PRIMARY · bot</span>' : '<span class="badge sim">viewer</span>'}</td>
+      <td>
+        <button class="btn secondary sm" onclick="editAccount('${esc(a.username)}', '${esc(a.display_name || '')}')">Edit</button>
+        ${a.primary ? '' : `<button class="btn danger sm" onclick="delAccount('${esc(a.username)}')">Delete</button>`}
+      </td>
+    </tr>`).join('');
+}
+
+function editAccount(username, display) {
+  editing = username;
+  document.getElementById('form-title').textContent = `Edit account — ${username}`;
+  document.getElementById('a-username').value = username;
+  document.getElementById('a-username').disabled = true;
+  document.getElementById('a-display').value = display;
+  document.getElementById('a-password').value = '';
+  document.getElementById('pw-hint').textContent = '(leave blank to keep current)';
+  document.getElementById('a-key').value = '';
+  document.getElementById('a-secret').value = '';
+  document.getElementById('cancel-btn').style.display = '';
+  window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+}
+
+function resetForm() {
+  editing = null;
+  document.getElementById('form-title').textContent = 'Add account';
+  document.getElementById('a-username').disabled = false;
+  document.getElementById('pw-hint').textContent = '';
+  document.getElementById('cancel-btn').style.display = 'none';
+  for (const id of ['a-display', 'a-username', 'a-password', 'a-key', 'a-secret'])
+    document.getElementById(id).value = '';
+}
+
+async function saveAccount() {
+  const body = {
+    username:     document.getElementById('a-username').value.trim(),
+    display_name: document.getElementById('a-display').value.trim(),
+    password:     document.getElementById('a-password').value,
+    api_key:      document.getElementById('a-key').value.trim(),
+    api_secret:   document.getElementById('a-secret').value.trim(),
+  };
+  if (!body.username) { toast('Username is required', 'err'); return; }
+  const d = await jpost('/api/accounts', body);
+  if (d.ok) {
+    toast(d.created ? 'Account created' : 'Account updated', 'ok');
+    resetForm();
+    loadAccounts();
+  } else toast(d.error || 'Save failed', 'err');
+}
+
+async function delAccount(username) {
+  if (!confirm(`Delete account "${username}"? Their login stops working immediately.`)) return;
+  const r = await fetch('/api/accounts/' + encodeURIComponent(username), { method: 'DELETE' });
+  const d = await r.json();
+  if (d.ok) { toast('Account deleted', 'ok'); loadAccounts(); }
+  else toast(d.error || 'Delete failed', 'err');
+}
+
+async function testKeys() {
+  const body = {
+    username:   document.getElementById('a-username').value.trim(),
+    api_key:    document.getElementById('a-key').value.trim(),
+    api_secret: document.getElementById('a-secret').value.trim(),
+  };
+  toast('Testing against Delta…');
+  const d = await jpost('/api/accounts/test', body);
+  if (d.ok) toast(`✓ Connected — USD balance $${fN(d.usd_balance, 2)}`, 'ok');
+  else toast('Connection failed: ' + (d.error || ''), 'err');
+}
+
+loadAccounts();
+</script>
+{% endblock %}

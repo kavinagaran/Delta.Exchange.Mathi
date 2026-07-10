@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="card">
+  <div class="card-hd">
+    Bot Log
+    <span class="spacer"></span>
+    <label class="fld" style="width:130px">
+      <select id="log-lines" onchange="loadLogs()">
+        <option value="100">last 100</option>
+        <option value="200">last 200</option>
+        <option value="500">last 500</option>
+      </select>
+    </label>
+    <button class="btn secondary sm" onclick="loadLogs()">Refresh</button>
+  </div>
+  <div class="card-bd">
+    <div class="log-wrap" id="log-wrap">Loading…</div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function loadLogs() {
+  const n = document.getElementById('log-lines').value;
+  const data = await jget('/api/logs?n=' + n);
+  const wrap = document.getElementById('log-wrap');
+  wrap.innerHTML = (data.lines || []).slice().reverse().map(line => {
+    let cls = '';
+    if (/WARNING/.test(line)) cls = 'warn';
+    else if (/ERROR|CRITICAL/.test(line)) cls = 'error';
+    else if (/ENTRY|EXIT|Filled|ORDER/.test(line)) cls = 'trade';
+    return `<div class="log-line ${cls}">${esc(line)}</div>`;
+  }).join('') || '<div class="log-line">No log lines</div>';
+  wrap.scrollTop = 0;
+}
+loadLogs();
+setInterval(loadLogs, 20_000);
+</script>
+{% endblock %}

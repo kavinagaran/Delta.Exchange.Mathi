@@ -1,0 +1,135 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="banner warn" id="dry-banner" style="display:none">⚠ DRY RUN is ON — entries are simulated, no real orders are placed.</div>
+
+<div class="card">
+  <div class="card-hd">Trading Mode</div>
+  <div class="card-bd form-grid">
+    <label class="fld"><span>Mode</span>
+      <select id="c-DRY_RUN" onchange="dryBanner()">
+        <option value="false">LIVE — real orders</option>
+        <option value="true">DRY RUN — simulate</option>
+      </select>
+    </label>
+    <label class="fld"><span>Max trades / day</span><input id="c-MAX_TRADES_PER_DAY" type="number" min="1" max="10"></label>
+    <label class="fld"><span>Dynamic lot sizing</span>
+      <select id="c-DYNAMIC_LOTS"><option value="true">ON — max(configured, affordable)</option><option value="false">OFF — configured lots only</option></select>
+    </label>
+    <label class="fld"><span>Strike step $</span><input id="c-STRIKE_STEP" type="number" min="50"></label>
+  </div>
+</div>
+
+<div class="grid cols-2">
+  <div class="card">
+    <div class="card-hd">🌅 Morning Slot</div>
+    <div class="card-bd form-grid">
+      <label class="fld"><span>Enabled</span>
+        <select id="c-MORNING_ENABLED"><option value="true">Yes</option><option value="false">No</option></select>
+      </label>
+      <label class="fld"><span>Lots</span><input id="c-MORNING_LOTS" type="number" min="1" max="5000"></label>
+      <label class="fld"><span>Entry hour (UTC)</span><input id="c-MORNING_H_UTC" type="number" min="0" max="23"></label>
+      <label class="fld"><span>Entry min (UTC)</span><input id="c-MORNING_M_UTC" type="number" min="0" max="59"></label>
+      <label class="fld"><span>Scheduled exit</span>
+        <select id="c-MORNING_EXIT_ENABLED"><option value="true">Enabled</option><option value="false">Disabled (TP/settlement only)</option></select>
+      </label>
+      <label class="fld"><span>Exit hour (UTC)</span><input id="c-MORNING_EXIT_H_UTC" type="number" min="0" max="23"></label>
+      <label class="fld"><span>Exit min (UTC)</span><input id="c-MORNING_EXIT_M_UTC" type="number" min="0" max="59"></label>
+      <label class="fld"><span>TP target $</span><input id="c-TP_TARGET_PNL_MORNING" type="number"></label>
+      <label class="fld"><span>TP poll secs</span><input id="c-TP_POLL_SECS_MORNING" type="number" min="10"></label>
+    </div>
+    <div class="card-bd hint" id="ist-morning" style="padding-top:0"></div>
+  </div>
+
+  <div class="card">
+    <div class="card-hd">🌇 Evening Slot</div>
+    <div class="card-bd form-grid">
+      <label class="fld"><span>Lots</span><input id="c-STRADDLE_LOTS" type="number" min="1" max="5000"></label>
+      <label class="fld"><span>Entry hour (UTC)</span><input id="c-ENTRY_H_UTC" type="number" min="0" max="23"></label>
+      <label class="fld"><span>Entry min (UTC)</span><input id="c-ENTRY_M_UTC" type="number" min="0" max="59"></label>
+      <label class="fld"><span>Exit hour (UTC)</span><input id="c-EXIT_H_UTC" type="number" min="0" max="23"></label>
+      <label class="fld"><span>Exit min (UTC)</span><input id="c-EXIT_M_UTC" type="number" min="0" max="59"></label>
+      <label class="fld"><span>TP target $</span><input id="c-TP_TARGET_PNL" type="number"></label>
+      <label class="fld"><span>TP poll secs</span><input id="c-TP_POLL_SECS" type="number" min="10"></label>
+    </div>
+    <div class="card-bd hint" id="ist-evening" style="padding-top:0"></div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-hd">Telegram Alerts</div>
+  <div class="card-bd form-grid">
+    <label class="fld"><span>Alerts</span>
+      <select id="c-TELEGRAM_ALERTS"><option value="true">On</option><option value="false">Off</option></select>
+    </label>
+    <label class="fld"><span>Bot token</span><input id="c-TELEGRAM_BOT_TOKEN" type="password" autocomplete="off"></label>
+    <label class="fld"><span>Chat ID</span><input id="c-TELEGRAM_CHAT_ID"></label>
+    <label class="fld"><span>&nbsp;</span><button class="btn secondary" onclick="testTelegram()">Send test message</button></label>
+  </div>
+</div>
+
+<div class="btn-row">
+  <button class="btn" onclick="saveConfig()" style="padding:10px 26px">💾 Save configuration</button>
+  <span class="hint" style="align-self:center">The bot watches .env and reloads itself within ~30 s of a save.</span>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const KEYS = ['DRY_RUN','STRADDLE_LOTS','STRIKE_STEP','ENTRY_H_UTC','ENTRY_M_UTC','EXIT_H_UTC','EXIT_M_UTC',
+  'TELEGRAM_BOT_TOKEN','TELEGRAM_CHAT_ID','TELEGRAM_ALERTS','TP_TARGET_PNL','TP_POLL_SECS',
+  'MORNING_ENABLED','MORNING_LOTS','MORNING_H_UTC','MORNING_M_UTC',
+  'MORNING_EXIT_ENABLED','MORNING_EXIT_H_UTC','MORNING_EXIT_M_UTC',
+  'DYNAMIC_LOTS','TP_TARGET_PNL_MORNING','TP_POLL_SECS_MORNING','MAX_TRADES_PER_DAY'];
+
+function dryBanner() {
+  const on = document.getElementById('c-DRY_RUN').value === 'true';
+  document.getElementById('dry-banner').style.display = on ? 'flex' : 'none';
+}
+
+function istHints() {
+  const pair = (h, m) => {
+    const H = +document.getElementById(h).value, M = +document.getElementById(m).value;
+    return (isNaN(H) || isNaN(M)) ? '—' : utcToIst(`${H}:${M}:00`);
+  };
+  document.getElementById('ist-morning').textContent =
+    `IST: entry ${pair('c-MORNING_H_UTC','c-MORNING_M_UTC')} · exit ${pair('c-MORNING_EXIT_H_UTC','c-MORNING_EXIT_M_UTC')}`;
+  document.getElementById('ist-evening').textContent =
+    `IST: entry ${pair('c-ENTRY_H_UTC','c-ENTRY_M_UTC')} · exit ${pair('c-EXIT_H_UTC','c-EXIT_M_UTC')}`;
+}
+
+async function loadConfig() {
+  const cfg = await jget('/api/config');
+  for (const k of KEYS) {
+    const el = document.getElementById('c-' + k);
+    if (!el) continue;
+    let v = (cfg[k] ?? '').toString().trim();
+    if (el.tagName === 'SELECT') v = ['1','true','yes'].includes(v.toLowerCase()) ? 'true' : 'false';
+    el.value = v;
+  }
+  dryBanner();
+  istHints();
+}
+
+async function saveConfig() {
+  const body = {};
+  for (const k of KEYS) {
+    const el = document.getElementById('c-' + k);
+    if (el && el.value !== '') body[k] = el.value;
+  }
+  const d = await jpost('/api/config', body);
+  if (d.ok) toast('Configuration saved — bot reloads within ~30 s' +
+                  (d.tp_restarted?.length ? ` (TP restarted: ${d.tp_restarted.join(', ')})` : ''), 'ok');
+  else toast('Save failed', 'err');
+}
+
+async function testTelegram() {
+  const d = await jpost('/api/test-telegram');
+  if (d.ok) toast('Test message sent — check Telegram', 'ok');
+  else toast('Telegram test failed: ' + (d.error || ''), 'err');
+}
+
+document.addEventListener('input', e => { if (/_[HM]_UTC$/.test(e.target.id || '')) istHints(); });
+loadConfig();
+</script>
+{% endblock %}

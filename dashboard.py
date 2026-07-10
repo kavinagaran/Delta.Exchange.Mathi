@@ -1,5 +1,5 @@
 """
-dashboard.py — MV-BTC Straddle Web Dashboard (Mathi)
+dashboard.py — NITHI-BOT · MV-BTC Straddle Web Dashboard
 Run  : python dashboard.py
 Open : http://localhost:5001
 """
@@ -9,6 +9,7 @@ import hmac
 import json
 import math
 import os
+import secrets
 import subprocess
 import sys
 import time
@@ -17,7 +18,8 @@ from pathlib import Path
 
 import requests as req
 from dotenv import load_dotenv, set_key
-from flask import Flask, jsonify, request, abort, send_file
+from flask import (Flask, jsonify, request, abort, send_file, session,
+                   redirect, render_template, has_request_context)
 
 # Force IPv4 — Delta's whitelist holds our IPv4; IPv6 rotates and gets rejected
 import socket as _socket
@@ -30,11 +32,18 @@ API_KEY    = os.getenv("API_KEY", "")
 API_SECRET = os.getenv("API_SECRET", "")
 API_BASE   = os.getenv("BASE_URL", "https://api.india.delta.exchange")
 
-def _sign(method, path, query="", body=""):
+def _sign(method, path, query="", body="", key=None, secret=None):
+    """Delta HMAC headers. Defaults to the PRIMARY (.env) credentials — the
+    account the bot actually trades. Everything that touches bot slot state
+    (sync, square-off, manual entry, TP) must stay on these defaults; only
+    account-scoped views (wallet, positions, trade reconstruction) pass the
+    logged-in account's keys explicitly via _active_creds()."""
+    key    = key or API_KEY
+    secret = secret or API_SECRET
     ts  = str(int(time.time()))
     msg = method + ts + path + query + body
-    sig = hmac.new(API_SECRET.encode(), msg.encode(), hashlib.sha256).hexdigest()
-    return {"api-key": API_KEY, "timestamp": ts, "signature": sig,
+    sig = hmac.new(secret.encode(), msg.encode(), hashlib.sha256).hexdigest()
+    return {"api-key": key, "timestamp": ts, "signature": sig,
             "Content-Type": "application/json"}
 
 def _exchange_pnl(product_id: int):
@@ -123,25 +132,239 @@ CONFIG_KEYS = [
     "MAX_TRADES_PER_DAY",
 ]
 
-app = Flask(__name__, static_folder=str(BASE), static_url_path="/static")
+app = Flask(__name__,
+            static_folder=str(BASE / "static"), static_url_path="/static",
+            template_folder=str(BASE / "templates"))
 
-# Optional HTTP Basic Auth — active only when DASH_PASS is set in .env.
-# Unset on the home-LAN Windows box (no login prompt there); set on the
-# public cloud server, where an unauthenticated dashboard would let anyone
-# who finds the port square off live positions.
+# Stable session secret across restarts so logins survive a redeploy.
+_SECRET_FILE = BASE / ".dash_secret"
+if not _SECRET_FILE.exists():
+    _SECRET_FILE.write_text(secrets.token_hex(32), encoding="utf-8")
+app.secret_key = _SECRET_FILE.read_text(encoding="utf-8").strip()
+app.permanent_session_lifetime = timedelta(days=30)
+
+# ─────────────────────────────────────────────────────────────
+# ACCOUNTS & AUTH
+#
+# accounts.json (gitignored) holds the dashboard users, each with their own
+# Delta API key/secret so the dashboard can show any account's wallet,
+# positions and trades. The BOT always trades the PRIMARY account (the .env
+# keys) — a logged-in secondary account gets account-scoped views but slot
+# state, square-off and manual entry remain tied to the bot's own account.
+#
+# The Android app keeps using HTTP Basic (DASH_USER/DASH_PASS from .env) on
+# /api/* — that path must never break.
+# ─────────────────────────────────────────────────────────────
+# Default must stay "mathi" — the Android app hardcodes it for Basic auth.
 DASH_USER = os.getenv("DASH_USER", "mathi")
 DASH_PASS = os.getenv("DASH_PASS", "")
 
+ACCOUNTS_FILE = BASE / "accounts.json"
+
+
+def _hash_pw(password: str, salt: str = "") -> str:
+    salt = salt or secrets.token_hex(16)
+    h = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 200_000)
+    return f"{salt}${h.hex()}"
+
+
+def _verify_pw(password: str, stored: str) -> bool:
+    try:
+        salt, _ = stored.split("$", 1)
+        return hmac.compare_digest(_hash_pw(password, salt), stored)
+    except (ValueError, AttributeError):
+        return False
+
+
+def _load_accounts() -> list:
+    data = _load_json(ACCOUNTS_FILE, None)
+    if isinstance(data, dict):
+        data = data.get("accounts", [])
+    if data:
+        return data
+    # Bootstrap: first run creates the primary account from .env so the
+    # existing server credentials keep working unchanged.
+    primary = {
+        "username":     DASH_USER,
+        "display_name": os.getenv("ACCOUNT_NAME", DASH_USER.capitalize()),
+        "pw_hash":      _hash_pw(DASH_PASS or DASH_USER),
+        "api_key":      API_KEY,
+        "api_secret":   API_SECRET,
+        "primary":      True,
+    }
+    _save_accounts([primary])
+    return [primary]
+
+
+def _save_accounts(accounts: list) -> None:
+    ACCOUNTS_FILE.write_text(json.dumps(accounts, indent=2), encoding="utf-8")
+
+
+def _find_account(username: str) -> dict | None:
+    return next((a for a in _load_accounts()
+                 if a.get("username", "").lower() == (username or "").lower()), None)
+
+
+def _session_account() -> dict | None:
+    if has_request_context() and session.get("user"):
+        return _find_account(session["user"])
+    return None
+
+
+def _active_creds() -> tuple:
+    """(api_key, api_secret) for account-scoped views: the logged-in
+    account's keys when a session user has them, else the primary .env keys
+    (Basic-auth clients like the Android app land here)."""
+    acct = _session_account()
+    if acct and acct.get("api_key") and acct.get("api_secret"):
+        return acct["api_key"], acct["api_secret"]
+    return API_KEY, API_SECRET
+
+
+def _is_primary_session() -> bool:
+    """True when the active viewer is the bot's own (primary) account —
+    Basic-auth clients and no-password local dev count as primary."""
+    acct = _session_account()
+    return acct is None or bool(acct.get("primary"))
+
+
 @app.before_request
-def _basic_auth_gate():
-    if not DASH_PASS:
+def _auth_gate():
+    open_paths = ("/login", "/static/", "/favicon.ico", "/health")
+    if request.path.startswith(open_paths):
         return None
+    # Path 1: HTTP Basic with the .env credentials (Android app, curl)
     a = request.authorization
-    if a and a.username == DASH_USER and a.password == DASH_PASS:
+    if DASH_PASS and a and a.username == DASH_USER and a.password == DASH_PASS:
         return None
-    from flask import Response
-    return Response("Authentication required", 401,
-                    {"WWW-Authenticate": 'Basic realm="Mathi Bot"'})
+    # Path 2: browser session
+    if session.get("user") and _find_account(session["user"]):
+        return None
+    if not DASH_PASS and not ACCOUNTS_FILE.exists():
+        return None   # local dev box with no password configured
+    if request.path.startswith("/api/") or request.path.startswith("/download/"):
+        return jsonify({"error": "authentication required"}), 401
+    return redirect("/login")
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if request.method == "GET":
+        if session.get("user") and _find_account(session["user"]):
+            return redirect("/")
+        return render_template("login.html")
+    data = request.get_json(silent=True) or request.form
+    acct = _find_account(data.get("username", ""))
+    if not acct or not _verify_pw(data.get("password", ""), acct.get("pw_hash", "")):
+        return jsonify({"ok": False, "error": "Invalid username or password"}), 401
+    session.permanent = True
+    session["user"] = acct["username"]
+    return jsonify({"ok": True, "display_name": acct.get("display_name", acct["username"])})
+
+
+@app.route("/logout", methods=["GET", "POST"])
+def logout():
+    session.clear()
+    return redirect("/login")
+
+
+@app.route("/api/me")
+def api_me():
+    acct = _session_account()
+    if acct:
+        return jsonify({"username":     acct["username"],
+                        "display_name": acct.get("display_name", acct["username"]),
+                        "primary":      bool(acct.get("primary"))})
+    return jsonify({"username": DASH_USER,
+                    "display_name": os.getenv("ACCOUNT_NAME", DASH_USER.capitalize()),
+                    "primary": True})
+
+
+def _mask(s: str) -> str:
+    return (s[:4] + "•" * 8 + s[-4:]) if s and len(s) > 8 else ("•" * 8 if s else "")
+
+
+@app.route("/api/accounts", methods=["GET"])
+def api_accounts_list():
+    return jsonify([{
+        "username":     a.get("username", ""),
+        "display_name": a.get("display_name", ""),
+        "api_key":      _mask(a.get("api_key", "")),
+        "has_secret":   bool(a.get("api_secret")),
+        "primary":      bool(a.get("primary")),
+    } for a in _load_accounts()])
+
+
+@app.route("/api/accounts", methods=["POST"])
+def api_accounts_save():
+    """Create or update an account. Only the primary account may manage
+    accounts; anyone may update their own password/keys."""
+    data = request.get_json(silent=True) or {}
+    username = (data.get("username") or "").strip()
+    if not username:
+        return jsonify({"ok": False, "error": "username is required"}), 400
+    me = _session_account()
+    editing_self = me is not None and me["username"].lower() == username.lower()
+    if not _is_primary_session() and not editing_self:
+        return jsonify({"ok": False, "error": "Only the primary account can manage other accounts"}), 403
+
+    accounts = _load_accounts()
+    acct = next((a for a in accounts if a.get("username", "").lower() == username.lower()), None)
+    is_new = acct is None
+    if is_new:
+        if not data.get("password"):
+            return jsonify({"ok": False, "error": "password is required for a new account"}), 400
+        acct = {"username": username, "primary": False}
+        accounts.append(acct)
+    if data.get("display_name"):
+        acct["display_name"] = data["display_name"].strip()
+    if data.get("password"):
+        acct["pw_hash"] = _hash_pw(data["password"])
+    # Keys are optional on update — an empty field means "keep existing"
+    if data.get("api_key"):
+        acct["api_key"] = data["api_key"].strip()
+    if data.get("api_secret"):
+        acct["api_secret"] = data["api_secret"].strip()
+    _save_accounts(accounts)
+    return jsonify({"ok": True, "created": is_new})
+
+
+@app.route("/api/accounts/<username>", methods=["DELETE"])
+def api_accounts_delete(username):
+    if not _is_primary_session():
+        return jsonify({"ok": False, "error": "Only the primary account can delete accounts"}), 403
+    accounts = _load_accounts()
+    acct = next((a for a in accounts if a.get("username", "").lower() == username.lower()), None)
+    if not acct:
+        return jsonify({"ok": False, "error": "No such account"}), 404
+    if acct.get("primary"):
+        return jsonify({"ok": False, "error": "The primary (bot) account cannot be deleted"}), 400
+    accounts.remove(acct)
+    _save_accounts(accounts)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/accounts/test", methods=["POST"])
+def api_accounts_test():
+    """Verify a key/secret pair actually authenticates against Delta."""
+    data = request.get_json(silent=True) or {}
+    key, secret = data.get("api_key", "").strip(), data.get("api_secret", "").strip()
+    if not key or not secret:
+        # Fall back to a stored account's keys
+        acct = _find_account(data.get("username", ""))
+        if acct:
+            key, secret = acct.get("api_key", ""), acct.get("api_secret", "")
+    if not key or not secret:
+        return jsonify({"ok": False, "error": "No credentials to test"}), 400
+    try:
+        hdrs = _sign("GET", "/v2/wallet/balances", key=key, secret=secret)
+        r = req.get(f"{API_BASE}/v2/wallet/balances", headers=hdrs, timeout=8).json()
+        if r.get("success"):
+            usd = next((w for w in r.get("result", []) if w.get("asset_symbol") == "USD"), {})
+            return jsonify({"ok": True, "usd_balance": round(float(usd.get("balance") or 0), 2)})
+        return jsonify({"ok": False, "error": str(r.get("error", "authentication failed"))}), 400
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 502
 
 
 # ─────────────────────────────────────────────────────────────
@@ -193,9 +416,31 @@ def _pnl_stats(trades: list) -> dict:
 # ─────────────────────────────────────────────────────────────
 # ROUTES
 # ─────────────────────────────────────────────────────────────
+_PAGES = {
+    "":          ("overview.html",  "Overview"),
+    "trades":    ("trades.html",    "Trades & P&L"),
+    "positions": ("positions.html", "Positions"),
+    "config":    ("config.html",    "Bot Config"),
+    "accounts":  ("accounts.html",  "API Accounts"),
+    "logs":      ("logs.html",      "Logs"),
+}
+
+
 @app.route("/")
-def index():
-    return (BASE / "dashboard.html").read_text(encoding="utf-8")
+@app.route("/<page>")
+def render_page(page=""):
+    if page not in _PAGES:
+        abort(404)
+    tmpl, title = _PAGES[page]
+    acct = _session_account()
+    return render_template(
+        tmpl,
+        page=page or "overview",
+        page_title=title,
+        display_name=(acct or {}).get("display_name",
+                       os.getenv("ACCOUNT_NAME", DASH_USER.capitalize())),
+        is_primary=_is_primary_session(),
+    )
 
 
 _last_sync = 0.0
@@ -673,7 +918,7 @@ def api_manual_entry():
         label = "LONG (bought)" if side == "buy" else "SHORT (sold to open)"
         mode  = " — DRY-RUN ⚠ (simulated, no real order)" if is_dry_run else ""
         _send_telegram(
-            f"🖐 <b>MANUAL {side.upper()} — {icon} {slot.upper()} (MATHI)</b>{mode}\n"
+            f"🖐 <b>MANUAL {side.upper()} — {icon} {slot.upper()} (NITHI-BOT)</b>{mode}\n"
             f"<code>{'━' * 24}</code>\n"
             f"Symbol  » <code>{symbol}</code>\n"
             f"Side    » <code>{label}</code>\n"
@@ -883,39 +1128,44 @@ def _reconstruct_trades_from_orders(orders: list, skip_prefixes=("MV-BTC",)) -> 
     return trades
 
 
-def _fetch_non_mv_trades() -> list:
-    """Closed round-trip trades for every non-MV product (calls, puts,
-    futures) the account has traded, reconstructed from order history."""
-    if not API_KEY or not API_SECRET:
+def _fetch_reconstructed_trades(skip_prefixes=("MV-BTC",)) -> list:
+    """Closed round-trip trades reconstructed from the logged-in account's
+    order history. For the primary account MV symbols are skipped (the bot's
+    own log already tracks them precisely); a secondary account has no bot
+    log, so everything it traded gets reconstructed."""
+    key, secret = _active_creds()
+    if not key or not secret:
         return []
     try:
-        hdrs = _sign("GET", "/v2/orders/history", "?page_size=500")
+        hdrs = _sign("GET", "/v2/orders/history", "?page_size=500", key=key, secret=secret)
         r = req.get(f"{API_BASE}/v2/orders/history", params={"page_size": 500},
                     headers=hdrs, timeout=15)
         data = r.json()
         if not data.get("success"):
             return []
-        return _reconstruct_trades_from_orders(data.get("result", []))
+        return _reconstruct_trades_from_orders(data.get("result", []), skip_prefixes)
     except Exception:
         return []
 
 
 def _all_trades_merged() -> list:
-    """Bot-tracked trades (precise, from trade_history.json -- now includes
-    manually-placed single-leg calls/puts once exchange-sync adopts them into
-    a slot) plus reconstructed trades for anything Delta shows that the bot
-    never adopted (e.g. futures, or a leg closed before the next sync ran).
-    Deduped on (symbol, date, entry_time) so an adopted position doesn't
-    appear twice once reconstruction also picks up its fills."""
+    """Primary account: bot-tracked trades (precise, from trade_history.json)
+    plus reconstructed trades for anything Delta shows that the bot never
+    adopted, deduped on (symbol, date, entry_time). A secondary logged-in
+    account has no bot log — its history is fully reconstructed from its own
+    order history instead."""
     def _key(t: dict) -> tuple:
         # Bot/reconcile records store entry_time_utc; reconstructed ones
         # store entry_time — same value, either name must match.
         return (t.get("symbol"),
                 t.get("date") or t.get("entry_date", ""),
                 t.get("entry_time") or t.get("entry_time_utc", ""))
-    mv_trades    = _load_json(HISTORY_FILE, [])
-    tracked_keys = {_key(t) for t in mv_trades}
-    other = [t for t in _fetch_non_mv_trades() if _key(t) not in tracked_keys]
+    if _is_primary_session():
+        mv_trades    = _load_json(HISTORY_FILE, [])
+        tracked_keys = {_key(t) for t in mv_trades}
+        other = [t for t in _fetch_reconstructed_trades() if _key(t) not in tracked_keys]
+    else:
+        mv_trades, other = [], _fetch_reconstructed_trades(skip_prefixes=())
     merged = mv_trades + other
     for t in merged:
         # Older records (square-offs, resumed states) carry only entry_date /
@@ -967,11 +1217,12 @@ def _usd_inr_rate() -> float:
 
 @app.route("/api/wallet")
 def api_wallet():
-    """Account value in USD and INR."""
-    if not API_KEY or not API_SECRET:
+    """Account value in USD and INR — scoped to the logged-in account."""
+    key, secret = _active_creds()
+    if not key or not secret:
         return jsonify({"error": "no api credentials"}), 503
     try:
-        hdrs = _sign("GET", "/v2/wallet/balances")
+        hdrs = _sign("GET", "/v2/wallet/balances", key=key, secret=secret)
         r = req.get(f"{API_BASE}/v2/wallet/balances", headers=hdrs, timeout=8)
         data = r.json()
         if not data.get("success"):
@@ -995,12 +1246,13 @@ def api_wallet():
 
 @app.route("/api/all-positions")
 def api_all_positions():
-    """Every currently open position on the Delta account — MV straddles,
-    calls/puts, perpetual futures, anything — not just what the bot tracks."""
-    if not API_KEY or not API_SECRET:
+    """Every currently open position on the logged-in Delta account — MV
+    straddles, calls/puts, perpetual futures — not just what the bot tracks."""
+    key, secret = _active_creds()
+    if not key or not secret:
         return jsonify([])
     try:
-        hdrs = _sign("GET", "/v2/positions/margined")
+        hdrs = _sign("GET", "/v2/positions/margined", key=key, secret=secret)
         r = req.get(f"{API_BASE}/v2/positions/margined", headers=hdrs, timeout=8)
         data = r.json()
         if not data.get("success"):
@@ -1122,7 +1374,7 @@ def test_telegram():
             f"https://api.telegram.org/bot{token}/sendMessage",
             json={
                 "chat_id":    chat_id,
-                "text":       "✅ <b>MV-BTC Bot</b> — Telegram alerts are connected!\n<code>Test message from dashboard.</code>",
+                "text":       "✅ <b>NITHI-BOT</b> — Telegram alerts are connected!\n<code>Test message from dashboard.</code>",
                 "parse_mode": "HTML",
             },
             timeout=8,
@@ -1167,7 +1419,7 @@ def _revive_tp_monitors():
 # ─────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     print("=" * 50)
-    print("  MV-BTC Straddle Dashboard")
+    print("  NITHI-BOT — MV-BTC Straddle Dashboard")
     print("  http://localhost:5001")
     print("=" * 50)
     _revive_tp_monitors()

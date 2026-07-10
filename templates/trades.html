@@ -1,0 +1,144 @@
+{% extends "base.html" %}
+
+{% block head %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+{% endblock %}
+
+{% block content %}
+<div class="stats" id="stats"></div>
+
+<div class="card">
+  <div class="card-hd">P&L Chart — day-wise</div>
+  <div class="card-bd">
+    <div class="chart-box"><canvas id="pnl-chart"></canvas></div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-hd">Trade History <span class="spacer"></span><span class="hint" id="trade-count"></span></div>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr>
+        <th>Date</th><th>Contract</th><th>Strike</th><th>Side</th><th>Lots</th>
+        <th>Entry</th><th>Exit</th><th>P&L</th><th>Cumulative</th><th>Result</th>
+      </tr></thead>
+      <tbody id="tbl-body"><tr class="empty-row"><td colspan="10">Loading…</td></tr></tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let chart = null;
+
+function drawChart(trades) {
+  /* One bar per calendar day (all of that day's real trades summed);
+     cumulative line runs over the daily sums. Simulated rows excluded. */
+  const byDay = new Map();
+  for (const t of trades) {
+    if (t.dry_run) continue;
+    const d = t.date || t.entry_date;
+    if (!d) continue;
+    byDay.set(d, (byDay.get(d) || 0) + (+(t.pnl_usd || 0)));
+  }
+  if (!byDay.size) return;
+  const labels = [...byDay.keys()].sort();
+  const daily  = labels.map(d => +byDay.get(d).toFixed(2));
+  let run = 0;
+  const cumu = daily.map(v => +(run += v).toFixed(2));
+
+  const css = getComputedStyle(document.documentElement);
+  const POS = css.getPropertyValue('--pos').trim(), NEG = css.getPropertyValue('--neg').trim();
+  const ctx = document.getElementById('pnl-chart').getContext('2d');
+  if (chart) chart.destroy();
+  chart = new Chart(ctx, {
+    data: {
+      labels,
+      datasets: [
+        { type: 'bar', label: 'Daily P&L', data: daily, yAxisID: 'yD',
+          backgroundColor: daily.map(v => v >= 0 ? 'rgba(8,135,93,.55)' : 'rgba(217,45,32,.5)'),
+          borderColor: daily.map(v => v >= 0 ? POS : NEG), borderWidth: 1, borderRadius: 4,
+          maxBarThickness: 46 },
+        { type: 'line', label: 'Cumulative P&L', data: cumu, yAxisID: 'yC',
+          borderColor: '#b45309', backgroundColor: 'rgba(180,83,9,.06)',
+          borderWidth: 2.5, pointRadius: 3, pointBackgroundColor: '#b45309', tension: .3, fill: true },
+      ],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { labels: { color: '#68758a', font: { size: 12 } } },
+        tooltip: { callbacks: { label: c => ` ${c.dataset.label}: ${f$(c.raw)}` } },
+      },
+      scales: {
+        x:  { ticks: { color: '#68758a', font: { size: 11 } }, grid: { color: 'rgba(100,116,139,.12)' } },
+        yD: { position: 'left', title: { display: true, text: 'Daily P&L', color: '#68758a' },
+              ticks: { color: '#68758a', callback: v => (v >= 0 ? '+$' : '-$') + Math.abs(v).toLocaleString() },
+              grid: { color: 'rgba(100,116,139,.12)' } },
+        yC: { position: 'right', title: { display: true, text: 'Cumulative P&L', color: '#b45309' },
+              ticks: { color: '#b45309', callback: v => '$' + v.toLocaleString() },
+              grid: { drawOnChartArea: false } },
+      },
+    },
+  });
+}
+
+function renderTable(trades) {
+  const body = document.getElementById('tbl-body');
+  if (!trades.length) {
+    body.innerHTML = '<tr class="empty-row"><td colspan="10">No trades yet</td></tr>';
+    return;
+  }
+  let cum = 0;
+  const withCum = trades.map(t => {
+    if (!t.dry_run) cum += +(t.pnl_usd || 0);
+    return { ...t, cum };
+  });
+  document.getElementById('trade-count').textContent = `${trades.length} trades`;
+  body.innerHTML = [...withCum].reverse().map(t => {
+    if (t.dry_run) {
+      return `<tr><td>${esc(t.date || t.entry_date || '—')}</td><td>${esc(t.symbol)}</td>
+        <td>$${fN(t.strike)}</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td>
+        <td class="${pnlCls(t.cum)}">${f$(t.cum)}</td>
+        <td><span class="badge sim">SIMULATED</span></td></tr>`;
+    }
+    const pnl = +(t.pnl_usd || 0);
+    return `<tr>
+      <td>${esc(t.date || t.entry_date || '—')}</td>
+      <td>${esc(t.symbol)}</td>
+      <td>${t.strike != null ? '$' + fN(t.strike) : '—'}</td>
+      <td>${t.side ? `<span class="badge ${String(t.side).toLowerCase() === 'short' ? 'short' : 'long'}">${esc(String(t.side).toUpperCase())}</span>` : '—'}</td>
+      <td>${fN(t.lots)}</td>
+      <td>$${fN(t.entry_mark, 2)}</td>
+      <td>$${fN(t.exit_mark, 2)}</td>
+      <td class="${pnlCls(pnl)}">${f$(pnl)}</td>
+      <td class="${pnlCls(t.cum)}">${f$(t.cum)}</td>
+      <td><span class="badge ${pnl >= 0 ? 'win' : 'loss'}">${pnl >= 0 ? 'WIN' : 'LOSS'}</span></td>
+    </tr>`;
+  }).join('');
+}
+
+async function loadStats() {
+  const s = await jget('/api/summary');
+  const el = document.getElementById('stats');
+  if (!s || !s.total_days) { el.innerHTML = ''; return; }
+  el.innerHTML = `
+    <div class="stat"><div class="lbl">Total P&L</div><div class="val ${pnlCls(s.total_pnl)}">${f$(s.total_pnl)}</div><div class="sub">${s.total_days} trades</div></div>
+    <div class="stat"><div class="lbl">Win rate</div><div class="val">${fN(s.win_rate, 1)}%</div><div class="sub">${s.wins} W / ${s.losses} L</div></div>
+    <div class="stat"><div class="lbl">Avg win</div><div class="val c-pos">${f$(s.avg_win)}</div><div class="sub">Avg loss ${f$(s.avg_loss)}</div></div>
+    <div class="stat"><div class="lbl">Risk / reward</div><div class="val">${fN(s.rr, 2)}</div><div class="sub">reward per $1 risked</div></div>
+    <div class="stat"><div class="lbl">Max drawdown</div><div class="val c-neg">${f$(s.max_dd)}</div><div class="sub">peak to trough</div></div>`;
+}
+
+async function load() {
+  const trades = await jget('/api/trades');
+  drawChart(trades);
+  renderTable(trades);
+  loadStats();
+}
+load();
+setInterval(load, 60_000);
+</script>
+{% endblock %}

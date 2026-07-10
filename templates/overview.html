@@ -1,0 +1,208 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="greeting">
+  <h2>Welcome Back, {{ display_name }} 👋</h2>
+  <p>Here's how your bot is doing today.</p>
+</div>
+
+{% if not is_primary %}
+<div class="banner info">ℹ You are viewing a secondary account. The bot itself trades the primary account — slot cards below reflect the bot's account; wallet &amp; positions reflect yours.</div>
+{% endif %}
+
+<div class="stats" id="stats"></div>
+
+<div class="grid cols-2">
+  <div class="card">
+    <div class="card-hd slot-hd">🌅 <span>Morning Trade</span><span class="when" id="when-morning">5:45 AM IST</span></div>
+    <div class="card-bd" id="slot-morning"><div class="no-pos">Loading…</div></div>
+  </div>
+  <div class="card">
+    <div class="card-hd slot-hd">🌇 <span>Evening Trade</span><span class="when" id="when-evening">5:35 PM IST</span></div>
+    <div class="card-bd" id="slot-evening"><div class="no-pos">Loading…</div></div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-hd">Today's Trades</div>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr>
+        <th>Contract</th><th>Strike</th><th>Lots</th><th>Entry</th><th>Exit / Mark</th><th>P&L</th><th>Status</th>
+      </tr></thead>
+      <tbody id="today-body"><tr class="empty-row"><td colspan="7">Loading…</td></tr></tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+/* ── Slot cards ──────────────────────────────────────────── */
+function manualSlotNow() {
+  return istNowMinutes() < 660 ? 'morning' : 'evening';   // same 11:00 IST boundary as exchange-sync
+}
+
+function manualBtns(slot) {
+  if (slot !== manualSlotNow()) return '';
+  return `<div class="btn-row center">
+    <button class="btn success sm" onclick="manualEntry('${slot}','buy')">▲ Buy straddle</button>
+    <button class="btn danger sm"  onclick="manualEntry('${slot}','sell')">▼ Sell straddle</button>
+  </div>`;
+}
+
+function tpRow(slot, tp) {
+  const t = (tp || {})[slot] || {};
+  const on = !!t.running;
+  return `<div class="tp-row">
+    <span class="tp-state ${on ? 'on' : 'off'}">TP monitor: ${on ? 'RUNNING' : 'stopped'}</span>
+    <label class="fld"><span>Target $</span><input id="tp-target-${slot}" type="number" step="1" value="${t.target_pnl ?? ''}"></label>
+    <label class="fld"><span>Poll s</span><input id="tp-poll-${slot}" type="number" step="5" min="10" value="${t.poll_secs ?? ''}"></label>
+    <button class="btn secondary sm" onclick="saveTp('${slot}')">Save</button>
+    <button class="btn ${on ? 'warn' : 'success'} sm" onclick="toggleTp('${slot}', ${on})">${on ? 'Stop' : 'Start'}</button>
+  </div>`;
+}
+
+function slotHtml(s, slot, tp) {
+  if (!s || !s.status || s.status === 'IDLE') {
+    return `<div class="no-pos"><span class="icon">💤</span>No position</div>${manualBtns(slot)}`;
+  }
+  if (s.status === 'OPEN' && s.dry_run) {
+    return `<div class="sim-note">⚠ SIMULATED entry — no real order was placed<br>
+      <span class="hint">${esc(s.symbol)} · Mode was DRY RUN at entry time</span></div>`;
+  }
+  if (s.status === 'OPEN') {
+    const pnl = s.live_pnl;
+    return `
+      <div class="big-pnl ${pnlCls(pnl)}">${f$(pnl)}<small>live p&amp;l</small></div>
+      <dl class="kv">
+        <dt>Contract</dt><dd>${esc(s.symbol)}</dd>
+        <dt>Side</dt><dd><span class="badge ${s.side === 'short' ? 'short' : 'long'}">${(s.side || 'long').toUpperCase()}</span></dd>
+        <dt>Lots</dt><dd>${fN(s.lots)}</dd>
+        <dt>Entry mark</dt><dd>$${fN(s.entry_mark, 4)}</dd>
+        <dt>Current mark</dt><dd>$${fN(s.current_mark, 4)}</dd>
+        <dt>Entered</dt><dd>${utcToIst(s.entry_time_utc)}</dd>
+        <dt>Cost</dt><dd>$${fN(s.total_cost_usd, 2)}</dd>
+      </dl>
+      <div class="btn-row center">
+        <button class="btn danger" onclick="squareOff('${slot}')">Square off now</button>
+      </div>
+      ${tpRow(slot, tp)}`;
+  }
+  if (s.status === 'CLOSED' && s.dry_run) {
+    return `<div class="sim-note">⚠ SIMULATED — no real trade occurred<br><span class="hint">${esc(s.symbol)}</span></div>${manualBtns(slot)}`;
+  }
+  /* CLOSED real */
+  const pnl = +s.pnl_usd;
+  return `
+    <div class="big-pnl ${pnlCls(pnl)}">${f$(pnl)}<small>closed ${esc(utcToIst(s.exit_time_utc))}</small></div>
+    <dl class="kv">
+      <dt>Contract</dt><dd>${esc(s.symbol)}</dd>
+      <dt>Lots</dt><dd>${fN(s.lots)}</dd>
+      <dt>Entry → Exit</dt><dd>$${fN(s.entry_mark, 2)} → $${fN(s.exit_mark, 2)}</dd>
+      <dt>Trigger</dt><dd>${esc(s.exit_trigger || '—')}</dd>
+    </dl>
+    ${manualBtns(slot)}`;
+}
+
+async function loadSlots() {
+  const [st, tp] = await Promise.all([jget('/api/status'), jget('/api/tp-monitor').catch(() => ({}))]);
+  const evening = { ...st }; delete evening.morning;
+  document.getElementById('slot-morning').innerHTML = slotHtml(st.morning, 'morning', tp);
+  document.getElementById('slot-evening').innerHTML = slotHtml(evening, 'evening', tp);
+  if (st.entry_ist) document.getElementById('when-evening').textContent = st.entry_ist.split('(')[0].trim();
+}
+
+/* ── Stat tiles ─────────────────────────────────────────── */
+async function loadStats() {
+  const s = await jget('/api/summary');
+  const el = document.getElementById('stats');
+  if (!s || !s.total_days) { el.innerHTML = ''; return; }
+  el.innerHTML = `
+    <div class="stat"><div class="lbl">Total P&L</div><div class="val ${pnlCls(s.total_pnl)}">${f$(s.total_pnl)}</div><div class="sub">${s.total_days} trades</div></div>
+    <div class="stat"><div class="lbl">Win rate</div><div class="val">${fN(s.win_rate, 1)}%</div><div class="sub">${s.wins} W / ${s.losses} L</div></div>
+    <div class="stat"><div class="lbl">Avg win</div><div class="val c-pos">${f$(s.avg_win)}</div><div class="sub">Avg loss ${f$(s.avg_loss)}</div></div>
+    <div class="stat"><div class="lbl">Risk / reward</div><div class="val">${fN(s.rr, 2)}</div><div class="sub">reward per $1 risked</div></div>
+    <div class="stat"><div class="lbl">Max drawdown</div><div class="val c-neg">${f$(s.max_dd)}</div><div class="sub">peak to trough</div></div>`;
+}
+
+/* ── Today's trades ─────────────────────────────────────── */
+async function loadToday() {
+  const rows = await jget('/api/today-trades');
+  const body = document.getElementById('today-body');
+  if (!rows.length) {
+    body.innerHTML = '<tr class="empty-row"><td colspan="7">No trades today</td></tr>';
+    return;
+  }
+  body.innerHTML = rows.map(t => {
+    const icon = t.slot === 'morning' ? '🌅 ' : (t.slot === 'evening' ? '🌇 ' : '');
+    if (t.dry_run) {
+      return `<tr><td>${icon}${esc(t.symbol)}</td><td>$${fN(t.strike)}</td>
+        <td>—</td><td>—</td><td>—</td><td>—</td>
+        <td><span class="badge sim">SIMULATED</span></td></tr>`;
+    }
+    const live = t._live;
+    const pnl  = live ? t.live_pnl : t.pnl_usd;
+    const exit = live ? t.current_mark : t.exit_mark;
+    const status = live ? '<span class="badge live">LIVE</span>'
+                 : (+pnl >= 0 ? '<span class="badge win">WIN</span>' : '<span class="badge loss">LOSS</span>');
+    return `<tr>
+      <td>${icon}${esc(t.symbol)}</td>
+      <td>$${fN(t.strike)}</td>
+      <td>${fN(t.lots)}</td>
+      <td>$${fN(t.entry_mark, 2)}</td>
+      <td>$${fN(exit, 2)}</td>
+      <td class="${pnlCls(pnl)}">${f$(pnl)}</td>
+      <td>${status}</td></tr>`;
+  }).join('');
+}
+
+/* ── Actions ────────────────────────────────────────────── */
+async function manualEntry(slot, side) {
+  let p;
+  try { p = await jget('/api/manual-entry/preview?slot=' + slot); } catch (e) {}
+  if (!p || !p.ok) { toast('Cannot fetch preview: ' + (p && p.error || 'network error'), 'err'); return; }
+  const msg = `${side === 'buy' ? 'BUY (long)' : 'SELL (short — collect premium)'} — ${slot.toUpperCase()}\n\n` +
+    `Contract: ${p.symbol}\nStrike:   $${fN(p.strike)}\nMark:     $${fN(p.mark, 2)} / BTC\n` +
+    `Lots:     ${fN(p.lots)}\nValue:    ~$${fN(p.est_value)}\n\n` +
+    (p.dry_run ? '⚠ Mode is DRY RUN — this will be SIMULATED, no real order placed.\n\n' : '') +
+    `Place market ${side.toUpperCase()} order?`;
+  if (!confirm(msg)) return;
+  const d = await jpost('/api/manual-entry?slot=' + slot, { side });
+  if (d.ok) {
+    toast(`${side.toUpperCase()} filled${d.dry_run ? ' (SIMULATED)' : ''}: ${fN(d.lots)} lots ${d.symbol} @ $${fN(d.fill, 2)}`, 'ok');
+    loadAll();
+  } else toast('Order failed: ' + JSON.stringify(d.error), 'err');
+}
+
+async function squareOff(slot) {
+  if (!confirm(`Square off the ${slot.toUpperCase()} position now at market price?`)) return;
+  const d = await jpost('/api/square-off?slot=' + slot);
+  if (d.ok) { toast(`Closed — P&L ${f$(d.pnl)}`, 'ok'); loadAll(); }
+  else toast('Square off failed: ' + JSON.stringify(d.error), 'err');
+}
+
+async function toggleTp(slot, running) {
+  const d = await jpost(`/api/tp-monitor/${running ? 'stop' : 'start'}?slot=` + slot);
+  if (d.ok) { toast(`TP monitor ${running ? 'stopped' : 'started'} (${slot})`, 'ok'); loadSlots(); }
+  else toast(d.error || 'TP monitor action failed', 'err');
+}
+
+async function saveTp(slot) {
+  const keys = slot === 'morning'
+    ? { t: 'TP_TARGET_PNL_MORNING', p: 'TP_POLL_SECS_MORNING' }
+    : { t: 'TP_TARGET_PNL',         p: 'TP_POLL_SECS' };
+  const body = {};
+  body[keys.t] = document.getElementById(`tp-target-${slot}`).value;
+  body[keys.p] = document.getElementById(`tp-poll-${slot}`).value;
+  const d = await jpost('/api/config', body);
+  if (d.ok) toast('TP settings saved' + (d.tp_restarted?.length ? ' — monitor restarted' : ''), 'ok');
+  else toast('Save failed', 'err');
+}
+
+function loadAll() { loadSlots(); loadStats(); loadToday(); refreshTopbar(); }
+loadAll();
+setInterval(() => { loadSlots(); loadToday(); }, 12_000);
+setInterval(loadStats, 60_000);
+</script>
+{% endblock %}

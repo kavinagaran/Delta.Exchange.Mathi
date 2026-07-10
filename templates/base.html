@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ page_title }} · NITHI-BOT</title>
+<link rel="stylesheet" href="/static/css/app.css">
+<script src="/static/js/app.js"></script>
+{% block head %}{% endblock %}
+</head>
+<body>
+<div class="layout">
+
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="logo">N</div>
+      <div>
+        <div class="name">NITHI-BOT</div>
+        <div class="sub">MV-BTC STRADDLE</div>
+      </div>
+    </div>
+
+    <nav class="nav">
+      {% set items = [
+        ('overview',  '/',          'Overview',     'M3 12l9-8 9 8M5 10v10h4v-6h6v6h4V10'),
+        ('trades',    '/trades',    'Trades & P&L', 'M3 17l5-6 4 3 6-8M14 6h4v4'),
+        ('positions', '/positions', 'Positions',    'M4 6h16M4 12h16M4 18h10'),
+        ('config',    '/config',    'Bot Config',   'M12 8a4 4 0 100 8 4 4 0 000-8zm8 4a8 8 0 01-.2 1.8l2 1.5-2 3.4-2.3-.9a8 8 0 01-3.1 1.8L14 22h-4l-.4-2.4a8 8 0 01-3.1-1.8l-2.3.9-2-3.4 2-1.5A8 8 0 014 12'),
+        ('accounts',  '/accounts',  'API Accounts', 'M16 7a4 4 0 11-8 0 4 4 0 018 0zM4 21v-1a6 6 0 016-6h4a6 6 0 016 6v1'),
+        ('logs',      '/logs',      'Logs',         'M6 3h9l5 5v13H6zM14 3v6h6M9 13h6M9 17h6'),
+      ] %}
+      {% for key, href, label, d in items %}
+      <a href="{{ href }}" class="{{ 'active' if page == key else '' }}">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="{{ d }}"/></svg>
+        <span>{{ label }}</span>
+      </a>
+      {% endfor %}
+    </nav>
+
+    <div class="sidebar-foot">
+      <div class="who">{{ display_name }}</div>
+      <a href="/logout">Sign out</a>
+    </div>
+  </aside>
+
+  <div class="main">
+    <header class="topbar">
+      <h1>{{ page_title }}</h1>
+      <span class="chip" id="tb-btc">BTC <b>—</b></span>
+      <span class="chip" id="tb-bal">Balance <b>—</b></span>
+      <span class="pill idle" id="tb-pill"><span class="dot"></span>Loading…</span>
+      <span class="chip" id="tb-clock">—</span>
+    </header>
+
+    <main class="content">
+      {% block content %}{% endblock %}
+    </main>
+  </div>
+
+</div>
+<div class="toast" id="toast"></div>
+{% block scripts %}{% endblock %}
+</body>
+</html>
