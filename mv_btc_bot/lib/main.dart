@@ -27,7 +27,7 @@ class MathiBotApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Mathi-bot',
+      title: 'Nithi-bot',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         brightness: Brightness.dark,
@@ -420,19 +420,34 @@ class _DashboardPageState extends State<DashboardPage> {
   Future<void> _editTpConfig(SlotMeta slot) async {
     final cfg = (_tp[slot.key] as Map<String, dynamic>?) ?? {};
     final targetCtl = TextEditingController(text: fmtNum(cfg['target_pnl'], dp: 0));
-    final pollCtl = TextEditingController(text: fmtNum(cfg['poll_secs'], dp: 0));
+    final slCtl     = TextEditingController(text: fmtNum(cfg['sl_pnl'] ?? 0, dp: 0));
+    final tslCtl    = TextEditingController(text: fmtNum(cfg['tsl_pnl'] ?? 0, dp: 0));
+    final pollCtl   = TextEditingController(text: fmtNum(cfg['poll_secs'], dp: 0));
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: kSurf,
-        title: Text('${slot.icon} ${slot.name} TP Config'),
+        title: Text('${slot.icon} ${slot.name} TP/SL Config'),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
             TextField(
               controller: targetCtl,
               keyboardType: TextInputType.number,
-              decoration: const InputDecoration(labelText: 'Target P&L (\$)'),
+              decoration: const InputDecoration(labelText: 'Take profit (\$)'),
+            ),
+            TextField(
+              controller: slCtl,
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(
+                  labelText: 'Stop loss (\$)', helperText: '0 = off'),
+            ),
+            TextField(
+              controller: tslCtl,
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(
+                  labelText: 'Trailing SL (\$)',
+                  helperText: '0 = off · give-back from peak P&L'),
             ),
             TextField(
               controller: pollCtl,
@@ -449,12 +464,16 @@ class _DashboardPageState extends State<DashboardPage> {
     );
     if (ok != true) return;
     final body = slot.key == 'morning'
-        ? {'TP_TARGET_PNL_MORNING': targetCtl.text, 'TP_POLL_SECS_MORNING': pollCtl.text}
-        : {'TP_TARGET_PNL': targetCtl.text, 'TP_POLL_SECS': pollCtl.text};
+        ? {'TP_TARGET_PNL_MORNING': targetCtl.text, 'TP_POLL_SECS_MORNING': pollCtl.text,
+           'SL_TARGET_PNL_MORNING': slCtl.text.isEmpty ? '0' : slCtl.text,
+           'TSL_TARGET_PNL_MORNING': tslCtl.text.isEmpty ? '0' : tslCtl.text}
+        : {'TP_TARGET_PNL': targetCtl.text, 'TP_POLL_SECS': pollCtl.text,
+           'SL_TARGET_PNL': slCtl.text.isEmpty ? '0' : slCtl.text,
+           'TSL_TARGET_PNL': tslCtl.text.isEmpty ? '0' : tslCtl.text};
     try {
       await Api.postJson('/api/config', body);
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('${slot.name} TP config saved')));
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('${slot.name} TP/SL config saved')));
       _refresh();
     } catch (e) {
       if (!mounted) return;
@@ -481,7 +500,7 @@ class _DashboardPageState extends State<DashboardPage> {
               children: [
                 const Text('⚡', style: TextStyle(fontSize: 20)),
                 const SizedBox(width: 6),
-                const Text('MATHI-BOT',
+                const Text('NITHI-BOT',
                     style: TextStyle(color: kGreen, fontSize: 22, fontWeight: FontWeight.w800, letterSpacing: 2)),
                 const Spacer(),
                 _StatusPill(
@@ -1025,6 +1044,10 @@ class _ConfigsPageState extends State<ConfigsPage> {
   bool _dryRun = false;
   bool _morningEnabled = true;
   bool _morningExitEnabled = true;
+  bool _eveningEnabled = true;
+  bool _eveningExitEnabled = true;
+  String _morningSide = 'buy';
+  String _eveningSide = 'buy';
   bool _telegramAlerts = true;
   bool _dynamicLots = true;
   bool _loading = true;
@@ -1035,6 +1058,7 @@ class _ConfigsPageState extends State<ConfigsPage> {
   static const _numKeys = [
     'STRADDLE_LOTS', 'MORNING_LOTS', 'MAX_TRADES_PER_DAY', 'STRIKE_STEP',
     'TP_TARGET_PNL', 'TP_POLL_SECS', 'TP_TARGET_PNL_MORNING', 'TP_POLL_SECS_MORNING',
+    'SL_TARGET_PNL', 'TSL_TARGET_PNL', 'SL_TARGET_PNL_MORNING', 'TSL_TARGET_PNL_MORNING',
   ];
   static const _timePairs = {
     'entry':        ('ENTRY_H_UTC', 'ENTRY_M_UTC'),
@@ -1089,6 +1113,10 @@ class _ConfigsPageState extends State<ConfigsPage> {
       _dryRun             = _envBool(d['DRY_RUN'], dflt: false);
       _morningEnabled     = _envBool(d['MORNING_ENABLED']);
       _morningExitEnabled = _envBool(d['MORNING_EXIT_ENABLED']);
+      _eveningEnabled     = _envBool(d['EVENING_ENABLED']);
+      _eveningExitEnabled = _envBool(d['EVENING_EXIT_ENABLED']);
+      _morningSide        = (d['MORNING_SIDE'] ?? '').toString().toLowerCase() == 'sell' ? 'sell' : 'buy';
+      _eveningSide        = (d['EVENING_SIDE'] ?? '').toString().toLowerCase() == 'sell' ? 'sell' : 'buy';
       _telegramAlerts     = _envBool(d['TELEGRAM_ALERTS']);
       _dynamicLots        = _envBool(d['DYNAMIC_LOTS']);
       setState(() => _loading = false);
@@ -1103,6 +1131,10 @@ class _ConfigsPageState extends State<ConfigsPage> {
       'DRY_RUN':              _dryRun ? 'true' : 'false',
       'MORNING_ENABLED':      _morningEnabled ? 'true' : 'false',
       'MORNING_EXIT_ENABLED': _morningExitEnabled ? 'true' : 'false',
+      'EVENING_ENABLED':      _eveningEnabled ? 'true' : 'false',
+      'EVENING_EXIT_ENABLED': _eveningExitEnabled ? 'true' : 'false',
+      'MORNING_SIDE':         _morningSide,
+      'EVENING_SIDE':         _eveningSide,
       'TELEGRAM_ALERTS':      _telegramAlerts ? 'true' : 'false',
       'DYNAMIC_LOTS':         _dynamicLots ? 'true' : 'false',
     };
@@ -1209,6 +1241,26 @@ class _ConfigsPageState extends State<ConfigsPage> {
         onChanged: onChanged,
       );
 
+  Widget _sideField(String value, ValueChanged<String> onChanged) => Padding(
+        padding: const EdgeInsets.symmetric(vertical: 6),
+        child: DropdownButtonFormField<String>(
+          initialValue: value,
+          decoration: InputDecoration(
+            labelText: 'Direction',
+            isDense: true,
+            border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+          ),
+          dropdownColor: kSurf,
+          items: const [
+            DropdownMenuItem(value: 'buy',
+                child: Text('BUY straddle — long (big move)', style: TextStyle(fontSize: 13.5))),
+            DropdownMenuItem(value: 'sell',
+                child: Text('SELL straddle — short (premium)', style: TextStyle(fontSize: 13.5))),
+          ],
+          onChanged: (v) => onChanged(v ?? 'buy'),
+        ),
+      );
+
   @override
   Widget build(BuildContext context) {
     if (_loading) {
@@ -1266,14 +1318,17 @@ class _ConfigsPageState extends State<ConfigsPage> {
                   children: [
                     _switchTile('Enabled', _morningEnabled,
                         (v) => setState(() => _morningEnabled = v)),
+                    _sideField(_morningSide, (v) => setState(() => _morningSide = v)),
                     _numField('MORNING_LOTS', 'Lots'),
                     _timeField('morning', 'Entry time'),
                     _switchTile('Scheduled Exit', _morningExitEnabled,
                         (v) => setState(() => _morningExitEnabled = v),
-                        subtitle: 'Off = close via TP / settlement only'),
+                        subtitle: 'Off = close via TP/SL / settlement only'),
                     _timeField('morning_exit', 'Exit time'),
                     _numField('TP_TARGET_PNL_MORNING', 'TP target (\$)'),
-                    _numField('TP_POLL_SECS_MORNING', 'TP poll (seconds)'),
+                    _numField('SL_TARGET_PNL_MORNING', 'SL target (\$, 0 = off)'),
+                    _numField('TSL_TARGET_PNL_MORNING', 'Trailing SL (\$, 0 = off)'),
+                    _numField('TP_POLL_SECS_MORNING', 'TP/SL poll (seconds)'),
                   ],
                 ),
               ),
@@ -1285,11 +1340,19 @@ class _ConfigsPageState extends State<ConfigsPage> {
                 padding: const EdgeInsets.fromLTRB(16, 6, 16, 10),
                 child: Column(
                   children: [
+                    _switchTile('Enabled', _eveningEnabled,
+                        (v) => setState(() => _eveningEnabled = v)),
+                    _sideField(_eveningSide, (v) => setState(() => _eveningSide = v)),
                     _numField('STRADDLE_LOTS', 'Lots'),
                     _timeField('entry', 'Entry time'),
+                    _switchTile('Scheduled Exit', _eveningExitEnabled,
+                        (v) => setState(() => _eveningExitEnabled = v),
+                        subtitle: 'Off = close via TP/SL / settlement only'),
                     _timeField('exit', 'Exit time'),
                     _numField('TP_TARGET_PNL', 'TP target (\$)'),
-                    _numField('TP_POLL_SECS', 'TP poll (seconds)'),
+                    _numField('SL_TARGET_PNL', 'SL target (\$, 0 = off)'),
+                    _numField('TSL_TARGET_PNL', 'Trailing SL (\$, 0 = off)'),
+                    _numField('TP_POLL_SECS', 'TP/SL poll (seconds)'),
                   ],
                 ),
               ),
@@ -1461,7 +1524,7 @@ class _SettingsPageState extends State<SettingsPage> {
                   Text('About', style: TextStyle(color: kText, fontWeight: FontWeight.w600)),
                   SizedBox(height: 8),
                   Text(
-                    'Mathi-bot mobile — MV-BTC daily straddle bot on Delta Exchange India.\n\n'
+                    'Nithi-bot mobile — MV-BTC daily straddle bot on Delta Exchange India.\n\n'
                     '🌅 Morning trade: 5:45 AM IST (settles 5:30 PM)\n'
                     '🌇 Evening trade: 5:35 PM IST (exits 2:30 AM)\n\n'
                     'This app is a remote control for the bot running on your PC.',
