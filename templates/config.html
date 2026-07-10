@@ -28,15 +28,22 @@
       <label class="fld"><span>Enabled</span>
         <select id="c-MORNING_ENABLED"><option value="true">Yes</option><option value="false">No</option></select>
       </label>
+      <label class="fld"><span>Direction</span>
+        <select id="c-MORNING_SIDE">
+          <option value="buy">BUY straddle — long (profit on a big move)</option>
+          <option value="sell">SELL straddle — short (collect premium)</option>
+        </select>
+      </label>
       <label class="fld"><span>Lots</span><input id="c-MORNING_LOTS" type="number" min="1" max="5000"></label>
+      <label class="fld"><span>Scheduled exit</span>
+        <select id="c-MORNING_EXIT_ENABLED"><option value="true">Enabled</option><option value="false">Disabled (TP/SL/settlement only)</option></select>
+      </label>
       <label class="fld"><span>Entry time (IST)</span><input id="t-morning-entry" type="time" step="60"></label>
       <label class="fld"><span>Exit time (IST)</span><input id="t-morning-exit" type="time" step="60"></label>
-      <label class="fld"><span>Scheduled exit</span>
-        <select id="c-MORNING_EXIT_ENABLED"><option value="true">Enabled</option><option value="false">Disabled (TP/settlement only)</option></select>
-      </label>
+      <label class="fld"><span>TP target $ (profit)</span><input id="c-TP_TARGET_PNL_MORNING" type="number" min="0"></label>
+      <label class="fld"><span>SL target $ (max loss, 0 = off)</span><input id="c-SL_TARGET_PNL_MORNING" type="number" min="0"></label>
+      <label class="fld"><span>TP/SL poll secs</span><input id="c-TP_POLL_SECS_MORNING" type="number" min="10"></label>
       <label class="fld"><span>&nbsp;</span><span class="hint" style="display:block;padding:9px 0" id="utc-morning"></span></label>
-      <label class="fld"><span>TP target $</span><input id="c-TP_TARGET_PNL_MORNING" type="number"></label>
-      <label class="fld"><span>TP poll secs</span><input id="c-TP_POLL_SECS_MORNING" type="number" min="10"></label>
     </div>
   </div>
 
@@ -46,15 +53,22 @@
       <label class="fld"><span>Enabled</span>
         <select id="c-EVENING_ENABLED"><option value="true">Yes</option><option value="false">No</option></select>
       </label>
+      <label class="fld"><span>Direction</span>
+        <select id="c-EVENING_SIDE">
+          <option value="buy">BUY straddle — long (profit on a big move)</option>
+          <option value="sell">SELL straddle — short (collect premium)</option>
+        </select>
+      </label>
       <label class="fld"><span>Lots</span><input id="c-STRADDLE_LOTS" type="number" min="1" max="5000"></label>
+      <label class="fld"><span>Scheduled exit</span>
+        <select id="c-EVENING_EXIT_ENABLED"><option value="true">Enabled</option><option value="false">Disabled (TP/SL/settlement only)</option></select>
+      </label>
       <label class="fld"><span>Entry time (IST)</span><input id="t-evening-entry" type="time" step="60"></label>
       <label class="fld"><span>Exit time (IST)</span><input id="t-evening-exit" type="time" step="60"></label>
-      <label class="fld"><span>Scheduled exit</span>
-        <select id="c-EVENING_EXIT_ENABLED"><option value="true">Enabled</option><option value="false">Disabled (TP/settlement only)</option></select>
-      </label>
+      <label class="fld"><span>TP target $ (profit)</span><input id="c-TP_TARGET_PNL" type="number" min="0"></label>
+      <label class="fld"><span>SL target $ (max loss, 0 = off)</span><input id="c-SL_TARGET_PNL" type="number" min="0"></label>
+      <label class="fld"><span>TP/SL poll secs</span><input id="c-TP_POLL_SECS" type="number" min="10"></label>
       <label class="fld"><span>&nbsp;</span><span class="hint" style="display:block;padding:9px 0" id="utc-evening"></span></label>
-      <label class="fld"><span>TP target $</span><input id="c-TP_TARGET_PNL" type="number"></label>
-      <label class="fld"><span>TP poll secs</span><input id="c-TP_POLL_SECS" type="number" min="10"></label>
     </div>
   </div>
 </div>
@@ -80,6 +94,7 @@
 {% block scripts %}
 <script>
 const KEYS = ['DRY_RUN','STRADDLE_LOTS','STRIKE_STEP','EVENING_ENABLED','EVENING_EXIT_ENABLED',
+  'EVENING_SIDE','MORNING_SIDE','SL_TARGET_PNL','SL_TARGET_PNL_MORNING',
   'TELEGRAM_BOT_TOKEN','TELEGRAM_CHAT_ID','TELEGRAM_ALERTS','TP_TARGET_PNL','TP_POLL_SECS',
   'MORNING_ENABLED','MORNING_LOTS','MORNING_EXIT_ENABLED',
   'DYNAMIC_LOTS','TP_TARGET_PNL_MORNING','TP_POLL_SECS_MORNING','MAX_TRADES_PER_DAY'];
@@ -126,7 +141,13 @@ async function loadConfig() {
     const el = document.getElementById('c-' + k);
     if (!el) continue;
     let v = (cfg[k] ?? '').toString().trim();
-    if (el.tagName === 'SELECT') v = ['1','true','yes'].includes(v.toLowerCase()) ? 'true' : 'false';
+    if (el.tagName === 'SELECT') {
+      // Boolean selects (true/false options) coerce env-style values; value
+      // selects (e.g. Direction buy/sell) just normalize case + default.
+      const isBool = [...el.options].some(o => o.value === 'true');
+      if (isBool) v = ['1','true','yes'].includes(v.toLowerCase()) ? 'true' : 'false';
+      else        v = v.toLowerCase() || el.options[0].value;
+    }
     el.value = v;
   }
   for (const [id, [hk, mk]] of Object.entries(TIME_FIELDS)) {

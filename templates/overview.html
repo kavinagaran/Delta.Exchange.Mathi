@@ -51,8 +51,9 @@ function tpRow(slot, tp) {
   const t = (tp || {})[slot] || {};
   const on = !!t.running;
   return `<div class="tp-row">
-    <span class="tp-state ${on ? 'on' : 'off'}">TP monitor: ${on ? 'RUNNING' : 'stopped'}</span>
-    <label class="fld"><span>Target $</span><input id="tp-target-${slot}" type="number" step="1" value="${t.target_pnl ?? ''}"></label>
+    <span class="tp-state ${on ? 'on' : 'off'}">TP/SL monitor: ${on ? 'RUNNING' : 'stopped'}</span>
+    <label class="fld"><span>TP $</span><input id="tp-target-${slot}" type="number" step="1" value="${t.target_pnl ?? ''}"></label>
+    <label class="fld"><span>SL $ (0=off)</span><input id="tp-sl-${slot}" type="number" step="1" min="0" value="${t.sl_pnl ?? 0}"></label>
     <label class="fld"><span>Poll s</span><input id="tp-poll-${slot}" type="number" step="5" min="10" value="${t.poll_secs ?? ''}"></label>
     <button class="btn secondary sm" onclick="saveTp('${slot}')">Save</button>
     <button class="btn ${on ? 'warn' : 'success'} sm" onclick="toggleTp('${slot}', ${on})">${on ? 'Stop' : 'Start'}</button>
@@ -187,13 +188,14 @@ async function toggleTp(slot, running) {
 
 async function saveTp(slot) {
   const keys = slot === 'morning'
-    ? { t: 'TP_TARGET_PNL_MORNING', p: 'TP_POLL_SECS_MORNING' }
-    : { t: 'TP_TARGET_PNL',         p: 'TP_POLL_SECS' };
+    ? { t: 'TP_TARGET_PNL_MORNING', p: 'TP_POLL_SECS_MORNING', s: 'SL_TARGET_PNL_MORNING' }
+    : { t: 'TP_TARGET_PNL',         p: 'TP_POLL_SECS',         s: 'SL_TARGET_PNL' };
   const body = {};
   body[keys.t] = document.getElementById(`tp-target-${slot}`).value;
   body[keys.p] = document.getElementById(`tp-poll-${slot}`).value;
+  body[keys.s] = document.getElementById(`tp-sl-${slot}`).value || '0';
   const d = await jpost('/api/config', body);
-  if (d.ok) toast('TP settings saved' + (d.tp_restarted?.length ? ' — monitor restarted' : ''), 'ok');
+  if (d.ok) toast('TP/SL settings saved' + (d.tp_restarted?.length ? ' — monitor restarted' : ''), 'ok');
   else toast('Save failed', 'err');
 }
 

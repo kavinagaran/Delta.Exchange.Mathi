@@ -140,14 +140,15 @@ def _spawn_tp(user: str, slot: str):
 # Keys the dashboard is allowed to read/write
 CONFIG_KEYS = [
     "DRY_RUN", "STRADDLE_LOTS", "STRIKE_STEP",
-    "EVENING_ENABLED", "EVENING_EXIT_ENABLED",
+    "EVENING_ENABLED", "EVENING_EXIT_ENABLED", "EVENING_SIDE",
     "ENTRY_H_UTC", "ENTRY_M_UTC", "EXIT_H_UTC", "EXIT_M_UTC",
     "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "TELEGRAM_ALERTS",
-    "TP_TARGET_PNL", "TP_POLL_SECS",
+    "TP_TARGET_PNL", "TP_POLL_SECS", "SL_TARGET_PNL",
     "MORNING_ENABLED", "MORNING_LOTS", "MORNING_H_UTC", "MORNING_M_UTC",
     "MORNING_EXIT_ENABLED", "MORNING_EXIT_H_UTC", "MORNING_EXIT_M_UTC",
+    "MORNING_SIDE",
     "DYNAMIC_LOTS",
-    "TP_TARGET_PNL_MORNING", "TP_POLL_SECS_MORNING",
+    "TP_TARGET_PNL_MORNING", "TP_POLL_SECS_MORNING", "SL_TARGET_PNL_MORNING",
     "MAX_TRADES_PER_DAY",
 ]
 
@@ -1064,12 +1065,14 @@ def api_manual_entry():
 
 
 def _tp_env(slot: str):
-    """The active account's TP target/poll for a slot (their config.json,
-    .env defaults as fallback)."""
+    """The active account's TP target / poll / SL for a slot (their
+    config.json, .env defaults as fallback). SL 0 = disabled."""
     if slot == "morning":
-        keys, dflt = ("TP_TARGET_PNL_MORNING", "TP_POLL_SECS_MORNING"), (300.0, 30)
+        keys = ("TP_TARGET_PNL_MORNING", "TP_POLL_SECS_MORNING", "SL_TARGET_PNL_MORNING")
+        dflt = (300.0, 30)
     else:
-        keys, dflt = ("TP_TARGET_PNL", "TP_POLL_SECS"), (105.0, 30)
+        keys = ("TP_TARGET_PNL", "TP_POLL_SECS", "SL_TARGET_PNL")
+        dflt = (105.0, 30)
     try:
         target = float(_cfg(keys[0]) or dflt[0])
     except ValueError:
@@ -1078,7 +1081,11 @@ def _tp_env(slot: str):
         poll = int(float(_cfg(keys[1]) or dflt[1]))
     except ValueError:
         poll = dflt[1]
-    return target, poll
+    try:
+        sl = abs(float(_cfg(keys[2]) or 0))
+    except ValueError:
+        sl = 0.0
+    return target, poll, sl
 
 
 @app.route("/api/tp-monitor", methods=["GET"])
@@ -1086,8 +1093,9 @@ def tp_monitor_status():
     user = _active_user()
     out = {}
     for slot in SLOTS:
-        target, poll = _tp_env(slot)
-        out[slot] = {"running": _tp_running(user, slot), "target_pnl": target, "poll_secs": poll}
+        target, poll, sl = _tp_env(slot)
+        out[slot] = {"running": _tp_running(user, slot), "target_pnl": target,
+                     "poll_secs": poll, "sl_pnl": sl}
     # Back-compat top-level fields = evening
     out.update(out["evening"])
     return jsonify(out)
@@ -1503,8 +1511,8 @@ def _restart_tp_monitor(user: str, slot: str) -> bool:
 
 
 _TP_KEYS_BY_SLOT = {
-    "evening": {"TP_TARGET_PNL", "TP_POLL_SECS"},
-    "morning": {"TP_TARGET_PNL_MORNING", "TP_POLL_SECS_MORNING"},
+    "evening": {"TP_TARGET_PNL", "TP_POLL_SECS", "SL_TARGET_PNL"},
+    "morning": {"TP_TARGET_PNL_MORNING", "TP_POLL_SECS_MORNING", "SL_TARGET_PNL_MORNING"},
 }
 
 

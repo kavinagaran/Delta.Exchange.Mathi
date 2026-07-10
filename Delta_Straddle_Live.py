@@ -96,6 +96,14 @@ assert 1 <= LOTS <= 1000, f"LOTS must be between 1 and 1000, got {LOTS}"
 EVENING_ENABLED      = os.getenv("EVENING_ENABLED", "true").lower() in ("1", "true", "yes")
 EVENING_EXIT_ENABLED = os.getenv("EVENING_EXIT_ENABLED", "true").lower() in ("1", "true", "yes")
 
+# Scheduled entry direction per slot: "buy" opens a long straddle (profit on
+# a big move), "sell" opens a short straddle (collect premium, profit on a
+# quiet day — losses are open-ended, margin requirements are the user's job).
+def _side_env(key: str) -> str:
+    return "sell" if os.getenv(key, "buy").strip().lower() == "sell" else "buy"
+EVENING_SIDE = _side_env("EVENING_SIDE")
+MORNING_SIDE = _side_env("MORNING_SIDE")
+
 # Timing in UTC — configurable via .env / dashboard (defaults: 12:05 entry, 19:30 exit)
 ENTRY_H_UTC = int(os.getenv("ENTRY_H_UTC", 12))
 ENTRY_M_UTC = int(os.getenv("ENTRY_M_UTC", 5))
@@ -598,13 +606,14 @@ def morning_entry_job():
     log.info("Entry mark  : $%.4f/BTC", entry_mark)
     log.info("Lots        : %d  |  Total premium: $%.2f", lots, total_cost)
 
-    order = place_market_order(product_id, symbol, "buy", lots)
+    order = place_market_order(product_id, symbol, MORNING_SIDE, lots)
     fill  = float(order.get("result", {}).get("average_fill_price") or entry_mark)
 
     now = datetime.now(timezone.utc)
     save_morning_state({
         "slot":           "morning",
         "status":         "OPEN",
+        "side":           "long" if MORNING_SIDE == "buy" else "short",
         "entry_date":     today,
         "entry_time_utc": now.strftime("%H:%M:%S"),
         "symbol":         symbol,
@@ -622,9 +631,10 @@ def morning_entry_job():
     })
 
     send_telegram(
-        f"🌅 <b>MORNING STRADDLE OPENED — {TAG}</b>\n"
+        f"🌅 <b>MORNING STRADDLE {'SOLD (short)' if MORNING_SIDE == 'sell' else 'OPENED'} — {TAG}</b>\n"
         f"<code>{'━' * 24}</code>\n"
         f"Symbol  » <code>{symbol}</code>\n"
+        f"Side    » <code>{'SHORT — sold to open' if MORNING_SIDE == 'sell' else 'LONG — bought'}</code>\n"
         f"Strike  » <code>${strike:,.0f}</code>\n"
         f"Lots    » <code>{lots:,}</code>\n"
         f"Entry   » <code>${fill:.4f} / BTC</code>\n"
@@ -669,13 +679,14 @@ def entry_job():
     log.info("Entry mark  : $%.4f/BTC  ($%.4f/lot)", entry_mark, entry_mark * contract_val)
     log.info("Lots        : %d  |  Total premium: $%.2f", lots, total_cost)
 
-    # Place the single buy order
-    order = place_market_order(product_id, symbol, "buy", lots)
+    # Place the single entry order (direction per EVENING_SIDE config)
+    order = place_market_order(product_id, symbol, EVENING_SIDE, lots)
 
     # Persist — this is what prevents any second order today
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     save_state({
         "status":         "OPEN",
+        "side":           "long" if EVENING_SIDE == "buy" else "short",
         "entry_date":     today,
         "entry_time_utc": datetime.now(timezone.utc).strftime("%H:%M:%S"),
         "symbol":         symbol,
@@ -694,9 +705,10 @@ def entry_job():
              EXIT_H_UTC, EXIT_M_UTC)
 
     send_telegram(
-        f"🔺 <b>ENTRY CONFIRMED — {TAG}</b>\n"
+        f"{'🔻' if EVENING_SIDE == 'sell' else '🔺'} <b>ENTRY CONFIRMED — {TAG}</b>\n"
         f"<code>{'━' * 24}</code>\n"
         f"Symbol  » <code>{symbol}</code>\n"
+        f"Side    » <code>{'SHORT — sold to open' if EVENING_SIDE == 'sell' else 'LONG — bought'}</code>\n"
         f"Strike  » <code>${strike:,.0f}</code>\n"
         f"Lots    » <code>{lots:,}</code>\n"
         f"Premium » <code>${entry_mark:.4f} / BTC</code>\n"
@@ -832,15 +844,16 @@ def _ist_label(h_utc: int, m_utc: int) -> str:
 def main():
     log.info("=" * 64)
     log.info("Delta MV Straddle Bot")
-    log.info("  Morning: %02d:%02d UTC (%s)  lots=%d  enabled=%s",
+    log.info("  Morning: %02d:%02d UTC (%s)  lots=%d  side=%s  enabled=%s",
              MORNING_H_UTC, MORNING_M_UTC,
-             _ist_label(MORNING_H_UTC, MORNING_M_UTC), MORNING_LOTS, MORNING_ENABLED)
+             _ist_label(MORNING_H_UTC, MORNING_M_UTC), MORNING_LOTS,
+             MORNING_SIDE.upper(), MORNING_ENABLED)
     log.info("  M-Exit : %s",
              ("%02d:%02d UTC (%s)" % (MORNING_EXIT_H_UTC, MORNING_EXIT_M_UTC,
                                        _ist_label(MORNING_EXIT_H_UTC, MORNING_EXIT_M_UTC)))
              if MORNING_EXIT_ENABLED else "DISABLED (TP/settlement only)")
-    log.info("  Entry  : %02d:%02d UTC (%s)  enabled=%s", ENTRY_H_UTC, ENTRY_M_UTC,
-             _ist_label(ENTRY_H_UTC, ENTRY_M_UTC), EVENING_ENABLED)
+    log.info("  Entry  : %02d:%02d UTC (%s)  side=%s  enabled=%s", ENTRY_H_UTC, ENTRY_M_UTC,
+             _ist_label(ENTRY_H_UTC, ENTRY_M_UTC), EVENING_SIDE.upper(), EVENING_ENABLED)
     log.info("  Exit   : %s",
              ("%02d:%02d UTC (%s)" % (EXIT_H_UTC, EXIT_M_UTC,
                                        _ist_label(EXIT_H_UTC, EXIT_M_UTC)))

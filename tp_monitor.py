@@ -58,14 +58,22 @@ BASE_URL   = os.getenv("BASE_URL", "https://api.india.delta.exchange")
 TG_TOKEN   = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TG_CHAT    = os.getenv("TELEGRAM_CHAT_ID", "")
 
+def _f(key, default=0.0):
+    try:
+        return float(os.getenv(key) or default)
+    except ValueError:
+        return default
+
 if SLOT == "morning":
     STATE_FILE = USER_DIR / "morning_state.json"
-    TARGET_PNL = float(os.getenv("TP_TARGET_PNL_MORNING") or 300)
-    POLL_SECS  = int(float(os.getenv("TP_POLL_SECS_MORNING") or 30))
+    TARGET_PNL = _f("TP_TARGET_PNL_MORNING", 300)
+    SL_PNL     = abs(_f("SL_TARGET_PNL_MORNING", 0))   # 0 = stop-loss disabled
+    POLL_SECS  = int(_f("TP_POLL_SECS_MORNING", 30))
 else:
     STATE_FILE = USER_DIR / "straddle_state.json"
-    TARGET_PNL = float(os.getenv("TP_TARGET_PNL") or 105)
-    POLL_SECS  = int(float(os.getenv("TP_POLL_SECS") or 30))
+    TARGET_PNL = _f("TP_TARGET_PNL", 105)
+    SL_PNL     = abs(_f("SL_TARGET_PNL", 0))            # 0 = stop-loss disabled
+    POLL_SECS  = int(_f("TP_POLL_SECS", 30))
 LOG_NAME = f"tp_{USER}_{SLOT}.log"
 
 HISTORY_FILE = USER_DIR / "trade_history.json"
@@ -171,7 +179,8 @@ def append_history(state):
         log.warning("History append failed: %s", e)
 
 
-def close_position(state, mark, pnl):
+def close_position(state, mark, pnl, reason="take_profit"):
+    """reason: 'take_profit' or 'stop_loss' — sets the trigger + alert."""
     product_id = state["product_id"]
     symbol     = state["symbol"]
     lots       = state["lots"]
@@ -194,8 +203,9 @@ def close_position(state, mark, pnl):
         return True
     lots = abs(live_size)
 
-    log.info("TP HIT — P&L $%.2f  mark $%.4f  %sing %d lots to close...",
-             pnl, mark, close_side, lots)
+    tag = "TP" if reason == "take_profit" else "SL"
+    log.info("%s HIT — P&L $%.2f  mark $%.4f  %sing %d lots to close...",
+             tag, pnl, mark, close_side, lots)
     result = place_order(product_id, symbol, close_side, lots)
     if result.get("success"):
         o    = result.get("result", {})
@@ -208,33 +218,39 @@ def close_position(state, mark, pnl):
             "exit_time_utc": time.strftime("%H:%M:%S", time.gmtime()),
             "exit_mark":     fill,
             "pnl_usd":       real,
-            "exit_trigger":  f"take_profit_{SLOT}",
+            "exit_trigger":  f"{reason}_{SLOT}",
         })
         STATE_FILE.write_text(json.dumps(state, indent=2), encoding="utf-8")
         append_history(state)
 
         label = "🌅 MORNING" if SLOT == "morning" else "🌇 EVENING"
+        head  = (f"✅ <b>TAKE PROFIT HIT — {label} ({USER.upper()})</b>"
+                 if reason == "take_profit" else
+                 f"🛑 <b>STOP LOSS HIT — {label} ({USER.upper()})</b>")
+        psign = "+" if real >= 0 else "-"
         send_telegram(
-            f"✅ <b>TAKE PROFIT HIT — {label} ({USER.upper()})</b>\n"
+            f"{head}\n"
             f"<code>{'━' * 24}</code>\n"
             f"Symbol  » <code>{symbol}</code>\n"
             f"Lots    » <code>{lots:,}</code>\n"
             f"Entry   » <code>${float(state['entry_mark']):.4f}</code>\n"
             f"Exit    » <code>${fill:.4f}</code>\n"
-            f"P&L     » <code>+${real:.2f}</code> 🎯\n"
+            f"P&L     » <code>{psign}${abs(real):.2f}</code> {'🎯' if reason == 'take_profit' else '🛑'}\n"
             f"OrderID » <code>{o.get('id')}</code>"
         )
         return True
     else:
-        log.error("SELL FAILED: %s", result)
-        send_telegram(f"⚠️ <b>TP SELL FAILED — {SLOT.upper()} ({USER.upper()})</b>\n<code>{result}</code>")
+        log.error("%s CLOSE FAILED: %s", tag, result)
+        send_telegram(f"⚠️ <b>{tag} CLOSE FAILED — {SLOT.upper()} ({USER.upper()})</b>\n<code>{result}</code>")
         return False
 
 
 def main():
     log.info("=" * 56)
-    log.info("TP Monitor [%s/%s] started  target=+$%.2f  poll=%ds  state=%s",
-             USER, SLOT, TARGET_PNL, POLL_SECS, STATE_FILE)
+    log.info("TP/SL Monitor [%s/%s] started  tp=+$%.2f  sl=%s  poll=%ds  state=%s",
+             USER, SLOT, TARGET_PNL,
+             f"-${SL_PNL:.2f}" if SL_PNL > 0 else "off",
+             POLL_SECS, STATE_FILE)
 
     state = load_state()
     if state.get("status") != "OPEN":
@@ -261,11 +277,16 @@ def main():
             mark = get_mark(symbol)
             pnl  = (mark - entry_mark) * cv * lots * sign
 
-            log.info("mark=%.4f  pnl=$%.2f  target=$%.2f", mark, pnl, TARGET_PNL)
+            log.info("mark=%.4f  pnl=$%.2f  tp=$%.2f  sl=%s", mark, pnl, TARGET_PNL,
+                     f"-${SL_PNL:.2f}" if SL_PNL > 0 else "off")
 
             if pnl >= TARGET_PNL:
-                if close_position(state, mark, pnl):
-                    log.info("Monitor done.")
+                if close_position(state, mark, pnl, "take_profit"):
+                    log.info("Monitor done (take profit).")
+                    break
+            elif SL_PNL > 0 and pnl <= -SL_PNL:
+                if close_position(state, mark, pnl, "stop_loss"):
+                    log.info("Monitor done (stop loss).")
                     break
         except Exception as e:
             log.warning("Poll error: %s", e)
