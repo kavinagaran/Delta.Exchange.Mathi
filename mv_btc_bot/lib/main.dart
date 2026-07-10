@@ -63,6 +63,7 @@ class Api {
   static String baseUrl = 'http://13.207.78.56:5001';
   static String user = 'mathi';
   static String pass = '';
+  static String displayName = '';
 
   static Map<String, String> get _headers => {
         'Content-Type': 'application/json',
@@ -151,11 +152,32 @@ class HomeShell extends StatefulWidget {
 class _HomeShellState extends State<HomeShell> {
   int _tab = 0;
   bool _ready = false;
+  bool _authed = false;
 
   @override
   void initState() {
     super.initState();
-    Api.loadBaseUrl().then((_) => setState(() => _ready = true));
+    _init();
+  }
+
+  Future<void> _init() async {
+    await Api.loadBaseUrl();
+    bool ok = false;
+    if (Api.pass.isNotEmpty) {
+      try {
+        final me = await Api.getJson('/api/me') as Map<String, dynamic>;
+        Api.displayName = (me['display_name'] ?? Api.user).toString();
+        ok = true;
+      } catch (_) {}
+    }
+    if (!mounted) return;
+    setState(() { _ready = true; _authed = ok; });
+  }
+
+  void _signOut() {
+    Api.saveBaseUrl(Api.baseUrl, Api.user, '');
+    Api.displayName = '';
+    setState(() { _authed = false; _tab = 0; });
   }
 
   @override
@@ -163,10 +185,18 @@ class _HomeShellState extends State<HomeShell> {
     if (!_ready) {
       return const Scaffold(body: Center(child: CircularProgressIndicator(color: kGreen)));
     }
+    if (!_authed) {
+      return LoginScreen(onSuccess: () => setState(() => _authed = true));
+    }
     return Scaffold(
       body: IndexedStack(
         index: _tab,
-        children: const [DashboardPage(), LogsPage(), ConfigsPage(), SettingsPage()],
+        children: [
+          const DashboardPage(),
+          const LogsPage(),
+          const ConfigsPage(),
+          SettingsPage(onSignOut: _signOut),
+        ],
       ),
       bottomNavigationBar: NavigationBar(
         backgroundColor: kSurf,
@@ -179,6 +209,155 @@ class _HomeShellState extends State<HomeShell> {
           NavigationDestination(icon: Icon(Icons.tune_outlined), selectedIcon: Icon(Icons.tune, color: kGreen), label: 'Configs'),
           NavigationDestination(icon: Icon(Icons.settings_outlined), selectedIcon: Icon(Icons.settings, color: kGreen), label: 'Settings'),
         ],
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+// Login screen — sign in as any configured account
+// ─────────────────────────────────────────────────────────────
+class LoginScreen extends StatefulWidget {
+  final VoidCallback onSuccess;
+  const LoginScreen({super.key, required this.onSuccess});
+
+  @override
+  State<LoginScreen> createState() => _LoginScreenState();
+}
+
+class _LoginScreenState extends State<LoginScreen> {
+  late final TextEditingController _urlCtl =
+      TextEditingController(text: Api.baseUrl);
+  late final TextEditingController _userCtl =
+      TextEditingController(text: Api.user);
+  final TextEditingController _passCtl = TextEditingController();
+  bool _busy = false;
+  String? _error;
+
+  @override
+  void dispose() {
+    _urlCtl.dispose();
+    _userCtl.dispose();
+    _passCtl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _signIn() async {
+    setState(() { _busy = true; _error = null; });
+    await Api.saveBaseUrl(_urlCtl.text, _userCtl.text, _passCtl.text);
+    try {
+      final me = await Api.getJson('/api/me') as Map<String, dynamic>;
+      Api.displayName = (me['display_name'] ?? Api.user).toString();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('Welcome back, ${Api.displayName}!')));
+      widget.onSuccess();
+    } catch (e) {
+      await Api.saveBaseUrl(_urlCtl.text, _userCtl.text, '');
+      if (!mounted) return;
+      setState(() {
+        _busy = false;
+        _error = e.toString().contains('Login failed')
+            ? 'Wrong username or password'
+            : 'Cannot reach server: $e';
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: SafeArea(
+        child: Center(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(28),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const Center(child: Text('⚡', style: TextStyle(fontSize: 40))),
+                const SizedBox(height: 8),
+                const Center(
+                  child: Text('NITHI-BOT',
+                      style: TextStyle(color: kGreen, fontSize: 26,
+                          fontWeight: FontWeight.w800, letterSpacing: 3)),
+                ),
+                const SizedBox(height: 4),
+                const Center(
+                  child: Text('MV-BTC Straddle · Delta Exchange India',
+                      style: TextStyle(color: kMuted, fontSize: 12)),
+                ),
+                const SizedBox(height: 30),
+                if (_error != null) ...[
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: kRed.withValues(alpha: 0.12),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Text(_error!,
+                        style: const TextStyle(color: kRed, fontSize: 13)),
+                  ),
+                  const SizedBox(height: 14),
+                ],
+                TextField(
+                  controller: _userCtl,
+                  autofillHints: const [AutofillHints.username],
+                  decoration: InputDecoration(
+                    labelText: 'Username',
+                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                  ),
+                ),
+                const SizedBox(height: 14),
+                TextField(
+                  controller: _passCtl,
+                  obscureText: true,
+                  autofillHints: const [AutofillHints.password],
+                  onSubmitted: (_) => _busy ? null : _signIn(),
+                  decoration: InputDecoration(
+                    labelText: 'Password',
+                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                  ),
+                ),
+                const SizedBox(height: 14),
+                ExpansionTile(
+                  tilePadding: EdgeInsets.zero,
+                  title: const Text('Server',
+                      style: TextStyle(color: kMuted, fontSize: 13)),
+                  children: [
+                    TextField(
+                      controller: _urlCtl,
+                      keyboardType: TextInputType.url,
+                      style: const TextStyle(fontFamily: 'monospace', fontSize: 13),
+                      decoration: InputDecoration(
+                        labelText: 'Server URL',
+                        border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                  ],
+                ),
+                const SizedBox(height: 18),
+                FilledButton(
+                  style: FilledButton.styleFrom(
+                    backgroundColor: kGreen.withValues(alpha: 0.15),
+                    foregroundColor: kGreen,
+                    padding: const EdgeInsets.symmetric(vertical: 15),
+                  ),
+                  onPressed: _busy ? null : _signIn,
+                  child: Text(_busy ? 'Signing in…' : 'SIGN IN',
+                      style: const TextStyle(
+                          fontWeight: FontWeight.w700, letterSpacing: 1)),
+                ),
+                const SizedBox(height: 10),
+                const Center(
+                  child: Text('Accounts are managed on the web dashboard → API Accounts',
+                      style: TextStyle(color: kMuted, fontSize: 11)),
+                ),
+              ],
+            ),
+          ),
+        ),
       ),
     );
   }
@@ -1391,7 +1570,8 @@ class _ConfigsPageState extends State<ConfigsPage> {
 // Settings page
 // ─────────────────────────────────────────────────────────────
 class SettingsPage extends StatefulWidget {
-  const SettingsPage({super.key});
+  final VoidCallback? onSignOut;
+  const SettingsPage({super.key, this.onSignOut});
 
   @override
   State<SettingsPage> createState() => _SettingsPageState();
@@ -1443,6 +1623,25 @@ class _SettingsPageState extends State<SettingsPage> {
         padding: const EdgeInsets.all(16),
         children: [
           const Text('SETTINGS', style: TextStyle(color: kMuted, fontSize: 12, letterSpacing: 1.5)),
+          const SizedBox(height: 16),
+          Card(
+            child: ListTile(
+              leading: const CircleAvatar(
+                backgroundColor: kGreen,
+                foregroundColor: kBg,
+                child: Icon(Icons.person),
+              ),
+              title: Text(Api.displayName.isEmpty ? Api.user : Api.displayName,
+                  style: const TextStyle(fontWeight: FontWeight.w700)),
+              subtitle: Text('Signed in as ${Api.user}',
+                  style: const TextStyle(color: kMuted, fontSize: 12)),
+              trailing: TextButton(
+                onPressed: widget.onSignOut,
+                child: const Text('Switch account',
+                    style: TextStyle(color: kGold)),
+              ),
+            ),
+          ),
           const SizedBox(height: 16),
           Card(
             child: Padding(

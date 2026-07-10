@@ -21,7 +21,7 @@ from pathlib import Path
 import requests as req
 from dotenv import load_dotenv, set_key
 from flask import (Flask, jsonify, request, abort, send_file, session,
-                   redirect, render_template, has_request_context)
+                   redirect, render_template, has_request_context, g)
 
 # Force IPv4 — Delta's whitelist holds our IPv4; IPv6 rotates and gets rejected
 import socket as _socket
@@ -282,9 +282,34 @@ def _find_account(username: str) -> dict | None:
     return acct
 
 
+# PBKDF2 is deliberately slow (~100k+ iterations) — Basic-auth clients like
+# the Android app resend credentials on EVERY request, so memoize the verdict
+# per (username, password-hash) to avoid burning CPU on each poll.
+_basic_cache: dict = {}
+
+
+def _basic_account_ok(username: str, password: str) -> bool:
+    u = _safe_user(username)
+    if not u:
+        return False
+    key = (u, hashlib.sha256(password.encode()).hexdigest())
+    if key in _basic_cache:
+        return _basic_cache[key]
+    acct = _find_account(u)
+    ok = bool(acct and _verify_pw(password, acct.get("pw_hash", "")))
+    if len(_basic_cache) > 256:
+        _basic_cache.clear()
+    _basic_cache[key] = ok
+    return ok
+
+
 def _session_account() -> dict | None:
-    if has_request_context() and session.get("user"):
-        return _find_account(session["user"])
+    if has_request_context():
+        if session.get("user"):
+            return _find_account(session["user"])
+        u = getattr(g, "basic_user", None)   # Basic-auth (Android app) account
+        if u:
+            return _find_account(u)
     return None
 
 
@@ -347,10 +372,16 @@ def _auth_gate():
     open_paths = ("/login", "/static/", "/favicon.ico", "/health")
     if request.path.startswith(open_paths):
         return None
-    # Path 1: HTTP Basic with the .env credentials (Android app, curl)
+    # Path 1: HTTP Basic (Android app, curl) — either the .env credentials
+    # (maps to DASH_USER's account) or ANY account's own username/password,
+    # so the app can sign in and switch between accounts.
     a = request.authorization
-    if DASH_PASS and a and a.username == DASH_USER and a.password == DASH_PASS:
-        return None
+    if a:
+        if DASH_PASS and a.username == DASH_USER and a.password == DASH_PASS:
+            return None
+        if _basic_account_ok(a.username or "", a.password or ""):
+            g.basic_user = _safe_user(a.username)
+            return None
     # Path 2: browser session
     if session.get("user") and _find_account(session["user"]):
         return None
