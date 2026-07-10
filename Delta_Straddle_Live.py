@@ -122,6 +122,17 @@ for _f in ("straddle_state.json", "morning_state.json", "trade_history.json"):
     if _src.exists() and not _dst.exists():
         _shutil.move(str(_src), str(_dst))
 
+# Each bot instance trades ITS user's own credentials (account.json),
+# falling back to the .env keys — one `mathi-bot@<user>` service per account.
+try:
+    _acct = json.loads((DATA_DIR / "account.json").read_text(encoding="utf-8"))
+    API_KEY    = _acct.get("api_key")    or API_KEY
+    API_SECRET = _acct.get("api_secret") or API_SECRET
+except Exception:
+    pass
+
+TAG = BOT_USER.upper()   # identifies this instance in alerts and logs
+
 # ─────────────────────────────────────────────────────────────
 # LOGGING
 # ─────────────────────────────────────────────────────────────
@@ -130,7 +141,8 @@ LOG_DIR.mkdir(exist_ok=True)
 
 _fmt = logging.Formatter("%(asctime)s  %(levelname)-8s  %(message)s",
                          datefmt="%Y-%m-%d %H:%M:%S")
-_fh  = TimedRotatingFileHandler(LOG_DIR / "straddle.log",
+# Per-instance log — multiple bots must never interleave one file
+_fh  = TimedRotatingFileHandler(LOG_DIR / f"straddle_{BOT_USER}.log",
                                  when="midnight", backupCount=30, utc=True)
 _fh.setFormatter(_fmt)
 _ch  = logging.StreamHandler(sys.stdout)
@@ -506,7 +518,7 @@ def check_api_access():
             _ip_was_broken = False
             _ip_alert_at   = 0.0
             log.info("API access restored — orders can be placed again.")
-            send_telegram("✅ <b>API ACCESS RESTORED — MATHI</b>\nOrders can be placed again.")
+            send_telegram(f"✅ <b>API ACCESS RESTORED — {TAG}</b>\nOrders can be placed again.")
         return
 
     code = str(((data.get("error") or {}).get("code")) or "")
@@ -531,7 +543,7 @@ def check_api_access():
 
     log.error("API KEY BLOCKED — IP not whitelisted. IPv4=%s  IPv6=%s", ip4, ip6)
     send_telegram(
-        "🚨 <b>API KEY BLOCKED — IP CHANGED (MATHI)</b>\n"
+        f"🚨 <b>API KEY BLOCKED — IP CHANGED ({TAG})</b>\n"
         "Delta is rejecting authenticated calls: IP not whitelisted.\n"
         "Whitelist these in Delta → Account → API Keys:\n"
         f"IPv4 » <code>{ip4}</code>\n"
@@ -602,7 +614,7 @@ def morning_entry_job():
     })
 
     send_telegram(
-        f"🌅 <b>MORNING STRADDLE OPENED — MATHI</b>\n"
+        f"🌅 <b>MORNING STRADDLE OPENED — {TAG}</b>\n"
         f"<code>{'━' * 24}</code>\n"
         f"Symbol  » <code>{symbol}</code>\n"
         f"Strike  » <code>${strike:,.0f}</code>\n"
@@ -674,7 +686,7 @@ def entry_job():
              EXIT_H_UTC, EXIT_M_UTC)
 
     send_telegram(
-        f"🔺 <b>ENTRY CONFIRMED</b>\n"
+        f"🔺 <b>ENTRY CONFIRMED — {TAG}</b>\n"
         f"<code>{'━' * 24}</code>\n"
         f"Symbol  » <code>{symbol}</code>\n"
         f"Strike  » <code>${strike:,.0f}</code>\n"
@@ -786,7 +798,7 @@ def _close_position_job(state: dict, save_fn, label: str):
     _arrow = "▲" if btc_move >= 0 else "▼"
     _slot_icon = "🌅" if label == "MORNING" else "🌇"
     send_telegram(
-        f"{_icon} <b>{_slot_icon} {label} EXIT — {_label}  {_sign}${abs(pnl_usd):.2f}</b>\n"
+        f"{_icon} <b>{_slot_icon} {label} EXIT — {TAG} · {_label}  {_sign}${abs(pnl_usd):.2f}</b>\n"
         f"<code>{'━' * 24}</code>\n"
         f"Symbol  » <code>{symbol}</code>\n"
         f"Entry   » <code>${entry_mark:.4f} / BTC</code>\n"
@@ -870,7 +882,7 @@ def main():
                     morning_entry_job()
                 except Exception as exc:
                     log.exception("Morning entry job failed")
-                    send_telegram(f"⚠️ <b>MORNING ENTRY FAILED — MATHI</b>\n<code>{exc}</code>")
+                    send_telegram(f"⚠️ <b>MORNING ENTRY FAILED — {TAG}</b>\n<code>{exc}</code>")
 
             # MORNING EXIT TRIGGER (skipped when MORNING_EXIT_ENABLED=false)
             in_morning_exit = (MORNING_ENABLED
@@ -883,7 +895,7 @@ def main():
                     morning_exit_job()
                 except Exception as exc:
                     log.exception("Morning exit job failed")
-                    send_telegram(f"⚠️ <b>MORNING EXIT FAILED — MATHI</b>\n<code>{exc}</code>")
+                    send_telegram(f"⚠️ <b>MORNING EXIT FAILED — {TAG}</b>\n<code>{exc}</code>")
 
             # ENTRY TRIGGER  12:05–12:14 UTC (skipped when EVENING_ENABLED=false)
             in_entry_window = (EVENING_ENABLED
@@ -895,7 +907,7 @@ def main():
                     entry_job()
                 except Exception as exc:
                     log.exception("Entry job failed")
-                    send_telegram(f"⚠️ <b>ENTRY FAILED</b>\n<code>{exc}</code>")
+                    send_telegram(f"⚠️ <b>ENTRY FAILED — {TAG}</b>\n<code>{exc}</code>")
 
             # EXIT TRIGGER  19:30–19:39 UTC (skipped when EVENING_EXIT_ENABLED=false;
             # intentionally NOT gated on EVENING_ENABLED — see toggle comments up top)
@@ -908,7 +920,7 @@ def main():
                     exit_job()
                 except Exception as exc:
                     log.exception("Exit job failed")
-                    send_telegram(f"⚠️ <b>EXIT FAILED</b>\n<code>{exc}</code>")
+                    send_telegram(f"⚠️ <b>EXIT FAILED — {TAG}</b>\n<code>{exc}</code>")
 
             # CONFIG WATCH — when .env changes (dashboard/app save, manual
             # edit), reload the whole process so new settings apply without
@@ -919,7 +931,7 @@ def main():
                 env_mt = ENV_FILE.stat().st_mtime
                 if env_mt != env_mtime and time.time() - env_mt > 2:
                     log.info("Config change detected in .env — reloading bot with new settings.")
-                    send_telegram("🔄 <b>CONFIG CHANGED — BOT RELOADED (MATHI)</b>\n"
+                    send_telegram(f"🔄 <b>CONFIG CHANGED — BOT RELOADED ({TAG})</b>\n"
                                   "New settings are now in effect.")
                     os.execv(sys.executable, [sys.executable] + sys.argv)
 

@@ -421,6 +421,8 @@ def api_accounts_delete(username):
         return jsonify({"ok": False, "error": "The bot engine's account cannot be deleted"}), 400
     if _session_account() and _session_account()["username"] == username:
         return jsonify({"ok": False, "error": "You cannot delete the account you are signed in as"}), 400
+    if _bot_active(username):
+        return jsonify({"ok": False, "error": "Stop this account's bot before deleting it"}), 400
     # Remove only the login (account.json); trade data stays on disk so
     # history is never silently destroyed.
     _account_file(username).unlink(missing_ok=True)
@@ -1115,7 +1117,11 @@ def download_apk():
 
 @app.route("/api/logs")
 def api_logs():
-    log_file = Path(__file__).parent / "logs" / "straddle.log"
+    # Each bot instance logs to its own file; fall back to the legacy
+    # shared straddle.log for history from before the per-user split.
+    log_file = BASE / "logs" / f"straddle_{_active_user()}.log"
+    if not log_file.exists():
+        log_file = BASE / "logs" / "straddle.log"
     n = min(int(request.args.get("n", 100)), 500)
     try:
         text = log_file.read_text(encoding="utf-8", errors="replace")
@@ -1123,6 +1129,58 @@ def api_logs():
         return jsonify({"lines": rows[-n:]})
     except FileNotFoundError:
         return jsonify({"lines": []})
+
+
+# ─────────────────────────────────────────────────────────────
+# PER-ACCOUNT BOT INSTANCES — one systemd unit per user
+# (`mathi-bot@<username>` template; each trades that user's own keys
+#  against that user's folder)
+# ─────────────────────────────────────────────────────────────
+def _bot_unit(user: str) -> str:
+    return f"mathi-bot@{user}.service"
+
+
+def _systemctl(*args) -> tuple:
+    try:
+        r = subprocess.run(list(args), capture_output=True, text=True, timeout=15)
+        return r.returncode, (r.stdout + r.stderr).strip()
+    except Exception as e:
+        return 1, str(e)
+
+
+def _bot_active(user: str) -> bool:
+    if not shutil.which("systemctl"):
+        return False
+    rc, out = _systemctl("systemctl", "is-active", _bot_unit(user))
+    return out == "active"
+
+
+@app.route("/api/bots")
+def api_bots():
+    supported = bool(shutil.which("systemctl"))
+    return jsonify({a["username"]: {"supported": supported,
+                                    "active": supported and _bot_active(a["username"])}
+                    for a in _load_accounts()})
+
+
+@app.route("/api/bots/<username>/<action>", methods=["POST"])
+def api_bot_action(username, action):
+    username = _safe_user(username)
+    acct = _find_account(username) if username else None
+    if not acct:
+        return jsonify({"ok": False, "error": "No such account"}), 404
+    if action not in ("start", "stop"):
+        return jsonify({"ok": False, "error": "action must be start or stop"}), 400
+    if not shutil.which("systemctl"):
+        return jsonify({"ok": False, "error": "systemd not available on this host"}), 501
+    if action == "start" and not (acct.get("api_key") and acct.get("api_secret")):
+        return jsonify({"ok": False, "error": "Set the account's API key & secret first"}), 400
+    # enable --now / disable --now so the choice survives server reboots
+    verb = "enable" if action == "start" else "disable"
+    rc, out = _systemctl("sudo", "-n", "systemctl", verb, "--now", _bot_unit(username))
+    if rc != 0:
+        return jsonify({"ok": False, "error": out or "systemctl failed"}), 500
+    return jsonify({"ok": True, "unit": _bot_unit(username), "action": action})
 
 
 def _parse_strike(symbol: str):

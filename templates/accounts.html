@@ -1,14 +1,14 @@
 {% extends "base.html" %}
 
 {% block content %}
-<div class="banner info">Every account is a full trading account: sign in and the whole dashboard — positions, trades, manual Buy/Sell, square-off, TP monitors — runs on <b>your</b> Delta API keys, with your data kept in your own folder on the server. The scheduled auto-trade engine runs on the account marked <b>BOT ENGINE</b>.</div>
+<div class="banner info">Every account is a full trading account: sign in and the whole dashboard — positions, trades, manual Buy/Sell, square-off, TP monitors — runs on <b>your</b> Delta API keys, with your data kept in your own folder on the server. <b>Auto-trade</b> runs a separate scheduled bot instance for that account (same strategy &amp; timings from Bot Config, that account's keys and money).</div>
 
 <div class="card">
   <div class="card-hd">Accounts</div>
   <div class="tbl-wrap">
     <table>
       <thead><tr>
-        <th>Name</th><th>Username</th><th>API Key</th><th>Secret</th><th></th><th style="width:180px"></th>
+        <th>Name</th><th>Username</th><th>API Key</th><th>Secret</th><th>Auto-trade</th><th style="width:180px"></th>
       </tr></thead>
       <tbody id="acct-body"><tr class="empty-row"><td colspan="6">Loading…</td></tr></tbody>
     </table>
@@ -75,19 +75,40 @@
 let editing = null;
 
 async function loadAccounts() {
-  const rows = await jget('/api/accounts');
-  document.getElementById('acct-body').innerHTML = rows.map(a => `
+  const [rows, bots] = await Promise.all([
+    jget('/api/accounts'),
+    jget('/api/bots').catch(() => ({})),
+  ]);
+  document.getElementById('acct-body').innerHTML = rows.map(a => {
+    const b = bots[a.username] || {};
+    const botCell = !b.supported
+      ? '<span class="hint">n/a</span>'
+      : (b.active
+          ? `<span class="badge live">RUNNING</span> <button class="btn warn sm" onclick="botAction('${esc(a.username)}','stop')">Stop</button>`
+          : `<span class="badge sim">off</span> <button class="btn success sm" onclick="botAction('${esc(a.username)}','start')">Start</button>`);
+    return `
     <tr>
       <td><b>${esc(a.display_name || a.username)}</b></td>
       <td>${esc(a.username)}</td>
       <td class="mono">${esc(a.api_key || '—')}</td>
       <td>${a.has_secret ? '<span class="badge win">set</span>' : '<span class="badge loss">missing</span>'}</td>
-      <td>${a.bot ? '<span class="badge live">BOT ENGINE</span>' : ''}</td>
+      <td>${botCell}</td>
       <td>
         <button class="btn secondary sm" onclick="editAccount('${esc(a.username)}', '${esc(a.display_name || '')}')">Edit</button>
         ${a.bot ? '' : `<button class="btn danger sm" onclick="delAccount('${esc(a.username)}')">Delete</button>`}
       </td>
-    </tr>`).join('');
+    </tr>`;
+  }).join('');
+}
+
+async function botAction(username, action) {
+  const msg = action === 'start'
+    ? `Start the auto-trade bot for "${username}"?\n\nIt will place REAL scheduled trades with this account's own API keys and balance, using the strategy settings on the Bot Config page.`
+    : `Stop the auto-trade bot for "${username}"?\n\nNo new scheduled entries will fire. An already-open position keeps its TP monitor and can still be squared off manually.`;
+  if (!confirm(msg)) return;
+  const d = await jpost(`/api/bots/${encodeURIComponent(username)}/${action}`);
+  if (d.ok) { toast(`Bot ${action === 'start' ? 'started' : 'stopped'} for ${username}`, 'ok'); loadAccounts(); }
+  else toast(d.error || 'Bot action failed', 'err');
 }
 
 function editAccount(username, display) {
