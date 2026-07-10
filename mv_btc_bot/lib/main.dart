@@ -701,7 +701,7 @@ class _DashboardPageState extends State<DashboardPage> {
               keyboardType: TextInputType.number,
               decoration: const InputDecoration(
                   labelText: 'Trailing SL (\$)',
-                  helperText: '0 = off · give-back from peak P&L'),
+                  helperText: '0 = off · arms once profit reaches this, then trails the peak'),
             ),
             TextField(
               controller: pollCtl,

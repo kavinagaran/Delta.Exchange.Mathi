@@ -272,10 +272,15 @@ def main():
              symbol, entry_mark, lots,
              "SHORT" if sign < 0 else "LONG", TARGET_PNL)
 
-    # Trailing stop: trail from the best P&L seen since the monitor started.
-    # Peak starts at 0 (entry), so before any profit a TSL of $X behaves like
-    # a fixed SL of $X; once P&L runs up, the floor rises with it.
-    peak_pnl = 0.0
+    # Trailing stop: trail from the best P&L seen since the monitor started —
+    # but it ARMS only once that peak has reached the TSL amount. Until then
+    # it stays dormant and losses are exclusively the fixed SL's job (an
+    # unarmed TSL used to act as a second, tighter stop below breakeven and
+    # cut a trade at -$259 that had a -$600 SL configured). Once armed, the
+    # floor (peak - TSL) is by construction at breakeven or better, so TSL
+    # can only ever close flat or in profit.
+    peak_pnl  = 0.0
+    tsl_armed = False
 
     while True:
         try:
@@ -287,17 +292,23 @@ def main():
             mark = get_mark(symbol)
             pnl  = (mark - entry_mark) * cv * lots * sign
             peak_pnl = max(peak_pnl, pnl)
+            if TSL_PNL > 0 and not tsl_armed and peak_pnl >= TSL_PNL:
+                tsl_armed = True
+                log.info("TSL ARMED — peak $%.2f reached the $%.2f trail; floor now $%.2f.",
+                         peak_pnl, TSL_PNL, peak_pnl - TSL_PNL)
 
             log.info("mark=%.4f  pnl=$%.2f  peak=$%.2f  tp=$%.2f  sl=%s  tsl=%s",
                      mark, pnl, peak_pnl, TARGET_PNL,
                      f"-${SL_PNL:.2f}" if SL_PNL > 0 else "off",
-                     f"${peak_pnl - TSL_PNL:.2f}" if TSL_PNL > 0 else "off")
+                     "off" if TSL_PNL <= 0 else
+                     (f"${peak_pnl - TSL_PNL:.2f}" if tsl_armed else
+                      f"unarmed (arms at +${TSL_PNL:.2f})"))
 
             if pnl >= TARGET_PNL:
                 if close_position(state, mark, pnl, "take_profit"):
                     log.info("Monitor done (take profit).")
                     break
-            elif TSL_PNL > 0 and pnl <= peak_pnl - TSL_PNL:
+            elif tsl_armed and pnl <= peak_pnl - TSL_PNL:
                 if close_position(state, mark, pnl, "trailing_stop"):
                     log.info("Monitor done (trailing stop: peak $%.2f, gave back $%.2f).",
                              peak_pnl, peak_pnl - pnl)
