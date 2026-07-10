@@ -434,6 +434,76 @@ class _DashboardPageState extends State<DashboardPage> {
     }
   }
 
+  double _intrinsic(String symbol, double strike, double s) {
+    // MV = move option (straddle): pays |move from strike|. C/P = vanilla.
+    if (symbol.startsWith('MV-')) return (s - strike).abs();
+    if (symbol.startsWith('P-')) return (strike - s).clamp(0, double.infinity).toDouble();
+    return (s - strike).clamp(0, double.infinity).toDouble();
+  }
+
+  void _showPayoff(Map<String, dynamic> st) {
+    final symbol = (st['symbol'] ?? '').toString();
+    final strike = (st['strike'] as num?)?.toDouble() ?? 0;
+    final entry  = (st['entry_mark'] as num?)?.toDouble() ?? 0;
+    final lots   = (st['lots'] as num?)?.toDouble() ?? 0;
+    final cv     = (st['contract_value'] as num?)?.toDouble() ?? 0.001;
+    final sign   = st['side'] == 'short' ? -1.0 : 1.0;
+    final btc    = (_evening['btc_futures_price'] as num?)?.toDouble() ?? strike;
+    if (strike <= 0 || entry <= 0) return;
+
+    final lo = (strike < btc ? strike : btc) * 0.955;
+    final hi = (strike > btc ? strike : btc) * 1.045;
+    const n = 120;
+    final xs = <double>[], ys = <double>[];
+    for (var i = 0; i <= n; i++) {
+      final s = lo + (hi - lo) * i / n;
+      xs.add(s);
+      ys.add((_intrinsic(symbol, strike, s) - entry) * cv * lots * sign);
+    }
+    final pnlNow = (_intrinsic(symbol, strike, btc) - entry) * cv * lots * sign;
+    final bes = symbol.startsWith('MV-')
+        ? [strike - entry, strike + entry]
+        : symbol.startsWith('P-') ? [strike - entry] : [strike + entry];
+
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: kSurf,
+        insetPadding: const EdgeInsets.symmetric(horizontal: 14),
+        title: Text('Payoff — $symbol',
+            style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              SizedBox(
+                height: 210,
+                width: double.maxFinite,
+                child: CustomPaint(
+                  painter: PayoffPainter(xs: xs, ys: ys, spot: btc, spotPnl: pnlNow),
+                ),
+              ),
+              const SizedBox(height: 12),
+              Text(
+                '${st['side'] == 'short' ? 'SHORT' : 'LONG'} ${fmtNum(lots)} lots'
+                ' · Strike \$${fmtNum(strike)} · Entry ${fmtUsd(entry, dp: 2)}\n'
+                'Breakeven ${bes.map((b) => '\$${fmtNum(b)}').join(' / ')}'
+                ' · BTC now \$${fmtNum(btc)}\n'
+                'At current BTC: ${fmtUsd(pnlNow)}',
+                style: const TextStyle(color: kMuted, fontSize: 12, height: 1.6),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Close')),
+        ],
+      ),
+    );
+  }
+
   Future<void> _squareOff(SlotMeta slot) async {
     final ok = await showDialog<bool>(
       context: context,
@@ -907,6 +977,16 @@ class _DashboardPageState extends State<DashboardPage> {
                 onPressed: () => _squareOff(slot),
                 child: const Text('⏹ SQUARE OFF', style: TextStyle(fontWeight: FontWeight.w700)),
               ),
+            ),
+            const SizedBox(width: 10),
+            OutlinedButton(
+              style: OutlinedButton.styleFrom(
+                foregroundColor: kGold,
+                side: const BorderSide(color: kGold, width: 1.5),
+                padding: const EdgeInsets.symmetric(vertical: 11, horizontal: 14),
+              ),
+              onPressed: () => _showPayoff(st),
+              child: const Icon(Icons.ssid_chart, size: 20),
             ),
           ],
         ),
@@ -1740,4 +1820,72 @@ class _SettingsPageState extends State<SettingsPage> {
       ),
     );
   }
+}
+
+// ─────────────────────────────────────────────────────────────
+// Payoff-at-settlement chart (dependency-free CustomPainter)
+// ─────────────────────────────────────────────────────────────
+class PayoffPainter extends CustomPainter {
+  final List<double> xs, ys;
+  final double spot, spotPnl;
+  PayoffPainter({required this.xs, required this.ys, required this.spot, required this.spotPnl});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (xs.length < 2) return;
+    const padL = 46.0, padR = 8.0, padT = 8.0, padB = 22.0;
+    final w = size.width - padL - padR, h = size.height - padT - padB;
+
+    double yMin = ys.reduce((a, b) => a < b ? a : b);
+    double yMax = ys.reduce((a, b) => a > b ? a : b);
+    if (yMin > 0) yMin = 0;
+    if (yMax < 0) yMax = 0;
+    final ySpan = (yMax - yMin) == 0 ? 1 : (yMax - yMin);
+    final xMin = xs.first, xSpan = xs.last - xs.first;
+
+    double px(double x) => padL + (x - xMin) / xSpan * w;
+    double py(double y) => padT + (yMax - y) / ySpan * h;
+
+    final grid = Paint()..color = const Color(0xFF1E2A45)..strokeWidth = 1;
+    final txt = TextStyle(color: const Color(0xFF8CA0BC), fontSize: 9);
+
+    // Horizontal gridlines + y labels (min, 0, max)
+    for (final y in {yMin, 0.0, yMax}) {
+      canvas.drawLine(Offset(padL, py(y)), Offset(padL + w, py(y)),
+          y == 0 ? (Paint()..color = const Color(0xFF8CA0BC)..strokeWidth = 1.2) : grid);
+      final tp = TextPainter(
+          text: TextSpan(text: '${y < 0 ? '-' : y > 0 ? '+' : ''}\$${y.abs().round()}', style: txt),
+          textDirection: TextDirection.ltr)..layout();
+      tp.paint(canvas, Offset(padL - tp.width - 4, py(y) - tp.height / 2));
+    }
+    // X labels (first, strike-ish middle, last)
+    for (final i in [0, xs.length ~/ 2, xs.length - 1]) {
+      final tp = TextPainter(
+          text: TextSpan(text: '\$${xs[i].round()}', style: txt),
+          textDirection: TextDirection.ltr)..layout();
+      tp.paint(canvas, Offset(px(xs[i]) - tp.width / 2, size.height - padB + 6));
+    }
+
+    // Payoff polyline, green above zero / red below, per segment
+    for (var i = 0; i < xs.length - 1; i++) {
+      final paint = Paint()
+        ..color = (ys[i] + ys[i + 1]) / 2 >= 0 ? kGreen : kRed
+        ..strokeWidth = 2.2
+        ..style = PaintingStyle.stroke;
+      canvas.drawLine(Offset(px(xs[i]), py(ys[i])),
+          Offset(px(xs[i + 1]), py(ys[i + 1])), paint);
+    }
+
+    // Current spot marker
+    final sx = px(spot.clamp(xs.first, xs.last)), sy = py(spotPnl.clamp(yMin, yMax));
+    canvas.drawLine(Offset(sx, padT), Offset(sx, padT + h),
+        Paint()..color = const Color(0x552563EB)..strokeWidth = 1);
+    canvas.drawCircle(Offset(sx, sy), 4.5, Paint()..color = const Color(0xFF2563EB));
+    canvas.drawCircle(Offset(sx, sy), 4.5,
+        Paint()..color = Colors.white..style = PaintingStyle.stroke..strokeWidth = 1.2);
+  }
+
+  @override
+  bool shouldRepaint(covariant PayoffPainter old) =>
+      old.xs != xs || old.ys != ys || old.spot != spot;
 }
