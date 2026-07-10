@@ -48,6 +48,14 @@ _env_lots = int(os.getenv("STRADDLE_LOTS", 1000))
 LOTS      = min(_env_lots, 1000)            # safety cap: never exceed 1000
 assert 1 <= LOTS <= 1000, f"LOTS must be between 1 and 1000, got {LOTS}"
 
+# Evening slot toggles (defaults on — this is the core trade).
+# EVENING_EXIT_ENABLED=false skips only the scheduled exit: the position then
+# closes via TP monitor, square-off, or settlement. The exit deliberately does
+# NOT also depend on EVENING_ENABLED, so switching off new entries never
+# strands an already-open position without its scheduled close.
+EVENING_ENABLED      = os.getenv("EVENING_ENABLED", "true").lower() in ("1", "true", "yes")
+EVENING_EXIT_ENABLED = os.getenv("EVENING_EXIT_ENABLED", "true").lower() in ("1", "true", "yes")
+
 # Timing in UTC — configurable via .env / dashboard (defaults: 12:05 entry, 19:30 exit)
 ENTRY_H_UTC = int(os.getenv("ENTRY_H_UTC", 12))
 ENTRY_M_UTC = int(os.getenv("ENTRY_M_UTC", 5))
@@ -795,10 +803,12 @@ def main():
              ("%02d:%02d UTC (%s)" % (MORNING_EXIT_H_UTC, MORNING_EXIT_M_UTC,
                                        _ist_label(MORNING_EXIT_H_UTC, MORNING_EXIT_M_UTC)))
              if MORNING_EXIT_ENABLED else "DISABLED (TP/settlement only)")
-    log.info("  Entry  : %02d:%02d UTC (%s)", ENTRY_H_UTC, ENTRY_M_UTC,
-             _ist_label(ENTRY_H_UTC, ENTRY_M_UTC))
-    log.info("  Exit   : %02d:%02d UTC (%s)", EXIT_H_UTC, EXIT_M_UTC,
-             _ist_label(EXIT_H_UTC, EXIT_M_UTC))
+    log.info("  Entry  : %02d:%02d UTC (%s)  enabled=%s", ENTRY_H_UTC, ENTRY_M_UTC,
+             _ist_label(ENTRY_H_UTC, ENTRY_M_UTC), EVENING_ENABLED)
+    log.info("  Exit   : %s",
+             ("%02d:%02d UTC (%s)" % (EXIT_H_UTC, EXIT_M_UTC,
+                                       _ist_label(EXIT_H_UTC, EXIT_M_UTC)))
+             if EVENING_EXIT_ENABLED else "DISABLED (TP/settlement only)")
     log.info("  Lots   : %d  |  DRY-RUN: %s", LOTS, DRY_RUN)
     log.info("=" * 64)
 
@@ -859,8 +869,9 @@ def main():
                     log.exception("Morning exit job failed")
                     send_telegram(f"⚠️ <b>MORNING EXIT FAILED — MATHI</b>\n<code>{exc}</code>")
 
-            # ENTRY TRIGGER  12:05–12:14 UTC
-            in_entry_window = (h == ENTRY_H_UTC
+            # ENTRY TRIGGER  12:05–12:14 UTC (skipped when EVENING_ENABLED=false)
+            in_entry_window = (EVENING_ENABLED
+                               and h == ENTRY_H_UTC
                                and ENTRY_WIN_START <= m < ENTRY_WIN_END)
             if in_entry_window and not fired_entry:
                 fired_entry = True
@@ -870,8 +881,10 @@ def main():
                     log.exception("Entry job failed")
                     send_telegram(f"⚠️ <b>ENTRY FAILED</b>\n<code>{exc}</code>")
 
-            # EXIT TRIGGER  19:30–19:39 UTC
-            in_exit_window = (h == EXIT_H_UTC
+            # EXIT TRIGGER  19:30–19:39 UTC (skipped when EVENING_EXIT_ENABLED=false;
+            # intentionally NOT gated on EVENING_ENABLED — see toggle comments up top)
+            in_exit_window = (EVENING_EXIT_ENABLED
+                              and h == EXIT_H_UTC
                               and EXIT_WIN_START <= m < EXIT_WIN_END)
             if in_exit_window and not fired_exit:
                 fired_exit = True

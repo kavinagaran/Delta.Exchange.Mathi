@@ -43,13 +43,13 @@
     <div class="card-hd">🌇 Evening Slot</div>
     <div class="card-bd form-grid two">
       <label class="fld"><span>Enabled</span>
-        <select disabled title="The evening slot is the bot's core trade and is always on"><option>Yes (always)</option></select>
+        <select id="c-EVENING_ENABLED"><option value="true">Yes</option><option value="false">No</option></select>
       </label>
       <label class="fld"><span>Lots</span><input id="c-STRADDLE_LOTS" type="number" min="1" max="5000"></label>
       <label class="fld"><span>Entry time (IST)</span><input id="t-evening-entry" type="time" step="60"></label>
       <label class="fld"><span>Exit time (IST)</span><input id="t-evening-exit" type="time" step="60"></label>
       <label class="fld"><span>Scheduled exit</span>
-        <select disabled title="The evening position is always closed at the scheduled exit time"><option>Enabled (always)</option></select>
+        <select id="c-EVENING_EXIT_ENABLED"><option value="true">Enabled</option><option value="false">Disabled (TP/settlement only)</option></select>
       </label>
       <label class="fld"><span>&nbsp;</span><span class="hint" style="display:block;padding:9px 0" id="utc-evening"></span></label>
       <label class="fld"><span>TP target $</span><input id="c-TP_TARGET_PNL" type="number"></label>
@@ -78,7 +78,7 @@
 
 {% block scripts %}
 <script>
-const KEYS = ['DRY_RUN','STRADDLE_LOTS','STRIKE_STEP',
+const KEYS = ['DRY_RUN','STRADDLE_LOTS','STRIKE_STEP','EVENING_ENABLED','EVENING_EXIT_ENABLED',
   'TELEGRAM_BOT_TOKEN','TELEGRAM_CHAT_ID','TELEGRAM_ALERTS','TP_TARGET_PNL','TP_POLL_SECS',
   'MORNING_ENABLED','MORNING_LOTS','MORNING_EXIT_ENABLED',
   'DYNAMIC_LOTS','TP_TARGET_PNL_MORNING','TP_POLL_SECS_MORNING','MAX_TRADES_PER_DAY'];

@@ -122,6 +122,7 @@ def _tp_running(slot: str = "evening") -> bool:
 # Keys the dashboard is allowed to read/write
 CONFIG_KEYS = [
     "DRY_RUN", "STRADDLE_LOTS", "STRIKE_STEP",
+    "EVENING_ENABLED", "EVENING_EXIT_ENABLED",
     "ENTRY_H_UTC", "ENTRY_M_UTC", "EXIT_H_UTC", "EXIT_M_UTC",
     "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "TELEGRAM_ALERTS",
     "TP_TARGET_PNL", "TP_POLL_SECS",
@@ -644,7 +645,9 @@ def api_status():
         hh, mm = divmod(t, 60)
         return f"{(hh + 11) % 12 + 1}:{mm:02d} {'PM' if hh >= 12 else 'AM'} IST"
     state["entry_ist"]         = _ist_str("ENTRY_H_UTC", "ENTRY_M_UTC", 12, 5)
-    state["exit_ist"]          = _ist_str("EXIT_H_UTC", "EXIT_M_UTC", 19, 30)
+    state["exit_ist"]          = (_ist_str("EXIT_H_UTC", "EXIT_M_UTC", 19, 30)
+                                  if os.getenv("EVENING_EXIT_ENABLED", "true").lower() in ("1", "true", "yes")
+                                  else "TP / settlement only")
     state["morning_entry_ist"] = _ist_str("MORNING_H_UTC", "MORNING_M_UTC", 0, 15)
     state["morning_exit_ist"]  = (_ist_str("MORNING_EXIT_H_UTC", "MORNING_EXIT_M_UTC", 11, 30)
                                   if os.getenv("MORNING_EXIT_ENABLED", "false").lower() in ("1", "true", "yes")
