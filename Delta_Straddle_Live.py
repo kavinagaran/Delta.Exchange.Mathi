@@ -43,6 +43,46 @@ API_KEY          = os.getenv("API_KEY",          "")
 API_SECRET       = os.getenv("API_SECRET",       "")
 PERPETUAL_SYMBOL = os.getenv("PERPETUAL_SYMBOL", "BTCUSD")
 
+# ── Account identity & per-user data (must come before strategy config:
+#    every os.getenv below may be overridden by this user's config.json) ──
+BOT_USER = os.getenv("BOT_USER", os.getenv("DASH_USER", "mathi"))
+DATA_DIR = Path(__file__).parent / "users" / BOT_USER
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+STATE_FILE         = DATA_DIR / "straddle_state.json"
+MORNING_STATE_FILE = DATA_DIR / "morning_state.json"
+HISTORY_FILE       = DATA_DIR / "trade_history.json"
+ENV_FILE           = Path(__file__).parent / ".env"
+CFG_FILE           = DATA_DIR / "config.json"
+
+# One-time migration: these files used to live in the repo root — move them
+# into the bot account's folder if they're still there.
+import shutil as _shutil
+for _f in ("straddle_state.json", "morning_state.json", "trade_history.json"):
+    _src = Path(__file__).parent / _f
+    _dst = DATA_DIR / _f
+    if _src.exists() and not _dst.exists():
+        _shutil.move(str(_src), str(_dst))
+
+# Each bot instance trades ITS user's own credentials (account.json),
+# falling back to the .env keys — one `mathi-bot@<user>` service per account.
+try:
+    _acct = json.loads((DATA_DIR / "account.json").read_text(encoding="utf-8"))
+    API_KEY    = _acct.get("api_key")    or API_KEY
+    API_SECRET = _acct.get("api_secret") or API_SECRET
+except Exception:
+    pass
+
+# Per-account strategy config: users/<name>/config.json overrides the .env
+# defaults key by key, so every os.getenv below is account-scoped.
+try:
+    for _k, _v in json.loads(CFG_FILE.read_text(encoding="utf-8")).items():
+        os.environ[str(_k)] = str(_v)
+except Exception:
+    pass
+
+TAG = BOT_USER.upper()   # identifies this instance in alerts and logs
+
 # Capped at 1000 — env can only decrease, never increase
 _env_lots = int(os.getenv("STRADDLE_LOTS", 1000))
 LOTS      = min(_env_lots, 1000)            # safety cap: never exceed 1000
@@ -100,38 +140,6 @@ MORNING_EXIT_WIN_END   = min(MORNING_EXIT_M_UTC + 10, 60)
 TELEGRAM_TOKEN  = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHATID = os.getenv("TELEGRAM_CHAT_ID",   "")
 TELEGRAM_ON     = os.getenv("TELEGRAM_ALERTS", "true").lower() in ("1", "true", "yes")
-
-# Every account has its own data folder (users/<name>/) shared with the
-# dashboard. The scheduled bot engine trades BOT_USER's account; its state
-# and history live in that user's folder.
-BOT_USER = os.getenv("BOT_USER", os.getenv("DASH_USER", "mathi"))
-DATA_DIR = Path(__file__).parent / "users" / BOT_USER
-DATA_DIR.mkdir(parents=True, exist_ok=True)
-
-STATE_FILE         = DATA_DIR / "straddle_state.json"
-MORNING_STATE_FILE = DATA_DIR / "morning_state.json"
-HISTORY_FILE       = DATA_DIR / "trade_history.json"
-ENV_FILE           = Path(__file__).parent / ".env"
-
-# One-time migration: these files used to live in the repo root — move them
-# into the bot account's folder if they're still there.
-import shutil as _shutil
-for _f in ("straddle_state.json", "morning_state.json", "trade_history.json"):
-    _src = Path(__file__).parent / _f
-    _dst = DATA_DIR / _f
-    if _src.exists() and not _dst.exists():
-        _shutil.move(str(_src), str(_dst))
-
-# Each bot instance trades ITS user's own credentials (account.json),
-# falling back to the .env keys — one `mathi-bot@<user>` service per account.
-try:
-    _acct = json.loads((DATA_DIR / "account.json").read_text(encoding="utf-8"))
-    API_KEY    = _acct.get("api_key")    or API_KEY
-    API_SECRET = _acct.get("api_secret") or API_SECRET
-except Exception:
-    pass
-
-TAG = BOT_USER.upper()   # identifies this instance in alerts and logs
 
 # ─────────────────────────────────────────────────────────────
 # LOGGING
@@ -856,6 +864,7 @@ def main():
     fired_morning_exit = False
     last_day           = None
     env_mtime          = ENV_FILE.stat().st_mtime if ENV_FILE.exists() else 0
+    cfg_mtime          = CFG_FILE.stat().st_mtime if CFG_FILE.exists() else 0
 
     while True:
         try:
@@ -927,13 +936,15 @@ def main():
             # anyone having to restart the service by hand. os.execv replaces
             # this process in place; daily-fire guards are state-file backed,
             # so a reload inside a trigger window can't double-fire orders.
-            if ENV_FILE.exists():
-                env_mt = ENV_FILE.stat().st_mtime
-                if env_mt != env_mtime and time.time() - env_mt > 2:
-                    log.info("Config change detected in .env — reloading bot with new settings.")
-                    send_telegram(f"🔄 <b>CONFIG CHANGED — BOT RELOADED ({TAG})</b>\n"
-                                  "New settings are now in effect.")
-                    os.execv(sys.executable, [sys.executable] + sys.argv)
+            env_mt = ENV_FILE.stat().st_mtime if ENV_FILE.exists() else 0
+            cfg_mt = CFG_FILE.stat().st_mtime if CFG_FILE.exists() else 0
+            if (env_mt != env_mtime or cfg_mt != cfg_mtime) \
+               and time.time() - max(env_mt, cfg_mt) > 2:
+                src = "config.json" if cfg_mt != cfg_mtime else ".env"
+                log.info("Config change detected in %s — reloading bot with new settings.", src)
+                send_telegram(f"🔄 <b>CONFIG CHANGED — BOT RELOADED ({TAG})</b>\n"
+                              "New settings are now in effect.")
+                os.execv(sys.executable, [sys.executable] + sys.argv)
 
             # Heartbeat every 10 min — reports both slots
             if m % 10 == 0 and now.second < POLL_SEC:

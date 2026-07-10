@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 
 {% block content %}
+<div class="banner info">These settings apply to <b>{{ display_name }}'s account only</b> — its bot instance, TP monitors and manual trading. Every account has its own configuration.</div>
 <div class="banner warn" id="dry-banner" style="display:none">⚠ DRY RUN is ON — entries are simulated, no real orders are placed.</div>
 
 <div class="card">
@@ -72,7 +73,7 @@
 
 <div class="btn-row">
   <button class="btn" onclick="saveConfig()" style="padding:10px 26px">💾 Save configuration</button>
-  <span class="hint" style="align-self:center">The bot watches .env and reloads itself within ~30 s of a save.</span>
+  <span class="hint" style="align-self:center">This account's bot instance picks up saved changes within ~30 s.</span>
 </div>
 {% endblock %}
 
@@ -150,7 +151,7 @@ async function saveConfig() {
     body[mk] = String(m);
   }
   const d = await jpost('/api/config', body);
-  if (d.ok) toast('Configuration saved — bot reloads within ~30 s' +
+  if (d.ok) toast('Saved for this account — its bot reloads within ~30 s' +
                   (d.tp_restarted?.length ? ` (TP restarted: ${d.tp_restarted.join(', ')})` : ''), 'ok');
   else toast('Save failed', 'err');
 }

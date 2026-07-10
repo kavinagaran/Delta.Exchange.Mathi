@@ -316,6 +316,30 @@ def _hist_file() -> Path:
     return _user_dir() / "trade_history.json"
 
 
+def _cfg_file() -> Path:
+    return _user_dir() / "config.json"
+
+
+def _user_cfg() -> dict:
+    """The active account's strategy config: .env values as global defaults,
+    overridden key by key by users/<name>/config.json."""
+    cfg = {k: os.getenv(k, "") for k in CONFIG_KEYS}
+    saved = _load_json(_cfg_file(), {})
+    if isinstance(saved, dict):
+        cfg.update({k: str(v) for k, v in saved.items() if k in CONFIG_KEYS})
+    return cfg
+
+
+def _cfg(key: str, default: str = "") -> str:
+    v = _user_cfg().get(key, "")
+    return v if v != "" else default
+
+
+def _cfg_bool(key: str, default: bool = False) -> bool:
+    v = _cfg(key)
+    return v.lower() in ("1", "true", "yes") if v else default
+
+
 @app.before_request
 def _auth_gate():
     open_paths = ("/login", "/static/", "/favicon.ico", "/health")
@@ -721,22 +745,26 @@ def api_status():
         state["btc_futures_price"] = float(r_btc.json().get("result", {}).get("mark_price") or 0)
     except Exception:
         state["btc_futures_price"] = None
-    # IST schedule strings for the UI, computed from the live .env config
+    # IST schedule strings for the UI, from the active account's own config
+    cfg = _user_cfg()
     def _ist_str(h_key, m_key, dflt_h, dflt_m):
         try:
-            h, m = int(os.getenv(h_key) or dflt_h), int(os.getenv(m_key) or dflt_m)
+            h, m = int(cfg.get(h_key) or dflt_h), int(cfg.get(m_key) or dflt_m)
         except ValueError:
             h, m = dflt_h, dflt_m
         t = (h * 60 + m + 330) % 1440
         hh, mm = divmod(t, 60)
         return f"{(hh + 11) % 12 + 1}:{mm:02d} {'PM' if hh >= 12 else 'AM'} IST"
+    def _cfg_on(key, default):
+        v = cfg.get(key, "")
+        return v.lower() in ("1", "true", "yes") if v else default
     state["entry_ist"]         = _ist_str("ENTRY_H_UTC", "ENTRY_M_UTC", 12, 5)
     state["exit_ist"]          = (_ist_str("EXIT_H_UTC", "EXIT_M_UTC", 19, 30)
-                                  if os.getenv("EVENING_EXIT_ENABLED", "true").lower() in ("1", "true", "yes")
+                                  if _cfg_on("EVENING_EXIT_ENABLED", True)
                                   else "TP / settlement only")
     state["morning_entry_ist"] = _ist_str("MORNING_H_UTC", "MORNING_M_UTC", 0, 15)
     state["morning_exit_ist"]  = (_ist_str("MORNING_EXIT_H_UTC", "MORNING_EXIT_M_UTC", 11, 30)
-                                  if os.getenv("MORNING_EXIT_ENABLED", "false").lower() in ("1", "true", "yes")
+                                  if _cfg_on("MORNING_EXIT_ENABLED", False)
                                   else "TP / settlement only")
     return jsonify(state)
 
@@ -860,8 +888,8 @@ def _slot_arg() -> str:
 
 
 def _send_telegram(text: str) -> None:
-    token = os.getenv("TELEGRAM_BOT_TOKEN", "")
-    chat  = os.getenv("TELEGRAM_CHAT_ID", "")
+    token = _cfg("TELEGRAM_BOT_TOKEN")
+    chat  = _cfg("TELEGRAM_CHAT_ID")
     if not token or not chat:
         return
     try:
@@ -894,10 +922,10 @@ def _current_atm_mv() -> dict | None:
 def _manual_entry_lots(slot: str, mark: float, cv: float) -> int:
     """Usual sizing: slot's configured lots, upgraded by dynamic sizing
     (max of configured and affordable-with-balance) when DYNAMIC_LOTS is on."""
-    configured = int(os.getenv("MORNING_LOTS", 2000) if slot == "morning"
-                     else os.getenv("STRADDLE_LOTS", 800))
+    configured = int(_cfg("MORNING_LOTS", "2000") if slot == "morning"
+                     else _cfg("STRADDLE_LOTS", "800"))
     max_lots = int(os.getenv("MAX_ORDER_LOTS", 5000))
-    if os.getenv("DYNAMIC_LOTS", "true").lower() not in ("1", "true", "yes"):
+    if not _cfg_bool("DYNAMIC_LOTS", True):
         return min(configured, max_lots)
     try:
         hdrs = _sign("GET", "/v2/wallet/balances")
@@ -937,7 +965,7 @@ def api_manual_entry_preview():
         "lots":       lots,
         "est_value":  round(mark * cv * lots, 2),
         "settlement": contract.get("settlement_time", ""),
-        "dry_run":    os.getenv("DRY_RUN", "false").lower() in ("1", "true", "yes"),
+        "dry_run":    _cfg_bool("DRY_RUN", False),
     })
 
 
@@ -977,7 +1005,7 @@ def api_manual_entry():
     # previously this always fired a REAL order regardless of the DRY RUN
     # toggle, so "simulating" via the Mode switch gave no real protection
     # against an accidental click on Buy/Sell.
-    is_dry_run = os.getenv("DRY_RUN", "false").lower() in ("1", "true", "yes")
+    is_dry_run = _cfg_bool("DRY_RUN", False)
 
     try:
         if is_dry_run:
@@ -1036,16 +1064,18 @@ def api_manual_entry():
 
 
 def _tp_env(slot: str):
+    """The active account's TP target/poll for a slot (their config.json,
+    .env defaults as fallback)."""
     if slot == "morning":
         keys, dflt = ("TP_TARGET_PNL_MORNING", "TP_POLL_SECS_MORNING"), (300.0, 30)
     else:
         keys, dflt = ("TP_TARGET_PNL", "TP_POLL_SECS"), (105.0, 30)
     try:
-        target = float(os.getenv(keys[0]) or dflt[0])
+        target = float(_cfg(keys[0]) or dflt[0])
     except ValueError:
         target = dflt[0]
     try:
-        poll = int(float(os.getenv(keys[1]) or dflt[1]))
+        poll = int(float(_cfg(keys[1]) or dflt[1]))
     except ValueError:
         poll = dflt[1]
     return target, poll
@@ -1443,7 +1473,7 @@ def api_summary():
 
 @app.route("/api/config", methods=["GET"])
 def get_config():
-    return jsonify({k: os.getenv(k, "") for k in CONFIG_KEYS})
+    return jsonify(_user_cfg())
 
 
 def _restart_tp_monitor(user: str, slot: str) -> bool:
@@ -1480,26 +1510,18 @@ _TP_KEYS_BY_SLOT = {
 
 @app.route("/api/config", methods=["POST"])
 def set_config():
+    """Save strategy settings for the ACTIVE account only — written to
+    users/<name>/config.json, never to the shared .env (which now serves
+    purely as the global default for keys an account hasn't set). The
+    account's bot instance watches its config.json and self-reloads."""
     data = request.json or {}
-    lines = ENV_FILE.read_text(encoding="utf-8").splitlines() if ENV_FILE.exists() else []
-    for key, val in data.items():
-        if key not in CONFIG_KEYS:
-            continue
-        # Replace EVERY matching line, not just the first: append scripts had
-        # produced duplicate keys, and since dotenv takes the LAST occurrence,
-        # replacing only the first made saves silently ineffective.
-        replaced = False
-        for i, line in enumerate(lines):
-            stripped = line.strip()
-            if stripped.startswith(key + "=") or stripped.startswith(key + " ="):
-                lines[i] = f"{key} = {val}"
-                replaced = True
-        if not replaced:
-            lines.append(f"{key} = {val}")
-    ENV_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    load_dotenv(override=True)
-    # The bot watches .env and reloads itself; running TP monitors don't,
-    # so bounce any of the active user's monitors whose targets just changed.
+    saved = _load_json(_cfg_file(), {})
+    if not isinstance(saved, dict):
+        saved = {}
+    saved.update({k: str(v) for k, v in data.items() if k in CONFIG_KEYS})
+    _cfg_file().write_text(json.dumps(saved, indent=2), encoding="utf-8")
+    # Running TP monitors don't watch config — bounce any of the active
+    # user's monitors whose targets just changed.
     user = _active_user()
     tp_restarted = []
     for slot, keys in _TP_KEYS_BY_SLOT.items():
@@ -1511,8 +1533,8 @@ def set_config():
 
 @app.route("/api/test-telegram", methods=["POST"])
 def test_telegram():
-    token   = os.getenv("TELEGRAM_BOT_TOKEN", "")
-    chat_id = os.getenv("TELEGRAM_CHAT_ID",   "")
+    token   = _cfg("TELEGRAM_BOT_TOKEN")
+    chat_id = _cfg("TELEGRAM_CHAT_ID")
     if not token or not chat_id:
         return jsonify({"ok": False, "error": "TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not configured"}), 400
     try:

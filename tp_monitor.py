@@ -44,6 +44,14 @@ try:
     _acct = json.loads((USER_DIR / "account.json").read_text(encoding="utf-8"))
 except Exception:
     _acct = {}
+
+# Per-account config overrides (users/<name>/config.json) — the TP target
+# and poll interval below must be THIS account's settings, not the globals.
+try:
+    for _k, _v in json.loads((USER_DIR / "config.json").read_text(encoding="utf-8")).items():
+        os.environ[str(_k)] = str(_v)
+except Exception:
+    pass
 API_KEY    = _acct.get("api_key")    or os.getenv("API_KEY", "")
 API_SECRET = _acct.get("api_secret") or os.getenv("API_SECRET", "")
 BASE_URL   = os.getenv("BASE_URL", "https://api.india.delta.exchange")
