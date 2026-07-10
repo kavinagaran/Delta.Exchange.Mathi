@@ -6,7 +6,7 @@
     <div class="card-hd">Account Value</div>
     <div class="card-bd">
       <div class="stats" style="margin:0">
-        <div class="stat"><div class="lbl">Balance (USD)</div><div class="val" id="w-usd">—</div><div class="sub" id="w-avail">available: —</div></div>
+        <div class="stat"><div class="lbl">Balance (USD)</div><div class="val" id="w-usd">—</div><div class="sub" id="w-avail">Available: —</div></div>
         <div class="stat"><div class="lbl">Balance (INR)</div><div class="val" id="w-inr">—</div><div class="sub" id="w-rate">USD/INR: —</div></div>
       </div>
     </div>
@@ -23,7 +23,7 @@
 </div>
 
 <div class="card">
-  <div class="card-hd">All Open Positions <span class="spacer"></span><span class="hint">everything on this Delta account — bot-tracked or not</span></div>
+  <div class="card-hd">All Open Positions <span class="spacer"></span><span class="hint">Everything on this Delta account — bot-tracked or not</span></div>
   <div class="tbl-wrap">
     <table>
       <thead><tr>
@@ -42,7 +42,7 @@ async function load() {
     const w = await jget('/api/wallet');
     if (w.usd_balance != null) {
       document.getElementById('w-usd').textContent  = '$' + fN(w.usd_balance, 2);
-      document.getElementById('w-avail').textContent = 'available: $' + fN(w.usd_available, 2);
+      document.getElementById('w-avail').textContent = 'Available: $' + fN(w.usd_available, 2);
       document.getElementById('w-inr').textContent  = w.inr_balance != null ? '₹' + fN(w.inr_balance) : '—';
       document.getElementById('w-rate').textContent = 'USD/INR: ' + fN(w.usd_inr_rate, 2);
     }

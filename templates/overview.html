@@ -74,7 +74,7 @@ function slotHtml(s, slot, tp) {
   if (s.status === 'OPEN') {
     const pnl = s.live_pnl;
     return `
-      <div class="big-pnl ${pnlCls(pnl)}">${f$(pnl)}<small>live p&amp;l</small></div>
+      <div class="big-pnl ${pnlCls(pnl)}">${f$(pnl)}<small>Live P&amp;L</small></div>
       <dl class="kv">
         <dt>Contract</dt><dd>${esc(s.symbol)}</dd>
         <dt>Side</dt><dd><span class="badge ${s.side === 'short' ? 'short' : 'long'}">${(s.side || 'long').toUpperCase()}</span></dd>
@@ -95,7 +95,7 @@ function slotHtml(s, slot, tp) {
   /* CLOSED real */
   const pnl = +s.pnl_usd;
   return `
-    <div class="big-pnl ${pnlCls(pnl)}">${f$(pnl)}<small>closed ${esc(utcToIst(s.exit_time_utc))}</small></div>
+    <div class="big-pnl ${pnlCls(pnl)}">${f$(pnl)}<small>Closed ${esc(utcToIst(s.exit_time_utc))}</small></div>
     <dl class="kv">
       <dt>Contract</dt><dd>${esc(s.symbol)}</dd>
       <dt>Lots</dt><dd>${fN(s.lots)}</dd>
@@ -110,8 +110,8 @@ async function loadSlots() {
   const evening = { ...st }; delete evening.morning;
   document.getElementById('slot-morning').innerHTML = slotHtml(st.morning, 'morning', tp);
   document.getElementById('slot-evening').innerHTML = slotHtml(evening, 'evening', tp);
-  if (st.morning_entry_ist) document.getElementById('when-morning').textContent = 'entry ' + st.morning_entry_ist;
-  if (st.entry_ist)         document.getElementById('when-evening').textContent = 'entry ' + st.entry_ist;
+  if (st.morning_entry_ist) document.getElementById('when-morning').textContent = 'Entry ' + st.morning_entry_ist;
+  if (st.entry_ist)         document.getElementById('when-evening').textContent = 'Entry ' + st.entry_ist;
 }
 
 /* ── Stat tiles ─────────────────────────────────────────── */
@@ -123,8 +123,8 @@ async function loadStats() {
     <div class="stat"><div class="lbl">Total P&L</div><div class="val ${pnlCls(s.total_pnl)}">${f$(s.total_pnl)}</div><div class="sub">${s.total_days} trades</div></div>
     <div class="stat"><div class="lbl">Win rate</div><div class="val">${fN(s.win_rate, 1)}%</div><div class="sub">${s.wins} W / ${s.losses} L</div></div>
     <div class="stat"><div class="lbl">Avg win</div><div class="val c-pos">${f$(s.avg_win)}</div><div class="sub">Avg loss ${f$(s.avg_loss)}</div></div>
-    <div class="stat"><div class="lbl">Risk / reward</div><div class="val">${fN(s.rr, 2)}</div><div class="sub">reward per $1 risked</div></div>
-    <div class="stat"><div class="lbl">Max drawdown</div><div class="val c-neg">${f$(s.max_dd)}</div><div class="sub">peak to trough</div></div>`;
+    <div class="stat"><div class="lbl">Risk / reward</div><div class="val">${fN(s.rr, 2)}</div><div class="sub">Reward per $1 risked</div></div>
+    <div class="stat"><div class="lbl">Max drawdown</div><div class="val c-neg">${f$(s.max_dd)}</div><div class="sub">Peak to trough</div></div>`;
 }
 
 /* ── Today's trades ─────────────────────────────────────── */
