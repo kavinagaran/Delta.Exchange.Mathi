@@ -964,8 +964,9 @@ def _current_atm_mv() -> dict | None:
 
 
 def _manual_entry_lots(slot: str, mark: float, cv: float) -> int:
-    """Usual sizing: slot's configured lots, upgraded by dynamic sizing
-    (max of configured and affordable-with-balance) when DYNAMIC_LOTS is on."""
+    """Usual sizing: slot's configured lots, sized DOWN by dynamic sizing
+    (min of configured and affordable-with-balance) when DYNAMIC_LOTS is on —
+    an order never exceeds either the configured size or the balance."""
     configured = int(_cfg("MORNING_LOTS", "2000") if slot == "morning"
                      else _cfg("STRADDLE_LOTS", "800"))
     max_lots = int(os.getenv("MAX_ORDER_LOTS", 5000))
@@ -980,7 +981,7 @@ def _manual_entry_lots(slot: str, mark: float, cv: float) -> int:
                 bal = float(w.get("available_balance") or 0)
                 break
         afford = int((bal * 0.98) / (mark * cv)) if mark > 0 else 0
-        return max(min(max(configured, afford), max_lots), 1)
+        return max(min(configured, afford, max_lots), 1)
     except Exception:
         return min(configured, max_lots)
 

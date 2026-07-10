@@ -1492,7 +1492,7 @@ class _ConfigsPageState extends State<ConfigsPage> {
                         (v) => setState(() => _telegramAlerts = v)),
                     _switchTile('Dynamic Lots', _dynamicLots,
                         (v) => setState(() => _dynamicLots = v),
-                        subtitle: 'At entry, buy max(configured, affordable with balance)'),
+                        subtitle: 'At entry, buy min(configured, affordable with balance)'),
                     _numField('MAX_TRADES_PER_DAY', 'Max trades per day'),
                     _numField('STRIKE_STEP', 'Strike step (\$)'),
                   ],

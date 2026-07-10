@@ -486,8 +486,9 @@ def get_available_usd() -> float:
 def _effective_lots(configured: int, mark: float, contract_val: float, label: str) -> int:
     """Dynamic lot sizing: how many lots the available balance can buy at the
     current mark (with a 2% fee/slippage buffer). Per spec we buy whichever is
-    HIGHER — configured or affordable — capped at MAX_ORDER_LOTS. Falls back
-    to the configured size if the balance check fails."""
+    LOWER — configured or affordable — so the order never exceeds either the
+    configured size or the balance (capped at MAX_ORDER_LOTS, floor 1). Falls
+    back to the configured size if the balance check fails."""
     if not DYNAMIC_LOTS:
         return configured
     try:
@@ -498,14 +499,13 @@ def _effective_lots(configured: int, mark: float, contract_val: float, label: st
         log.warning("%s: balance check failed (%s) — using configured %d lots.",
                     label, e, configured)
         return configured
-    lots = min(max(configured, afford), MAX_ORDER_LOTS)
+    lots = max(min(configured, afford, MAX_ORDER_LOTS), 1)
     log.info("%s lot sizing: configured=%d  affordable=%d  (bal $%.2f, $%.4f/lot)  -> using %d",
              label, configured, afford, bal, cost, lots)
     if afford < configured:
-        log.warning("%s: balance only covers %d of the configured %d lots — "
-                    "order may be rejected for insufficient margin.",
-                    label, afford, configured)
-    return max(lots, 1)
+        log.info("%s: sized DOWN to %d lots — balance covers fewer than the configured %d.",
+                 label, lots, configured)
+    return lots
 
 # ─────────────────────────────────────────────────────────────
 # API / IP WATCHDOG — detects whitelisted-IP lockout
