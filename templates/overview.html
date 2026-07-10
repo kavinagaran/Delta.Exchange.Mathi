@@ -1,5 +1,9 @@
 {% extends "base.html" %}
 
+{% block head %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+{% endblock %}
+
 {% block content %}
 <div class="greeting">
   <h2>Welcome Back, {{ display_name }} 👋</h2>
@@ -16,6 +20,17 @@
   <div class="card">
     <div class="card-hd slot-hd">🌇 <span>Evening Trade</span><span class="when" id="when-evening">5:35 PM IST</span></div>
     <div class="card-bd" id="slot-evening"><div class="no-pos">Loading…</div></div>
+  </div>
+</div>
+
+<div class="modal-back" id="payoff-modal" onclick="if(event.target===this)closePayoff()">
+  <div class="modal">
+    <div class="modal-hd">
+      <h3 id="payoff-title">Payoff at settlement</h3>
+      <button class="x" onclick="closePayoff()" aria-label="Close">×</button>
+    </div>
+    <div class="chart-box" style="height:300px"><canvas id="payoff-chart"></canvas></div>
+    <div class="payoff-facts" id="payoff-facts"></div>
   </div>
 </div>
 
@@ -91,6 +106,10 @@ function slotHtml(s, slot, tp) {
       </dl>
       <div class="btn-row center">
         <button class="btn danger" onclick="squareOff('${slot}')">Square off now</button>
+        <button class="btn secondary" onclick="showPayoff('${slot}')" title="Payoff at settlement">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18M7 14l4-6 4 3 5-8"/></svg>
+          Payoff
+        </button>
       </div>
       ${tpRow(slot, tp)}`;
   }
@@ -113,6 +132,7 @@ function slotHtml(s, slot, tp) {
 async function loadSlots() {
   const [st, tp] = await Promise.all([jget('/api/status'), jget('/api/tp-monitor').catch(() => ({}))]);
   const evening = { ...st }; delete evening.morning;
+  window._slots = { morning: st.morning || {}, evening, btc: +st.btc_futures_price || 0 };
   document.getElementById('slot-morning').innerHTML = slotHtml(st.morning, 'morning', tp);
   document.getElementById('slot-evening').innerHTML = slotHtml(evening, 'evening', tp);
   if (st.morning_entry_ist) document.getElementById('when-morning').textContent = 'Entry ' + st.morning_entry_ist;
@@ -207,6 +227,98 @@ async function saveTp(slot) {
   if (d.ok) toast('TP/SL settings saved' + (d.tp_restarted?.length ? ' — monitor restarted' : ''), 'ok');
   else toast('Save failed', 'err');
 }
+
+/* ── Payoff chart ───────────────────────────────────────── */
+let payoffChart = null;
+
+function _intrinsic(symbol, strike, S) {
+  // MV = move option (straddle): pays |move from strike|. C/P = vanilla.
+  if (symbol.startsWith('MV-')) return Math.abs(S - strike);
+  if (symbol.startsWith('P-'))  return Math.max(strike - S, 0);
+  return Math.max(S - strike, 0);
+}
+
+function showPayoff(slot) {
+  const s = (window._slots || {})[slot];
+  if (!s || s.status !== 'OPEN') { toast('No open position to chart', 'err'); return; }
+  const symbol = s.symbol || '';
+  const strike = +s.strike, entry = +s.entry_mark;
+  const lots   = +s.lots, cv = +s.contract_value || 0.001;
+  const sign   = s.side === 'short' ? -1 : 1;
+  const btc    = (window._slots || {}).btc || strike;
+
+  // Sweep settlement prices around strike & spot
+  const lo = Math.min(strike, btc) * 0.955, hi = Math.max(strike, btc) * 1.045;
+  const N = 120, xs = [], ys = [];
+  for (let i = 0; i <= N; i++) {
+    const S = lo + (hi - lo) * i / N;
+    xs.push(S);
+    ys.push(+((_intrinsic(symbol, strike, S) - entry) * cv * lots * sign).toFixed(2));
+  }
+  const pnlNow = +((_intrinsic(symbol, strike, btc) - entry) * cv * lots * sign).toFixed(2);
+
+  // Breakevens: where intrinsic == entry
+  const bes = symbol.startsWith('MV-') ? [strike - entry, strike + entry]
+            : symbol.startsWith('P-')  ? [strike - entry]
+            : [strike + entry];
+
+  document.getElementById('payoff-title').textContent =
+    `Payoff at settlement — ${symbol} (${(s.side || 'long').toUpperCase()} ${fN(lots)} lots)`;
+  document.getElementById('payoff-facts').innerHTML =
+    `<span class="f">Strike <b>$${fN(strike)}</b></span>` +
+    `<span class="f">Entry mark <b>$${fN(entry, 2)}</b></span>` +
+    bes.map(b => `<span class="f">Breakeven <b>$${fN(b)}</b></span>`).join('') +
+    `<span class="f">BTC now <b>$${fN(btc)}</b></span>` +
+    `<span class="f">At current BTC <b class="${pnlCls(pnlNow)}">${f$(pnlNow)}</b></span>`;
+
+  const css = getComputedStyle(document.documentElement);
+  const POS = css.getPropertyValue('--pos').trim(), NEG = css.getPropertyValue('--neg').trim();
+  const ctx = document.getElementById('payoff-chart').getContext('2d');
+  if (payoffChart) payoffChart.destroy();
+  payoffChart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: xs.map(v => Math.round(v)),
+      datasets: [
+        { label: 'P&L at settlement', data: ys, borderWidth: 2.5, pointRadius: 0, tension: 0,
+          borderColor: POS,
+          segment: { borderColor: c => (c.p1.parsed.y >= 0 ? POS : NEG) },
+          fill: { target: 'origin',
+                  above: 'rgba(8,135,93,.10)', below: 'rgba(217,45,32,.10)' } },
+        { label: 'Current BTC', data: xs.map((v, i) =>
+            (i === xs.reduce((a, _, j) => Math.abs(xs[j] - btc) < Math.abs(xs[a] - btc) ? j : a, 0)) ? pnlNow : null),
+          pointRadius: 5, pointBackgroundColor: '#2563eb', borderColor: '#2563eb',
+          showLine: false },
+      ],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: {
+          title: items => 'BTC $' + fN(+items[0].label),
+          label: c => c.datasetIndex === 0 ? ` P&L: ${f$(c.raw)}` : ` Current BTC: ${f$(c.raw)}`,
+        } },
+      },
+      scales: {
+        x: { ticks: { color: '#68758a', font: { size: 10 }, maxTicksLimit: 10 },
+             grid: { color: 'rgba(100,116,139,.10)' },
+             title: { display: true, text: 'BTC price at settlement', color: '#68758a', font: { size: 11 } } },
+        y: { ticks: { color: '#68758a', font: { size: 10 },
+               callback: v => (v >= 0 ? '+$' : '-$') + Math.abs(v).toLocaleString() },
+             grid: { color: c => c.tick.value === 0 ? 'rgba(26,35,51,.45)' : 'rgba(100,116,139,.10)',
+                     lineWidth: c => c.tick.value === 0 ? 1.5 : 1 } },
+      },
+    },
+  });
+  document.getElementById('payoff-modal').classList.add('show');
+}
+
+function closePayoff() {
+  document.getElementById('payoff-modal').classList.remove('show');
+}
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closePayoff(); });
 
 function loadAll() { loadSlots(); loadStats(); loadToday(); refreshTopbar(); }
 loadAll();

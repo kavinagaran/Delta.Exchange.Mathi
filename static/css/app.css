@@ -311,5 +311,29 @@ body.login-body {
 .toast.ok  { background: var(--pos); }
 
 .chart-box { position: relative; height: 340px; }
+
+/* ── Modal ──────────────────────────────────────────────── */
+.modal-back {
+  position: fixed; inset: 0; z-index: 60;
+  background: rgba(13, 18, 32, .55);
+  display: none; place-items: center; padding: 20px;
+}
+.modal-back.show { display: grid; }
+.modal {
+  width: 680px; max-width: 94vw;
+  background: var(--surface); border-radius: 12px;
+  box-shadow: 0 18px 50px rgba(6, 12, 26, .35);
+  padding: 18px 20px 20px;
+}
+.modal-hd { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+.modal-hd h3 { font-size: 15px; font-weight: 650; }
+.modal-hd .x {
+  margin-left: auto; border: 0; background: none; cursor: pointer;
+  font-size: 20px; color: var(--muted); line-height: 1;
+}
+.modal-hd .x:hover { color: var(--text); }
+.payoff-facts { display: flex; gap: 18px; flex-wrap: wrap; margin-top: 12px; }
+.payoff-facts .f { font-size: 12px; color: var(--muted); }
+.payoff-facts .f b { color: var(--text); font-variant-numeric: tabular-nums; }
 .mono { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; }
 .hint { color: var(--muted); font-size: 12px; }
