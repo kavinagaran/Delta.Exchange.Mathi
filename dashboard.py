@@ -157,6 +157,17 @@ app = Flask(__name__,
             static_folder=str(BASE / "static"), static_url_path="/static",
             template_folder=str(BASE / "templates"))
 
+
+@app.template_global()
+def asset_v(path: str) -> str:
+    """Cache-busting version for a static asset: its mtime. Deploys restart
+    the dashboard, so a changed file always gets a fresh URL and browsers
+    never serve a stale stylesheet/script."""
+    try:
+        return str(int((BASE / "static" / path).stat().st_mtime))
+    except OSError:
+        return "0"
+
 # Stable session secret across restarts so logins survive a redeploy.
 _SECRET_FILE = BASE / ".dash_secret"
 if not _SECRET_FILE.exists():

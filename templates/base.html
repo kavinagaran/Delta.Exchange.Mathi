@@ -4,8 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{ page_title }} · NITHI-BOT</title>
-<link rel="stylesheet" href="/static/css/app.css">
-<script src="/static/js/app.js"></script>
+<link rel="stylesheet" href="/static/css/app.css?v={{ asset_v('css/app.css') }}">
+<script src="/static/js/app.js?v={{ asset_v('js/app.js') }}"></script>
 {% block head %}{% endblock %}
 </head>
 <body>
