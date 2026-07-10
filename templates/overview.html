@@ -50,14 +50,21 @@ function manualBtns(slot) {
 function tpRow(slot, tp) {
   const t = (tp || {})[slot] || {};
   const on = !!t.running;
-  return `<div class="tp-row">
-    <span class="tp-state ${on ? 'on' : 'off'}">TP/SL monitor: ${on ? 'RUNNING' : 'stopped'}</span>
-    <label class="fld"><span>TP $</span><input id="tp-target-${slot}" type="number" step="1" value="${t.target_pnl ?? ''}"></label>
-    <label class="fld"><span>SL $ (0=off)</span><input id="tp-sl-${slot}" type="number" step="1" min="0" value="${t.sl_pnl ?? 0}"></label>
-    <label class="fld"><span>TSL $ (0=off)</span><input id="tp-tsl-${slot}" type="number" step="1" min="0" value="${t.tsl_pnl ?? 0}"></label>
-    <label class="fld"><span>Poll s</span><input id="tp-poll-${slot}" type="number" step="5" min="10" value="${t.poll_secs ?? ''}"></label>
-    <button class="btn secondary sm" onclick="saveTp('${slot}')">Save</button>
-    <button class="btn ${on ? 'warn' : 'success'} sm" onclick="toggleTp('${slot}', ${on})">${on ? 'Stop' : 'Start'}</button>
+  return `<div class="tp-box">
+    <div class="tp-box-hd">
+      <span class="tp-title">TP / SL / TSL Monitor</span>
+      <span class="pill ${on ? 'live' : 'idle'} mini"><span class="dot"></span>${on ? 'RUNNING' : 'STOPPED'}</span>
+      <span class="tp-spacer"></span>
+      <button class="btn secondary sm" onclick="saveTp('${slot}')">Save</button>
+      <button class="btn ${on ? 'warn' : 'success'} sm" onclick="toggleTp('${slot}', ${on})">${on ? 'Stop' : 'Start'}</button>
+    </div>
+    <div class="tp-fields">
+      <label class="fld"><span>Take profit $</span><input id="tp-target-${slot}" type="number" step="1" value="${t.target_pnl ?? ''}"></label>
+      <label class="fld"><span>Stop loss $</span><input id="tp-sl-${slot}" type="number" step="1" min="0" value="${t.sl_pnl ?? 0}" placeholder="0 = off"></label>
+      <label class="fld"><span>Trailing SL $</span><input id="tp-tsl-${slot}" type="number" step="1" min="0" value="${t.tsl_pnl ?? 0}" placeholder="0 = off"></label>
+      <label class="fld"><span>Poll secs</span><input id="tp-poll-${slot}" type="number" step="5" min="10" value="${t.poll_secs ?? ''}"></label>
+    </div>
+    <div class="tp-note">SL / TSL: 0 = off · TSL trails the peak P&L, closing when profit gives back that amount</div>
   </div>`;
 }
 
