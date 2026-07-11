@@ -79,7 +79,9 @@ function tpRow(slot, tp) {
       <label class="fld"><span>Trailing SL $</span><input id="tp-tsl-${slot}" type="number" step="1" min="0" value="${t.tsl_pnl ?? 0}" placeholder="0 = off"></label>
       <label class="fld"><span>Poll secs</span><input id="tp-poll-${slot}" type="number" step="5" min="10" value="${t.poll_secs ?? ''}"></label>
     </div>
-    <div class="tp-note">SL / TSL: 0 = off · TSL arms once profit first reaches the TSL amount, then closes when P&L gives that back from its peak (never below breakeven — losses are SL's job)</div>
+    <div class="tp-note">${t.tsl_armed
+        ? `<b class="c-pos">TSL armed — floor ${f$(t.tsl_floor)}${t.tsl_on_exchange ? ' · resting stop on exchange' : ''}</b> · `
+        : ''}SL / TSL: 0 = off · TSL arms once profit first reaches the TSL amount, then trails the peak with a resting stop order on the exchange (never below breakeven — losses are SL's job)</div>
   </div>`;
 }
 

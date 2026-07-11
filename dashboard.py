@@ -1148,8 +1148,13 @@ def tp_monitor_status():
     out = {}
     for slot in SLOTS:
         target, poll, sl, tsl = _tp_env(slot)
+        st = _load_json(_slot_file(slot), {})
         out[slot] = {"running": _tp_running(user, slot), "target_pnl": target,
-                     "poll_secs": poll, "sl_pnl": sl, "tsl_pnl": tsl}
+                     "poll_secs": poll, "sl_pnl": sl, "tsl_pnl": tsl,
+                     # live trail bookkeeping persisted by the monitor
+                     "tsl_armed":       bool(st.get("tsl_armed")) and st.get("status") == "OPEN",
+                     "tsl_floor":       st.get("tsl_floor"),
+                     "tsl_on_exchange": bool(st.get("tsl_stop_order_id")) and st.get("status") == "OPEN"}
     # Back-compat top-level fields = evening
     out.update(out["evening"])
     return jsonify(out)
