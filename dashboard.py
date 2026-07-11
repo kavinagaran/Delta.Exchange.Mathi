@@ -233,10 +233,24 @@ def _verify_pw(password: str, stored: str) -> bool:
         return False
 
 
+# PBKDF2 is deliberately slow (~100k+ iterations) — Basic-auth clients like
+# the Android app resend credentials on EVERY request, so memoize the verdict
+# per (username, password-hash) to avoid burning CPU on each poll.
+_basic_cache: dict = {}
+
+
 def _save_account(acct: dict) -> None:
     d = _udir(acct["username"])
     d.mkdir(parents=True, exist_ok=True)
     (d / "account.json").write_text(json.dumps(acct, indent=2), encoding="utf-8")
+    _drop_basic_cache(acct["username"])
+
+
+def _drop_basic_cache(username: str) -> None:
+    """Forget memoized Basic-auth verdicts for a user so a password change
+    or account deletion takes effect immediately, not on next restart."""
+    for k in [k for k in _basic_cache if k[0] == username]:
+        del _basic_cache[k]
 
 
 def _bootstrap_users() -> None:
@@ -293,12 +307,6 @@ def _find_account(username: str) -> dict | None:
     return acct
 
 
-# PBKDF2 is deliberately slow (~100k+ iterations) — Basic-auth clients like
-# the Android app resend credentials on EVERY request, so memoize the verdict
-# per (username, password-hash) to avoid burning CPU on each poll.
-_basic_cache: dict = {}
-
-
 def _basic_account_ok(username: str, password: str) -> bool:
     u = _safe_user(username)
     if not u:
@@ -332,8 +340,14 @@ def _active_user() -> str:
 
 
 def _active_creds() -> tuple:
-    """(api_key, api_secret) of the active account; .env keys as fallback."""
-    acct = _session_account() or _find_account(DASH_USER)
+    """(api_key, api_secret) of the active account. A logged-in account uses
+    ONLY its own keys — an account without keys gets none, never another
+    account's. The .env keys back just the legacy no-account paths
+    (DASH_USER/DASH_PASS Basic auth, local dev with no users tree)."""
+    acct = _session_account()
+    if acct:
+        return acct.get("api_key", ""), acct.get("api_secret", "")
+    acct = _find_account(DASH_USER)
     if acct and acct.get("api_key") and acct.get("api_secret"):
         return acct["api_key"], acct["api_secret"]
     return API_KEY, API_SECRET
@@ -424,6 +438,11 @@ def logout():
     return redirect("/login")
 
 
+@app.route("/health")
+def health():
+    return jsonify({"ok": True})
+
+
 @app.route("/api/me")
 def api_me():
     acct = _session_account()
@@ -494,6 +513,7 @@ def api_accounts_delete(username):
     # Remove only the login (account.json); trade data stays on disk so
     # history is never silently destroyed.
     _account_file(username).unlink(missing_ok=True)
+    _drop_basic_cache(username)
     return jsonify({"ok": True})
 
 
