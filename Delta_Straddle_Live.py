@@ -485,22 +485,28 @@ def get_available_usd() -> float:
 
 def _effective_lots(configured: int, mark: float, contract_val: float, label: str) -> int:
     """Dynamic lot sizing: how many lots the available balance can buy at the
-    current mark (with a 2% fee/slippage buffer). Per spec we buy whichever is
-    LOWER — configured or affordable — so the order never exceeds either the
-    configured size or the balance (capped at MAX_ORDER_LOTS, floor 1). Falls
-    back to the configured size if the balance check fails."""
+    current mark. Per spec we buy whichever is LOWER — configured or
+    affordable — so the order never exceeds either the configured size or the
+    balance (capped at MAX_ORDER_LOTS, floor 1). Falls back to the configured
+    size if the balance check fails. Delta charges the options taker fee on
+    the underlying NOTIONAL, not the premium — each lot must be funded for
+    premium + fee or the order bounces with insufficient_commission."""
     if not DYNAMIC_LOTS:
         return configured
     try:
         bal  = get_available_usd()
-        cost = mark * contract_val
+        # 0.05% of notional pads Delta's 0.03% taker rate; the exchange caps
+        # the fee at 10% of premium. 2% buffer stays for slippage.
+        spot = get_btc_price()
+        fee  = min(0.0005 * spot, 0.10 * mark) * contract_val
+        cost = mark * contract_val + fee
         afford = int((bal * 0.98) / cost) if cost > 0 else 0
     except Exception as e:
         log.warning("%s: balance check failed (%s) — using configured %d lots.",
                     label, e, configured)
         return configured
     lots = max(min(configured, afford, MAX_ORDER_LOTS), 1)
-    log.info("%s lot sizing: configured=%d  affordable=%d  (bal $%.2f, $%.4f/lot)  -> using %d",
+    log.info("%s lot sizing: configured=%d  affordable=%d  (bal $%.2f, $%.4f/lot incl. fee)  -> using %d",
              label, configured, afford, bal, cost, lots)
     if afford < configured:
         log.info("%s: sized DOWN to %d lots — balance covers fewer than the configured %d.",

@@ -991,10 +991,13 @@ def _current_atm_mv() -> dict | None:
         return None
 
 
-def _manual_entry_lots(slot: str, mark: float, cv: float) -> int:
+def _manual_entry_lots(slot: str, mark: float, cv: float, strike: float = 0.0) -> int:
     """Usual sizing: slot's configured lots, sized DOWN by dynamic sizing
     (min of configured and affordable-with-balance) when DYNAMIC_LOTS is on —
-    an order never exceeds either the configured size or the balance."""
+    an order never exceeds either the configured size or the balance.
+    Delta charges the options taker fee on the underlying NOTIONAL, not the
+    premium, so each lot must be funded for premium + fee or the exchange
+    rejects the order with insufficient_commission."""
     configured = int(_cfg("MORNING_LOTS", "2000") if slot == "morning"
                      else _cfg("STRADDLE_LOTS", "800"))
     max_lots = int(os.getenv("MAX_ORDER_LOTS", 5000))
@@ -1008,7 +1011,10 @@ def _manual_entry_lots(slot: str, mark: float, cv: float) -> int:
             if w.get("asset_symbol") == "USD":
                 bal = float(w.get("available_balance") or 0)
                 break
-        afford = int((bal * 0.98) / (mark * cv)) if mark > 0 else 0
+        # 0.05% of notional pads Delta's 0.03% taker rate; the exchange caps
+        # the fee at 10% of premium (also the fallback when strike is unknown).
+        fee = (min(0.0005 * strike, 0.10 * mark) if strike > 0 else 0.10 * mark) * cv
+        afford = int((bal * 0.98) / (mark * cv + fee)) if mark > 0 else 0
         return max(min(configured, afford, max_lots), 1)
     except Exception:
         return min(configured, max_lots)
@@ -1028,7 +1034,7 @@ def api_manual_entry_preview():
                      .json().get("result", {}).get("mark_price") or 0)
     except Exception:
         mark = 0.0
-    lots = _manual_entry_lots(slot, mark, cv)
+    lots = _manual_entry_lots(slot, mark, cv, float(contract.get("strike_price") or 0))
     return jsonify({
         "ok":         True,
         "slot":       slot,
@@ -1072,7 +1078,7 @@ def api_manual_entry():
                      .json().get("result", {}).get("mark_price") or 0)
     except Exception:
         mark = 0.0
-    lots = _manual_entry_lots(slot, mark, cv)
+    lots = _manual_entry_lots(slot, mark, cv, float(contract.get("strike_price") or 0))
 
     # Manual entries must respect Mode the same way the scheduled bot does —
     # previously this always fired a REAL order regardless of the DRY RUN
