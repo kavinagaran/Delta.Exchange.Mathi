@@ -1175,12 +1175,15 @@ def tp_monitor_status():
     for slot in SLOTS:
         target, poll, sl, tsl = _tp_env(slot)
         st = _load_json(_slot_file(slot), {})
+        open_stop = bool(st.get("tsl_stop_order_id")) and st.get("status") == "OPEN"
         out[slot] = {"running": _tp_running(user, slot), "target_pnl": target,
                      "poll_secs": poll, "sl_pnl": sl, "tsl_pnl": tsl,
-                     # live trail bookkeeping persisted by the monitor
+                     # live trail bookkeeping persisted by the monitor — SL and TSL
+                     # share one resting exchange stop, distinguished by stop_kind
                      "tsl_armed":       bool(st.get("tsl_armed")) and st.get("status") == "OPEN",
                      "tsl_floor":       st.get("tsl_floor"),
-                     "tsl_on_exchange": bool(st.get("tsl_stop_order_id")) and st.get("status") == "OPEN"}
+                     "tsl_on_exchange": open_stop and st.get("stop_kind") == "tsl",
+                     "sl_on_exchange":  open_stop and st.get("stop_kind", "sl") == "sl"}
     # Back-compat top-level fields = evening
     out.update(out["evening"])
     return jsonify(out)

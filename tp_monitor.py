@@ -132,8 +132,9 @@ def place_order(product_id, symbol, side, size):
 
 
 # ─────────────────────────────────────────────────────────────
-# Exchange-resident stop orders (the armed TSL lives ON Delta, so the
-# position stays protected even if this monitor or the server dies)
+# Exchange-resident stop orders (the fixed SL and the armed TSL both live
+# ON Delta as a single resting reduce-only stop, so the position stays
+# protected even if this monitor or the server dies)
 # ─────────────────────────────────────────────────────────────
 def place_stop_order(product_id, side, size, stop_price):
     """Reduce-only stop-market: triggers on MARK price (same basis as our
@@ -337,14 +338,13 @@ def main():
              symbol, entry_mark, lots,
              "SHORT" if sign < 0 else "LONG", TARGET_PNL)
 
-    # Trailing stop: trail from the best P&L seen — but it ARMS only once
-    # that peak has reached the TSL amount. Until then it stays dormant and
-    # losses are exclusively the fixed SL's job. Once armed, the floor
-    # (peak - TSL) starts at breakeven and only rises — AND it is placed as
-    # a reduce-only stop-market order ON THE EXCHANGE, ratcheted upward as
-    # the peak climbs, so the position stays protected even if this monitor
-    # or the whole server dies. Peak/armed/stop-order id are persisted into
-    # the slot state file so restarts resume instead of forgetting the trail.
+    # Fixed SL and trailing stop share ONE resting exchange order across the
+    # position's life: the SL is placed at monitor start at -SL_PNL; once the
+    # trailing stop ARMS (peak reaches the TSL amount) the same order is just
+    # ratcheted upward to the new floor (peak - TSL) and re-tagged "tsl" —
+    # never two stops fighting each other, never a gap in coverage. Peak /
+    # armed / stop-order id / kind are persisted into the slot state file so
+    # restarts resume instead of forgetting the trail.
     product_id  = state["product_id"]
     is_short    = sign < 0
     close_side  = "buy" if is_short else "sell"
@@ -352,6 +352,7 @@ def main():
     tsl_armed   = bool(state.get("tsl_armed"))
     stop_id     = state.get("tsl_stop_order_id")
     stop_floor  = float(state.get("tsl_floor") or 0.0)
+    stop_kind   = state.get("stop_kind") or ("tsl" if tsl_armed else "sl")
     persist_pk  = peak_pnl
     ratchet_min = max(5.0, TSL_PNL * 0.05)   # move the stop on >= this floor gain
 
@@ -359,57 +360,65 @@ def main():
         """P&L floor ($) -> option mark trigger price, on the 0.1 tick."""
         return max(round(entry_mark + sign * floor_usd / (cv * lots), 1), 0.1)
 
-    def ensure_stop(floor_usd):
+    def ensure_stop(floor_usd, kind):
         """Place / ratchet the exchange stop to the new floor. Never moves it
         down. Ratchet order: edit in place; else place NEW first, cancel old
-        after — a failed step always leaves one protective stop resting."""
-        nonlocal stop_id, stop_floor
+        after — a failed step always leaves one protective stop resting.
+        kind is 'sl' or 'tsl', just for logging/telegram/exit-trigger tagging —
+        the resting-order mechanics are identical either way."""
+        nonlocal stop_id, stop_floor, stop_kind
         price = floor_price(floor_usd)
+        tag = kind.upper()
         if stop_id:
             resp = edit_stop_price(stop_id, product_id, price)
             if resp.get("success"):
-                stop_floor = floor_usd
-                save_state_fields(tsl_peak=round(peak_pnl, 2), tsl_armed=True,
-                                  tsl_floor=round(floor_usd, 2), tsl_stop_order_id=stop_id)
-                log.info("TSL stop RATCHETED to $%.1f (floor $%.2f, order %s).",
-                         price, floor_usd, stop_id)
+                stop_floor, stop_kind = floor_usd, kind
+                save_state_fields(tsl_peak=round(peak_pnl, 2), tsl_armed=tsl_armed,
+                                  tsl_floor=round(floor_usd, 2), tsl_stop_order_id=stop_id,
+                                  stop_kind=kind)
+                log.info("%s stop RATCHETED to $%.1f (floor $%.2f, order %s).",
+                         tag, price, floor_usd, stop_id)
                 return
             log.warning("Stop edit failed (%s) — replacing.", resp.get("error"))
         resp = place_stop_order(product_id, close_side, int(state.get("lots", lots)), price)
         new_id = (resp.get("result") or {}).get("id") if resp.get("success") else None
         if new_id:
             old = stop_id
-            stop_id, stop_floor = new_id, floor_usd
+            stop_id, stop_floor, stop_kind = new_id, floor_usd, kind
             if old:
                 cancel_order(old, product_id)
-            save_state_fields(tsl_peak=round(peak_pnl, 2), tsl_armed=True,
-                              tsl_floor=round(floor_usd, 2), tsl_stop_order_id=stop_id)
-            log.info("TSL stop PLACED on exchange: %s %d lots @ trigger $%.1f (floor $%.2f, order %s).",
-                     close_side.upper(), int(state.get("lots", lots)), price, floor_usd, stop_id)
+            save_state_fields(tsl_peak=round(peak_pnl, 2), tsl_armed=tsl_armed,
+                              tsl_floor=round(floor_usd, 2), tsl_stop_order_id=stop_id,
+                              stop_kind=kind)
+            log.info("%s stop PLACED on exchange: %s %d lots @ trigger $%.1f (floor $%.2f, order %s).",
+                     tag, close_side.upper(), int(state.get("lots", lots)), price, floor_usd, stop_id)
         else:
             log.warning("Stop placement failed: %s — monitor-side trigger remains the fallback.",
                         resp.get("error", resp))
 
-    def finalize_stop_fill(order):
+    def finalize_stop_fill(order, kind):
         """The exchange stop executed — record the real fill as the exit."""
         fill = float(order.get("average_fill_price") or 0)
         done = abs(int(float(order.get("size") or state.get("lots", lots))))
         real = round((fill - entry_mark) * cv * done * sign, 2)
+        exit_trigger = f"trailing_stop_{SLOT}" if kind == "tsl" else f"stop_loss_{SLOT}"
         st = load_state()
         st.update({
             "status":        "CLOSED",
             "exit_time_utc": time.strftime("%H:%M:%S", time.gmtime()),
             "exit_mark":     fill,
             "pnl_usd":       real,
-            "exit_trigger":  f"trailing_stop_{SLOT}",
+            "exit_trigger":  exit_trigger,
             "exit_order_id": order.get("id"),
         })
         STATE_FILE.write_text(json.dumps(st, indent=2), encoding="utf-8")
         append_history(st)
         label = "🌅 MORNING" if SLOT == "morning" else "🌇 EVENING"
         psign = "+" if real >= 0 else "-"
+        head_label = "TRAILING STOP" if kind == "tsl" else "STOP LOSS"
+        emoji = "🔻" if kind == "tsl" else "🛑"
         send_telegram(
-            f"🔻 <b>TRAILING STOP EXECUTED (exchange) — {label} ({USER.upper()})</b>\n"
+            f"{emoji} <b>{head_label} EXECUTED (exchange) — {label} ({USER.upper()})</b>\n"
             f"<code>{'━' * 24}</code>\n"
             f"Symbol  » <code>{symbol}</code>\n"
             f"Lots    » <code>{done:,}</code>\n"
@@ -422,7 +431,7 @@ def main():
     def cleanup_stop():
         if stop_id:
             cancel_order(stop_id, product_id)
-            log.info("Resting TSL stop %s cancelled.", stop_id)
+            log.info("Resting %s stop %s cancelled.", stop_kind.upper(), stop_id)
 
     # If the dashboard stops this monitor (SIGTERM), take the resting stop
     # with us — a stopped monitor must not leave invisible orders behind.
@@ -436,8 +445,10 @@ def main():
         pass
 
     if stop_id:
-        log.info("Resumed with resting TSL stop %s (floor $%.2f, peak $%.2f).",
-                 stop_id, stop_floor, peak_pnl)
+        log.info("Resumed with resting %s stop %s (floor $%.2f, peak $%.2f).",
+                 stop_kind.upper(), stop_id, stop_floor, peak_pnl)
+    elif SL_PNL > 0:
+        ensure_stop(-SL_PNL, "sl")
 
     while True:
         try:
@@ -453,8 +464,9 @@ def main():
                 if live == 0:
                     order = get_order(stop_id)
                     if str(order.get("state")) == "closed":
-                        finalize_stop_fill(order)
-                        log.info("Monitor done (trailing stop executed on exchange).")
+                        finalize_stop_fill(order, stop_kind)
+                        log.info("Monitor done (%s executed on exchange).",
+                                 "trailing stop" if stop_kind == "tsl" else "stop loss")
                     else:
                         log.info("Position closed externally — cancelling resting stop.")
                         cleanup_stop()
@@ -478,13 +490,14 @@ def main():
             if tsl_armed and TSL_PNL > 0:
                 floor = peak_pnl - TSL_PNL
                 if stop_id is None or floor - stop_floor >= ratchet_min:
-                    ensure_stop(floor)
+                    ensure_stop(floor, "tsl")
 
             log.info("mark=%.4f  pnl=$%.2f  peak=$%.2f  tp=$%.2f  sl=%s  tsl=%s",
                      mark, pnl, peak_pnl, TARGET_PNL,
-                     f"-${SL_PNL:.2f}" if SL_PNL > 0 else "off",
+                     (f"-${SL_PNL:.2f} (on exchange)" if (SL_PNL > 0 and stop_id and stop_kind == "sl")
+                      else (f"-${SL_PNL:.2f}" if SL_PNL > 0 else "off")),
                      "off" if TSL_PNL <= 0 else
-                     (f"${stop_floor:.2f} (on exchange)" if stop_id else
+                     (f"${stop_floor:.2f} (on exchange)" if (stop_id and stop_kind == "tsl") else
                       (f"${peak_pnl - TSL_PNL:.2f}" if tsl_armed else
                        f"unarmed (arms at +${TSL_PNL:.2f})")))
 
@@ -500,9 +513,8 @@ def main():
                     log.info("Monitor done (trailing stop: peak $%.2f, gave back $%.2f).",
                              peak_pnl, peak_pnl - pnl)
                     break
-            elif SL_PNL > 0 and pnl <= -SL_PNL:
-                cleanup_stop()
-                stop_id = None
+            elif SL_PNL > 0 and stop_id is None and pnl <= -SL_PNL:
+                # Fallback only — normally the exchange-resident stop handles this
                 if close_position(state, mark, pnl, "stop_loss"):
                     log.info("Monitor done (stop loss).")
                     break
