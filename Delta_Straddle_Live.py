@@ -17,6 +17,7 @@ import hmac
 import json
 import logging
 import os
+import subprocess
 import sys
 import time
 from datetime import datetime, timezone, timedelta
@@ -112,11 +113,12 @@ EXIT_M_UTC  = int(os.getenv("EXIT_M_UTC",  30))
 assert 0 <= ENTRY_H_UTC <= 23 and 0 <= ENTRY_M_UTC <= 59, "invalid entry time"
 assert 0 <= EXIT_H_UTC  <= 23 and 0 <= EXIT_M_UTC  <= 59, "invalid exit time"
 
-# Execution windows (minutes) — fires once per day inside these ranges
+# Execution windows (minutes). Entries fire only inside a 10-min window (a
+# stale late entry is worse than no entry); exits fire from their start time
+# ONWARD (catch-up), so bot downtime can't strand a position past its exit.
 ENTRY_WIN_START = ENTRY_M_UTC
 ENTRY_WIN_END   = min(ENTRY_M_UTC + 10, 60)  # 10-min window, capped at hour end
 EXIT_WIN_START  = EXIT_M_UTC
-EXIT_WIN_END    = min(EXIT_M_UTC  + 10, 60)  # 10-min window, capped at hour end
 
 DRY_RUN  = os.getenv("DRY_RUN", "false").lower() in ("1", "true", "yes")
 POLL_SEC = 30
@@ -141,8 +143,7 @@ MORNING_EXIT_ENABLED = os.getenv("MORNING_EXIT_ENABLED", "true").lower() in ("1"
 MORNING_EXIT_H_UTC = int(os.getenv("MORNING_EXIT_H_UTC", 11))
 MORNING_EXIT_M_UTC = int(os.getenv("MORNING_EXIT_M_UTC", 30))
 assert 0 <= MORNING_EXIT_H_UTC <= 23 and 0 <= MORNING_EXIT_M_UTC <= 59, "invalid morning exit time"
-MORNING_EXIT_WIN_START = MORNING_EXIT_M_UTC
-MORNING_EXIT_WIN_END   = min(MORNING_EXIT_M_UTC + 10, 60)
+MORNING_EXIT_WIN_START = MORNING_EXIT_M_UTC   # fires from this time ONWARD (catch-up)
 
 # Telegram alerts
 TELEGRAM_TOKEN  = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -514,6 +515,65 @@ def _effective_lots(configured: int, mark: float, contract_val: float, label: st
     return lots
 
 # ─────────────────────────────────────────────────────────────
+# TP MONITOR SPAWN + STALE-STOP SWEEP
+# ─────────────────────────────────────────────────────────────
+def start_tp_monitor(slot: str):
+    """Spawn tp_monitor.py for this slot right after an entry, so TP/SL/TSL
+    protection never depends on someone pressing Start in the dashboard.
+    Uses the same users/<user>/tp_<slot>.pid file the dashboard tracks."""
+    if DRY_RUN:
+        return   # no real position to protect
+    try:
+        pf = DATA_DIR / f"tp_{slot}.pid"
+        if pf.exists():
+            try:
+                # POSIX liveness probe; the live bot runs on Linux (Windows
+                # dev copy is DRY_RUN and returns above — os.kill(pid, 0)
+                # is NOT safe as a liveness check on Windows).
+                os.kill(int(pf.read_text().strip()), 0)
+                log.info("TP monitor for %s already running — not spawning.", slot)
+                return
+            except (OSError, ValueError):
+                pass
+        script = Path(__file__).parent / "tp_monitor.py"
+        proc = subprocess.Popen(
+            [sys.executable, str(script), "--slot", slot, "--user", BOT_USER],
+            cwd=str(Path(__file__).parent),
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        pf.write_text(str(proc.pid))
+        log.info("TP monitor spawned for %s slot (pid %d).", slot, proc.pid)
+    except Exception as exc:
+        log.warning("TP monitor spawn failed for %s: %s", slot, exc)
+        send_telegram(f"⚠️ <b>TP MONITOR SPAWN FAILED — {slot.upper()} ({TAG})</b>\n"
+                      f"<code>{exc}</code>\nStart it manually from the dashboard.")
+
+
+def cancel_product_stops(product_id: int):
+    """Cancel any resting stop/TP orders left on this product from an earlier
+    position — a stale reduce-only order must never fire against the brand-new
+    position we are about to open."""
+    if DRY_RUN:
+        return
+    try:
+        data = _get("/v2/orders",
+                    params={"product_ids": str(product_id), "states": "open"},
+                    auth=True)
+        for o in data.get("result", []):
+            if not o.get("stop_order_type"):
+                continue
+            body = json.dumps({"id": o["id"], "product_id": product_id},
+                              separators=(",", ":"))
+            hdrs = _sign("DELETE", "/v2/orders", "", body)
+            requests.delete(BASE_URL + "/v2/orders", data=body, headers=hdrs,
+                            timeout=15)
+            log.info("Cancelled stale resting order %s on product %d.",
+                     o["id"], product_id)
+    except Exception as exc:
+        log.warning("Stale-stop sweep failed for product %d: %s", product_id, exc)
+
+
+# ─────────────────────────────────────────────────────────────
 # API / IP WATCHDOG — detects whitelisted-IP lockout
 # ─────────────────────────────────────────────────────────────
 _ip_alert_at   = 0.0
@@ -612,6 +672,7 @@ def morning_entry_job():
     log.info("Entry mark  : $%.4f/BTC", entry_mark)
     log.info("Lots        : %d  |  Total premium: $%.2f", lots, total_cost)
 
+    cancel_product_stops(product_id)
     order = place_market_order(product_id, symbol, MORNING_SIDE, lots)
     fill  = float(order.get("result", {}).get("average_fill_price") or entry_mark)
 
@@ -650,6 +711,7 @@ def morning_entry_job():
         f"Mode    » <code>{'DRY-RUN ⚠' if DRY_RUN else 'LIVE ●'}</code>"
     )
     log.info("Morning straddle opened: %d lots %s @ $%.4f", lots, symbol, fill)
+    start_tp_monitor("morning")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -686,7 +748,11 @@ def entry_job():
     log.info("Lots        : %d  |  Total premium: $%.2f", lots, total_cost)
 
     # Place the single entry order (direction per EVENING_SIDE config)
+    cancel_product_stops(product_id)
     order = place_market_order(product_id, symbol, EVENING_SIDE, lots)
+    # Record the REAL fill, not the pre-order snapshot — all downstream P&L
+    # (TP/SL triggers included) keys off entry_mark.
+    fill  = float(order.get("result", {}).get("average_fill_price") or entry_mark)
 
     # Persist — this is what prevents any second order today
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -701,9 +767,9 @@ def entry_job():
         "settlement":     settlement,
         "contract_value": contract_val,
         "lots":           lots,
-        "entry_mark":     entry_mark,
+        "entry_mark":     round(fill, 4),
         "btc_at_entry":   btc_price,
-        "total_cost_usd": round(total_cost, 4),
+        "total_cost_usd": round(fill * contract_val * lots, 4),
         "order_id":       order.get("result", {}).get("id"),
         "dry_run":        DRY_RUN,
     })
@@ -717,12 +783,13 @@ def entry_job():
         f"Side    » <code>{'SHORT — sold to open' if EVENING_SIDE == 'sell' else 'LONG — bought'}</code>\n"
         f"Strike  » <code>${strike:,.0f}</code>\n"
         f"Lots    » <code>{lots:,}</code>\n"
-        f"Premium » <code>${entry_mark:.4f} / BTC</code>\n"
-        f"Cost    » <code>${total_cost:.2f}</code>\n"
+        f"Premium » <code>${fill:.4f} / BTC</code>\n"
+        f"Cost    » <code>${fill * contract_val * lots:.2f}</code>\n"
         f"BTC     » <code>${btc_price:,.2f}</code>\n"
         f"Time    » <code>{datetime.now(timezone.utc).strftime('%H:%M UTC')}  (IST +5:30)</code>\n"
         f"Mode    » <code>{'DRY-RUN ⚠' if DRY_RUN else 'LIVE ●'}</code>"
     )
+    start_tp_monitor("evening")
 
 # ─────────────────────────────────────────────────────────────
 # EXIT JOBS — shared close logic for both slots
@@ -912,11 +979,15 @@ def main():
                     log.exception("Morning entry job failed")
                     send_telegram(f"⚠️ <b>MORNING ENTRY FAILED — {TAG}</b>\n<code>{exc}</code>")
 
-            # MORNING EXIT TRIGGER (skipped when MORNING_EXIT_ENABLED=false)
+            # MORNING EXIT TRIGGER (skipped when MORNING_EXIT_ENABLED=false).
+            # Catch-up semantics: fires any time AFTER the exit time too, so a
+            # bot that was down during the exit window still closes the
+            # position when it comes back (exit_job no-ops if nothing is open).
             in_morning_exit = (MORNING_ENABLED
                                and MORNING_EXIT_ENABLED
-                               and h == MORNING_EXIT_H_UTC
-                               and MORNING_EXIT_WIN_START <= m < MORNING_EXIT_WIN_END)
+                               and (h > MORNING_EXIT_H_UTC
+                                    or (h == MORNING_EXIT_H_UTC
+                                        and m >= MORNING_EXIT_WIN_START)))
             if in_morning_exit and not fired_morning_exit:
                 fired_morning_exit = True
                 try:
@@ -937,11 +1008,14 @@ def main():
                     log.exception("Entry job failed")
                     send_telegram(f"⚠️ <b>ENTRY FAILED — {TAG}</b>\n<code>{exc}</code>")
 
-            # EXIT TRIGGER  19:30–19:39 UTC (skipped when EVENING_EXIT_ENABLED=false;
-            # intentionally NOT gated on EVENING_ENABLED — see toggle comments up top)
+            # EXIT TRIGGER  19:30 UTC onward (skipped when EVENING_EXIT_ENABLED=false;
+            # intentionally NOT gated on EVENING_ENABLED — see toggle comments up top).
+            # Catch-up semantics like the morning exit: any time past the exit
+            # time still fires, so downtime during the old 10-min window can no
+            # longer leave a position riding to settlement.
             in_exit_window = (EVENING_EXIT_ENABLED
-                              and h == EXIT_H_UTC
-                              and EXIT_WIN_START <= m < EXIT_WIN_END)
+                              and (h > EXIT_H_UTC
+                                   or (h == EXIT_H_UTC and m >= EXIT_WIN_START)))
             if in_exit_window and not fired_exit:
                 fired_exit = True
                 try:

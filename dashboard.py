@@ -802,8 +802,20 @@ def _enrich_live(state: dict) -> dict:
     return state
 
 
+_last_revive = {"ts": 0.0}
+
+
 @app.route("/api/status")
 def api_status():
+    # Piggyback monitor revival on the UI's status polling: a TP monitor that
+    # died mid-day (OOM, crash) gets respawned within a minute instead of
+    # only at dashboard startup.
+    if time.time() - _last_revive["ts"] > 60:
+        _last_revive["ts"] = time.time()
+        try:
+            _revive_tp_monitors()
+        except Exception:
+            pass
     _sync_states_from_exchange()
     state   = _enrich_live(_load_json(_slot_file("evening"), {}))
     morning = _enrich_live(_load_json(_slot_file("morning"), {}))
@@ -902,6 +914,22 @@ def api_square_off():
                 break
         if live_size == 0:
             return jsonify({"ok": False, "error": "Position not found on exchange — may have already been closed."}), 400
+
+        # Cancel any resting exchange stop/TP the monitor owns for this
+        # position BEFORE closing — they must not race our market close, and
+        # an orphaned reduce-only stop could fire against a later position
+        # in the same contract.
+        for oid_key in ("tsl_stop_order_id", "tp_stop_order_id"):
+            oid = state.get(oid_key)
+            if oid:
+                try:
+                    body_c = json.dumps({"id": oid, "product_id": product_id},
+                                        separators=(",", ":"))
+                    hdrs_c = _sign("DELETE", "/v2/orders", "", body_c)
+                    req.delete(f"{API_BASE}/v2/orders", data=body_c,
+                               headers=hdrs_c, timeout=10)
+                except Exception:
+                    pass
 
         # Use actual exchange size; negative size = short position
         is_short   = live_size < 0 or state.get("side") == "short"
@@ -1073,6 +1101,16 @@ def api_manual_entry():
     pid    = int(contract["id"])
     symbol = contract["symbol"]
     cv     = float(contract.get("contract_value") or 0.001)
+
+    # Two slots must never share one contract: exchange positions are per
+    # product, so one slot's stop firing would close BOTH slots' exposure and
+    # the P&L attribution would be garbage.
+    other_slot = "morning" if slot == "evening" else "evening"
+    other = _load_json(_slot_file(other_slot), {})
+    if other.get("status") == "OPEN" and int(other.get("product_id", 0) or 0) == pid:
+        return jsonify({"ok": False,
+                        "error": f"The {other_slot} slot already holds {symbol} — "
+                                 "two slots can't share one contract"}), 400
     try:
         mark = float(req.get(f"{API_BASE}/v2/tickers/{symbol}", timeout=6)
                      .json().get("result", {}).get("mark_price") or 0)
@@ -1183,7 +1221,8 @@ def tp_monitor_status():
                      "tsl_armed":       bool(st.get("tsl_armed")) and st.get("status") == "OPEN",
                      "tsl_floor":       st.get("tsl_floor"),
                      "tsl_on_exchange": open_stop and st.get("stop_kind") == "tsl",
-                     "sl_on_exchange":  open_stop and st.get("stop_kind", "sl") == "sl"}
+                     "sl_on_exchange":  open_stop and st.get("stop_kind", "sl") == "sl",
+                     "tp_on_exchange":  bool(st.get("tp_stop_order_id")) and st.get("status") == "OPEN"}
     # Back-compat top-level fields = evening
     out.update(out["evening"])
     return jsonify(out)

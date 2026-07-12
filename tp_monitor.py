@@ -136,15 +136,16 @@ def place_order(product_id, symbol, side, size):
 # ON Delta as a single resting reduce-only stop, so the position stays
 # protected even if this monitor or the server dies)
 # ─────────────────────────────────────────────────────────────
-def place_stop_order(product_id, side, size, stop_price):
+def place_stop_order(product_id, side, size, stop_price, order_kind="stop_loss_order"):
     """Reduce-only stop-market: triggers on MARK price (same basis as our
-    P&L math). reduce_only guarantees it can only ever close exposure."""
+    P&L math). reduce_only guarantees it can only ever close exposure.
+    order_kind: 'stop_loss_order' (SL / TSL) or 'take_profit_order' (TP)."""
     payload = {
         "product_id":          product_id,
         "size":                size,
         "side":                side,
         "order_type":          "market_order",
-        "stop_order_type":     "stop_loss_order",
+        "stop_order_type":     order_kind,
         "stop_price":          f"{stop_price:.1f}",
         "stop_trigger_method": "mark_price",
         "reduce_only":         True,
@@ -338,12 +339,16 @@ def main():
              symbol, entry_mark, lots,
              "SHORT" if sign < 0 else "LONG", TARGET_PNL)
 
-    # Fixed SL and trailing stop share ONE resting exchange order across the
-    # position's life: the SL is placed at monitor start at -SL_PNL; once the
-    # trailing stop ARMS (peak reaches the TSL amount) the same order is just
-    # ratcheted upward to the new floor (peak - TSL) and re-tagged "tsl" —
-    # never two stops fighting each other, never a gap in coverage. Peak /
-    # armed / stop-order id / kind are persisted into the slot state file so
+    # BOTH exits live on the exchange as resting reduce-only orders, so the
+    # position stays protected in both directions even if this monitor or the
+    # whole server dies:
+    #   - one stop order (SL placed at -SL_PNL from the start; once the TSL
+    #     ARMS — peak reaches the TSL amount — the same order is ratcheted
+    #     upward to the floor (peak - TSL) and re-tagged "tsl"), and
+    #   - one take-profit order at +TARGET_PNL.
+    # Placement is retried every poll until it sticks, and both orders are
+    # re-placed if the position size changes (top-up / partial close). All
+    # ids / peak / armed / kind are persisted into the slot state file so
     # restarts resume instead of forgetting the trail.
     product_id  = state["product_id"]
     is_short    = sign < 0
@@ -353,6 +358,9 @@ def main():
     stop_id     = state.get("tsl_stop_order_id")
     stop_floor  = float(state.get("tsl_floor") or 0.0)
     stop_kind   = state.get("stop_kind") or ("tsl" if tsl_armed else "sl")
+    stop_lots   = int(state.get("stop_lots") or lots)
+    tp_id       = state.get("tp_stop_order_id")
+    tp_lots     = int(state.get("tp_lots") or lots)
     persist_pk  = peak_pnl
     ratchet_min = max(5.0, TSL_PNL * 0.05)   # move the stop on >= this floor gain
 
@@ -364,44 +372,70 @@ def main():
         """Place / ratchet the exchange stop to the new floor. Never moves it
         down. Ratchet order: edit in place; else place NEW first, cancel old
         after — a failed step always leaves one protective stop resting.
-        kind is 'sl' or 'tsl', just for logging/telegram/exit-trigger tagging —
-        the resting-order mechanics are identical either way."""
-        nonlocal stop_id, stop_floor, stop_kind
+        A size change (top-up / partial close) forces a full replace so the
+        stop always covers the whole position. kind is 'sl' or 'tsl', just
+        for logging/telegram/exit-trigger tagging — the resting-order
+        mechanics are identical either way."""
+        nonlocal stop_id, stop_floor, stop_kind, stop_lots
         price = floor_price(floor_usd)
         tag = kind.upper()
-        if stop_id:
+        if stop_id and stop_lots == lots:
             resp = edit_stop_price(stop_id, product_id, price)
             if resp.get("success"):
                 stop_floor, stop_kind = floor_usd, kind
                 save_state_fields(tsl_peak=round(peak_pnl, 2), tsl_armed=tsl_armed,
                                   tsl_floor=round(floor_usd, 2), tsl_stop_order_id=stop_id,
-                                  stop_kind=kind)
+                                  stop_kind=kind, stop_lots=stop_lots)
                 log.info("%s stop RATCHETED to $%.1f (floor $%.2f, order %s).",
                          tag, price, floor_usd, stop_id)
                 return
             log.warning("Stop edit failed (%s) — replacing.", resp.get("error"))
-        resp = place_stop_order(product_id, close_side, int(state.get("lots", lots)), price)
+        resp = place_stop_order(product_id, close_side, lots, price)
         new_id = (resp.get("result") or {}).get("id") if resp.get("success") else None
         if new_id:
             old = stop_id
-            stop_id, stop_floor, stop_kind = new_id, floor_usd, kind
+            stop_id, stop_floor, stop_kind, stop_lots = new_id, floor_usd, kind, lots
             if old:
                 cancel_order(old, product_id)
             save_state_fields(tsl_peak=round(peak_pnl, 2), tsl_armed=tsl_armed,
                               tsl_floor=round(floor_usd, 2), tsl_stop_order_id=stop_id,
-                              stop_kind=kind)
+                              stop_kind=kind, stop_lots=lots)
             log.info("%s stop PLACED on exchange: %s %d lots @ trigger $%.1f (floor $%.2f, order %s).",
-                     tag, close_side.upper(), int(state.get("lots", lots)), price, floor_usd, stop_id)
+                     tag, close_side.upper(), lots, price, floor_usd, stop_id)
         else:
             log.warning("Stop placement failed: %s — monitor-side trigger remains the fallback.",
                         resp.get("error", resp))
 
+    def ensure_tp(force=False):
+        """Keep a reduce-only take-profit order resting on the exchange at
+        +TARGET_PNL, so the upside exit also survives monitor/server death.
+        Replace order: place NEW first, cancel old after."""
+        nonlocal tp_id, tp_lots
+        if tp_id and tp_lots == lots and not force:
+            return
+        price = max(round(entry_mark + sign * TARGET_PNL / (cv * lots), 1), 0.1)
+        resp = place_stop_order(product_id, close_side, lots, price, "take_profit_order")
+        new_id = (resp.get("result") or {}).get("id") if resp.get("success") else None
+        if new_id:
+            old = tp_id
+            tp_id, tp_lots = new_id, lots
+            if old:
+                cancel_order(old, product_id)
+            save_state_fields(tp_stop_order_id=tp_id, tp_lots=tp_lots)
+            log.info("TP order PLACED on exchange: %s %d lots @ trigger $%.1f (order %s).",
+                     close_side.upper(), lots, price, tp_id)
+        else:
+            log.warning("TP placement failed: %s — monitor-side TP remains the fallback.",
+                        resp.get("error", resp))
+
     def finalize_stop_fill(order, kind):
-        """The exchange stop executed — record the real fill as the exit."""
+        """A resting exchange order executed — record the real fill as the exit.
+        kind: 'tp', 'tsl' or 'sl'."""
         fill = float(order.get("average_fill_price") or 0)
         done = abs(int(float(order.get("size") or state.get("lots", lots))))
         real = round((fill - entry_mark) * cv * done * sign, 2)
-        exit_trigger = f"trailing_stop_{SLOT}" if kind == "tsl" else f"stop_loss_{SLOT}"
+        exit_trigger = {"tp":  f"take_profit_{SLOT}",
+                        "tsl": f"trailing_stop_{SLOT}"}.get(kind, f"stop_loss_{SLOT}")
         st = load_state()
         st.update({
             "status":        "CLOSED",
@@ -415,8 +449,8 @@ def main():
         append_history(st)
         label = "🌅 MORNING" if SLOT == "morning" else "🌇 EVENING"
         psign = "+" if real >= 0 else "-"
-        head_label = "TRAILING STOP" if kind == "tsl" else "STOP LOSS"
-        emoji = "🔻" if kind == "tsl" else "🛑"
+        head_label = {"tp": "TAKE PROFIT", "tsl": "TRAILING STOP"}.get(kind, "STOP LOSS")
+        emoji = {"tp": "✅", "tsl": "🔻"}.get(kind, "🛑")
         send_telegram(
             f"{emoji} <b>{head_label} EXECUTED (exchange) — {label} ({USER.upper()})</b>\n"
             f"<code>{'━' * 24}</code>\n"
@@ -429,11 +463,14 @@ def main():
         )
 
     def cleanup_stop():
-        if stop_id:
-            cancel_order(stop_id, product_id)
-            log.info("Resting %s stop %s cancelled.", stop_kind.upper(), stop_id)
+        """Cancel every resting exchange order we own (stop AND take-profit).
+        Cancelling an already-filled order fails harmlessly."""
+        for oid, kind in ((stop_id, stop_kind), (tp_id, "tp")):
+            if oid:
+                cancel_order(oid, product_id)
+                log.info("Resting %s order %s cancelled.", kind.upper(), oid)
 
-    # If the dashboard stops this monitor (SIGTERM), take the resting stop
+    # If the dashboard stops this monitor (SIGTERM), take the resting orders
     # with us — a stopped monitor must not leave invisible orders behind.
     def _on_term(*_):
         cleanup_stop()
@@ -444,11 +481,10 @@ def main():
     except Exception:
         pass
 
-    if stop_id:
-        log.info("Resumed with resting %s stop %s (floor $%.2f, peak $%.2f).",
-                 stop_kind.upper(), stop_id, stop_floor, peak_pnl)
-    elif SL_PNL > 0:
-        ensure_stop(-SL_PNL, "sl")
+    if stop_id or tp_id:
+        log.info("Resumed with resting orders: %s=%s (floor $%.2f)  tp=%s  (peak $%.2f).",
+                 stop_kind.upper(), stop_id, stop_floor, tp_id, peak_pnl)
+    # Initial placement (and any retry after failure) happens in the loop.
 
     while True:
         try:
@@ -458,24 +494,41 @@ def main():
                 cleanup_stop()
                 break
 
-            # A resting exchange stop may have fired between polls
-            if stop_id:
+            # A resting exchange order (TP or SL/TSL) may have fired between polls
+            if stop_id or tp_id:
                 live = get_exchange_size(product_id)
                 if live == 0:
-                    order = get_order(stop_id)
-                    if str(order.get("state")) == "closed":
-                        finalize_stop_fill(order, stop_kind)
-                        log.info("Monitor done (%s executed on exchange).",
-                                 "trailing stop" if stop_kind == "tsl" else "stop loss")
+                    done_kind = None
+                    for oid, kind in ((tp_id, "tp"), (stop_id, stop_kind)):
+                        if not oid:
+                            continue
+                        order = get_order(oid)
+                        if str(order.get("state")) == "closed":
+                            done_kind = kind
+                            finalize_stop_fill(order, kind)
+                            break
+                    cleanup_stop()   # cancel whichever resting order did NOT fire
+                    if done_kind:
+                        log.info("Monitor done (%s executed on exchange).", done_kind.upper())
                     else:
-                        log.info("Position closed externally — cancelling resting stop.")
-                        cleanup_stop()
+                        log.info("Position closed externally — resting orders cancelled.")
                         st = load_state()
                         st.update({"status": "CLOSED",
                                    "exit_time_utc": time.strftime("%H:%M:%S", time.gmtime()),
                                    "exit_trigger": "closed_externally"})
                         STATE_FILE.write_text(json.dumps(st, indent=2), encoding="utf-8")
                     break
+
+            # Position may have been topped up or partially closed (dashboard
+            # sync updates the state file) — resize the resting orders to match.
+            pos_changed = False
+            new_lots  = int(float(state.get("lots") or lots))
+            new_entry = float(state.get("entry_mark") or entry_mark)
+            if new_lots != lots or new_entry != entry_mark:
+                log.info("Position changed: lots %d -> %d  entry %.4f -> %.4f — resizing resting orders.",
+                         lots, new_lots, entry_mark, new_entry)
+                lots, entry_mark = new_lots, new_entry
+                pos_changed = True
 
             mark = get_mark(symbol)
             pnl  = (mark - entry_mark) * cv * lots * sign
@@ -487,13 +540,21 @@ def main():
                 tsl_armed = True
                 log.info("TSL ARMED — peak $%.2f reached the $%.2f trail; floor now $%.2f.",
                          peak_pnl, TSL_PNL, peak_pnl - TSL_PNL)
+
+            # Resting-order maintenance: place on first pass, RETRY every poll
+            # after a failed placement, ratchet the TSL, resize on lot changes.
             if tsl_armed and TSL_PNL > 0:
                 floor = peak_pnl - TSL_PNL
-                if stop_id is None or floor - stop_floor >= ratchet_min:
+                if stop_id is None or floor - stop_floor >= ratchet_min or pos_changed:
                     ensure_stop(floor, "tsl")
+            elif SL_PNL > 0 and (stop_id is None or pos_changed):
+                ensure_stop(-SL_PNL, "sl")
+            if TARGET_PNL > 0:
+                ensure_tp(force=pos_changed)
 
-            log.info("mark=%.4f  pnl=$%.2f  peak=$%.2f  tp=$%.2f  sl=%s  tsl=%s",
-                     mark, pnl, peak_pnl, TARGET_PNL,
+            log.info("mark=%.4f  pnl=$%.2f  peak=$%.2f  tp=%s  sl=%s  tsl=%s",
+                     mark, pnl, peak_pnl,
+                     f"+${TARGET_PNL:.2f}" + (" (on exchange)" if tp_id else ""),
                      (f"-${SL_PNL:.2f} (on exchange)" if (SL_PNL > 0 and stop_id and stop_kind == "sl")
                       else (f"-${SL_PNL:.2f}" if SL_PNL > 0 else "off")),
                      "off" if TSL_PNL <= 0 else
@@ -501,20 +562,25 @@ def main():
                       (f"${peak_pnl - TSL_PNL:.2f}" if tsl_armed else
                        f"unarmed (arms at +${TSL_PNL:.2f})")))
 
-            if pnl >= TARGET_PNL:
-                cleanup_stop()   # never leave the stop racing our TP close
+            # Monitor-side fallbacks — only when the corresponding exchange
+            # order is NOT resting (placement failed); always cancel every
+            # resting order before a market close so nothing races it.
+            if tp_id is None and pnl >= TARGET_PNL:
+                cleanup_stop()
                 stop_id = None
                 if close_position(state, mark, pnl, "take_profit"):
                     log.info("Monitor done (take profit).")
                     break
             elif tsl_armed and stop_id is None and pnl <= peak_pnl - TSL_PNL:
-                # Fallback only — normally the exchange-resident stop handles this
+                cleanup_stop()   # cancels a resting TP, if any
+                tp_id = None
                 if close_position(state, mark, pnl, "trailing_stop"):
                     log.info("Monitor done (trailing stop: peak $%.2f, gave back $%.2f).",
                              peak_pnl, peak_pnl - pnl)
                     break
             elif SL_PNL > 0 and stop_id is None and pnl <= -SL_PNL:
-                # Fallback only — normally the exchange-resident stop handles this
+                cleanup_stop()   # cancels a resting TP, if any
+                tp_id = None
                 if close_position(state, mark, pnl, "stop_loss"):
                     log.info("Monitor done (stop loss).")
                     break
