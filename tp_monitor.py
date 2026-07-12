@@ -363,6 +363,21 @@ def main():
     tp_lots     = int(state.get("tp_lots") or lots)
     persist_pk  = peak_pnl
     ratchet_min = max(5.0, TSL_PNL * 0.05)   # move the stop on >= this floor gain
+    # Delta only supports resting stop/TP orders on some products (MOVE yes,
+    # vanilla calls/puts no) — once the exchange says 'unsupported', stop
+    # retrying and run purely on the monitor-side triggers.
+    exch_unsupported = False
+
+    def _mark_unsupported(resp, what):
+        nonlocal exch_unsupported
+        err  = resp.get("error")
+        code = err.get("code") if isinstance(err, dict) else err
+        if str(code) == "unsupported":
+            exch_unsupported = True
+            log.warning("%s: exchange-resident orders UNSUPPORTED on this product "
+                        "— monitor-side triggers only from here on.", what)
+            return True
+        return False
 
     def floor_price(floor_usd):
         """P&L floor ($) -> option mark trigger price, on the 0.1 tick."""
@@ -377,6 +392,8 @@ def main():
         for logging/telegram/exit-trigger tagging — the resting-order
         mechanics are identical either way."""
         nonlocal stop_id, stop_floor, stop_kind, stop_lots
+        if exch_unsupported:
+            return
         price = floor_price(floor_usd)
         tag = kind.upper()
         if stop_id and stop_lots == lots:
@@ -403,15 +420,16 @@ def main():
             log.info("%s stop PLACED on exchange: %s %d lots @ trigger $%.1f (floor $%.2f, order %s).",
                      tag, close_side.upper(), lots, price, floor_usd, stop_id)
         else:
-            log.warning("Stop placement failed: %s — monitor-side trigger remains the fallback.",
-                        resp.get("error", resp))
+            if not _mark_unsupported(resp, "Stop"):
+                log.warning("Stop placement failed: %s — monitor-side trigger remains the fallback.",
+                            resp.get("error", resp))
 
     def ensure_tp(force=False):
         """Keep a reduce-only take-profit order resting on the exchange at
         +TARGET_PNL, so the upside exit also survives monitor/server death.
         Replace order: place NEW first, cancel old after."""
         nonlocal tp_id, tp_lots
-        if tp_id and tp_lots == lots and not force:
+        if exch_unsupported or (tp_id and tp_lots == lots and not force):
             return
         price = max(round(entry_mark + sign * TARGET_PNL / (cv * lots), 1), 0.1)
         resp = place_stop_order(product_id, close_side, lots, price, "take_profit_order")
@@ -425,8 +443,9 @@ def main():
             log.info("TP order PLACED on exchange: %s %d lots @ trigger $%.1f (order %s).",
                      close_side.upper(), lots, price, tp_id)
         else:
-            log.warning("TP placement failed: %s — monitor-side TP remains the fallback.",
-                        resp.get("error", resp))
+            if not _mark_unsupported(resp, "TP"):
+                log.warning("TP placement failed: %s — monitor-side TP remains the fallback.",
+                            resp.get("error", resp))
 
     def finalize_stop_fill(order, kind):
         """A resting exchange order executed — record the real fill as the exit.
