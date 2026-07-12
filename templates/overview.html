@@ -6,8 +6,16 @@
 
 {% block content %}
 <div class="greeting">
-  <h2>Welcome Back, {{ display_name }} 👋</h2>
-  <p>Here's how your bot is doing today.</p>
+  <div class="greeting-txt">
+    <h2>Welcome Back, {{ display_name }} 👋</h2>
+    <p>Here's how your bot is doing today.</p>
+  </div>
+  <div class="trend-box" id="trend-box"
+       title="1-hour BTC candles — EMA 9/21 crossover confirmed by RSI(14). UP/DOWN only when all three agree; computed on closed candles so it can't flicker mid-hour.">
+    <div class="lbl">BTC Trend · 1H</div>
+    <div class="dir c-muted" id="trend-dir">—</div>
+    <div class="sub" id="trend-sub">loading…</div>
+  </div>
 </div>
 
 <div class="stats" id="stats"></div>
@@ -323,9 +331,29 @@ function closePayoff() {
 }
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closePayoff(); });
 
-function loadAll() { loadSlots(); loadStats(); loadToday(); refreshTopbar(); }
+/* ── BTC 1H trend badge ─────────────────────────────────── */
+async function loadTrend() {
+  let t;
+  try { t = await jget('/api/trend'); } catch (e) { return; }
+  const dir = document.getElementById('trend-dir'), sub = document.getElementById('trend-sub');
+  if (!dir || !t) return;
+  const map = {
+    up:      ['▲ UPTREND',   'c-pos'],
+    down:    ['▼ DOWNTREND', 'c-neg'],
+    neutral: ['◆ SIDEWAYS',  'c-muted'],
+  };
+  const [label, cls] = map[t.trend] || ['— N/A', 'c-muted'];
+  dir.textContent = label;
+  dir.className   = 'dir ' + cls;
+  sub.textContent = t.ema9
+    ? `EMA9 ${fN(t.ema9)} · EMA21 ${fN(t.ema21)} · RSI ${fN(t.rsi, 1)}`
+    : (t.error || '');
+}
+
+function loadAll() { loadSlots(); loadStats(); loadToday(); loadTrend(); refreshTopbar(); }
 loadAll();
 setInterval(() => { loadSlots(); loadToday(); }, 12_000);
 setInterval(loadStats, 60_000);
+setInterval(loadTrend, 60_000);
 </script>
 {% endblock %}

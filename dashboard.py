@@ -1530,6 +1530,76 @@ def _usd_inr_rate() -> float:
         return _fx_cache["rate"]
 
 
+# ─────────────────────────────────────────────────────────────
+# BTC 1H TREND — EMA 9/21 crossover + RSI(14) confirmation
+# ─────────────────────────────────────────────────────────────
+def _ema(vals: list, n: int) -> float:
+    k = 2 / (n + 1)
+    e = sum(vals[:n]) / n
+    for v in vals[n:]:
+        e = v * k + e * (1 - k)
+    return e
+
+
+def _rsi(vals: list, n: int = 14) -> float:
+    """Wilder-smoothed RSI over the whole series."""
+    if len(vals) < n + 1:
+        return 50.0
+    gains = losses = 0.0
+    for i in range(1, n + 1):
+        d = vals[i] - vals[i - 1]
+        gains  += max(d, 0.0)
+        losses += max(-d, 0.0)
+    ag, al = gains / n, losses / n
+    for i in range(n + 1, len(vals)):
+        d = vals[i] - vals[i - 1]
+        ag = (ag * (n - 1) + max(d, 0.0)) / n
+        al = (al * (n - 1) + max(-d, 0.0)) / n
+    return 100.0 if al == 0 else 100.0 - 100.0 / (1.0 + ag / al)
+
+
+_trend_cache = {"ts": 0.0, "data": None}
+
+
+@app.route("/api/trend")
+def api_trend():
+    """BTC trend on 1-hour candles: UP only when EMA9 > EMA21 AND price >
+    EMA21 AND RSI(14) > 50 — DOWN when all three are reversed — otherwise
+    NEUTRAL (mixed signals = no trend call). Computed on COMPLETED candles
+    only, so the arrow can't flicker mid-hour; cached for 2 minutes."""
+    if _trend_cache["data"] and time.time() - _trend_cache["ts"] < 120:
+        return jsonify(_trend_cache["data"])
+    try:
+        end   = int(time.time())
+        start = end - 3600 * 300   # ~300 hourly candles
+        r = req.get(f"{API_BASE}/v2/history/candles",
+                    params={"resolution": "1h", "symbol": "BTCUSD",
+                            "start": start, "end": end},
+                    timeout=10).json()
+        candles = sorted(r.get("result") or [], key=lambda c: c.get("time", 0))
+        # Drop the in-progress hour — only closed candles count
+        if candles and candles[-1].get("time", 0) >= end - end % 3600:
+            candles = candles[:-1]
+        closes = [float(c["close"]) for c in candles]
+        if len(closes) < 40:
+            return jsonify({"trend": "na", "error": "not enough candle data"}), 502
+        ema9, ema21, rsi = _ema(closes, 9), _ema(closes, 21), _rsi(closes, 14)
+        close = closes[-1]
+        if ema9 > ema21 and close > ema21 and rsi > 50:
+            trend = "up"
+        elif ema9 < ema21 and close < ema21 and rsi < 50:
+            trend = "down"
+        else:
+            trend = "neutral"
+        data = {"trend": trend, "ema9": round(ema9, 2), "ema21": round(ema21, 2),
+                "rsi": round(rsi, 1), "close": round(close, 2),
+                "candle_time": candles[-1].get("time")}
+        _trend_cache.update(ts=time.time(), data=data)
+        return jsonify(data)
+    except Exception as e:
+        return jsonify({"trend": "na", "error": str(e)}), 502
+
+
 @app.route("/api/wallet")
 def api_wallet():
     """Account value in USD and INR — scoped to the logged-in account."""
