@@ -1019,6 +1019,30 @@ def _current_atm_mv() -> dict | None:
         return None
 
 
+# Rejection codes meaning "balance doesn't cover this size" — fixable by
+# downsizing, never by retrying the same order.
+BALANCE_REJECTIONS = ("insufficient_commission", "insufficient_margin",
+                      "insufficient_balance")
+
+
+def _downsized_lots(size: int, ctx: dict) -> int | None:
+    """The exchange's rejection context reports available_balance and
+    required_additional_balance — together the TRUE total cost of the
+    rejected order (margin + premium + commission, whatever Delta's formula
+    is), so the per-lot cost and truly affordable size follow exactly.
+    None = can't downsize (context unusable or already at 1 lot)."""
+    try:
+        avail = float(ctx.get("available_balance") or 0)
+        extra = float(ctx.get("required_additional_balance") or 0)
+    except (TypeError, ValueError):
+        return None
+    if avail <= 0 or extra <= 0 or size <= 1:
+        return None
+    per_lot = (avail + extra) / size
+    new = min(int(avail * 0.98 / per_lot), size - 1)   # 2% slippage buffer
+    return new if new >= 1 else None
+
+
 def _manual_entry_lots(slot: str, mark: float, cv: float, strike: float = 0.0) -> int:
     """Usual sizing: slot's configured lots, sized DOWN by dynamic sizing
     (min of configured and affordable-with-balance) when DYNAMIC_LOTS is on —
@@ -1128,14 +1152,30 @@ def api_manual_entry():
         if is_dry_run:
             o = {"id": 0, "average_fill_price": mark}
         else:
-            import json as _json
-            payload = {"product_id": pid, "size": lots, "side": side, "order_type": "market_order"}
-            body    = _json.dumps(payload, separators=(",", ":"))
-            hdrs    = _sign("POST", "/v2/orders", "", body)
-            result  = req.post(f"{API_BASE}/v2/orders", data=body, headers=hdrs, timeout=15).json()
-            if not result.get("success") or not (result.get("result") or {}).get("id"):
+            # Entry orders auto-downsize on balance/commission/margin
+            # rejections: the sizing estimate can't perfectly model Delta's
+            # margin+fee formulas (SELL/short margin especially), but the
+            # rejection context reports exactly how much balance the order
+            # truly needed — resize from it and retry.
+            o = None
+            for _ in range(3):
+                payload = {"product_id": pid, "size": lots, "side": side,
+                           "order_type": "market_order"}
+                body    = json.dumps(payload, separators=(",", ":"))
+                hdrs    = _sign("POST", "/v2/orders", "", body)
+                result  = req.post(f"{API_BASE}/v2/orders", data=body,
+                                   headers=hdrs, timeout=15).json()
+                if result.get("success") and (result.get("result") or {}).get("id"):
+                    o = result["result"]
+                    break
+                err = result.get("error") or {}
+                new_lots = (_downsized_lots(lots, err.get("context") or {})
+                            if str(err.get("code")) in BALANCE_REJECTIONS else None)
+                if not new_lots:
+                    return jsonify({"ok": False, "error": result.get("error", result)}), 400
+                lots = new_lots
+            if o is None:
                 return jsonify({"ok": False, "error": result.get("error", result)}), 400
-            o = result.get("result", {})
 
         fill = float(o.get("average_fill_price") or mark)
         now  = datetime.now(timezone.utc)

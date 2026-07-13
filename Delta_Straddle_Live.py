@@ -212,14 +212,23 @@ def _post(path: str, payload: dict) -> dict:
     return resp.json()
 
 def _retry(fn, *args, retries=3, delay=3, **kwargs):
+    last = None
     for attempt in range(retries):
         try:
             return fn(*args, **kwargs)
+        except requests.HTTPError as exc:
+            status = exc.response.status_code if exc.response is not None else 0
+            if 400 <= status < 500:
+                raise   # client rejection — an identical retry can never succeed,
+                        # and callers need the response body (e.g. order rejection
+                        # context) intact to react to it
+            last = exc
         except Exception as exc:
-            log.warning("Attempt %d/%d — %s: %s", attempt + 1, retries, fn.__name__, exc)
-            if attempt < retries - 1:
-                time.sleep(delay)
-    raise RuntimeError(f"All {retries} retries exhausted: {fn.__name__}")
+            last = exc
+        log.warning("Attempt %d/%d — %s: %s", attempt + 1, retries, fn.__name__, last)
+        if attempt < retries - 1:
+            time.sleep(delay)
+    raise RuntimeError(f"All {retries} retries exhausted: {fn.__name__}") from last
 
 # ─────────────────────────────────────────────────────────────
 # STATE PERSISTENCE
@@ -470,6 +479,64 @@ def place_market_order(product_id: int, symbol: str, side: str, size: int,
              order.get("average_fill_price", "pending"))
     return resp
 
+
+# Rejection codes that mean "the balance doesn't cover this size" — the fix
+# is fewer lots, not a retry of the same order.
+BALANCE_REJECTIONS = ("insufficient_commission", "insufficient_margin",
+                      "insufficient_balance")
+
+
+def _rejection(exc) -> tuple[str, dict]:
+    """(error_code, context) from a Delta order-rejection HTTPError."""
+    try:
+        err = exc.response.json().get("error") or {}
+        return str(err.get("code", "")), err.get("context") or {}
+    except Exception:
+        return "", {}
+
+
+def downsized_lots(size: int, ctx: dict) -> int | None:
+    """The exchange's rejection context states available_balance and
+    required_additional_balance — together they give the TRUE total cost of
+    the rejected order (margin + premium + commission, whatever Delta's
+    formula is), so the per-lot cost and the truly affordable size follow
+    exactly. None = can't downsize (context unusable or already at 1 lot)."""
+    try:
+        avail = float(ctx.get("available_balance") or 0)
+        extra = float(ctx.get("required_additional_balance") or 0)
+    except (TypeError, ValueError):
+        return None
+    if avail <= 0 or extra <= 0 or size <= 1:
+        return None
+    per_lot = (avail + extra) / size
+    new = min(int(avail * 0.98 / per_lot), size - 1)   # 2% slippage buffer
+    return new if new >= 1 else None
+
+
+def place_entry_order(product_id: int, symbol: str, side: str, size: int) -> tuple[dict, int]:
+    """Place an ENTRY order, auto-downsizing when the exchange rejects it for
+    balance/commission/margin. Client-side sizing estimates cannot perfectly
+    model Delta's margin+fee formulas (SELL/short entries especially — margin
+    is a different formula from a long's premium+fee) — the exchange's own
+    rejection context is authoritative, so resize from it and retry.
+    Returns (order_response, actual_lots). Closes must NEVER go through this:
+    a close must be for the full position size or not at all."""
+    for _ in range(3):
+        try:
+            return place_market_order(product_id, symbol, side, size), size
+        except requests.HTTPError as exc:
+            code, ctx = _rejection(exc)
+            new_size = downsized_lots(size, ctx) if code in BALANCE_REJECTIONS else None
+            if not new_size:
+                raise
+            log.warning("%s %s rejected for %d lots (%s: needs %s more) — "
+                        "downsizing to %d and retrying.",
+                        side.upper(), symbol, size, code,
+                        ctx.get("required_additional_balance", "?"), new_size)
+            size = new_size
+    return place_market_order(product_id, symbol, side, size), size
+
+
 def get_mv_position(product_id: int) -> dict | None:
     data = _retry(_get, "/v2/positions/margined", auth=True)
     for pos in data.get("result", []):
@@ -673,7 +740,7 @@ def morning_entry_job():
     log.info("Lots        : %d  |  Total premium: $%.2f", lots, total_cost)
 
     cancel_product_stops(product_id)
-    order = place_market_order(product_id, symbol, MORNING_SIDE, lots)
+    order, lots = place_entry_order(product_id, symbol, MORNING_SIDE, lots)
     fill  = float(order.get("result", {}).get("average_fill_price") or entry_mark)
 
     now = datetime.now(timezone.utc)
@@ -749,7 +816,7 @@ def entry_job():
 
     # Place the single entry order (direction per EVENING_SIDE config)
     cancel_product_stops(product_id)
-    order = place_market_order(product_id, symbol, EVENING_SIDE, lots)
+    order, lots = place_entry_order(product_id, symbol, EVENING_SIDE, lots)
     # Record the REAL fill, not the pre-order snapshot — all downstream P&L
     # (TP/SL triggers included) keys off entry_mark.
     fill  = float(order.get("result", {}).get("average_fill_price") or entry_mark)
