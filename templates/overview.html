@@ -107,9 +107,10 @@ function tpRow(slot, tp, positionOpen = true) {
     <div class="tp-box-hd">
       <span class="tp-title">TP / SL / TSL Monitor</span>
       <span class="pill ${on ? 'live' : 'idle'} mini"><span class="dot"></span>${on ? 'RUNNING' : 'STOPPED'}</span>
-      <span class="tp-spacer"></span>
-      <button class="btn secondary sm" onclick="saveTp('${slot}')">Save</button>
-      <button class="btn ${on ? 'warn' : 'success'} sm" onclick="toggleTp('${slot}', ${on})" ${positionOpen ? '' : 'disabled title="Opens automatically with the trend position"'}>${on ? 'Stop' : (positionOpen ? 'Start' : 'Auto-starts on entry')}</button>
+      <span class="tp-actions">
+        <button class="btn secondary sm" onclick="saveTp('${slot}')">Save</button>
+        <button class="btn ${on ? 'warn' : 'success'} sm" onclick="toggleTp('${slot}', ${on})" ${positionOpen ? '' : 'disabled title="Opens automatically with the trend position"'}>${on ? 'Stop' : (positionOpen ? 'Start' : 'Auto-starts on entry')}</button>
+      </span>
     </div>
     <div class="tp-fields">
       <label class="fld"><span>Take profit $</span><input id="tp-target-${slot}" type="number" step="1" min="1" value="${t.target_pnl ?? ''}"></label>

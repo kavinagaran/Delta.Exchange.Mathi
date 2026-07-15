@@ -294,17 +294,23 @@ input.mono { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; fon
   border: 1px solid var(--border); border-radius: 8px;
   background: #fafbfd;
 }
-.tp-box-hd { display: flex; align-items: center; gap: 9px; margin-bottom: 12px; }
+.tp-box-hd { display: flex; align-items: center; gap: 9px; margin-bottom: 12px; flex-wrap: nowrap; }
 .tp-title {
   font-size: 11px; font-weight: 650; color: var(--muted);
   letter-spacing: .05em; text-transform: uppercase; white-space: nowrap;
 }
-.tp-spacer { margin-left: auto; }
+.tp-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
 .pill.mini { padding: 3px 10px; font-size: 10.5px; }
-.tp-fields { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+.tp-fields { display: grid; grid-template-columns: repeat(4, minmax(145px, 210px)); gap: 10px; }
 .tp-fields input { height: 34px; }
 .tp-note { margin-top: 9px; font-size: 11px; color: var(--muted); }
 @media (max-width: 1100px) { .tp-fields { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 560px) {
+  .tp-box-hd { gap: 6px; }
+  .tp-title { overflow: hidden; text-overflow: ellipsis; }
+  .tp-actions { gap: 5px; }
+  .tp-actions .btn.sm { padding-left: 8px; padding-right: 8px; }
+}
 
 /* ── Logs ───────────────────────────────────────────────── */
 .log-wrap {
