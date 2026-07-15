@@ -1037,6 +1037,7 @@ def render_page(page=""):
 
 
 _last_sync: dict = {}   # username -> last exchange-sync epoch
+EXCHANGE_SYNC_INTERVAL_SECONDS = 8
 
 def _state_matches(state: dict, pid: int, size: int, entry: float) -> bool:
     side = "short" if size < 0 else "long"
@@ -1116,8 +1117,42 @@ def _owned_trend_order(orders: list, product_id: int) -> dict | None:
     return latest if _is_trend_client_order_id(latest.get("client_order_id")) else None
 
 
+def _finite_position_number(position: dict, key: str) -> float | None:
+    """Read a finite exchange position field without silently inventing zero."""
+    value = position.get(key)
+    if value in (None, "") or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _external_option_live_pnl(position: dict) -> tuple[float, str]:
+    """Return the live, fee-aware net P&L for a visible-only option position.
+
+    Delta reports option entry/exit cashflows separately.  ``unrealized_pnl``
+    alone is therefore not the trade's complete mark-to-market result: for a
+    long option it omits the premium already paid.  When those cashflow fields
+    are present, use the exchange's own net cashflow basis and subtract the
+    blocked commission.  Older/malformed payloads fall back to the exchange
+    P&L field rather than attempting a price-derived estimate.
+    """
+    realized_cashflow = _finite_position_number(position, "realized_cashflow")
+    unrealized_cashflow = _finite_position_number(position, "unrealized_cashflow")
+    commission = _finite_position_number(position, "commission")
+    if (realized_cashflow is not None and unrealized_cashflow is not None
+            and commission is not None):
+        return realized_cashflow + unrealized_cashflow - abs(commission), "cashflow_net"
+
+    fallback = _finite_position_number(position, "unrealized_pnl")
+    return (fallback if fallback is not None else 0.0), "unrealized_pnl_fallback"
+
+
 def _external_option_view(position: dict) -> dict:
     """Safe, UI-facing representation of a non-bot C/P position."""
+    live_pnl, pnl_source = _external_option_live_pnl(position)
     return {
         "ownership": "external",
         "product_id": int(position.get("product_id", 0) or 0),
@@ -1126,7 +1161,8 @@ def _external_option_view(position: dict) -> dict:
         "lots": abs(int(float(position.get("size", 0) or 0))),
         "entry_mark": float(position.get("entry_price", 0) or 0),
         "mark_price": float(position.get("mark_price", 0) or 0),
-        "live_pnl": float(position.get("unrealized_pnl", 0) or 0),
+        "live_pnl": live_pnl,
+        "pnl_source": pnl_source,
         "created_at": str(position.get("created_at", "")),
     }
 
@@ -1161,7 +1197,7 @@ def _sync_states_from_exchange() -> None:
     if not key or not secret:
         return
     user = _active_user()
-    if time.time() - _last_sync.get(user, 0) < 30:
+    if time.time() - _last_sync.get(user, 0) < EXCHANGE_SYNC_INTERVAL_SECONDS:
         return
     _last_sync[user] = time.time()
     try:

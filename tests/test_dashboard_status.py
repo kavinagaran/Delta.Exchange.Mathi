@@ -24,6 +24,39 @@ def _write(path: Path, value) -> None:
     path.write_text(json.dumps(value), encoding="utf-8")
 
 
+def test_external_option_uses_exchange_cashflows_for_live_net_pnl():
+    # Long option: premium paid at entry is a realized cash outflow, while the
+    # current option value is an unrealized cash inflow. Delta's standalone
+    # unrealized_pnl does not include that entry premium.
+    position = {
+        "product_id": 142277,
+        "product_symbol": "P-BTC-64400-160726",
+        "size": "3",
+        "entry_price": "295",
+        "mark_price": "121.3",
+        "realized_cashflow": "-0.885",
+        "unrealized_cashflow": "0.357",
+        "commission": "0.0229206858",
+        "unrealized_pnl": "-0.357",
+    }
+
+    view = dashboard._external_option_view(position)
+
+    assert view["pnl_source"] == "cashflow_net"
+    assert view["live_pnl"] == pytest.approx(-0.5509206858)
+    assert view["live_pnl"] != pytest.approx(-0.357)
+
+
+def test_external_option_falls_back_only_when_cashflow_accounting_is_unavailable():
+    view = dashboard._external_option_view({
+        "product_id": 1, "product_symbol": "C-BTC-TEST", "size": "1",
+        "unrealized_pnl": "12.5",
+    })
+
+    assert view["pnl_source"] == "unrealized_pnl_fallback"
+    assert view["live_pnl"] == 12.5
+
+
 def test_latest_closed_trade_uses_full_utc_time_and_overnight_rollover():
     # The first trade's raw exit clock is smaller, but it exited five minutes
     # later on the following UTC day.

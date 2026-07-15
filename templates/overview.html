@@ -192,7 +192,7 @@ function renderExternalOptions(rows) {
   body.innerHTML = `<div class="external-option-grid">${rows.map(p => `
     <div class="external-option-row">
       <div><strong>${esc(p.symbol)}</strong><small>${esc((p.side || '').toUpperCase())} · ${fN(p.lots)} lots</small></div>
-      <div><span class="${pnlCls(p.live_pnl)}">${f$(p.live_pnl)}</span><small>External P&amp;L</small></div>
+       <div><span class="${pnlCls(p.live_pnl)}">${f$(p.live_pnl)}</span><small>Live net P&amp;L · Mark $${fN(p.mark_price, 2)}</small></div>
       <span class="badge sim">NOT BOT-OWNED</span>
     </div>`).join('')}</div>`;
 }
