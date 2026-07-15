@@ -367,8 +367,111 @@ def load_morning_state() -> dict | None:
                 raise RuntimeError(f"state and backup are unreadable: {MORNING_STATE_FILE}") from exc
     return None
 
-def log_trade(state: dict):
-    """Append closed trade to trade_history.json for the dashboard."""
+_MOVE_HISTORY_ACCOUNTING_FIELDS = {
+    "exit_mark", "pnl_usd", "gross_pnl_usd", "fees_usd",
+    "entry_fee_usd", "exit_fee_usd", "pnl_includes_fees",
+    "fees_complete", "fees_available", "fees_estimated",
+    "entry_fee_source", "exit_fee_source", "exit_price_source",
+    "exit_order_id", "exit_client_order_id", "exit_time",
+    "exit_reconciliation_status", "accounting_status",
+}
+
+
+def _move_bool(value) -> bool:
+    return value is True or str(value or "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
+def _move_finite_number(record: dict, key: str) -> bool:
+    value = record.get(key)
+    if value is None or isinstance(value, bool):
+        return False
+    try:
+        return math.isfinite(float(value))
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
+def _move_external_accounting_required(record: dict) -> bool:
+    if _move_bool(record.get("dry_run")):
+        return False
+    trigger = str(record.get("exit_trigger") or "").strip().lower()
+    return (
+        "external" in trigger
+        or trigger in {"exchange_already_flat", "reconciled_stale"}
+        or str(record.get("exit_price_source") or "").lower() == "mark_after_exchange_flat"
+        or str(record.get("exit_reconciliation_status") or "").startswith("pending")
+        or str(record.get("accounting_status") or "").lower() == "pending"
+    )
+
+
+def _move_history_accounting_complete(record: dict) -> bool:
+    """Whether a MOVE history row contains final realised accounting."""
+    if not isinstance(record, dict):
+        return False
+    if not (_move_finite_number(record, "exit_mark")
+            and _move_finite_number(record, "pnl_usd")):
+        return False
+    if not _move_external_accounting_required(record):
+        # Legacy and dry-run MOVE rows predate detailed fee fields.
+        return True
+    if str(record.get("exit_price_source") or "").lower() == "mark_after_exchange_flat":
+        return False
+    if not _move_bool(record.get("pnl_includes_fees")):
+        return False
+    return all(_move_finite_number(record, key) for key in (
+        "gross_pnl_usd", "fees_usd", "entry_fee_usd", "exit_fee_usd",
+    ))
+
+
+def _move_history_authority(record: dict) -> int:
+    """Rank partial rows so a retry cannot erase stronger exchange evidence."""
+    if _move_history_accounting_complete(record):
+        return 10_000
+    score = 0
+    if record.get("exit_order_id") not in (None, ""):
+        score += 100
+    if record.get("exit_client_order_id") not in (None, ""):
+        score += 50
+    if _move_bool(record.get("pnl_includes_fees")):
+        score += 25
+    if str(record.get("exit_fee_source") or "").lower() == "exchange":
+        score += 20
+    if str(record.get("entry_fee_source") or "").lower() == "exchange":
+        score += 20
+    score += sum(1 for key in (
+        "exit_mark", "pnl_usd", "gross_pnl_usd", "fees_usd",
+        "entry_fee_usd", "exit_fee_usd",
+    ) if _move_finite_number(record, key))
+    if str(record.get("exit_price_source") or "").lower() == "mark_after_exchange_flat":
+        score -= 50
+    return score
+
+
+def _move_first_present(state: dict, *keys):
+    for key in keys:
+        value = state.get(key)
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def log_trade(state: dict) -> bool:
+    """Safely upsert a MOVE trade; return true only for final accounting."""
+    entry_fee = _move_first_present(
+        state, "entry_fee_usd", "entry_commission_usd", "entry_fees_usd",
+    )
+    exit_fee = _move_first_present(
+        state, "exit_fee_usd", "exit_commission_usd", "exit_fees_usd",
+    )
+    fees_complete = state.get("fees_complete")
+    if fees_complete in (None, ""):
+        fees_complete = (
+            _move_bool(state.get("pnl_includes_fees"))
+            and entry_fee is not None and exit_fee is not None
+            and state.get("fees_usd") is not None
+        )
     record = {
         "slot":         state.get("slot", "evening"),
         "date":         state.get("entry_date", ""),
@@ -380,14 +483,23 @@ def log_trade(state: dict):
                         or state.get("lots", 0),
         "exit_lots":    state.get("closed_lots") or state.get("lots", 0),
         "entry_mark":   state.get("entry_mark", 0),
-        "exit_mark":    state.get("exit_mark", 0),
+        # Unknown realised fields stay JSON null.  Zero is a valid result, not
+        # an acceptable placeholder for a close whose fill is unresolved.
+        "exit_mark":    state.get("exit_mark"),
         "btc_entry":    state.get("btc_at_entry", 0),
         "btc_exit":     state.get("btc_at_exit", 0),
         "btc_move_pct": state.get("btc_move_pct", 0),
-        "pnl_usd":      state.get("pnl_usd", 0),
-        "gross_pnl_usd": state.get("gross_pnl_usd", state.get("pnl_usd", 0)),
-        "fees_usd":     state.get("fees_usd", 0),
-        "pnl_includes_fees": state.get("pnl_includes_fees", False),
+        "pnl_usd":      state.get("pnl_usd"),
+        "gross_pnl_usd": state.get("gross_pnl_usd"),
+        "fees_usd":     state.get("fees_usd"),
+        "entry_fee_usd": entry_fee,
+        "exit_fee_usd": exit_fee,
+        "entry_fee_source": state.get("entry_fee_source"),
+        "exit_fee_source": state.get("exit_fee_source"),
+        "fees_available": _move_bool(state.get("fees_available")),
+        "fees_complete": _move_bool(fees_complete),
+        "fees_estimated": _move_bool(state.get("fees_estimated")),
+        "pnl_includes_fees": _move_bool(state.get("pnl_includes_fees")),
         "cost_usd":     state.get("total_cost_usd", 0),
         "entry_time":   state.get("entry_time_utc", ""),
         "exit_time":    state.get("exit_time_utc", ""),
@@ -398,12 +510,32 @@ def log_trade(state: dict):
         "client_order_id": state.get("client_order_id"),
         "client_order_ids": state.get("client_order_ids", []),
         "exit_order_id": state.get("exit_order_id"),
+        "exit_client_order_id": state.get("exit_client_order_id"),
+        "exit_price_source": state.get("exit_price_source"),
+        "exit_reconciliation_status": state.get("exit_reconciliation_status"),
         "entry_trigger": state.get("entry_trigger"),
         "exit_trigger": state.get("exit_trigger"),
         "risk_at_entry_usd": state.get("risk_at_entry_usd"),
         "move_value_signal": state.get("move_value_signal"),
         "execution_snapshot": state.get("execution_snapshot"),
     }
+    # The old exchange-flat path valued the exit at a later ticker mark.  That
+    # is not a realised fill and its zero/derived P&L must not become durable.
+    if (str(record.get("exit_price_source") or "").lower()
+            == "mark_after_exchange_flat"):
+        for key in (
+            "exit_mark", "pnl_usd", "gross_pnl_usd", "fees_usd",
+            "exit_fee_usd",
+        ):
+            record[key] = None
+        record.update({
+            "pnl_includes_fees": False,
+            "fees_complete": False,
+            "fees_available": False,
+        })
+    record["accounting_status"] = (
+        "complete" if _move_history_accounting_complete(record) else "pending"
+    )
     owner = f"move-history-{state.get('slot', 'unknown')}"
     with account_file_lock(DATA_DIR, "history", owner, stale_after_sec=30,
                            wait_sec=5) as acquired:
@@ -419,15 +551,47 @@ def log_trade(state: dict):
             if not isinstance(history, list) or any(not isinstance(row, dict) for row in history):
                 raise RuntimeError(
                     f"existing trade history has invalid schema; refusing to overwrite {HISTORY_FILE}")
-        # Dedupe on date+symbol+entry_time so multiple trades per day are kept
-        history = [r for r in history
-                   if not (r.get("date") == record["date"]
-                           and r.get("symbol") == record["symbol"]
-                           and r.get("entry_time") == record["entry_time"])]
-        history.append(record)
-        history.sort(key=lambda r: (r.get("date", ""), r.get("entry_time", "")))
+        # Dedupe on date+symbol+entry_time so multiple trades per day are kept,
+        # but never replace a complete or more authoritative row with defaults.
+        duplicate_index = next((
+            index for index, row in enumerate(history)
+            if (row.get("entry_date") or row.get("date")) == record["date"]
+            and row.get("symbol") == record["symbol"]
+            and (row.get("entry_time") or row.get("entry_time_utc")) == record["entry_time"]
+        ), None)
+        if duplicate_index is None:
+            history.append(record)
+            stored = record
+        else:
+            existing = history[duplicate_index]
+            if _move_history_accounting_complete(existing):
+                stored = existing
+            else:
+                existing_authority = _move_history_authority(existing)
+                incoming_authority = _move_history_authority(record)
+                stored = dict(existing)
+                for key, value in record.items():
+                    if value is None:
+                        continue
+                    if (key in _MOVE_HISTORY_ACCOUNTING_FIELDS
+                            and existing.get(key) is not None
+                            and existing_authority >= incoming_authority):
+                        continue
+                    stored[key] = value
+                stored["accounting_status"] = (
+                    "complete" if _move_history_accounting_complete(stored) else "pending"
+                )
+                history[duplicate_index] = stored
+        history.sort(key=lambda r: (
+            str(r.get("date") or r.get("entry_date") or ""),
+            str(r.get("entry_time") or r.get("entry_time_utc") or ""),
+        ))
         _atomic_json(HISTORY_FILE, history)
-    log.info("Trade logged → %s  P&L=$%.2f", record["date"], record.get("pnl_usd", 0))
+    if _move_finite_number(stored, "pnl_usd"):
+        log.info("Trade logged → %s  P&L=$%.2f", record["date"], float(stored["pnl_usd"]))
+    else:
+        log.warning("Trade history pending → %s  realised P&L is unresolved", record["date"])
+    return _move_history_accounting_complete(stored)
 
 
 def _flush_pending_move_history() -> bool:
@@ -441,11 +605,15 @@ def _flush_pending_move_history() -> bool:
         if not state.get("history_pending"):
             continue
         try:
-            log_trade(state)
-            state["history_pending"] = False
-            state["history_logged"] = True
-            state["history_logged_at_utc"] = datetime.now(timezone.utc).isoformat()
-            save_fn(state)
+            final = log_trade(state)
+            if final:
+                state["history_pending"] = False
+                state["history_logged"] = True
+                state["history_logged_at_utc"] = datetime.now(timezone.utc).isoformat()
+                save_fn(state)
+            else:
+                complete = False
+                log.warning("%s history outbox remains pending: realised accounting incomplete", slot)
         except Exception as exc:
             complete = False
             log.error("%s history outbox remains pending: %s", slot, exc)
@@ -2579,10 +2747,11 @@ def _close_position_job_locked(state: dict, save_fn, label: str,
         "history_logged": False,
     })
     save_fn(state)
-    log_trade(state)
-    state["history_pending"] = False
-    state["history_logged"] = True
-    state["history_logged_at_utc"] = datetime.now(timezone.utc).isoformat()
+    history_complete = log_trade(state)
+    state["history_pending"] = not history_complete
+    state["history_logged"] = bool(history_complete)
+    if history_complete:
+        state["history_logged_at_utc"] = datetime.now(timezone.utc).isoformat()
     save_fn(state)
     closed_lots = int(state.get("closed_lots") or filled_lots or recorded_lots)
     audit_event(DATA_DIR, "move_position_closed", {

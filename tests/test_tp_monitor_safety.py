@@ -43,6 +43,7 @@ class TpMonitorSafetyTests(unittest.TestCase):
             "contract_value": 1.0,
             "entry_date": "2026-07-15",
             "entry_time_utc": "01:02:03",
+            "exit_detected_at_utc": "2026-07-15T01:10:00Z",
             "protection_config": {
                 "tp_target_pnl": 100,
                 "sl_target_pnl": 0,
@@ -183,7 +184,9 @@ class TpMonitorSafetyTests(unittest.TestCase):
     def test_exit_history_records_actual_fees_and_net_pnl(self):
         self.write_state(entry_fee_usd=0.10)
         order = {
-            "id": "close-1", "average_fill_price": "2.0", "commission": "0.20",
+            "id": "close-1", "state": "closed", "size": 10,
+            "unfilled_size": 0, "average_fill_price": "2.0",
+            "commission": "0.20",
         }
         response = {"success": True, "result": dict(order)}
         with patch.object(tp_monitor, "get_exchange_size", side_effect=[10, 0]), \
@@ -200,6 +203,319 @@ class TpMonitorSafetyTests(unittest.TestCase):
         self.assertEqual(history[0]["gross_pnl_usd"], 10.0)
         self.assertAlmostEqual(history[0]["fees_usd"], 0.30)
         self.assertTrue(history[0]["fees_available"])
+
+    def test_external_close_resolver_requires_post_entry_opposite_full_fill(self):
+        state = self.write_state(tp_stop_order_id="tp-close")
+        response = Mock()
+        response.json.return_value = {"success": True, "result": [
+            {"id": "pre-entry", "product_id": 101, "side": "sell", "state": "closed",
+             "size": 10, "average_fill_price": "0.9",
+             "created_at": "2026-07-15T01:01:59Z"},
+            {"id": "wrong-side", "product_id": 101, "side": "buy", "state": "closed",
+             "size": 10, "average_fill_price": "0.8",
+             "created_at": "2026-07-15T01:03:00Z"},
+            {"id": "partial-later", "product_id": 101, "side": "sell", "state": "closed",
+             "size": 5, "average_fill_price": "0.7",
+             "created_at": "2026-07-15T01:05:00Z"},
+            {"id": "manual-later", "product_id": 101, "side": "sell", "state": "closed",
+             "size": 10, "average_fill_price": "0.6",
+             "created_at": "2026-07-15T01:04:00Z"},
+            {"id": "safe-reduce-later", "product_id": 101, "side": "sell", "state": "closed",
+             "size": 10, "unfilled_size": 0, "average_fill_price": "0.55",
+             "reduce_only": True,
+             "created_at": "2026-07-15T01:06:00Z"},
+            {"id": "oversized-latest", "product_id": 101, "side": "sell", "state": "closed",
+             "size": 20, "unfilled_size": 0, "average_fill_price": "0.45",
+             "reduce_only": True,
+             "created_at": "2026-07-15T01:07:00Z"},
+            {"id": "after-detection", "product_id": 101, "side": "sell", "state": "closed",
+             "size": 10, "unfilled_size": 0, "average_fill_price": "0.40",
+             "reduce_only": True,
+             "created_at": "2026-07-15T01:11:00Z"},
+            {"id": "tp-close", "product_id": 101, "side": "sell", "state": "closed",
+             "size": 10, "unfilled_size": 0, "average_fill_price": "0.5",
+             "created_at": "2026-07-15T01:03:00Z"},
+        ]}
+        with patch.object(tp_monitor, "_sign", return_value={}), \
+             patch.object(tp_monitor.requests, "get", return_value=response) as get:
+            order, conclusive, error = tp_monitor._resolve_external_close_order(state)
+            self.assertTrue(conclusive)
+            self.assertEqual(error, "")
+            self.assertEqual(order["id"], "tp-close")
+            self.assertEqual(get.call_args.kwargs["params"], {
+                "page_size": 50, "product_ids": "101",
+            })
+
+            # Without a persisted protection identity, the later manual order is
+            # rejected because it does not explicitly prove reduce-only intent.
+            state.pop("tp_stop_order_id")
+            order, conclusive, error = tp_monitor._resolve_external_close_order(state)
+            self.assertTrue(conclusive)
+            self.assertEqual(error, "")
+            self.assertEqual(order["id"], "safe-reduce-later")
+
+    def test_external_flat_close_uses_history_fill_and_fee_aware_net_loss(self):
+        self.write_state(entry_fee_usd=0.10)
+        close_order = {
+            "id": "external-close", "client_order_id": "manual-close",
+            "product_id": 101, "side": "sell", "state": "closed", "size": 10,
+            "unfilled_size": 0, "average_fill_price": "0.5", "commission": "0.20",
+            "created_at": "2026-07-15T01:03:00Z",
+        }
+        with patch.object(tp_monitor, "get_exchange_size", return_value=0), \
+             patch.object(tp_monitor, "_resolve_external_close_order",
+                          return_value=(close_order, True, "")):
+            closed = tp_monitor.close_position(self.read_state(), 0.5, -5.0)
+
+        self.assertTrue(closed)
+        state = self.read_state()
+        self.assertEqual(state["status"], "CLOSED")
+        self.assertEqual(state["exit_order_id"], "external-close")
+        self.assertEqual(state["exit_mark"], 0.5)
+        self.assertEqual(state["gross_pnl_usd"], -5.0)
+        self.assertEqual(state["pnl_usd"], -5.3)
+        self.assertAlmostEqual(state["fees_usd"], 0.30)
+        self.assertTrue(state["pnl_includes_fees"])
+        self.assertFalse(state["history_pending"])
+        history = json.loads(self.history_file.read_text(encoding="utf-8"))
+        self.assertEqual(history[0]["pnl_usd"], -5.3)
+        self.assertEqual(history[0]["accounting_status"], "complete")
+
+    def test_external_flat_unknown_accounting_stays_null_and_pending(self):
+        self.write_state()
+        with patch.object(tp_monitor, "get_exchange_size", return_value=0), \
+             patch.object(tp_monitor, "_resolve_external_close_order", return_value=(
+                 {}, False, "order history unavailable",
+             )):
+            closed = tp_monitor.close_position(self.read_state(), 1.0, 0.0)
+
+        self.assertTrue(closed)
+        state = self.read_state()
+        self.assertEqual(state["status"], "CLOSED")
+        self.assertIsNone(state["exit_mark"])
+        self.assertIsNone(state["gross_pnl_usd"])
+        self.assertIsNone(state["pnl_usd"])
+        self.assertIsNone(state["fees_usd"])
+        self.assertTrue(state["history_pending"])
+        self.assertFalse(state["history_logged"])
+        self.assertEqual(state["exit_reconciliation_status"], "pending_order_history")
+        history = json.loads(self.history_file.read_text(encoding="utf-8"))
+        self.assertIsNone(history[0]["pnl_usd"])
+        self.assertEqual(history[0]["accounting_status"], "pending")
+
+    def test_verified_flat_close_never_uses_live_mark_as_missing_fill(self):
+        state = self.write_state(
+            pending_close_order_id="close-without-fill",
+            pending_close_client_order_id="close-client",
+        )
+        with patch.object(tp_monitor, "_resolve_external_close_order", return_value=(
+            {}, False, "terminal history has not exposed the fill yet",
+        )):
+            closed = tp_monitor._finalize_confirmed_market_close(
+                state, {"id": "close-without-fill", "state": "closed"},
+                mark=9.0, lots=10, reason="take_profit",
+            )
+
+        self.assertTrue(closed)
+        persisted = self.read_state()
+        self.assertIsNone(persisted["exit_mark"])
+        self.assertIsNone(persisted["gross_pnl_usd"])
+        self.assertIsNone(persisted["pnl_usd"])
+        self.assertTrue(persisted["history_pending"])
+
+    def test_verified_flat_non_exact_close_order_never_prices_full_position(self):
+        cases = (
+            ("partial", 10, 4),
+            ("oversized", 12, 0),
+        )
+        for label, size, unfilled in cases:
+            with self.subTest(label=label):
+                self.history_file.unlink(missing_ok=True)
+                state = self.write_state(
+                    pending_close_order_id=f"{label}-close",
+                    pending_close_client_order_id=f"{label}-client",
+                )
+                non_exact = {
+                    "id": f"{label}-close", "client_order_id": f"{label}-client",
+                    "state": "closed", "size": size, "unfilled_size": unfilled,
+                    "average_fill_price": "2.0", "commission": "0.12",
+                }
+                with patch.object(tp_monitor, "_resolve_external_close_order", return_value=(
+                    {}, False, "an exact owned-lot close fill is not visible yet",
+                )):
+                    closed = tp_monitor._finalize_confirmed_market_close(
+                        state, non_exact, mark=2.0, lots=10, reason="take_profit",
+                    )
+
+                self.assertTrue(closed)
+                persisted = self.read_state()
+                self.assertEqual(persisted["status"], "CLOSED")
+                self.assertIsNone(persisted["exit_mark"])
+                self.assertIsNone(persisted["gross_pnl_usd"])
+                self.assertIsNone(persisted["pnl_usd"])
+                self.assertTrue(persisted["history_pending"])
+
+    def test_partial_terminal_protection_order_routes_to_strict_reconciliation(self):
+        self.write_state(tp_stop_order_id="tp-partial", entry_fee_usd=0.10)
+        partial = {
+            "id": "tp-partial", "state": "closed", "size": 10,
+            "unfilled_size": 4, "average_fill_price": "2.0",
+            "commission": "0.12",
+        }
+        with patch.object(tp_monitor, "REMOVE_PROTECTION", False), \
+             patch.object(tp_monitor, "install_signal_handlers"), \
+             patch.object(tp_monitor, "get_exchange_size", return_value=0), \
+             patch.object(tp_monitor, "get_order", return_value=partial), \
+             patch.object(tp_monitor, "remove_exchange_protection", return_value=True), \
+             patch.object(tp_monitor, "_resolve_external_close_order", return_value=(
+                 {}, False, "an exact owned-lot close fill is not visible yet",
+             )), \
+             patch.object(tp_monitor, "send_telegram") as telegram:
+            self.assertEqual(tp_monitor.main(), 0)
+
+        telegram.assert_not_called()
+        persisted = self.read_state()
+        self.assertEqual(persisted["status"], "CLOSED")
+        self.assertIsNone(persisted["exit_mark"])
+        self.assertIsNone(persisted["gross_pnl_usd"])
+        self.assertIsNone(persisted["pnl_usd"])
+        self.assertTrue(persisted["history_pending"])
+
+    def test_closed_pending_worker_retries_once_then_repairs_on_later_run(self):
+        self.write_state(
+            status="CLOSED", history_pending=True, history_logged=False,
+            exit_trigger="closed_externally", exit_mark=None,
+            gross_pnl_usd=None, pnl_usd=None, fees_usd=None,
+            entry_fee_usd=0.10,
+        )
+        close_order = {
+            "id": "external-close", "client_order_id": "external-client",
+            "product_id": 101, "side": "sell", "state": "closed",
+            "size": 10, "unfilled_size": 0,
+            "average_fill_price": "0.5", "commission": "0.20",
+            "reduce_only": True, "created_at": "2026-07-15T01:03:00Z",
+        }
+        with patch.object(tp_monitor, "REMOVE_PROTECTION", False), \
+             patch.object(tp_monitor, "install_signal_handlers"), \
+             patch.object(tp_monitor, "remove_exchange_protection", return_value=True), \
+             patch.object(tp_monitor, "get_exchange_size", return_value=0) as get_size, \
+             patch.object(tp_monitor, "place_stop_order") as place_stop, \
+             patch.object(tp_monitor, "_resolve_external_close_order", side_effect=[
+                 ({}, False, "order history temporarily unavailable"),
+                 (close_order, True, ""),
+             ]) as resolve:
+            self.assertEqual(tp_monitor.main(), 0)
+            first = self.read_state()
+            self.assertTrue(first["history_pending"])
+            self.assertIsNone(first["pnl_usd"])
+
+            self.assertEqual(tp_monitor.main(), 0)
+
+        self.assertEqual(resolve.call_count, 2)
+        self.assertEqual(get_size.call_count, 2)
+        place_stop.assert_not_called()
+        final = self.read_state()
+        self.assertFalse(final["history_pending"])
+        self.assertEqual(final["exit_order_id"], "external-close")
+        self.assertEqual(final["gross_pnl_usd"], -5.0)
+        self.assertEqual(final["pnl_usd"], -5.3)
+        history = json.loads(self.history_file.read_text(encoding="utf-8"))
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0]["accounting_status"], "complete")
+        self.assertEqual(history[0]["pnl_usd"], -5.3)
+
+    def test_closed_worker_never_cancels_without_verified_zero_exposure(self):
+        for live_size in (None, 4):
+            with self.subTest(live_size=live_size):
+                self.write_state(
+                    status="CLOSED", history_pending=True,
+                    exit_trigger="closed_externally", tp_stop_order_id="tp-keep",
+                )
+                self.health_file.unlink(missing_ok=True)
+                with patch.object(tp_monitor, "REMOVE_PROTECTION", False), \
+                     patch.object(tp_monitor, "install_signal_handlers"), \
+                     patch.object(tp_monitor, "get_exchange_size", return_value=live_size), \
+                     patch.object(tp_monitor, "remove_exchange_protection") as remove, \
+                     patch.object(tp_monitor, "_finalize_external_flat_close") as reconcile, \
+                     patch.object(tp_monitor, "place_stop_order") as place_stop:
+                    self.assertEqual(tp_monitor.main(), 0)
+
+                remove.assert_not_called()
+                reconcile.assert_not_called()
+                place_stop.assert_not_called()
+                self.assertEqual(self.read_state()["tp_stop_order_id"], "tp-keep")
+                health = json.loads(self.health_file.read_text(encoding="utf-8"))
+                self.assertEqual(health["status"], "degraded")
+                self.assertEqual(health["exchange_position_size"], live_size)
+                self.assertTrue(health["protection_established"])
+
+    def test_complete_accounting_repairs_incomplete_history_duplicate(self):
+        self.write_state(
+            status="CLOSED", exit_mark=0.5, gross_pnl_usd=-5.0, pnl_usd=-5.3,
+            entry_fee_usd=0.1, exit_fee_usd=0.2, fees_usd=0.3,
+            fees_available=True, fees_complete=True, pnl_includes_fees=True,
+            exit_order_id="external-close", exit_time_utc="01:03:00",
+            exit_trigger="closed_externally", closed_lots=10,
+        )
+        self.history_file.write_text(json.dumps([{
+            "symbol": "C-BTC-TEST", "entry_date": "2026-07-15",
+            "entry_time_utc": "01:02:03", "exit_mark": 0,
+            "gross_pnl_usd": 0, "pnl_usd": 0, "fees_usd": None,
+            "pnl_includes_fees": False, "accounting_status": "pending",
+        }]), encoding="utf-8")
+
+        self.assertTrue(tp_monitor.append_history(self.read_state()))
+
+        history = json.loads(self.history_file.read_text(encoding="utf-8"))
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0]["exit_order_id"], "external-close")
+        self.assertEqual(history[0]["exit_mark"], 0.5)
+        self.assertEqual(history[0]["gross_pnl_usd"], -5.0)
+        self.assertEqual(history[0]["pnl_usd"], -5.3)
+        self.assertEqual(history[0]["accounting_status"], "complete")
+        self.assertFalse(self.read_state()["history_pending"])
+
+    def test_complete_history_hydrates_state_without_a_new_order_lookup(self):
+        self.write_state(
+            status="CLOSED", history_pending=True, history_logged=False,
+            exit_trigger="closed_externally", exit_mark=None, pnl_usd=None,
+        )
+        self.history_file.write_text(json.dumps([{
+            "slot": "evening", "symbol": "C-BTC-TEST",
+            "entry_date": "2026-07-15", "entry_time_utc": "01:02:03",
+            "exit_date": "2026-07-15", "exit_time_utc": "01:03:00",
+            "exit_mark": 0.5, "gross_pnl_usd": -5.0, "pnl_usd": -5.3,
+            "entry_fee_usd": 0.1, "exit_fee_usd": 0.2, "fees_usd": 0.3,
+            "pnl_includes_fees": True, "accounting_status": "complete",
+            "exit_order_id": "history-close",
+            "exit_reconciliation_status": "resolved_order_history",
+        }]), encoding="utf-8")
+
+        with patch.object(tp_monitor, "_resolve_external_close_order") as resolve:
+            self.assertTrue(tp_monitor._finalize_external_flat_close(self.read_state()))
+
+        resolve.assert_not_called()
+        hydrated = self.read_state()
+        self.assertFalse(hydrated["history_pending"])
+        self.assertTrue(hydrated["history_logged"])
+        self.assertEqual(hydrated["exit_order_id"], "history-close")
+        self.assertEqual(hydrated["pnl_usd"], -5.3)
+
+    def test_legacy_non_fee_and_dry_run_history_do_not_remain_pending(self):
+        for dry_run in (False, True):
+            with self.subTest(dry_run=dry_run):
+                self.history_file.unlink(missing_ok=True)
+                self.write_state(
+                    status="CLOSED", exit_mark=1.25, pnl_usd=2.5,
+                    exit_time_utc="01:03:00", exit_trigger="legacy_close",
+                    dry_run=dry_run,
+                )
+                self.assertTrue(tp_monitor.append_history(self.read_state()))
+                state = self.read_state()
+                self.assertFalse(state["history_pending"])
+                self.assertTrue(state["history_logged"])
+                row = json.loads(self.history_file.read_text(encoding="utf-8"))[0]
+                self.assertEqual(row["accounting_status"], "complete")
 
     def test_close_identity_is_durable_before_market_order_submit(self):
         self.write_state(tp_stop_order_id="tp-1")
@@ -230,7 +546,8 @@ class TpMonitorSafetyTests(unittest.TestCase):
         self.write_state(tp_stop_order_id="tp-1", entry_fee_usd=0.10)
         exact = {
             "id": "close-1", "client_order_id": "durable-close-id",
-            "state": "closed", "average_fill_price": "2.0", "commission": "0.20",
+            "state": "closed", "size": 10, "unfilled_size": 0,
+            "average_fill_price": "2.0", "commission": "0.20",
         }
 
         def response_lost(_product_id, _symbol, _side, _lots, **kwargs):

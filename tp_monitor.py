@@ -629,6 +629,180 @@ def _order_state(order):
     return str((order or {}).get("state") or (order or {}).get("status") or "").lower()
 
 
+def _parse_utc_datetime(value):
+    """Parse Delta/state ISO timestamps into comparable UTC datetimes."""
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _state_entry_datetime(state):
+    for key in ("entry_created_at_utc", "entry_created_at", "entry_timestamp_utc"):
+        parsed = _parse_utc_datetime(state.get(key))
+        if parsed is not None:
+            return parsed
+    entry_date = str(state.get("entry_date") or state.get("date") or "").strip()
+    entry_time = str(state.get("entry_time_utc") or state.get("entry_time") or "").strip()
+    if not entry_date or not entry_time:
+        return None
+    return _parse_utc_datetime(f"{entry_date}T{entry_time}")
+
+
+def _order_filled_size(order):
+    """Return the proven filled size, never the merely requested size."""
+    if not isinstance(order, dict):
+        return 0
+    for key in ("filled_size", "filled_quantity", "executed_size"):
+        value = order.get(key)
+        if value not in (None, ""):
+            try:
+                return max(abs(int(float(value))), 0)
+            except (TypeError, ValueError, OverflowError):
+                return 0
+    try:
+        requested = abs(int(float(order.get("size") or 0)))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    if order.get("unfilled_size") not in (None, ""):
+        try:
+            unfilled = abs(int(float(order["unfilled_size"])))
+            return max(requested - unfilled, 0)
+        except (TypeError, ValueError, OverflowError):
+            return 0
+    # ``filled`` explicitly proves the whole requested size.  Delta also uses
+    # ``closed`` for terminal partially-filled/cancelled orders, so a positive
+    # average price alone cannot prove their requested quantity was executed.
+    if _order_state(order) == "filled":
+        return requested
+    return 0
+
+
+def _owned_close_lots(state):
+    for key in ("owned_entry_lots", "entry_lots", "lots"):
+        try:
+            value = abs(int(float(state.get(key) or 0)))
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if value > 0:
+            return value
+    return 0
+
+
+def _resolve_external_close_order(state):
+    """Find a provable full close from authenticated terminal order history.
+
+    A same-product order is not enough: it must be an opposite-side filled
+    order submitted after this state's entry and must exactly match all
+    bot-owned lots.  A larger same-product order may include external exposure,
+    whose fill fee cannot safely be charged to this strategy.
+    Known protection identities are preferred, otherwise the latest qualifying
+    fill wins.  The conclusive flag distinguishes "no match yet" from an API
+    failure so callers can preserve pending accounting safely.
+    """
+    entered = _state_entry_datetime(state)
+    detected = _parse_utc_datetime(state.get("exit_detected_at_utc"))
+    expected_lots = _owned_close_lots(state)
+    product_id = state.get("product_id")
+    close_side = "buy" if str(state.get("side") or "").lower() == "short" else "sell"
+    if entered is None:
+        return {}, False, "entry timestamp is unavailable; post-entry close cannot be proven"
+    if detected is None:
+        return {}, False, "persisted exit detection timestamp is unavailable"
+    if detected <= entered:
+        return {}, False, "exit detection timestamp does not follow the entry"
+    if product_id in (None, "") or expected_lots <= 0:
+        return {}, False, "product identity or owned lot count is unavailable"
+
+    path = "/v2/orders/history"
+    # Delta currently caps this endpoint at 50.  Filtering server-side keeps
+    # the relevant product's recent close inside that bounded page.
+    params = {"page_size": 50, "product_ids": str(product_id)}
+    query = "?" + urlencode(params)
+    try:
+        response = requests.get(
+            f"{BASE_URL}{path}", params=params,
+            headers=_sign("GET", path, query), timeout=10,
+        ).json()
+    except Exception as exc:
+        log.warning("External close history lookup failed: %s", exc)
+        return {}, False, f"order history unavailable: {exc}"
+    if not isinstance(response, dict) or not response.get("success"):
+        error = response.get("error") if isinstance(response, dict) else response
+        return {}, False, f"order history rejected: {error or 'unknown response'}"
+
+    result = response.get("result") or []
+    if isinstance(result, dict):
+        result = result.get("orders") or result.get("data") or []
+    if not isinstance(result, list):
+        return {}, False, "order history response did not contain an order list"
+
+    known_order_ids = {
+        str(value) for value in (
+            state.get("tp_stop_order_id"), state.get("tsl_stop_order_id"),
+            state.get("pending_close_order_id"),
+        ) if value not in (None, "")
+    }
+    known_client_ids = {
+        str(value) for value in (
+            state.get("tp_client_order_id"), state.get("stop_client_order_id"),
+            state.get("pending_close_client_order_id"),
+        ) if value not in (None, "")
+    }
+    candidates = []
+    for order in result:
+        if not isinstance(order, dict):
+            continue
+        if str(order.get("product_id")) != str(product_id):
+            continue
+        if str(order.get("side") or "").lower() != close_side:
+            continue
+        if _order_state(order) not in {"closed", "filled"}:
+            continue
+        try:
+            fill = float(order.get("average_fill_price") or 0)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if not math.isfinite(fill) or fill <= 0:
+            continue
+        created = _parse_utc_datetime(
+            order.get("created_at") or order.get("created_at_utc")
+            or order.get("order_created_at")
+        )
+        if created is None or created <= entered or created > detected:
+            continue
+        if _order_filled_size(order) != expected_lots:
+            continue
+        is_known = (
+            str(order.get("id") or "") in known_order_ids
+            or str(order.get("client_order_id") or "") in known_client_ids
+        )
+        reduce_value = order.get("reduce_only")
+        reduce_known = reduce_value not in (None, "")
+        reduce_only = (
+            reduce_value is True
+            or str(reduce_value).strip().lower() in {"1", "true", "yes"}
+        )
+        # A known protection identity was created reduce-only by this monitor,
+        # and some terminal-history payloads omit the flag.  Unknown orders do
+        # not get that trust: explicit reduce_only=true is required so an
+        # opposite-side reversal cannot be misattributed as this strategy's exit.
+        if (is_known and reduce_known and not reduce_only) or (not is_known and not reduce_only):
+            continue
+        candidates.append((1 if is_known else 0, created, order))
+
+    if not candidates:
+        return {}, True, "no authoritative post-entry opposite-side full fill found"
+    candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return dict(candidates[0][2]), True, ""
+
+
 def _cancel_confirmed(response, order_id):
     if isinstance(response, dict) and response.get("success"):
         return True, "cancelled"
@@ -703,11 +877,103 @@ def remove_exchange_protection(state=None, *, confirmed_closed=False, explicit=F
     return not pending
 
 
+def _history_accounting_complete(record):
+    """Return whether a row is final, without stranding legacy/dry-run rows.
+
+    Externally-flat reconciliation is deliberately strict because that is where
+    a missing fill previously became fake zero P&L.  Older non-external and
+    dry-run records predate fee fields; their explicit exit/P&L remains final.
+    """
+    if not isinstance(record, dict):
+        return False
+
+    def finite_number(key, *, minimum=None, positive=False):
+        value = record.get(key)
+        if value is None or isinstance(value, bool):
+            return False
+        try:
+            value = float(value)
+        except (TypeError, ValueError, OverflowError):
+            return False
+        if not math.isfinite(value):
+            return False
+        if positive and value <= 0:
+            return False
+        return minimum is None or value >= minimum
+
+    if not finite_number("exit_mark", minimum=0) or not finite_number("pnl_usd"):
+        return False
+    dry_run = record.get("dry_run")
+    is_dry_run = dry_run is True or str(dry_run).strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+    strict = not is_dry_run and (
+        str(record.get("exit_trigger") or "").lower() == "closed_externally"
+        or str(record.get("exit_reconciliation_status") or "").startswith("pending")
+        or str(record.get("accounting_status") or "").lower() == "pending"
+    )
+    if not strict:
+        return True
+    includes_fees = record.get("pnl_includes_fees")
+    if not (includes_fees is True
+            or str(includes_fees).strip().lower() in {"1", "true", "yes", "on"}):
+        return False
+    return (
+        finite_number("exit_mark", positive=True)
+        and finite_number("gross_pnl_usd")
+        and finite_number("fees_usd", minimum=0)
+        and finite_number("entry_fee_usd", minimum=0)
+        and finite_number("exit_fee_usd", minimum=0)
+    )
+
+
+def _history_entry_ids(record):
+    if not isinstance(record, dict):
+        return set()
+    identities = set()
+    for key in ("entry_client_order_id", "client_order_id"):
+        value = record.get(key)
+        if value not in (None, ""):
+            identities.add(("client", str(value)))
+    for value in record.get("client_order_ids") or []:
+        if value not in (None, ""):
+            identities.add(("client", str(value)))
+    for key in ("entry_order_id", "order_id"):
+        value = record.get(key)
+        if value not in (None, ""):
+            identities.add(("order", str(value)))
+    for value in record.get("order_ids") or []:
+        if value not in (None, ""):
+            identities.add(("order", str(value)))
+    return identities
+
+
+def _same_history_trade(left, right):
+    """Match a trade by stable entry identity, with a legacy timestamp fallback."""
+    if not isinstance(left, dict) or not isinstance(right, dict):
+        return False
+    left_slot = str(left.get("slot") or "").lower()
+    right_slot = str(right.get("slot") or "").lower()
+    if left_slot and right_slot and left_slot != right_slot:
+        return False
+    left_ids = _history_entry_ids(left)
+    right_ids = _history_entry_ids(right)
+    if left_ids and right_ids:
+        return bool(left_ids & right_ids)
+    return (
+        str(left.get("symbol") or "") == str(right.get("symbol") or "")
+        and str(left.get("entry_date") or left.get("date") or "")
+        == str(right.get("entry_date") or right.get("date") or "")
+        and str(left.get("entry_time_utc") or left.get("entry_time") or "")
+        == str(right.get("entry_time_utc") or right.get("entry_time") or "")
+    )
+
+
 def append_history(state):
-    """Record the closed trade so dashboard history and daily caps see it."""
+    """Record or repair the closed trade so history never freezes fake zeros."""
     try:
         rec = {
-            "slot":         SLOT,
+            "slot":         state.get("slot") or SLOT,
             "date":         state.get("entry_date", ""),
             "entry_date":   state.get("entry_date", ""),
             "trading_date": state.get("trading_date", state.get("entry_date", "")),
@@ -717,49 +983,246 @@ def append_history(state):
                             or state.get("lots", 0),
             "exit_lots":    state.get("closed_lots") or state.get("lots", 0),
             "entry_mark":   state.get("entry_mark", 0),
-            "exit_mark":    state.get("exit_mark", 0),
-            "pnl_usd":      state.get("pnl_usd", 0),
-            "gross_pnl_usd": state.get("gross_pnl_usd", state.get("pnl_usd", 0)),
+            # Missing realized accounting is deliberately JSON null.  Zero is
+            # a legitimate result and must never be used as an unknown marker.
+            "exit_mark":    state.get("exit_mark"),
+            "pnl_usd":      state.get("pnl_usd"),
+            "gross_pnl_usd": state.get("gross_pnl_usd"),
             "fees_usd":     state.get("fees_usd"),
             "entry_fee_usd": state.get("entry_fee_usd"),
             "exit_fee_usd": state.get("exit_fee_usd"),
             "fees_available": bool(state.get("fees_available")),
+            "fees_complete": bool(state.get("fees_complete")),
+            "fees_estimated": bool(state.get("fees_estimated")),
             "pnl_includes_fees": bool(state.get("pnl_includes_fees")),
             "cost_usd":     state.get("total_cost_usd", 0),
             "entry_time":   state.get("entry_time_utc", ""),
+            "entry_time_utc": state.get("entry_time_utc", ""),
             "exit_time":    state.get("exit_time_utc", ""),
+            "exit_time_utc": state.get("exit_time_utc", ""),
+            "exit_date":    state.get("exit_date"),
+            "exit_at_utc":  state.get("exit_at_utc"),
             "exit_trigger": state.get("exit_trigger", ""),
             "side":         state.get("side", "long"),
             "dry_run":      bool(state.get("dry_run", False)),
             "order_id":     state.get("order_id") or state.get("entry_order_id"),
+            "entry_order_id": state.get("entry_order_id") or state.get("order_id"),
             "order_ids":    state.get("order_ids", []),
             "client_order_id": state.get("client_order_id"),
+            "entry_client_order_id": state.get("entry_client_order_id")
+                                     or state.get("client_order_id"),
             "client_order_ids": state.get("client_order_ids", []),
             "exit_order_id": state.get("exit_order_id"),
+            "exit_client_order_id": state.get("exit_client_order_id"),
+            "exit_reconciliation_status": state.get("exit_reconciliation_status"),
+            "entry_fee_source": state.get("entry_fee_source"),
+            "exit_fee_source": state.get("exit_fee_source"),
         }
+        rec["accounting_status"] = (
+            "complete" if _history_accounting_complete(rec) else "pending"
+        )
         with account_file_lock(USER_DIR, "history", f"tp-{SLOT}-{os.getpid()}",
                                stale_after_sec=30, wait_sec=5) as acquired:
             if not acquired:
                 raise RuntimeError("trade-history lock unavailable")
             hist = json.loads(HISTORY_FILE.read_text()) if HISTORY_FILE.exists() else []
-            dup = any(r.get("symbol") == rec["symbol"]
-                      and (r.get("entry_date") or r.get("date")) == rec["date"]
-                      and r.get("entry_time") == rec["entry_time"]
-                      for r in hist)
-            if not dup:
+            duplicate_index = next((
+                index for index, row in enumerate(hist)
+                if _same_history_trade(row, rec)
+            ), None)
+            if duplicate_index is None:
                 hist.append(rec)
+                stored = rec
                 _atomic_write_json(HISTORY_FILE, hist)
-        save_state_fields(
-            history_pending=False, history_logged=True,
-            history_logged_at_utc=_utc_now(),
-        )
+            else:
+                existing = hist[duplicate_index]
+                if _history_accounting_complete(existing):
+                    stored = existing
+                else:
+                    # An incomplete row may have come from an earlier flat
+                    # detection.  Replace its synthetic zeros/nulls with the
+                    # now-authoritative accounting without creating a duplicate.
+                    stored = {**existing, **rec}
+                    stored["accounting_status"] = (
+                        "complete" if _history_accounting_complete(stored) else "pending"
+                    )
+                    if stored != existing:
+                        hist[duplicate_index] = stored
+                        _atomic_write_json(HISTORY_FILE, hist)
+        complete = _history_accounting_complete(stored)
+        history_fields = {
+            "history_pending": not complete,
+            "history_logged": complete,
+        }
+        if complete:
+            history_fields["history_logged_at_utc"] = _utc_now()
+        save_state_fields(**history_fields)
         return True
     except Exception as e:
         log.warning("History append failed: %s", e)
         return False
 
 
-def _finalize_confirmed_market_close(state, order, mark, lots, reason):
+def _hydrate_complete_history(state):
+    """Restore final accounting from the ledger before doing another lookup."""
+    try:
+        history = json.loads(HISTORY_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None
+    if not isinstance(history, list):
+        return None
+    existing = next((
+        row for row in reversed(history)
+        if _same_history_trade(row, state) and _history_accounting_complete(row)
+    ), None)
+    if existing is None:
+        return None
+    hydrated = dict(state)
+    direct_keys = (
+        "exit_date", "exit_at_utc", "exit_mark", "pnl_usd", "gross_pnl_usd",
+        "fees_usd", "entry_fee_usd", "exit_fee_usd", "fees_available",
+        "fees_complete", "fees_estimated", "pnl_includes_fees",
+        "entry_fee_source", "exit_fee_source", "exit_trigger", "exit_order_id",
+        "exit_client_order_id", "exit_reconciliation_status", "closed_lots",
+    )
+    for key in direct_keys:
+        if key in existing and existing.get(key) is not None:
+            hydrated[key] = existing[key]
+    exit_clock = existing.get("exit_time_utc") or existing.get("exit_time")
+    if exit_clock:
+        hydrated["exit_time_utc"] = exit_clock
+    hydrated.update({
+        "status": "CLOSED",
+        "history_pending": False,
+        "history_logged": True,
+        "history_logged_at_utc": hydrated.get("history_logged_at_utc") or _utc_now(),
+    })
+    _atomic_write_json(STATE_FILE, hydrated)
+    return hydrated
+
+
+def _finalize_external_flat_close_locked(state):
+    """Persist an externally-flat close with proven history accounting.
+
+    Exchange size zero proves exposure is gone, but it does not prove a fill
+    price.  Until history supplies a full post-entry opposite-side fill, keep
+    accounting null and retryable instead of publishing a false $0 result.
+    """
+    latest = load_state()
+    if isinstance(latest, dict):
+        state = {**state, **latest}
+    if _history_accounting_complete(state):
+        append_history(state)
+        return True
+    hydrated = _hydrate_complete_history(state)
+    if hydrated is not None:
+        log.info("Recovered complete %s accounting from trade history.", state.get("symbol"))
+        return True
+
+    now = datetime.now(timezone.utc)
+    if not state.get("exit_detected_at_utc"):
+        # Persist the upper attribution bound before querying.  A later order
+        # in this product can then never be pulled backward into this close.
+        state["exit_detected_at_utc"] = now.isoformat(timespec="seconds")
+        _atomic_write_json(STATE_FILE, state)
+    order, conclusive, error = _resolve_external_close_order(state)
+    lots = _owned_close_lots(state)
+
+    if order:
+        try:
+            fill = float(order["average_fill_price"])
+            entry = float(state["entry_mark"])
+            cv = float(state.get("contract_value"))
+            lots = int(lots)
+            if not (math.isfinite(fill) and fill > 0):
+                raise ValueError("exit fill must be finite and positive")
+            if not (math.isfinite(entry) and entry > 0):
+                raise ValueError("entry fill must be finite and positive")
+            if not (math.isfinite(cv) and cv > 0):
+                raise ValueError("contract value must be finite and positive")
+            if lots <= 0 or _order_filled_size(order) != lots:
+                raise ValueError("exit order does not exactly fill the owned lots")
+            sign = -1 if str(state.get("side") or "").lower() == "short" else 1
+            gross = (fill - entry) * cv * lots * sign
+            if not math.isfinite(gross):
+                raise ValueError("gross P&L is not finite")
+            real = _apply_exit_accounting(state, gross, order)
+            exited = _parse_utc_datetime(
+                order.get("updated_at") or order.get("closed_at")
+                or order.get("created_at") or order.get("created_at_utc")
+            )
+            exited = exited or now
+            state.update({
+                "status": "CLOSED",
+                "exit_date": exited.strftime("%Y-%m-%d"),
+                "exit_time_utc": exited.strftime("%H:%M:%S"),
+                "exit_at_utc": exited.isoformat().replace("+00:00", "Z"),
+                "exit_mark": fill,
+                "exit_trigger": "closed_externally",
+                "exit_order_id": order.get("id"),
+                "exit_client_order_id": order.get("client_order_id"),
+                "closed_lots": lots,
+                "exit_reconciliation_status": "resolved_order_history",
+                "exit_reconciliation_error": "",
+                "exit_history_lookup_conclusive": bool(conclusive),
+                "history_pending": True,
+                "history_logged": False,
+            })
+            _atomic_write_json(STATE_FILE, state)
+            append_history(state)
+            log.info(
+                "Externally-flat %s reconciled to order %s at %.4f; net P&L $%.2f.",
+                state.get("symbol"), order.get("id"), fill, real,
+            )
+            return True
+        except (KeyError, TypeError, ValueError, OverflowError) as exc:
+            error = f"close fill accounting failed: {exc}"
+            conclusive = False
+
+    pending_fields = {
+        "status": "CLOSED",
+        "exit_trigger": "closed_externally",
+        "closed_lots": lots,
+        "exit_detected_at_utc": state.get("exit_detected_at_utc"),
+        "exit_reconciliation_status": "pending_order_history",
+        "exit_reconciliation_error": error,
+        "exit_history_lookup_conclusive": bool(conclusive),
+        "history_pending": True,
+        "history_logged": False,
+    }
+    # Never replace already-known accounting with null merely because a later
+    # history request failed.  Unknown fields stay absent/null naturally.
+    state.update(pending_fields)
+    for key in (
+        "exit_date", "exit_time_utc", "exit_at_utc", "exit_mark",
+        "exit_order_id", "exit_client_order_id", "gross_pnl_usd",
+        "pnl_usd", "fees_usd", "exit_fee_usd",
+    ):
+        state.setdefault(key, None)
+    state.setdefault("fees_available", False)
+    state.setdefault("fees_complete", False)
+    state.setdefault("fees_estimated", False)
+    state.setdefault("pnl_includes_fees", False)
+    _atomic_write_json(STATE_FILE, state)
+    append_history(state)
+    log.warning("Externally-flat %s has pending realized accounting: %s",
+                state.get("symbol"), error)
+    return True
+
+
+def _finalize_external_flat_close(state):
+    """Serialize external-close reconciliation across monitor/dashboard actions."""
+    with account_file_lock(
+        USER_DIR, f"close-{SLOT}", f"tp-external-close-{os.getpid()}",
+        stale_after_sec=30, wait_sec=2,
+    ) as acquired:
+        if not acquired:
+            log.warning("Another %s close reconciliation is in progress.", SLOT)
+            return False
+        return _finalize_external_flat_close_locked(state)
+
+
+def _finalize_confirmed_market_close_locked(state, order, mark, lots, reason):
     """Finalize accounting only after exchange position size is verified zero."""
     latest = load_state()
     if isinstance(latest, dict):
@@ -767,14 +1230,40 @@ def _finalize_confirmed_market_close(state, order, mark, lots, reason):
     order = dict(order or {})
     order.setdefault("id", state.get("pending_close_order_id"))
     order.setdefault("client_order_id", state.get("pending_close_client_order_id"))
-    fill = float(order.get("average_fill_price") or mark)
-    cv = float(state.get("contract_value", 0.001))
+    try:
+        fill = float(order.get("average_fill_price") or 0)
+    except (TypeError, ValueError, OverflowError):
+        fill = 0
+    try:
+        expected_lots = abs(int(lots))
+        entry = float(state.get("entry_mark"))
+        cv = float(state.get("contract_value"))
+    except (TypeError, ValueError, OverflowError):
+        expected_lots, entry, cv = 0, 0, 0
+    filled_lots = _order_filled_size(order)
+    if (not math.isfinite(fill) or fill <= 0
+            or not math.isfinite(entry) or entry <= 0
+            or not math.isfinite(cv) or cv <= 0
+            or expected_lots <= 0 or filled_lots != expected_lots):
+        log.warning(
+            "Exchange is flat but close order %s lacks valid exact accounting "
+            "(%d/%d lots, entry %s, exit %s, cv %s); falling back to strict history.",
+            order.get("id"), filled_lots, expected_lots, state.get("entry_mark"),
+            order.get("average_fill_price"),
+            state.get("contract_value"),
+        )
+        return _finalize_external_flat_close_locked(state)
     sign = -1 if state.get("side") == "short" else 1
-    gross = round((fill - float(state["entry_mark"])) * cv * lots * sign, 2)
+    gross = (fill - entry) * cv * expected_lots * sign
+    if not math.isfinite(gross):
+        return _finalize_external_flat_close_locked(state)
     real = _apply_exit_accounting(state, gross, order)
+    exited = datetime.now(timezone.utc)
     state.update({
         "status": "CLOSED",
-        "exit_time_utc": time.strftime("%H:%M:%S", time.gmtime()),
+        "exit_date": exited.strftime("%Y-%m-%d"),
+        "exit_time_utc": exited.strftime("%H:%M:%S"),
+        "exit_at_utc": exited.isoformat().replace("+00:00", "Z"),
         "exit_mark": fill,
         "exit_trigger": f"{reason}_{SLOT}",
         "exit_order_id": order.get("id"),
@@ -786,7 +1275,7 @@ def _finalize_confirmed_market_close(state, order, mark, lots, reason):
         "pending_close_error": "",
         "history_pending": True,
         "history_logged": False,
-        "closed_lots": int(state.get("owned_entry_lots") or lots),
+        "closed_lots": int(state.get("owned_entry_lots") or expected_lots),
     })
     _atomic_write_json(STATE_FILE, state)
     append_history(state)
@@ -803,13 +1292,25 @@ def _finalize_confirmed_market_close(state, order, mark, lots, reason):
         f"{head}\n"
         f"<code>{'━' * 24}</code>\n"
         f"Symbol  » <code>{state.get('symbol')}</code>\n"
-        f"Lots    » <code>{lots:,}</code>\n"
+        f"Lots    » <code>{expected_lots:,}</code>\n"
         f"Entry   » <code>${float(state['entry_mark']):.4f}</code>\n"
         f"Exit    » <code>${fill:.4f}</code>\n"
         f"P&L     » <code>{psign}${abs(real):.2f}</code> {'🎯' if reason == 'take_profit' else '🛑'}\n"
         f"OrderID » <code>{order.get('id')}</code>"
     )
     return True
+
+
+def _finalize_confirmed_market_close(state, order, mark, lots, reason):
+    """Public serialized wrapper for confirmed-flat market accounting."""
+    with account_file_lock(
+        USER_DIR, f"close-{SLOT}", f"tp-market-finalize-{os.getpid()}",
+        stale_after_sec=30, wait_sec=2,
+    ) as acquired:
+        if not acquired:
+            log.warning("Another %s close reconciliation is in progress.", SLOT)
+            return False
+        return _finalize_confirmed_market_close_locked(state, order, mark, lots, reason)
 
 
 def _persist_close_fields(state, **fields):
@@ -880,7 +1381,7 @@ def _reconcile_uncertain_close(state, response_order, mark, lots, reason, error)
     # this reads zero.
     live_after = get_exchange_size(state["product_id"])
     if live_after == 0:
-        return _finalize_confirmed_market_close(state, order, mark, lots, reason)
+        return _finalize_confirmed_market_close_locked(state, order, mark, lots, reason)
 
     if live_after is None:
         pending_state = "ambiguous"
@@ -984,7 +1485,7 @@ def _close_position_locked(state, mark, pnl, reason="take_profit"):
         # for accounting/audit fallback.
         if live_size == 0:
             log.info("Pending close identity %s is verified flat.", pending_client_id)
-            return _finalize_confirmed_market_close(
+            return _finalize_confirmed_market_close_locked(
                 state, exact_order, mark, configured_lots, pending_reason
             )
 
@@ -1038,7 +1539,7 @@ def _close_position_locked(state, mark, pnl, reason="take_profit"):
                 )
                 return False
             if live_recheck == 0:
-                return _finalize_confirmed_market_close(
+                return _finalize_confirmed_market_close_locked(
                     state, exact_order, mark, configured_lots, pending_reason
                 )
             live_size = live_recheck
@@ -1063,18 +1564,8 @@ def _close_position_locked(state, mark, pnl, reason="take_profit"):
             retry_same_identity = True
 
     elif live_size == 0:
-        log.info("Position already closed on exchange — marking state CLOSED, monitor done.")
-        state.update({
-            "status": "CLOSED",
-            "exit_time_utc": time.strftime("%H:%M:%S", time.gmtime()),
-            "exit_trigger": "closed_externally",
-            "history_pending": True,
-            "history_logged": False,
-            "closed_lots": int(state.get("owned_entry_lots") or configured_lots),
-        })
-        _atomic_write_json(STATE_FILE, state)
-        append_history(state)
-        return True
+        log.info("Position already closed on exchange — reconciling its actual close fill.")
+        return _finalize_external_flat_close_locked(state)
 
     lots = abs(int(live_size))
     client_order_id = pending_client_id or _protection_client_order_id("close")
@@ -1163,7 +1654,7 @@ def _close_position_locked(state, mark, pnl, reason="take_profit"):
             full_order = {}
         if full_order:
             order = {**order, **full_order}
-        return _finalize_confirmed_market_close(
+        return _finalize_confirmed_market_close_locked(
             state, order, mark, lots, pending_reason
         )
 
@@ -1211,9 +1702,71 @@ def main():
         # exchange orders untouched.
         pass
 
-    if state.get("status") == "CLOSED" and state.get("history_pending"):
-        append_history(state)
+    if state.get("status") == "CLOSED":
+        # CLOSED workers are deliberately one-shot.  Dashboard supervision
+        # periodically respawns an externally-flat/history-pending worker, so a
+        # delayed order-history fill gets another chance without leaving an old
+        # monitor alive to collide with a later position in this slot.
+        product_id = state.get("product_id")
+        try:
+            live_size = get_exchange_size(product_id) if product_id not in (None, "") else None
+        except Exception as exc:
+            live_size = None
+            log.warning("Closed-state exposure verification failed: %s", exc)
+        if live_size != 0:
+            detail = (
+                "closed state has unverified exchange exposure; protection retained"
+                if live_size is None else
+                f"state says CLOSED but exchange still has {abs(int(live_size))} lots; "
+                "protection retained"
+            )
+            write_monitor_health(
+                "degraded", last_error=detail, state_status="CLOSED",
+                exchange_position_size=(None if live_size is None else int(live_size)),
+                protection_established=bool(
+                    state.get("tsl_stop_order_id") or state.get("tp_stop_order_id")
+                ),
+                reconciliation_pending=bool(state.get("history_pending")),
+            )
+            log.error(detail)
+            return 0
+        if state.get("history_pending"):
+            if (state.get("exit_trigger") == "closed_externally"
+                    and not _history_accounting_complete(state)):
+                _finalize_external_flat_close(state)
+            else:
+                append_history(state)
+            state = load_state()
+        cleanup_error = ""
+        try:
+            cleanup_ok = remove_exchange_protection(
+                state, confirmed_closed=True,
+                reason="one-shot CLOSED state reconciliation",
+            )
+        except Exception as exc:
+            cleanup_ok = False
+            cleanup_error = f"closed-state protection cleanup failed: {exc}"
+            log.warning(cleanup_error)
         state = load_state()
+        accounting_pending = bool(state.get("history_pending"))
+        if accounting_pending:
+            status = "reconciling"
+            last_error = str(
+                state.get("exit_reconciliation_error")
+                or "realised accounting is awaiting authoritative order history"
+            )
+        elif not cleanup_ok:
+            status = "degraded"
+            last_error = cleanup_error or "closed-state protection cleanup needs retry"
+        else:
+            status = "closed"
+            last_error = ""
+        write_monitor_health(
+            status, last_error=last_error, state_status="CLOSED",
+            exchange_position_size=int(live_size), protection_established=False,
+            reconciliation_pending=accounting_pending,
+        )
+        return 0
 
     if not state or not state.get("product_id"):
         write_monitor_health("error", last_error="position state is missing product_id",
@@ -1473,12 +2026,30 @@ def main():
             return finalize_stop_fill_locked(order, kind)
 
     def finalize_stop_fill_locked(order, kind):
-        fill = float(order.get("average_fill_price") or 0)
-        done = abs(int(float(order.get("size") or load_state().get("lots", lots))))
-        gross = round((fill - entry_mark) * cv * done * sign, 2)
+        closed_state = load_state()
+        expected = abs(int(float(closed_state.get("lots") or lots)))
+        proven_filled = _order_filled_size(order)
+        try:
+            fill = float(order.get("average_fill_price") or 0)
+        except (TypeError, ValueError, OverflowError):
+            fill = 0
+        if (not math.isfinite(fill) or fill <= 0
+                or not math.isfinite(entry_mark) or entry_mark <= 0
+                or not math.isfinite(cv) or cv <= 0
+                or expected <= 0 or proven_filled != expected):
+            log.warning(
+                "Terminal protection order %s does not prove a full fill "
+                "(%d/%d lots at %s); using strict order-history reconciliation.",
+                order.get("id"), proven_filled, expected,
+                order.get("average_fill_price"),
+            )
+            return _finalize_external_flat_close_locked(closed_state)
+        done = expected
+        gross = (fill - entry_mark) * cv * done * sign
+        if not math.isfinite(gross):
+            return _finalize_external_flat_close_locked(closed_state)
         exit_trigger = {"tp": f"take_profit_{SLOT}",
                         "tsl": f"trailing_stop_{SLOT}"}.get(kind, f"stop_loss_{SLOT}")
-        closed_state = load_state()
         real = _apply_exit_accounting(closed_state, gross, order)
         closed_state.update({
             "status": "CLOSED",
@@ -1552,21 +2123,22 @@ def main():
                     if not order_id:
                         continue
                     order = get_order(order_id)
-                    if _order_state(order) == "closed":
-                        done_kind = kind
-                        if state.get("status") == "OPEN":
-                            finalize_stop_fill(order, kind)
-                        break
+                    if _order_state(order) in {"closed", "filled"}:
+                        try:
+                            fill = float(order.get("average_fill_price") or 0)
+                        except (TypeError, ValueError, OverflowError):
+                            fill = 0
+                        if math.isfinite(fill) and fill > 0:
+                            done_kind = kind
+                            if state.get("status") == "OPEN":
+                                finalize_stop_fill(order, kind)
+                            break
+                        log.warning(
+                            "Terminal protection order %s has no fill price; "
+                            "resolving it through order history.", order_id,
+                        )
                 if state.get("status") == "OPEN" and not done_kind:
-                    state.update({
-                        "status": "CLOSED",
-                        "exit_time_utc": time.strftime("%H:%M:%S", time.gmtime()),
-                        "exit_trigger": "closed_externally",
-                        "history_pending": True,
-                        "history_logged": False,
-                    })
-                    _atomic_write_json(STATE_FILE, state)
-                    append_history(state)
+                    _finalize_external_flat_close(state)
                 cleaned = remove_exchange_protection(
                     load_state(), confirmed_closed=True, reason="exchange position confirmed zero"
                 )

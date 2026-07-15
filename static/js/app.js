@@ -56,6 +56,31 @@ function _setPill(el, cls, text) {
   el.innerHTML = `<span class="dot"></span>${esc(text)}`;
 }
 
+function _closedPill(trade) {
+  const raw = trade && trade.pnl_usd;
+  const known = raw !== null && raw !== undefined && raw !== '' && Number.isFinite(Number(raw));
+  if (!known) return { cls: 'closed', text: 'CLOSED —', pnl: null };
+  const pnl = Number(raw);
+  const cls = pnl > 0 ? 'closed-profit' : (pnl < 0 ? 'closed-loss' : 'closed');
+  return { cls, text: `CLOSED ${f$(pnl)}`, pnl };
+}
+
+function _closedAtMs(trade) {
+  if (!trade) return Number.NEGATIVE_INFINITY;
+  const explicit = trade.closed_at_utc || trade.exit_at_utc;
+  if (explicit) {
+    const parsed = Date.parse(explicit);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  const clock = trade.exit_time_utc || trade.exit_time || '';
+  const date = trade.exit_date || trade.entry_date || trade.date || '';
+  if (!date || !clock) return Number.NEGATIVE_INFINITY;
+  let parsed = Date.parse(`${date}T${clock}Z`);
+  const entryClock = trade.entry_time_utc || trade.entry_time || '';
+  if (!trade.exit_date && entryClock && clock < entryClock) parsed += 86_400_000;
+  return Number.isFinite(parsed) ? parsed : Number.NEGATIVE_INFINITY;
+}
+
 function statusFromSlots(st) {
   const slots = [st.morning || {}, { ...st, morning: undefined, trend: undefined }, st.trend || {}];
   const open = slots.filter(s => s && s.status === 'OPEN');
@@ -65,11 +90,11 @@ function statusFromSlots(st) {
     return { cls: 'live', text: `LIVE ${f$(pnl)}`, pnl };
   }
   if (open.length) return { cls: 'sim', text: 'SIMULATED ONLY' };
+  if (st.latest_closed_trade) return _closedPill(st.latest_closed_trade);
   const closed = slots.filter(s => s && s.status === 'CLOSED' && !s.dry_run);
   if (closed.length) {
-    const last = closed.reduce((a, b) => ((a.exit_time_utc || '') > (b.exit_time_utc || '') ? a : b));
-    const pnl = +last.pnl_usd || 0;
-    return { cls: pnl >= 0 ? 'closed-profit' : 'closed-loss', text: `CLOSED ${f$(pnl)}`, pnl };
+    const last = closed.reduce((a, b) => (_closedAtMs(a) > _closedAtMs(b) ? a : b));
+    return _closedPill(last);
   }
   return { cls: 'idle', text: 'IDLE — waiting' };
 }

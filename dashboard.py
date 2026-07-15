@@ -609,8 +609,57 @@ def _hist_file() -> Path:
     return _user_dir() / "trade_history.json"
 
 
+def _history_accounting_complete(record: dict) -> bool:
+    """Whether a closed-trade row contains final realised accounting.
+
+    Legacy and dry-run rows predate fee detail, so an explicit exit price and
+    P&L remain sufficient for those.  An externally detected flat position is
+    stricter: until both sides' fees and fee-aware net P&L are known, its row
+    must remain retryable instead of being mistaken for a completed history
+    append by the dashboard poller.
+    """
+    if not isinstance(record, dict):
+        return False
+
+    def finite_number(key: str) -> bool:
+        value = record.get(key)
+        if value is None or isinstance(value, bool):
+            return False
+        try:
+            return math.isfinite(float(value))
+        except (TypeError, ValueError, OverflowError):
+            return False
+
+    if not finite_number("exit_mark") or not finite_number("pnl_usd"):
+        return False
+    dry_run = record.get("dry_run")
+    is_dry_run = dry_run is True or str(dry_run).strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+    strict = not is_dry_run and (
+        str(record.get("exit_trigger") or "").lower() == "closed_externally"
+        or str(record.get("exit_reconciliation_status") or "").startswith("pending")
+        or str(record.get("accounting_status") or "").lower() == "pending"
+    )
+    if not strict:
+        return True
+    includes_fees = record.get("pnl_includes_fees")
+    if not (includes_fees is True
+            or str(includes_fees).strip().lower() in {"1", "true", "yes", "on"}):
+        return False
+    return all(finite_number(key) for key in (
+        "gross_pnl_usd", "fees_usd", "entry_fee_usd", "exit_fee_usd",
+    ))
+
+
 def _append_trade_history(record: dict, owner: str) -> bool:
-    """Cross-process-safe, deduplicated history append."""
+    """Cross-process-safe history upsert; true means accounting is final.
+
+    A pending external-close row is intentionally persisted but returns false,
+    keeping the slot's ``history_pending`` retry flag set.  Once authoritative
+    accounting arrives, the same trade is repaired in place rather than being
+    stranded as a duplicate with null or synthetic P&L.
+    """
     with account_file_lock(_user_dir(), "history", owner, wait_sec=2.0) as acquired:
         if not acquired:
             return False
@@ -625,17 +674,40 @@ def _append_trade_history(record: dict, owner: str) -> bool:
                 return False
         else:
             history = []
-        key = (record.get("client_order_id") or record.get("order_id"),
-               record.get("symbol"), record.get("entry_date") or record.get("date"),
-               record.get("entry_time_utc") or record.get("entry_time"))
+        incoming = dict(record)
+        incoming["accounting_status"] = (
+            "complete" if _history_accounting_complete(incoming) else "pending"
+        )
+        key = (incoming.get("client_order_id") or incoming.get("order_id"),
+               incoming.get("symbol"), incoming.get("entry_date") or incoming.get("date"),
+               incoming.get("entry_time_utc") or incoming.get("entry_time"))
+
         def row_key(row):
             return (row.get("client_order_id") or row.get("order_id"),
                     row.get("symbol"), row.get("entry_date") or row.get("date"),
                     row.get("entry_time_utc") or row.get("entry_time"))
-        if not any(row_key(row) == key for row in history if isinstance(row, dict)):
-            history.append(record)
+
+        duplicate_index = next((
+            index for index, row in enumerate(history)
+            if isinstance(row, dict) and row_key(row) == key
+        ), None)
+        if duplicate_index is None:
+            history.append(incoming)
             _atomic_write_json(_hist_file(), history)
-        return True
+            stored = incoming
+        else:
+            existing = history[duplicate_index]
+            if _history_accounting_complete(existing):
+                stored = existing
+            else:
+                stored = {**existing, **incoming}
+                stored["accounting_status"] = (
+                    "complete" if _history_accounting_complete(stored) else "pending"
+                )
+                if stored != existing:
+                    history[duplicate_index] = stored
+                    _atomic_write_json(_hist_file(), history)
+        return _history_accounting_complete(stored)
 
 
 def _flush_pending_history() -> None:
@@ -1060,53 +1132,18 @@ def _external_option_view(position: dict) -> dict:
 
 
 def _reconcile_stale_close(slot: str, state: dict, live_pids: set) -> dict:
-    """If a slot's on-disk state says OPEN but that position no longer exists
-    on the exchange (closed while the dashboard/bot was down, or by a manual
-    trade this process never saw), close it out using the real fill from
-    order history instead of leaving stale data blocking future syncs."""
+    """Leave an exchange-flat OPEN state for its strict TP monitor to resolve.
+
+    The dashboard cannot safely infer ownership from the latest same-product
+    opposite-side order: that order can predate this entry, be partial, open a
+    reversal, or belong to another strategy.  Open-state supervision runs
+    before exchange sync and the TP monitor verifies post-entry, reduce-only,
+    full-size order identity plus fee-aware accounting.  Until it does, keeping
+    this state OPEN is safer than publishing a fabricated close or P&L.
+    """
     pid = int(state.get("product_id", 0) or 0)
     if state.get("status") != "OPEN" or pid == 0 or pid in live_pids:
         return state
-    try:
-        hdrs = _sign("GET", "/v2/orders/history", "?page_size=20")
-        r = req.get(f"{API_BASE}/v2/orders/history", params={"page_size": 20}, headers=hdrs, timeout=6)
-        orders = r.json().get("result", [])
-        # A LONG closes with a SELL fill; a SHORT closes with a BUY fill.
-        # Looking only at sells (as this used to) attributed a short's exit
-        # to one of its own opening sells — wrong price, wrong P&L, and the
-        # real buy-back order never appeared anywhere.
-        is_short   = state.get("side") == "short"
-        close_side = "buy" if is_short else "sell"
-        fills = [o for o in orders
-                 if o.get("product_id") == pid and o.get("side") == close_side
-                 and o.get("state") == "closed" and o.get("average_fill_price")]
-        if not fills:
-            return state  # Can't reconcile yet — leave as-is, try again next sync
-        fills.sort(key=lambda o: str(o.get("created_at", "")), reverse=True)
-        fill    = fills[0]
-        exit_mk = float(fill["average_fill_price"])
-        cv      = float(state.get("contract_value", 0.001))
-        lots    = int(state.get("lots", 0))
-        entry   = float(state.get("entry_mark", 0))
-        sign    = -1 if is_short else 1
-        pnl     = round((exit_mk - entry) * cv * lots * sign, 2)
-        state.update({
-            "status":        "CLOSED",
-            "exit_time_utc": str(fill.get("created_at", ""))[11:19],
-            "exit_mark":      exit_mk,
-            "pnl_usd":        pnl,
-            "exit_trigger":   "reconciled_stale",
-            "exit_order_id":  fill.get("id"),
-        })
-        rec = {**state, "date": state.get("entry_date", ""),
-               "entry_time": state.get("entry_time_utc", ""),
-               "exit_time":  state.get("exit_time_utc", ""),
-               "cost_usd":   state.get("total_cost_usd", 0)}
-        appended = _append_trade_history(rec, f"dashboard-reconcile:{slot}")
-        state["history_pending"] = not appended
-        _atomic_write_json(_slot_file(slot), state)
-    except Exception:
-        pass
     return state
 
 
@@ -1272,6 +1309,136 @@ def _enrich_live(state: dict) -> dict:
     return state
 
 
+def _utc_trade_exit_at(record: dict) -> datetime | None:
+    """Return a closed trade's complete UTC exit timestamp.
+
+    Older state/history records store only an entry date and UTC clock times.
+    For those records an exit clock earlier than the entry clock means the
+    position closed after midnight on the following UTC day.  Newer records
+    can carry an authoritative ``exit_date`` or ISO ``exit_at_utc`` instead.
+    """
+    stamp = str(record.get("exit_at_utc") or "").strip()
+    if stamp:
+        try:
+            dt = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc)
+        except (TypeError, ValueError):
+            pass
+
+    exit_clock = str(
+        record.get("exit_time_utc") or record.get("exit_time") or ""
+    ).strip()
+    if not exit_clock:
+        return None
+
+    # Some imported history formats put a complete ISO timestamp in the
+    # exit-time field.  Preserve its date instead of combining it again.
+    try:
+        dt = datetime.fromisoformat(exit_clock.replace("Z", "+00:00"))
+        if "T" in exit_clock or " " in exit_clock:
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        pass
+
+    explicit_exit_date = str(record.get("exit_date") or "").strip()
+    entry_date = str(record.get("entry_date") or record.get("date") or "").strip()
+    exit_date = explicit_exit_date or entry_date
+    if not exit_date:
+        return None
+    try:
+        exited = datetime.fromisoformat(
+            f"{exit_date}T{exit_clock}".replace("Z", "+00:00")
+        )
+        if exited.tzinfo is None:
+            exited = exited.replace(tzinfo=timezone.utc)
+        exited = exited.astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+    # An explicit exit date is authoritative.  Infer a next-day close only
+    # for legacy records whose sole calendar date is their entry date.
+    if not explicit_exit_date:
+        entry_clock = str(
+            record.get("entry_time_utc") or record.get("entry_time") or ""
+        ).strip()
+        if entry_clock:
+            try:
+                entered = datetime.fromisoformat(
+                    f"{entry_date}T{entry_clock}".replace("Z", "+00:00")
+                )
+                if entered.tzinfo is None:
+                    entered = entered.replace(tzinfo=timezone.utc)
+                if exited < entered.astimezone(timezone.utc):
+                    exited += timedelta(days=1)
+            except (TypeError, ValueError):
+                pass
+    return exited
+
+
+def _closed_trade_pnl(record: dict) -> float | None:
+    """Return a finite realised P&L without turning missing data into zero."""
+    value = record.get("pnl_usd")
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        pnl = float(value)
+    except (TypeError, ValueError):
+        return None
+    return pnl if math.isfinite(pnl) else None
+
+
+def _latest_closed_trade(history: list, slot_states: dict[str, dict]) -> dict | None:
+    """Select the newest real closed trade from the ledger and slot states.
+
+    History is the authoritative closed-trade ledger, but a just-closed slot
+    state can precede (or survive failure of) its history append.  Both are
+    considered; an exact timestamp tie favours history.  History records from
+    older versions commonly omit ``status`` and are still closed by definition.
+    """
+    candidates: list[tuple[datetime, int, int, dict, str | None]] = []
+
+    def add(record: dict, slot: str | None, source_rank: int, sequence: int,
+            require_closed_status: bool) -> None:
+        if not isinstance(record, dict):
+            return
+        status = str(record.get("status") or "").strip().upper()
+        if ((require_closed_status and status != "CLOSED")
+                or (not require_closed_status and status and status != "CLOSED")):
+            return
+        dry_run = record.get("dry_run", False)
+        if dry_run is True or str(dry_run).strip().lower() in {"1", "true", "yes", "on"}:
+            return
+        exited = _utc_trade_exit_at(record)
+        if exited is None:
+            return
+        candidates.append((exited, source_rank, sequence, record, slot))
+
+    if isinstance(history, list):
+        for sequence, record in enumerate(history):
+            add(record, record.get("slot") if isinstance(record, dict) else None,
+                1, sequence, False)
+    for sequence, (slot, record) in enumerate(slot_states.items()):
+        add(record, slot, 0, sequence, True)
+
+    if not candidates:
+        return None
+    exited, _, _, record, slot = max(
+        candidates, key=lambda candidate: candidate[:3]
+    )
+    return {
+        "slot": slot,
+        "symbol": str(record.get("symbol") or ""),
+        "pnl_usd": _closed_trade_pnl(record),
+        "exit_date": exited.strftime("%Y-%m-%d"),
+        "exit_time_utc": exited.strftime("%H:%M:%S"),
+        "closed_at_utc": exited.isoformat().replace("+00:00", "Z"),
+    }
+
+
 _last_revive = {"ts": 0.0}
 
 
@@ -1290,6 +1457,10 @@ def api_status():
     state   = _enrich_live(_load_json(_slot_file("evening"), {}))
     morning = _enrich_live(_load_json(_slot_file("morning"), {}))
     trend   = _enrich_live(_load_json(_slot_file("trend"), {}))
+    state["latest_closed_trade"] = _latest_closed_trade(
+        _load_json(_hist_file(), []),
+        {"evening": state, "morning": morning, "trend": trend},
+    )
     state["morning"] = morning
     state["trend"]   = trend
     # C/P positions not opened by this strategy are intentionally separate:
@@ -4410,7 +4581,7 @@ _monitor_last_restart: dict[str, float] = {}
 
 
 def _ensure_open_monitors(force: bool = False) -> int:
-    """Supervise every real bot-owned OPEN slot, including local fallbacks."""
+    """Supervise OPEN protection and one-shot CLOSED reconciliation workers."""
     if not USERS_DIR.exists():
         return 0
     started = 0
@@ -4420,7 +4591,21 @@ def _ensure_open_monitors(force: bool = False) -> int:
         user = udir.name
         for slot in SLOTS:
             state = _load_json(udir / SLOT_STATE_FILES[slot], {})
-            if state.get("status") != "OPEN" or state.get("dry_run"):
+            status = str(state.get("status") or "").upper()
+            open_protection = status == "OPEN" and not state.get("dry_run")
+            pending_external_accounting = (
+                status == "CLOSED"
+                and bool(state.get("history_pending"))
+                and str(state.get("exit_trigger") or "").lower() == "closed_externally"
+                and not state.get("dry_run")
+            )
+            pending_closed_cleanup = status == "CLOSED" and bool(
+                state.get("tsl_stop_order_id")
+                or state.get("tp_stop_order_id")
+                or state.get("orphan_protection_order_ids")
+            )
+            if not (open_protection or pending_external_accounting
+                    or pending_closed_cleanup):
                 continue
             if slot == "trend" and not _is_owned_trend_state(state):
                 continue

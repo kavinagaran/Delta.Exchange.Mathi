@@ -7,6 +7,108 @@ import pytest
 import Delta_Straddle_Live as bot
 
 
+def _move_history_paths(tmp_path):
+    return patch.object(bot, "DATA_DIR", tmp_path), patch.object(
+        bot, "HISTORY_FILE", tmp_path / "trade_history.json")
+
+
+def test_external_pending_history_preserves_null_realized_fields(tmp_path):
+    data_patch, history_patch = _move_history_paths(tmp_path)
+    state = {
+        "slot": "evening", "status": "CLOSED", "history_pending": True,
+        "entry_date": "2026-07-15", "entry_time_utc": "01:00:00",
+        "symbol": "MV-BTC-TEST", "lots": 10, "entry_mark": 100,
+        "exit_trigger": "settlement_or_external",
+    }
+    with data_patch, history_patch:
+        final = bot.log_trade(state)
+
+    assert final is False
+    row = json.loads((tmp_path / "trade_history.json").read_text())[0]
+    assert row["exit_mark"] is None
+    assert row["gross_pnl_usd"] is None
+    assert row["fees_usd"] is None
+    assert row["pnl_usd"] is None
+    assert row["accounting_status"] == "pending"
+
+
+def test_pending_external_history_flush_does_not_clear_outbox(tmp_path):
+    data_patch, history_patch = _move_history_paths(tmp_path)
+    state = {
+        "slot": "evening", "status": "CLOSED", "history_pending": True,
+        "history_logged": False, "entry_date": "2026-07-15",
+        "entry_time_utc": "01:00:00", "symbol": "MV-BTC-TEST",
+        "lots": 10, "entry_mark": 100,
+        "exit_trigger": "settlement_or_external",
+    }
+    saved = []
+    with data_patch, history_patch, \
+         patch.object(bot, "load_morning_state", return_value=None), \
+         patch.object(bot, "load_state", return_value=dict(state)), \
+         patch.object(bot, "save_state", side_effect=lambda value: saved.append(dict(value))):
+        complete = bot._flush_pending_move_history()
+
+    assert complete is False
+    assert not saved or saved[-1]["history_pending"] is True
+
+
+def test_history_retry_never_overwrites_complete_or_stronger_row(tmp_path):
+    data_patch, history_patch = _move_history_paths(tmp_path)
+    complete_row = {
+        "date": "2026-07-15", "entry_date": "2026-07-15",
+        "entry_time": "01:00:00", "symbol": "MV-BTC-TEST",
+        "exit_mark": 80, "gross_pnl_usd": -2, "fees_usd": .3,
+        "entry_fee_usd": .1, "exit_fee_usd": .2, "pnl_usd": -2.3,
+        "pnl_includes_fees": True, "exit_trigger": "closed_externally",
+        "exit_order_id": 99, "accounting_status": "complete",
+    }
+    path = tmp_path / "trade_history.json"
+    path.write_text(json.dumps([complete_row]))
+    incoming = {
+        "slot": "evening", "entry_date": "2026-07-15",
+        "entry_time_utc": "01:00:00", "symbol": "MV-BTC-TEST",
+        "exit_trigger": "settlement_or_external",
+    }
+    with data_patch, history_patch:
+        assert bot.log_trade(incoming) is True
+    stored = json.loads(path.read_text())[0]
+    assert stored["pnl_usd"] == -2.3
+    assert stored["exit_order_id"] == 99
+
+    stronger_pending = dict(
+        complete_row, fees_usd=None, entry_fee_usd=None, exit_fee_usd=None,
+        pnl_includes_fees=False, accounting_status="pending",
+    )
+    path.write_text(json.dumps([stronger_pending]))
+    with data_patch, history_patch:
+        assert bot.log_trade(incoming) is False
+    stored = json.loads(path.read_text())[0]
+    assert stored["exit_mark"] == 80
+    assert stored["gross_pnl_usd"] == -2
+    assert stored["exit_order_id"] == 99
+
+
+def test_exchange_already_flat_close_keeps_history_pending(tmp_path):
+    state = {
+        "slot": "evening", "status": "OPEN", "side": "long",
+        "product_id": 1, "symbol": "MV-X", "lots": 10,
+        "entry_mark": 100, "contract_value": .001, "btc_at_entry": 65000,
+        "entry_date": "2026-07-15", "entry_time_utc": "01:00:00",
+    }
+    saved = []
+    with patch.object(bot, "DATA_DIR", tmp_path), \
+         patch.object(bot, "get_mv_position", return_value=None), \
+         patch.object(bot, "get_mv_mark", return_value=110), \
+         patch.object(bot, "get_btc_price", return_value=66000), \
+         patch.object(bot, "log_trade", return_value=False), \
+         patch.object(bot, "audit_event"), patch.object(bot, "send_telegram"):
+        bot._close_position_job(state, lambda value: saved.append(dict(value)), "EVENING")
+
+    assert saved[-1]["status"] == "CLOSED"
+    assert saved[-1]["history_pending"] is True
+    assert saved[-1]["history_logged"] is False
+
+
 def test_execution_snapshot_rejects_wide_spread():
     ticker = {"result": {"quotes": {"best_bid": "90", "best_ask": "110"},
                          "mark_price": "100", "spot_price": "65000"}}

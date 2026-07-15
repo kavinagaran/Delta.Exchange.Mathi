@@ -1,0 +1,69 @@
+import shutil
+import subprocess
+from pathlib import Path
+
+import pytest
+
+
+ROOT = Path(__file__).resolve().parents[1]
+NODE = shutil.which("node")
+
+
+@pytest.mark.skipif(NODE is None, reason="Node.js is required for frontend JavaScript tests")
+def test_closed_trade_capsule_classifies_pnl_and_uses_latest_trade():
+    script = r"""
+const fs = require('fs');
+const vm = require('vm');
+global.document = {
+  addEventListener() {}, getElementById() { return null; }, dispatchEvent() {}
+};
+global.CustomEvent = function() {};
+vm.runInThisContext(fs.readFileSync('static/js/app.js', 'utf8'));
+
+const cases = [
+  [{pnl_usd: 12.34}, 'closed-profit', 'CLOSED +$12.34'],
+  [{pnl_usd: -0.18}, 'closed-loss', 'CLOSED -$0.18'],
+  [{pnl_usd: 0}, 'closed', 'CLOSED +$0.00'],
+  [{pnl_usd: null}, 'closed', 'CLOSED \u2014'],
+  [{}, 'closed', 'CLOSED \u2014'],
+  [{pnl_usd: 'not-a-number'}, 'closed', 'CLOSED \u2014'],
+];
+for (const [trade, expectedClass, expectedText] of cases) {
+  const actual = _closedPill(trade);
+  if (actual.cls !== expectedClass || actual.text !== expectedText) {
+    throw new Error(JSON.stringify({trade, actual, expectedClass, expectedText}));
+  }
+}
+
+const latestLoss = statusFromSlots({
+  status: 'CLOSED', entry_date: '2026-07-14', entry_time_utc: '12:00:00',
+  exit_time_utc: '20:00:00', pnl_usd: 99,
+  morning: {status: 'CLOSED', entry_date: '2026-07-15',
+            entry_time_utc: '05:00:00', exit_time_utc: '11:00:00', pnl_usd: 8},
+  latest_closed_trade: {pnl_usd: -0.18, closed_at_utc: '2026-07-15T11:57:21Z'},
+});
+if (latestLoss.cls !== 'closed-loss' || latestLoss.text !== 'CLOSED -$0.18') {
+  throw new Error(`authoritative latest close was ignored: ${JSON.stringify(latestLoss)}`);
+}
+
+const live = statusFromSlots({
+  status: 'OPEN', live_pnl: -1.25,
+  latest_closed_trade: {pnl_usd: 20, closed_at_utc: '2026-07-15T11:57:21Z'},
+});
+if (live.cls !== 'live' || live.text !== 'LIVE -$1.25') {
+  throw new Error(`live position did not take precedence: ${JSON.stringify(live)}`);
+}
+
+const overnight = _closedAtMs({
+  entry_date: '2026-07-15', entry_time_utc: '23:00:00', exit_time_utc: '01:00:00'
+});
+const sameDay = _closedAtMs({
+  entry_date: '2026-07-15', entry_time_utc: '12:00:00', exit_time_utc: '22:00:00'
+});
+if (!(overnight > sameDay)) throw new Error('overnight close ordering failed');
+"""
+    result = subprocess.run(
+        [NODE, "-e", script], cwd=ROOT, text=True, capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
