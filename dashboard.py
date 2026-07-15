@@ -14,6 +14,7 @@ import secrets
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -75,6 +76,8 @@ SLOT_STATE_FILES = {
 }
 
 _tp_procs: dict = {}   # "<user>:<slot>" -> subprocess.Popen
+_trend_entry_lock = threading.Lock()
+_trend_auto_last_attempt: dict[str, float] = {}
 
 
 def _pid_alive(pid: int) -> bool:
@@ -159,6 +162,7 @@ CONFIG_KEYS = [
     "TSL_TARGET_PNL_MORNING",
     "TREND_LOTS", "TP_TARGET_PNL_TREND", "TP_POLL_SECS_TREND",
     "SL_TARGET_PNL_TREND", "TSL_TARGET_PNL_TREND",
+    "TREND_AUTO_ENTRY_ENABLED",
     "MAX_TRADES_PER_DAY",
 ]
 
@@ -1117,7 +1121,11 @@ def _manual_entry_lots(slot: str, mark: float, cv: float, strike: float = 0.0) -
     except ValueError:
         configured = int(lot_default)
     max_lots = int(os.getenv("MAX_ORDER_LOTS", 5000))
-    if not _cfg_bool("DYNAMIC_LOTS", True):
+    # Trend entries always honor min(configured, affordable), even if the
+    # legacy MOVE sizing toggle is disabled. This prevents an automatic trend
+    # order from ever using the configured lots as an unsafe upper bound.
+    is_trend = slot == "trend"
+    if not is_trend and not _cfg_bool("DYNAMIC_LOTS", True):
         return min(configured, max_lots)
     try:
         hdrs = _sign("GET", "/v2/wallet/balances")
@@ -1133,9 +1141,12 @@ def _manual_entry_lots(slot: str, mark: float, cv: float, strike: float = 0.0) -
         # the fee at 10% of premium (also the fallback when strike is unknown).
         fee = (min(0.0005 * strike, 0.10 * mark) if strike > 0 else 0.10 * mark) * cv
         afford = int((bal * 0.98) / (mark * cv + fee)) if mark > 0 else 0
-        return max(min(configured, afford, max_lots), 1)
+        affordable = min(configured, afford, max_lots)
+        return max(affordable, 0) if is_trend else max(affordable, 1)
     except Exception:
-        return min(configured, max_lots)
+        # A Trend entry must not proceed when affordability cannot be
+        # established; MOVE keeps its historical configured-lot fallback.
+        return 0 if is_trend else min(configured, max_lots)
 
 
 @app.route("/api/manual-entry/preview")
@@ -1795,14 +1806,19 @@ def _trend_entry_preview_data() -> tuple[dict, int]:
         return {"ok": False, "can_enter": False, "error": str(e)}, 502
     direction = trend.get("combined")
     option_type = "CE" if direction == "up" else "PE" if direction == "down" else None
+    signal_key = "|".join([str(direction or "na")] + [
+        str((trend.get("timeframes", {}).get(k) or {}).get("candle_time", ""))
+        for k in ("5m", "15m", "1h")
+    ])
     state = _load_json(_slot_file("trend"), {})
     if state.get("status") == "OPEN":
         return {"ok": True, "can_enter": False, "reason": "A trend position is already open",
-                "direction": direction, "option_type": option_type}, 200
+                "direction": direction, "option_type": option_type,
+                "signal_key": signal_key}, 200
     if not option_type:
         return {"ok": True, "can_enter": False,
                 "reason": "5M, 15M and 1H trends are not aligned",
-                "direction": direction}, 200
+                "direction": direction, "signal_key": signal_key}, 200
     contract, spot = _current_trend_option(direction)
     if not contract:
         return {"ok": False, "can_enter": False,
@@ -1818,13 +1834,17 @@ def _trend_entry_preview_data() -> tuple[dict, int]:
         return {"ok": False, "can_enter": False,
                 "error": f"Live mark unavailable for {symbol}"}, 502
     lots = _manual_entry_lots("trend", mark, cv, float(contract.get("strike_price") or 0))
+    if lots < 1:
+        return {"ok": False, "can_enter": False,
+                "error": "No affordable Trend lots available for the account"}, 200
     return {"ok": True, "can_enter": True, "direction": direction,
             "option_type": option_type, "symbol": symbol, "product_id": int(contract["id"]),
             "strike": float(contract.get("strike_price") or 0), "spot": round(spot, 2),
             "mark": round(mark, 4), "lots": lots,
             "est_value": round(mark * cv * lots, 2),
             "settlement": contract.get("settlement_time", ""),
-            "contract_value": cv, "dry_run": _cfg_bool("DRY_RUN", False)}, 200
+            "contract_value": cv, "dry_run": _cfg_bool("DRY_RUN", False),
+            "signal_key": signal_key, "timeframes": trend.get("timeframes", {})}, 200
 
 
 @app.route("/api/trend-entry/preview")
@@ -1833,8 +1853,7 @@ def api_trend_entry_preview():
     return jsonify(data), status
 
 
-@app.route("/api/trend-entry", methods=["POST"])
-def api_trend_entry():
+def _execute_trend_entry(auto: bool = False):
     """Buy the eligible 2-step ITM CE/PE; direction is always server-derived."""
     _sync_states_from_exchange()
     preview, status = _trend_entry_preview_data()
@@ -1884,7 +1903,10 @@ def api_trend_entry():
             "contract_value": cv, "lots": lots, "entry_mark": round(fill, 4),
             "btc_at_entry": preview["spot"],
             "total_cost_usd": round(fill * cv * lots, 2),
-            "order_id": order.get("id"), "entry_trigger": "trend_alignment",
+            "order_id": order.get("id"),
+            "entry_trigger": "trend_auto" if auto else "trend_alignment",
+            "auto_signal_key": preview.get("signal_key"),
+            "trend_timeframes": preview.get("timeframes", {}),
             "dry_run": is_dry_run,
         }
         _slot_file("trend").write_text(json.dumps(new_state, indent=2), encoding="utf-8")
@@ -1902,9 +1924,66 @@ def api_trend_entry():
         return jsonify({"ok": True, "slot": "trend", "side": "long",
                         "option_type": preview["option_type"], "symbol": preview["symbol"],
                         "lots": lots, "fill": fill, "order_id": order.get("id"),
-                        "dry_run": is_dry_run, "monitor_started": monitor_started})
+                        "dry_run": is_dry_run, "monitor_started": monitor_started,
+                        "auto": auto})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/trend-entry", methods=["POST"])
+def api_trend_entry():
+    if not _trend_entry_lock.acquire(blocking=False):
+        return jsonify({"ok": False, "error": "Another Trend entry is being processed"}), 409
+    try:
+        return _execute_trend_entry(auto=False)
+    finally:
+        _trend_entry_lock.release()
+
+
+def _maybe_auto_trend_entry() -> bool:
+    """Place at most one automatic entry per aligned candle set per account."""
+    if not _cfg_bool("TREND_AUTO_ENTRY_ENABLED", False):
+        return False
+    user = _active_user()
+    now = time.time()
+    if now - _trend_auto_last_attempt.get(user, 0.0) < 30:
+        return False
+    if not _trend_entry_lock.acquire(blocking=False):
+        return False
+    try:
+        _sync_states_from_exchange()
+        state = _load_json(_slot_file("trend"), {})
+        if state.get("status") == "OPEN":
+            return False
+        preview, status = _trend_entry_preview_data()
+        if status != 200 or not preview.get("can_enter"):
+            return False
+        if state.get("auto_signal_key") == preview.get("signal_key"):
+            return False
+        _trend_auto_last_attempt[user] = now
+        response = _execute_trend_entry(auto=True)
+        return bool(getattr(response, "status_code", 500) < 300)
+    finally:
+        _trend_entry_lock.release()
+
+
+def _trend_auto_loop() -> None:
+    """Background per-account trigger; works even when no browser is open."""
+    while True:
+        try:
+            for acct in _load_accounts():
+                user = _safe_user(acct.get("username", ""))
+                if not user:
+                    continue
+                try:
+                    with app.test_request_context("/api/trend-entry"):
+                        g.basic_user = user
+                        _maybe_auto_trend_entry()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        time.sleep(30)
 
 
 @app.route("/api/wallet")
@@ -2108,4 +2187,5 @@ if __name__ == "__main__":
     print("  http://localhost:5001")
     print("=" * 50)
     _revive_tp_monitors()
+    threading.Thread(target=_trend_auto_loop, name="trend-auto-entry", daemon=True).start()
     app.run(host="0.0.0.0", port=5001, debug=False)

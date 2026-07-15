@@ -1,5 +1,6 @@
 import unittest
 from datetime import datetime, timezone, timedelta
+from unittest.mock import patch
 
 import dashboard
 
@@ -56,6 +57,30 @@ class OptionSelectionTests(unittest.TestCase):
             self.products(later, [63800, 64000, 64200, 64400, 64600, 64800, 65000])
         selected = dashboard._pick_two_step_itm(products, 64850, "CE")
         self.assertEqual(selected["settlement_time"], later)
+
+
+class TrendSizingTests(unittest.TestCase):
+    def test_trend_lots_are_minimum_of_configured_and_affordable(self):
+        response = type("Response", (), {"json": lambda self: {
+            "success": True,
+            "result": [{"asset_symbol": "USD", "available_balance": "0.50"}],
+        }})()
+        def cfg(key, default=""):
+            return {"TREND_LOTS": "1000", "DYNAMIC_LOTS": "false"}.get(key, default)
+        with patch.object(dashboard, "_cfg", side_effect=cfg), \
+             patch.object(dashboard, "_cfg_bool", return_value=False), \
+             patch.object(dashboard.req, "get", return_value=response), \
+             patch.object(dashboard, "_sign", return_value={}):
+            lots = dashboard._manual_entry_lots("trend", 1.0, 0.001, 64000)
+        self.assertGreaterEqual(lots, 1)
+        self.assertLess(lots, 1000)
+
+    def test_trend_lots_are_zero_when_wallet_cannot_be_read(self):
+        response = type("Response", (), {"json": lambda self: {"success": False}})()
+        with patch.object(dashboard, "_cfg", return_value="1000"), \
+             patch.object(dashboard.req, "get", return_value=response), \
+             patch.object(dashboard, "_sign", return_value={}):
+            self.assertEqual(dashboard._manual_entry_lots("trend", 1.0, 0.001, 64000), 0)
 
 
 if __name__ == "__main__":
