@@ -6,16 +6,21 @@ import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
 // ─────────────────────────────────────────────────────────────
-// Theme colors — matched to the web dashboard
+// Design tokens — shared with static/css/app.css in the web dashboard.
 // ─────────────────────────────────────────────────────────────
-const kBg = Color(0xFF0A0E1A);
-const kSurf = Color(0xFF111A2E);
-const kBorder = Color(0xFF1E2A45);
-const kGreen = Color(0xFF00FF87);
-const kRed = Color(0xFFFF2D6E);
-const kGold = Color(0xFFFFD700);
-const kMuted = Color(0xFF8CA0BC);
-const kText = Color(0xFFE8EEF7);
+const kBg = Color(0xFFF2F4F8);
+const kSurf = Color(0xFFFFFFFF);
+const kBorder = Color(0xFFE4E8F0);
+const kGreen = Color(0xFF08875D);
+const kRed = Color(0xFFD92D20);
+const kGold = Color(
+  0xFF2563EB,
+); // Legacy name retained: this is web accent blue.
+const kMuted = Color(0xFF68758A);
+const kText = Color(0xFF1A2333);
+const kSidebar = Color(0xFF161D29);
+const kSidebarMuted = Color(0xFF8F9CB0);
+const kWarn = Color(0xFFB45309);
 
 void main() {
   runApp(const MathiBotApp());
@@ -30,24 +35,85 @@ class MathiBotApp extends StatelessWidget {
       title: 'Nithi-bot',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
-        brightness: Brightness.dark,
+        useMaterial3: true,
+        brightness: Brightness.light,
+        fontFamily: 'Roboto',
         scaffoldBackgroundColor: kBg,
-        colorScheme: const ColorScheme.dark(
-          primary: kGreen,
+        colorScheme: const ColorScheme.light(
+          primary: kGold,
           surface: kSurf,
           error: kRed,
+          onPrimary: Colors.white,
+          onSurface: kText,
         ),
         appBarTheme: const AppBarTheme(
-          backgroundColor: kBg,
+          backgroundColor: kSurf,
+          foregroundColor: kText,
           elevation: 0,
           centerTitle: false,
+          surfaceTintColor: Colors.transparent,
+          shape: Border(bottom: BorderSide(color: kBorder)),
+          titleTextStyle: TextStyle(
+            color: kText,
+            fontSize: 17,
+            fontWeight: FontWeight.w700,
+            letterSpacing: -0.15,
+          ),
         ),
         cardTheme: const CardThemeData(
           color: kSurf,
           elevation: 0,
+          surfaceTintColor: Colors.transparent,
           shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.all(Radius.circular(14)),
+            borderRadius: BorderRadius.all(Radius.circular(10)),
             side: BorderSide(color: kBorder),
+          ),
+        ),
+        dividerTheme: const DividerThemeData(color: kBorder, thickness: 1),
+        inputDecorationTheme: InputDecorationTheme(
+          filled: true,
+          fillColor: kSurf,
+          labelStyle: const TextStyle(color: kMuted, fontSize: 13),
+          hintStyle: const TextStyle(color: kMuted, fontSize: 13),
+          contentPadding: const EdgeInsets.symmetric(
+            horizontal: 13,
+            vertical: 13,
+          ),
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(8),
+            borderSide: const BorderSide(color: kBorder),
+          ),
+          enabledBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(8),
+            borderSide: const BorderSide(color: kBorder),
+          ),
+          focusedBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(8),
+            borderSide: const BorderSide(color: kGold, width: 1.5),
+          ),
+        ),
+        filledButtonTheme: FilledButtonThemeData(
+          style: FilledButton.styleFrom(
+            backgroundColor: kGold,
+            foregroundColor: Colors.white,
+            textStyle: const TextStyle(fontWeight: FontWeight.w700),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(8),
+            ),
+          ),
+        ),
+        navigationBarTheme: const NavigationBarThemeData(
+          backgroundColor: kSurf,
+          indicatorColor: Color(0xFFEEF3FE),
+          labelTextStyle: WidgetStatePropertyAll(
+            TextStyle(
+              fontSize: 10.5,
+              fontWeight: FontWeight.w600,
+              color: kMuted,
+            ),
+          ),
+          iconTheme: WidgetStatePropertyAll(
+            IconThemeData(color: kMuted, size: 21),
           ),
         ),
       ),
@@ -66,10 +132,10 @@ class Api {
   static String displayName = '';
 
   static Map<String, String> get _headers => {
-        'Content-Type': 'application/json',
-        if (pass.isNotEmpty)
-          'Authorization': 'Basic ${base64Encode(utf8.encode('$user:$pass'))}',
-      };
+    'Content-Type': 'application/json',
+    if (pass.isNotEmpty)
+      'Authorization': 'Basic ${base64Encode(utf8.encode('$user:$pass'))}',
+  };
 
   static Future<void> loadBaseUrl() async {
     final prefs = await SharedPreferences.getInstance();
@@ -92,11 +158,16 @@ class Api {
     final r = await http
         .get(Uri.parse('$baseUrl$path'), headers: _headers)
         .timeout(const Duration(seconds: 8));
-    if (r.statusCode == 401) throw Exception('Login failed — check username/password in Settings');
+    if (r.statusCode == 401) {
+      throw Exception('Login failed — check username/password in Settings');
+    }
     return jsonDecode(r.body);
   }
 
-  static Future<dynamic> postJson(String path, [Map<String, dynamic>? body]) async {
+  static Future<dynamic> postJson(
+    String path, [
+    Map<String, dynamic>? body,
+  ]) async {
     final r = await http
         .post(
           Uri.parse('$baseUrl$path'),
@@ -104,7 +175,19 @@ class Api {
           body: body == null ? null : jsonEncode(body),
         )
         .timeout(const Duration(seconds: 20));
-    if (r.statusCode == 401) throw Exception('Login failed — check username/password in Settings');
+    if (r.statusCode == 401) {
+      throw Exception('Login failed — check username/password in Settings');
+    }
+    return jsonDecode(r.body);
+  }
+
+  static Future<dynamic> deleteJson(String path) async {
+    final r = await http
+        .delete(Uri.parse('$baseUrl$path'), headers: _headers)
+        .timeout(const Duration(seconds: 15));
+    if (r.statusCode == 401) {
+      throw Exception('Login failed — check username/password in Settings');
+    }
     return jsonDecode(r.body);
   }
 }
@@ -171,45 +254,252 @@ class _HomeShellState extends State<HomeShell> {
       } catch (_) {}
     }
     if (!mounted) return;
-    setState(() { _ready = true; _authed = ok; });
+    setState(() {
+      _ready = true;
+      _authed = ok;
+    });
   }
 
   void _signOut() {
     Api.saveBaseUrl(Api.baseUrl, Api.user, '');
     Api.displayName = '';
-    setState(() { _authed = false; _tab = 0; });
+    setState(() {
+      _authed = false;
+      _tab = 0;
+    });
   }
 
   @override
   Widget build(BuildContext context) {
     if (!_ready) {
-      return const Scaffold(body: Center(child: CircularProgressIndicator(color: kGreen)));
+      return const Scaffold(
+        body: Center(child: CircularProgressIndicator(color: kGold)),
+      );
     }
     if (!_authed) {
       return LoginScreen(onSuccess: () => setState(() => _authed = true));
     }
-    return Scaffold(
-      body: IndexedStack(
-        index: _tab,
-        children: [
-          const DashboardPage(),
-          const LogsPage(),
-          const ConfigsPage(),
-          SettingsPage(onSignOut: _signOut),
-        ],
-      ),
-      bottomNavigationBar: NavigationBar(
-        backgroundColor: kSurf,
-        indicatorColor: kGreen.withValues(alpha: 0.15),
-        selectedIndex: _tab,
-        onDestinationSelected: (i) => setState(() => _tab = i),
-        destinations: const [
-          NavigationDestination(icon: Icon(Icons.dashboard_outlined), selectedIcon: Icon(Icons.dashboard, color: kGreen), label: 'Dashboard'),
-          NavigationDestination(icon: Icon(Icons.receipt_long_outlined), selectedIcon: Icon(Icons.receipt_long, color: kGreen), label: 'Logs'),
-          NavigationDestination(icon: Icon(Icons.tune_outlined), selectedIcon: Icon(Icons.tune, color: kGreen), label: 'Configs'),
-          NavigationDestination(icon: Icon(Icons.settings_outlined), selectedIcon: Icon(Icons.settings, color: kGreen), label: 'Settings'),
-        ],
-      ),
+    const labels = [
+      'Overview',
+      'Trades & P&L',
+      'Positions',
+      'Bot Config',
+      'API Accounts',
+      'Settings',
+    ];
+    const icons = [
+      Icons.dashboard_outlined,
+      Icons.show_chart_outlined,
+      Icons.view_list_outlined,
+      Icons.tune_outlined,
+      Icons.manage_accounts_outlined,
+      Icons.settings_outlined,
+    ];
+    final pages = <Widget>[
+      const DashboardPage(),
+      const TradesPage(),
+      const PositionsPage(),
+      const ConfigsPage(),
+      const AccountsPage(),
+      SettingsPage(onSignOut: _signOut),
+    ];
+
+    return LayoutBuilder(
+      builder: (context, bounds) {
+        final wide = bounds.maxWidth >= 840;
+        final body = IndexedStack(index: _tab, children: pages);
+        if (!wide) {
+          return Scaffold(
+            appBar: AppBar(
+              title: Text(labels[_tab]),
+              leadingWidth: 48,
+              leading: Padding(
+                padding: const EdgeInsets.all(10),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(7),
+                  child: Image.asset('assets/logo.png'),
+                ),
+              ),
+            ),
+            body: body,
+            bottomNavigationBar: NavigationBar(
+              height: 68,
+              selectedIndex: _tab,
+              onDestinationSelected: (i) => setState(() => _tab = i),
+              destinations: List.generate(
+                labels.length,
+                (i) => NavigationDestination(
+                  icon: Icon(icons[i]),
+                  selectedIcon: Icon(icons[i], color: kGold),
+                  label: i == 1
+                      ? 'Trades'
+                      : i == 3
+                      ? 'Config'
+                      : i == 4
+                      ? 'Accounts'
+                      : labels[i],
+                ),
+              ),
+            ),
+          );
+        }
+
+        return Scaffold(
+          body: Row(
+            children: [
+              Container(
+                width: 224,
+                color: kSidebar,
+                child: SafeArea(
+                  child: Column(
+                    children: [
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(18, 20, 18, 16),
+                        child: Row(
+                          children: [
+                            ClipRRect(
+                              borderRadius: BorderRadius.circular(10),
+                              child: Image.asset(
+                                'assets/logo.png',
+                                width: 38,
+                                height: 38,
+                              ),
+                            ),
+                            const SizedBox(width: 10),
+                            const Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    'NITHI-BOT',
+                                    style: TextStyle(
+                                      color: Colors.white,
+                                      fontWeight: FontWeight.w700,
+                                      fontSize: 15,
+                                      letterSpacing: .9,
+                                    ),
+                                  ),
+                                  Text(
+                                    'BTC Trade Made Bit Easy',
+                                    maxLines: 1,
+                                    style: TextStyle(
+                                      color: kSidebarMuted,
+                                      fontSize: 9.5,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const Divider(color: Color(0xFF232C3D), height: 1),
+                      const SizedBox(height: 10),
+                      Expanded(
+                        child: ListView.builder(
+                          padding: const EdgeInsets.symmetric(horizontal: 10),
+                          itemCount: labels.length,
+                          itemBuilder: (_, i) => Padding(
+                            padding: const EdgeInsets.only(bottom: 2),
+                            child: ListTile(
+                              dense: true,
+                              selected: _tab == i,
+                              selectedTileColor: kGold.withValues(alpha: .22),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                              leading: Icon(
+                                icons[i],
+                                size: 19,
+                                color: _tab == i ? Colors.white : kSidebarMuted,
+                              ),
+                              title: Text(
+                                labels[i],
+                                style: TextStyle(
+                                  color: _tab == i
+                                      ? Colors.white
+                                      : kSidebarMuted,
+                                  fontSize: 13.5,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                              onTap: () => setState(() => _tab = i),
+                            ),
+                          ),
+                        ),
+                      ),
+                      const Divider(color: Color(0xFF232C3D), height: 1),
+                      Padding(
+                        padding: const EdgeInsets.all(16),
+                        child: Row(
+                          children: [
+                            const CircleAvatar(
+                              radius: 16,
+                              backgroundColor: Color(0xFF232C3D),
+                              child: Icon(
+                                Icons.person_outline,
+                                size: 17,
+                                color: Colors.white,
+                              ),
+                            ),
+                            const SizedBox(width: 9),
+                            Expanded(
+                              child: Text(
+                                Api.displayName.isEmpty
+                                    ? Api.user
+                                    : Api.displayName,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontWeight: FontWeight.w600,
+                                  fontSize: 12,
+                                ),
+                              ),
+                            ),
+                            IconButton(
+                              onPressed: _signOut,
+                              tooltip: 'Sign out',
+                              icon: const Icon(
+                                Icons.logout,
+                                size: 18,
+                                color: kSidebarMuted,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              Expanded(
+                child: Column(
+                  children: [
+                    Container(
+                      height: 64,
+                      padding: const EdgeInsets.symmetric(horizontal: 26),
+                      decoration: const BoxDecoration(
+                        color: kSurf,
+                        border: Border(bottom: BorderSide(color: kBorder)),
+                      ),
+                      alignment: Alignment.centerLeft,
+                      child: Text(
+                        labels[_tab],
+                        style: const TextStyle(
+                          color: kText,
+                          fontSize: 17,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                    Expanded(child: body),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        );
+      },
     );
   }
 }
@@ -226,10 +516,12 @@ class LoginScreen extends StatefulWidget {
 }
 
 class _LoginScreenState extends State<LoginScreen> {
-  late final TextEditingController _urlCtl =
-      TextEditingController(text: Api.baseUrl);
-  late final TextEditingController _userCtl =
-      TextEditingController(text: Api.user);
+  late final TextEditingController _urlCtl = TextEditingController(
+    text: Api.baseUrl,
+  );
+  late final TextEditingController _userCtl = TextEditingController(
+    text: Api.user,
+  );
   final TextEditingController _passCtl = TextEditingController();
   bool _busy = false;
   String? _error;
@@ -243,14 +535,18 @@ class _LoginScreenState extends State<LoginScreen> {
   }
 
   Future<void> _signIn() async {
-    setState(() { _busy = true; _error = null; });
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
     await Api.saveBaseUrl(_urlCtl.text, _userCtl.text, _passCtl.text);
     try {
       final me = await Api.getJson('/api/me') as Map<String, dynamic>;
       Api.displayName = (me['display_name'] ?? Api.user).toString();
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text('Welcome back, ${Api.displayName}!')));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Welcome back, ${Api.displayName}!')),
+      );
       widget.onSuccess();
     } catch (e) {
       await Api.saveBaseUrl(_urlCtl.text, _userCtl.text, '');
@@ -278,19 +574,31 @@ class _LoginScreenState extends State<LoginScreen> {
                 Center(
                   child: ClipRRect(
                     borderRadius: BorderRadius.circular(20),
-                    child: Image.asset('assets/logo.png', width: 88, height: 88),
+                    child: Image.asset(
+                      'assets/logo.png',
+                      width: 88,
+                      height: 88,
+                    ),
                   ),
                 ),
                 const SizedBox(height: 12),
                 const Center(
-                  child: Text('NITHI-BOT',
-                      style: TextStyle(color: kGreen, fontSize: 26,
-                          fontWeight: FontWeight.w800, letterSpacing: 3)),
+                  child: Text(
+                    'NITHI-BOT',
+                    style: TextStyle(
+                      color: kGold,
+                      fontSize: 26,
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: 3,
+                    ),
+                  ),
                 ),
                 const SizedBox(height: 4),
                 const Center(
-                  child: Text('BTC Trade Made Bit Easy',
-                      style: TextStyle(color: kMuted, fontSize: 12)),
+                  child: Text(
+                    'BTC Trade Made Bit Easy',
+                    style: TextStyle(color: kMuted, fontSize: 12),
+                  ),
                 ),
                 const SizedBox(height: 30),
                 if (_error != null) ...[
@@ -300,8 +608,10 @@ class _LoginScreenState extends State<LoginScreen> {
                       color: kRed.withValues(alpha: 0.12),
                       borderRadius: BorderRadius.circular(8),
                     ),
-                    child: Text(_error!,
-                        style: const TextStyle(color: kRed, fontSize: 13)),
+                    child: Text(
+                      _error!,
+                      style: const TextStyle(color: kRed, fontSize: 13),
+                    ),
                   ),
                   const SizedBox(height: 14),
                 ],
@@ -310,7 +620,9 @@ class _LoginScreenState extends State<LoginScreen> {
                   autofillHints: const [AutofillHints.username],
                   decoration: InputDecoration(
                     labelText: 'Username',
-                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(8),
+                    ),
                   ),
                 ),
                 const SizedBox(height: 14),
@@ -321,22 +633,31 @@ class _LoginScreenState extends State<LoginScreen> {
                   onSubmitted: (_) => _busy ? null : _signIn(),
                   decoration: InputDecoration(
                     labelText: 'Password',
-                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(8),
+                    ),
                   ),
                 ),
                 const SizedBox(height: 14),
                 ExpansionTile(
                   tilePadding: EdgeInsets.zero,
-                  title: const Text('Server',
-                      style: TextStyle(color: kMuted, fontSize: 13)),
+                  title: const Text(
+                    'Server',
+                    style: TextStyle(color: kMuted, fontSize: 13),
+                  ),
                   children: [
                     TextField(
                       controller: _urlCtl,
                       keyboardType: TextInputType.url,
-                      style: const TextStyle(fontFamily: 'monospace', fontSize: 13),
+                      style: const TextStyle(
+                        fontFamily: 'monospace',
+                        fontSize: 13,
+                      ),
                       decoration: InputDecoration(
                         labelText: 'Server URL',
-                        border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(8),
+                        ),
                       ),
                     ),
                     const SizedBox(height: 8),
@@ -345,19 +666,23 @@ class _LoginScreenState extends State<LoginScreen> {
                 const SizedBox(height: 18),
                 FilledButton(
                   style: FilledButton.styleFrom(
-                    backgroundColor: kGreen.withValues(alpha: 0.15),
-                    foregroundColor: kGreen,
                     padding: const EdgeInsets.symmetric(vertical: 15),
                   ),
                   onPressed: _busy ? null : _signIn,
-                  child: Text(_busy ? 'Signing in…' : 'SIGN IN',
-                      style: const TextStyle(
-                          fontWeight: FontWeight.w700, letterSpacing: 1)),
+                  child: Text(
+                    _busy ? 'Signing in…' : 'SIGN IN',
+                    style: const TextStyle(
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 1,
+                    ),
+                  ),
                 ),
                 const SizedBox(height: 10),
                 const Center(
-                  child: Text('Accounts are managed on the web dashboard → API Accounts',
-                      style: TextStyle(color: kMuted, fontSize: 11)),
+                  child: Text(
+                    'Accounts are managed on the web dashboard → API Accounts',
+                    style: TextStyle(color: kMuted, fontSize: 11),
+                  ),
                 ),
               ],
             ),
@@ -437,18 +762,20 @@ class _DashboardPageState extends State<DashboardPage> {
   double _intrinsic(String symbol, double strike, double s) {
     // MV = move option (straddle): pays |move from strike|. C/P = vanilla.
     if (symbol.startsWith('MV-')) return (s - strike).abs();
-    if (symbol.startsWith('P-')) return (strike - s).clamp(0, double.infinity).toDouble();
+    if (symbol.startsWith('P-')) {
+      return (strike - s).clamp(0, double.infinity).toDouble();
+    }
     return (s - strike).clamp(0, double.infinity).toDouble();
   }
 
   void _showPayoff(Map<String, dynamic> st) {
     final symbol = (st['symbol'] ?? '').toString();
     final strike = (st['strike'] as num?)?.toDouble() ?? 0;
-    final entry  = (st['entry_mark'] as num?)?.toDouble() ?? 0;
-    final lots   = (st['lots'] as num?)?.toDouble() ?? 0;
-    final cv     = (st['contract_value'] as num?)?.toDouble() ?? 0.001;
-    final sign   = st['side'] == 'short' ? -1.0 : 1.0;
-    final btc    = (_evening['btc_futures_price'] as num?)?.toDouble() ?? strike;
+    final entry = (st['entry_mark'] as num?)?.toDouble() ?? 0;
+    final lots = (st['lots'] as num?)?.toDouble() ?? 0;
+    final cv = (st['contract_value'] as num?)?.toDouble() ?? 0.001;
+    final sign = st['side'] == 'short' ? -1.0 : 1.0;
+    final btc = (_evening['btc_futures_price'] as num?)?.toDouble() ?? strike;
     if (strike <= 0 || entry <= 0) return;
 
     final lo = (strike < btc ? strike : btc) * 0.955;
@@ -463,15 +790,19 @@ class _DashboardPageState extends State<DashboardPage> {
     final pnlNow = (_intrinsic(symbol, strike, btc) - entry) * cv * lots * sign;
     final bes = symbol.startsWith('MV-')
         ? [strike - entry, strike + entry]
-        : symbol.startsWith('P-') ? [strike - entry] : [strike + entry];
+        : symbol.startsWith('P-')
+        ? [strike - entry]
+        : [strike + entry];
 
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: kSurf,
         insetPadding: const EdgeInsets.symmetric(horizontal: 14),
-        title: Text('Payoff — $symbol',
-            style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
+        title: Text(
+          'Payoff — $symbol',
+          style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700),
+        ),
         content: SizedBox(
           width: double.maxFinite,
           child: Column(
@@ -482,7 +813,12 @@ class _DashboardPageState extends State<DashboardPage> {
                 height: 210,
                 width: double.maxFinite,
                 child: CustomPaint(
-                  painter: PayoffPainter(xs: xs, ys: ys, spot: btc, spotPnl: pnlNow),
+                  painter: PayoffPainter(
+                    xs: xs,
+                    ys: ys,
+                    spot: btc,
+                    spotPnl: pnlNow,
+                  ),
                 ),
               ),
               const SizedBox(height: 12),
@@ -492,13 +828,20 @@ class _DashboardPageState extends State<DashboardPage> {
                 'Breakeven ${bes.map((b) => '\$${fmtNum(b)}').join(' / ')}'
                 ' · BTC now \$${fmtNum(btc)}\n'
                 'At current BTC: ${fmtUsd(pnlNow)}',
-                style: const TextStyle(color: kMuted, fontSize: 12, height: 1.6),
+                style: const TextStyle(
+                  color: kMuted,
+                  fontSize: 12,
+                  height: 1.6,
+                ),
               ),
             ],
           ),
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Close')),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Close'),
+          ),
         ],
       ),
     );
@@ -510,12 +853,20 @@ class _DashboardPageState extends State<DashboardPage> {
       builder: (ctx) => AlertDialog(
         backgroundColor: kSurf,
         title: Text('Square Off ${slot.name}?'),
-        content: Text('Close the entire ${slot.name.toLowerCase()} position now at market price?'),
+        content: Text(
+          'Close the entire ${slot.name.toLowerCase()} position now at market price?',
+        ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
           TextButton(
             onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('SQUARE OFF', style: TextStyle(color: kRed, fontWeight: FontWeight.bold)),
+            child: const Text(
+              'SQUARE OFF',
+              style: TextStyle(color: kRed, fontWeight: FontWeight.bold),
+            ),
           ),
         ],
       ),
@@ -527,14 +878,18 @@ class _DashboardPageState extends State<DashboardPage> {
       final msg = d['ok'] == true
           ? '${slot.name} closed  P&L: ${fmtUsd(d['pnl'])}'
           : 'Failed: ${d['error']}';
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text(msg),
-        backgroundColor: d['ok'] == true ? const Color(0xFF0A3524) : const Color(0xFF3A0F1E),
-      ));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(msg),
+          backgroundColor: d['ok'] == true ? kGreen : kRed,
+        ),
+      );
       _refresh();
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Error: $e')));
     }
   }
 
@@ -542,12 +897,15 @@ class _DashboardPageState extends State<DashboardPage> {
     final isBuy = side == 'buy';
     Map<String, dynamic> p;
     try {
-      p = await Api.getJson('/api/manual-entry/preview?slot=${slot.key}') as Map<String, dynamic>;
+      p =
+          await Api.getJson('/api/manual-entry/preview?slot=${slot.key}')
+              as Map<String, dynamic>;
       if (p['ok'] != true) throw Exception(p['error'] ?? 'preview failed');
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text('Cannot fetch straddle preview: $e')));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Cannot fetch straddle preview: $e')),
+      );
       return;
     }
     if (!mounted) return;
@@ -560,123 +918,183 @@ class _DashboardPageState extends State<DashboardPage> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(isBuy
-                ? 'BUY (long) at market — ${slot.name} slot'
-                : 'SELL-TO-OPEN (short, collect premium) at market — ${slot.name} slot'),
+            Text(
+              isBuy
+                  ? 'BUY (long) at market — ${slot.name} slot'
+                  : 'SELL-TO-OPEN (short, collect premium) at market — ${slot.name} slot',
+            ),
             const SizedBox(height: 12),
             _previewRow('Contract', '${p['symbol']}'),
-            _previewRow('Strike', '\$${(p['strike'] as num).toStringAsFixed(0)}'),
-            _previewRow('Mark', '\$${(p['mark'] as num).toStringAsFixed(2)} / BTC'),
+            _previewRow(
+              'Strike',
+              '\$${(p['strike'] as num).toStringAsFixed(0)}',
+            ),
+            _previewRow(
+              'Mark',
+              '\$${(p['mark'] as num).toStringAsFixed(2)} / BTC',
+            ),
             _previewRow('Lots', '${p['lots']}'),
-            _previewRow('Value', '~\$${(p['est_value'] as num).toStringAsFixed(0)}'),
+            _previewRow(
+              'Value',
+              '~\$${(p['est_value'] as num).toStringAsFixed(0)}',
+            ),
             if (p['dry_run'] == true) ...[
               const SizedBox(height: 10),
               const Text(
                 '⚠ Mode is DRY RUN — this will be SIMULATED, no real order will be placed.',
-                style: TextStyle(color: kGold, fontSize: 12, fontWeight: FontWeight.w600),
+                style: TextStyle(
+                  color: kGold,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                ),
               ),
             ],
           ],
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
           TextButton(
             onPressed: () => Navigator.pop(ctx, true),
-            child: Text(isBuy ? 'BUY' : 'SELL',
-                style: TextStyle(color: isBuy ? kGreen : kRed, fontWeight: FontWeight.bold)),
+            child: Text(
+              isBuy ? 'BUY' : 'SELL',
+              style: TextStyle(
+                color: isBuy ? kGreen : kRed,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
           ),
         ],
       ),
     );
     if (ok != true) return;
     try {
-      final d = await Api.postJson('/api/manual-entry?slot=${slot.key}', {'side': side});
+      final d = await Api.postJson('/api/manual-entry?slot=${slot.key}', {
+        'side': side,
+      });
       if (!mounted) return;
       final simTag = d['dry_run'] == true ? ' (SIMULATED)' : '';
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text(d['ok'] == true
-            ? '${side.toUpperCase()} filled$simTag: ${d['lots']} lots ${d['symbol']} @ \$${(d['fill'] as num).toStringAsFixed(2)}'
-            : 'Order failed: ${d['error']}'),
-        backgroundColor: d['ok'] == true ? const Color(0xFF0A3524) : const Color(0xFF3A0F1E),
-      ));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            d['ok'] == true
+                ? '${side.toUpperCase()} filled$simTag: ${d['lots']} lots ${d['symbol']} @ \$${(d['fill'] as num).toStringAsFixed(2)}'
+                : 'Order failed: ${d['error']}',
+          ),
+          backgroundColor: d['ok'] == true ? kGreen : kRed,
+        ),
+      );
       _refresh();
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Error: $e')));
     }
   }
 
   Widget _previewRow(String k, String v) => Padding(
-        padding: const EdgeInsets.symmetric(vertical: 2),
-        child: Row(
-          children: [
-            SizedBox(width: 80, child: Text(k, style: const TextStyle(color: kMuted, fontSize: 12.5))),
-            Expanded(
-              child: Text(v,
-                  style: const TextStyle(
-                      color: kText, fontSize: 13, fontWeight: FontWeight.w600,
-                      fontFeatures: [FontFeature.tabularFigures()])),
-            ),
-          ],
+    padding: const EdgeInsets.symmetric(vertical: 2),
+    child: Row(
+      children: [
+        SizedBox(
+          width: 80,
+          child: Text(k, style: const TextStyle(color: kMuted, fontSize: 12.5)),
         ),
-      );
+        Expanded(
+          child: Text(
+            v,
+            style: const TextStyle(
+              color: kText,
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+              fontFeatures: [FontFeature.tabularFigures()],
+            ),
+          ),
+        ),
+      ],
+    ),
+  );
 
   Widget _manualButtons(SlotMeta slot) => Padding(
-        padding: const EdgeInsets.only(top: 10),
-        child: Row(
-          children: [
-            Expanded(
-              child: OutlinedButton(
-                style: OutlinedButton.styleFrom(
-                  foregroundColor: kGreen,
-                  side: const BorderSide(color: kGreen, width: 1.5),
-                  padding: const EdgeInsets.symmetric(vertical: 10),
-                ),
-                onPressed: () => _manualEntry(slot, 'buy'),
-                child: const Text('▲ BUY', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 12)),
-              ),
+    padding: const EdgeInsets.only(top: 10),
+    child: Row(
+      children: [
+        Expanded(
+          child: OutlinedButton(
+            style: OutlinedButton.styleFrom(
+              foregroundColor: kGreen,
+              side: const BorderSide(color: kGreen, width: 1.5),
+              padding: const EdgeInsets.symmetric(vertical: 10),
             ),
-            const SizedBox(width: 10),
-            Expanded(
-              child: OutlinedButton(
-                style: OutlinedButton.styleFrom(
-                  foregroundColor: kRed,
-                  side: const BorderSide(color: kRed, width: 1.5),
-                  padding: const EdgeInsets.symmetric(vertical: 10),
-                ),
-                onPressed: () => _manualEntry(slot, 'sell'),
-                child: const Text('▼ SELL', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 12)),
-              ),
+            onPressed: () => _manualEntry(slot, 'buy'),
+            child: const Text(
+              '▲ BUY',
+              style: TextStyle(fontWeight: FontWeight.w700, fontSize: 12),
             ),
-          ],
+          ),
         ),
-      );
+        const SizedBox(width: 10),
+        Expanded(
+          child: OutlinedButton(
+            style: OutlinedButton.styleFrom(
+              foregroundColor: kRed,
+              side: const BorderSide(color: kRed, width: 1.5),
+              padding: const EdgeInsets.symmetric(vertical: 10),
+            ),
+            onPressed: () => _manualEntry(slot, 'sell'),
+            child: const Text(
+              '▼ SELL',
+              style: TextStyle(fontWeight: FontWeight.w700, fontSize: 12),
+            ),
+          ),
+        ),
+      ],
+    ),
+  );
 
   Future<void> _toggleTp(SlotMeta slot) async {
     final cfg = (_tp[slot.key] as Map<String, dynamic>?) ?? {};
     final running = cfg['running'] == true;
     try {
       final d = await Api.postJson(
-          '/api/tp-monitor/${running ? 'stop' : 'start'}?slot=${slot.key}');
+        '/api/tp-monitor/${running ? 'stop' : 'start'}?slot=${slot.key}',
+      );
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text(d['ok'] == true
-            ? '${slot.name} TP monitor ${running ? 'stopped' : 'started'}'
-            : 'Error: ${d['error']}'),
-      ));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            d['ok'] == true
+                ? '${slot.name} TP monitor ${running ? 'stopped' : 'started'}'
+                : 'Error: ${d['error']}',
+          ),
+        ),
+      );
       _refresh();
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Error: $e')));
     }
   }
 
   Future<void> _editTpConfig(SlotMeta slot) async {
     final cfg = (_tp[slot.key] as Map<String, dynamic>?) ?? {};
-    final targetCtl = TextEditingController(text: fmtNum(cfg['target_pnl'], dp: 0));
-    final slCtl     = TextEditingController(text: fmtNum(cfg['sl_pnl'] ?? 0, dp: 0));
-    final tslCtl    = TextEditingController(text: fmtNum(cfg['tsl_pnl'] ?? 0, dp: 0));
-    final pollCtl   = TextEditingController(text: fmtNum(cfg['poll_secs'], dp: 0));
+    final targetCtl = TextEditingController(
+      text: fmtNum(cfg['target_pnl'], dp: 0),
+    );
+    final slCtl = TextEditingController(
+      text: fmtNum(cfg['sl_pnl'] ?? 0, dp: 0),
+    );
+    final tslCtl = TextEditingController(
+      text: fmtNum(cfg['tsl_pnl'] ?? 0, dp: 0),
+    );
+    final pollCtl = TextEditingController(
+      text: fmtNum(cfg['poll_secs'], dp: 0),
+    );
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -694,14 +1112,18 @@ class _DashboardPageState extends State<DashboardPage> {
               controller: slCtl,
               keyboardType: TextInputType.number,
               decoration: const InputDecoration(
-                  labelText: 'Stop loss (\$)', helperText: '0 = off'),
+                labelText: 'Stop loss (\$)',
+                helperText: '0 = off',
+              ),
             ),
             TextField(
               controller: tslCtl,
               keyboardType: TextInputType.number,
               decoration: const InputDecoration(
-                  labelText: 'Trailing SL (\$)',
-                  helperText: '0 = off · arms once profit reaches this, then trails the peak'),
+                labelText: 'Trailing SL (\$)',
+                helperText:
+                    '0 = off · arms once profit reaches this, then trails the peak',
+              ),
             ),
             TextField(
               controller: pollCtl,
@@ -711,117 +1133,170 @@ class _DashboardPageState extends State<DashboardPage> {
           ],
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
-          TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Save', style: TextStyle(color: kGold))),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Save', style: TextStyle(color: kGold)),
+          ),
         ],
       ),
     );
     if (ok != true) return;
     final body = slot.key == 'morning'
-        ? {'TP_TARGET_PNL_MORNING': targetCtl.text, 'TP_POLL_SECS_MORNING': pollCtl.text,
-           'SL_TARGET_PNL_MORNING': slCtl.text.isEmpty ? '0' : slCtl.text,
-           'TSL_TARGET_PNL_MORNING': tslCtl.text.isEmpty ? '0' : tslCtl.text}
-        : {'TP_TARGET_PNL': targetCtl.text, 'TP_POLL_SECS': pollCtl.text,
-           'SL_TARGET_PNL': slCtl.text.isEmpty ? '0' : slCtl.text,
-           'TSL_TARGET_PNL': tslCtl.text.isEmpty ? '0' : tslCtl.text};
+        ? {
+            'TP_TARGET_PNL_MORNING': targetCtl.text,
+            'TP_POLL_SECS_MORNING': pollCtl.text,
+            'SL_TARGET_PNL_MORNING': slCtl.text.isEmpty ? '0' : slCtl.text,
+            'TSL_TARGET_PNL_MORNING': tslCtl.text.isEmpty ? '0' : tslCtl.text,
+          }
+        : {
+            'TP_TARGET_PNL': targetCtl.text,
+            'TP_POLL_SECS': pollCtl.text,
+            'SL_TARGET_PNL': slCtl.text.isEmpty ? '0' : slCtl.text,
+            'TSL_TARGET_PNL': tslCtl.text.isEmpty ? '0' : tslCtl.text,
+          };
     try {
       await Api.postJson('/api/config', body);
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('${slot.name} TP/SL config saved')));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('${slot.name} TP/SL config saved')),
+      );
       _refresh();
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Error: $e')));
     }
   }
 
   @override
   Widget build(BuildContext context) {
     final btc = (_evening['btc_futures_price'] as num?)?.toDouble();
-    final openSlots = kSlots.where((s) => _slotState(s.key)['status'] == 'OPEN').toList();
+    final openSlots = kSlots
+        .where((s) => _slotState(s.key)['status'] == 'OPEN')
+        .toList();
     final totalPnl = openSlots.fold<double>(
-        0, (a, s) => a + (((_slotState(s.key)['live_pnl']) as num?)?.toDouble() ?? 0));
+      0,
+      (a, s) =>
+          a + (((_slotState(s.key)['live_pnl']) as num?)?.toDouble() ?? 0),
+    );
 
     return SafeArea(
       child: RefreshIndicator(
-        color: kGreen,
+        color: kGold,
         onRefresh: _refresh,
         child: ListView(
           padding: const EdgeInsets.all(16),
           children: [
-            // ── Header ──
             Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(8),
-                  child: Image.asset('assets/logo.png', width: 28, height: 28),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Welcome back, ${Api.displayName.isEmpty ? Api.user : Api.displayName}',
+                        style: const TextStyle(
+                          color: kText,
+                          fontSize: 22,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: -.3,
+                        ),
+                      ),
+                      const SizedBox(height: 3),
+                      const Text(
+                        'Live strategy status and today’s trading activity.',
+                        style: TextStyle(color: kMuted, fontSize: 13),
+                      ),
+                    ],
+                  ),
                 ),
-                const SizedBox(width: 8),
-                const Text('NITHI-BOT',
-                    style: TextStyle(color: kGreen, fontSize: 22, fontWeight: FontWeight.w800, letterSpacing: 2)),
-                const Spacer(),
+                const SizedBox(width: 12),
                 _StatusPill(
                   openCount: openSlots.length,
-                  anyClosed: kSlots.any((s) => _slotState(s.key)['status'] == 'CLOSED'),
+                  anyClosed: kSlots.any(
+                    (s) => _slotState(s.key)['status'] == 'CLOSED',
+                  ),
                 ),
               ],
             ),
             const SizedBox(height: 12),
 
-            // ── BTC price capsule ──
-            if (btc != null)
-              Center(
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
-                  decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(30),
-                    border: Border.all(color: _btcUp ? kGreen : kRed),
-                    boxShadow: [
-                      BoxShadow(
-                        color: (_btcUp ? kGreen : kRed).withValues(alpha: 0.35),
-                        blurRadius: 14,
+            if (btc != null || _wallet['usd_balance'] != null)
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 13,
+                      vertical: 7,
+                    ),
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(30),
+                      color: kSurf,
+                      border: Border.all(color: kBorder),
+                    ),
+                    child: Text(
+                      'BTC  ${btc == null ? '—' : '\$${btc.toStringAsFixed(2)}'}  ${_btcUp ? '▲' : '▼'}',
+                      style: const TextStyle(
+                        color: kText,
+                        fontWeight: FontWeight.w700,
+                        fontSize: 12.5,
+                        fontFeatures: [FontFeature.tabularFigures()],
                       ),
-                    ],
-                  ),
-                  child: Text(
-                    'BTC  \$${btc.toStringAsFixed(2)}  ${_btcUp ? '▲' : '▼'}',
-                    style: TextStyle(
-                      color: _btcUp ? kGreen : kRed,
-                      fontWeight: FontWeight.w700,
-                      fontSize: 16,
-                      fontFeatures: const [FontFeature.tabularFigures()],
                     ),
                   ),
-                ),
+                  if (_wallet['usd_balance'] != null)
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 13,
+                        vertical: 7,
+                      ),
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(30),
+                        color: kSurf,
+                        border: Border.all(color: kBorder),
+                      ),
+                      child: Text(
+                        'Balance  \$${(_wallet['usd_balance'] as num).toStringAsFixed(2)}'
+                        '${_wallet['inr_balance'] != null ? ' · ₹${(_wallet['inr_balance'] as num).round()}' : ''}',
+                        style: const TextStyle(
+                          color: kText,
+                          fontWeight: FontWeight.w700,
+                          fontSize: 12.5,
+                          fontFeatures: [FontFeature.tabularFigures()],
+                        ),
+                      ),
+                    ),
+                  if (openSlots.isNotEmpty)
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 13,
+                        vertical: 7,
+                      ),
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(30),
+                        color: (totalPnl >= 0 ? kGreen : kRed).withValues(
+                          alpha: .09,
+                        ),
+                      ),
+                      child: Text(
+                        'Live P&L  ${fmtUsd(totalPnl)}',
+                        style: TextStyle(
+                          color: totalPnl >= 0 ? kGreen : kRed,
+                          fontWeight: FontWeight.w800,
+                          fontSize: 12.5,
+                        ),
+                      ),
+                    ),
+                ],
               ),
-            if (_wallet['usd_balance'] != null) ...[
-              const SizedBox(height: 8),
-              Center(
-                child: Text(
-                  '💰 \$${(_wallet['usd_balance'] as num).toStringAsFixed(2)}'
-                  '${_wallet['inr_balance'] != null ? '  ·  ₹${(_wallet['inr_balance'] as num).round()}' : ''}',
-                  style: const TextStyle(
-                    color: kGold,
-                    fontWeight: FontWeight.w700,
-                    fontSize: 13,
-                    fontFeatures: [FontFeature.tabularFigures()],
-                  ),
-                ),
-              ),
-            ],
-            if (openSlots.isNotEmpty) ...[
-              const SizedBox(height: 8),
-              Center(
-                child: Text(
-                  'Combined live P&L: ${fmtUsd(totalPnl)}',
-                  style: TextStyle(
-                    color: totalPnl >= 0 ? kGreen : kRed,
-                    fontWeight: FontWeight.w700,
-                    fontSize: 13,
-                  ),
-                ),
-              ),
-            ],
             const SizedBox(height: 14),
 
             if (_error != null)
@@ -841,18 +1316,31 @@ class _DashboardPageState extends State<DashboardPage> {
             // ── Today's trades ──
             const Padding(
               padding: EdgeInsets.only(left: 4, bottom: 8, top: 4),
-              child: Text("TODAY'S TRADES",
-                  style: TextStyle(color: kMuted, fontSize: 11, letterSpacing: 1.5)),
+              child: Text(
+                "TODAY'S TRADES",
+                style: TextStyle(
+                  color: kMuted,
+                  fontSize: 11,
+                  letterSpacing: 1.5,
+                ),
+              ),
             ),
             if (_todayTrades.isEmpty)
               const Card(
                 child: Padding(
                   padding: EdgeInsets.all(20),
-                  child: Center(child: Text('No trades today', style: TextStyle(color: kMuted))),
+                  child: Center(
+                    child: Text(
+                      'No trades today',
+                      style: TextStyle(color: kMuted),
+                    ),
+                  ),
                 ),
               )
             else
-              ..._todayTrades.map((t) => _TradeTile(trade: t as Map<String, dynamic>)),
+              ..._todayTrades.map(
+                (t) => _TradeTile(trade: t as Map<String, dynamic>),
+              ),
             const SizedBox(height: 24),
           ],
         ),
@@ -874,10 +1362,20 @@ class _DashboardPageState extends State<DashboardPage> {
           children: [
             Row(
               children: [
-                Text('${slot.icon} ${slot.name.toUpperCase()} TRADE',
-                    style: const TextStyle(color: kMuted, fontSize: 11, letterSpacing: 1.2, fontWeight: FontWeight.w700)),
+                Text(
+                  '${slot.icon} ${slot.name.toUpperCase()} TRADE',
+                  style: const TextStyle(
+                    color: kMuted,
+                    fontSize: 11,
+                    letterSpacing: 1.2,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
                 const Spacer(),
-                Text(slot.entryLabel, style: const TextStyle(color: kGold, fontSize: 10)),
+                Text(
+                  slot.entryLabel,
+                  style: const TextStyle(color: kGold, fontSize: 10),
+                ),
               ],
             ),
             const SizedBox(height: 10),
@@ -910,10 +1408,18 @@ class _DashboardPageState extends State<DashboardPage> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const Text('SIMULATED — no real order was placed',
-                  style: TextStyle(color: kGold, fontWeight: FontWeight.w700, fontSize: 13)),
-              Text('${st['symbol'] ?? ''} · Mode was DRY RUN at entry time',
-                  style: const TextStyle(color: kMuted, fontSize: 11)),
+              const Text(
+                'SIMULATED — no real order was placed',
+                style: TextStyle(
+                  color: kGold,
+                  fontWeight: FontWeight.w700,
+                  fontSize: 13,
+                ),
+              ),
+              Text(
+                '${st['symbol'] ?? ''} · Mode was DRY RUN at entry time',
+                style: const TextStyle(color: kMuted, fontSize: 11),
+              ),
             ],
           ),
         ),
@@ -921,7 +1427,11 @@ class _DashboardPageState extends State<DashboardPage> {
     );
   }
 
-  Widget _openBody(SlotMeta slot, Map<String, dynamic> st, Map<String, dynamic> tpCfg) {
+  Widget _openBody(
+    SlotMeta slot,
+    Map<String, dynamic> st,
+    Map<String, dynamic> tpCfg,
+  ) {
     final pnl = (st['live_pnl'] as num?)?.toDouble();
     final pnlColor = pnl == null ? kMuted : (pnl >= 0 ? kGreen : kRed);
     final tpRunning = tpCfg['running'] == true;
@@ -934,27 +1444,49 @@ class _DashboardPageState extends State<DashboardPage> {
               child: Row(
                 children: [
                   Flexible(
-                    child: Text(st['symbol'] as String? ?? '—',
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(color: kGold, fontWeight: FontWeight.w700, fontSize: 15)),
+                    child: Text(
+                      st['symbol'] as String? ?? '—',
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: kGold,
+                        fontWeight: FontWeight.w700,
+                        fontSize: 15,
+                      ),
+                    ),
                   ),
                   const SizedBox(width: 6),
                   Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 6,
+                      vertical: 1,
+                    ),
                     decoration: BoxDecoration(
                       borderRadius: BorderRadius.circular(8),
-                      border: Border.all(color: st['side'] == 'short' ? kRed : kGreen),
+                      border: Border.all(
+                        color: st['side'] == 'short' ? kRed : kGreen,
+                      ),
                     ),
-                    child: Text(st['side'] == 'short' ? 'SHORT' : 'LONG',
-                        style: TextStyle(
-                            color: st['side'] == 'short' ? kRed : kGreen,
-                            fontSize: 9, fontWeight: FontWeight.w800, letterSpacing: 1)),
+                    child: Text(
+                      st['side'] == 'short' ? 'SHORT' : 'LONG',
+                      style: TextStyle(
+                        color: st['side'] == 'short' ? kRed : kGreen,
+                        fontSize: 9,
+                        fontWeight: FontWeight.w800,
+                        letterSpacing: 1,
+                      ),
+                    ),
                   ),
                 ],
               ),
             ),
-            Text(fmtUsd(pnl),
-                style: TextStyle(color: pnlColor, fontWeight: FontWeight.w800, fontSize: 22)),
+            Text(
+              fmtUsd(pnl),
+              style: TextStyle(
+                color: pnlColor,
+                fontWeight: FontWeight.w800,
+                fontSize: 22,
+              ),
+            ),
           ],
         ),
         const Divider(color: kBorder),
@@ -963,7 +1495,12 @@ class _DashboardPageState extends State<DashboardPage> {
         _kv('Entry Mark', fmtUsd(st['entry_mark'], dp: 4)),
         _kv('Current Mark', fmtUsd(st['current_mark'], dp: 4)),
         _kv('Total Cost', fmtUsd(st['total_cost_usd'])),
-        _kv('Settlement', (st['settlement'] as String? ?? '').replaceAll('T', ' ').replaceAll('Z', ' UTC')),
+        _kv(
+          'Settlement',
+          (st['settlement'] as String? ?? '')
+              .replaceAll('T', ' ')
+              .replaceAll('Z', ' UTC'),
+        ),
         const SizedBox(height: 12),
         Row(
           children: [
@@ -975,7 +1512,10 @@ class _DashboardPageState extends State<DashboardPage> {
                   padding: const EdgeInsets.symmetric(vertical: 11),
                 ),
                 onPressed: () => _squareOff(slot),
-                child: const Text('⏹ SQUARE OFF', style: TextStyle(fontWeight: FontWeight.w700)),
+                child: const Text(
+                  '⏹ SQUARE OFF',
+                  style: TextStyle(fontWeight: FontWeight.w700),
+                ),
               ),
             ),
             const SizedBox(width: 10),
@@ -983,7 +1523,10 @@ class _DashboardPageState extends State<DashboardPage> {
               style: OutlinedButton.styleFrom(
                 foregroundColor: kGold,
                 side: const BorderSide(color: kGold, width: 1.5),
-                padding: const EdgeInsets.symmetric(vertical: 11, horizontal: 14),
+                padding: const EdgeInsets.symmetric(
+                  vertical: 11,
+                  horizontal: 14,
+                ),
               ),
               onPressed: () => _showPayoff(st),
               child: const Icon(Icons.ssid_chart, size: 20),
@@ -1003,8 +1546,14 @@ class _DashboardPageState extends State<DashboardPage> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Text('TP / SL / TSL MONITOR',
-                        style: TextStyle(color: kMuted, fontSize: 9, letterSpacing: 1)),
+                    const Text(
+                      'TP / SL / TSL MONITOR',
+                      style: TextStyle(
+                        color: kMuted,
+                        fontSize: 9,
+                        letterSpacing: 1,
+                      ),
+                    ),
                     const SizedBox(height: 2),
                     Text(
                       tpRunning ? '● Running' : '○ Stopped',
@@ -1030,12 +1579,17 @@ class _DashboardPageState extends State<DashboardPage> {
               ),
               FilledButton(
                 style: FilledButton.styleFrom(
-                  backgroundColor: tpRunning ? kRed.withValues(alpha: 0.15) : kGreen.withValues(alpha: 0.15),
+                  backgroundColor: tpRunning
+                      ? kRed.withValues(alpha: 0.15)
+                      : kGreen.withValues(alpha: 0.15),
                   foregroundColor: tpRunning ? kRed : kGreen,
                   padding: const EdgeInsets.symmetric(horizontal: 14),
                 ),
                 onPressed: () => _toggleTp(slot),
-                child: Text(tpRunning ? 'STOP' : 'START', style: const TextStyle(fontSize: 12)),
+                child: Text(
+                  tpRunning ? 'STOP' : 'START',
+                  style: const TextStyle(fontSize: 12),
+                ),
               ),
             ],
           ),
@@ -1054,11 +1608,18 @@ class _DashboardPageState extends State<DashboardPage> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text('Closed ${st['exit_time_utc'] ?? ''} UTC · ${st['symbol'] ?? ''}',
-                  style: const TextStyle(color: kMuted, fontSize: 12)),
-              Text('P&L ${fmtUsd(pnl)}',
-                  style: TextStyle(
-                      color: pnl >= 0 ? kGreen : kRed, fontWeight: FontWeight.w700, fontSize: 16)),
+              Text(
+                'Closed ${st['exit_time_utc'] ?? ''} UTC · ${st['symbol'] ?? ''}',
+                style: const TextStyle(color: kMuted, fontSize: 12),
+              ),
+              Text(
+                'P&L ${fmtUsd(pnl)}',
+                style: TextStyle(
+                  color: pnl >= 0 ? kGreen : kRed,
+                  fontWeight: FontWeight.w700,
+                  fontSize: 16,
+                ),
+              ),
             ],
           ),
         ),
@@ -1071,24 +1632,31 @@ class _DashboardPageState extends State<DashboardPage> {
       children: [
         const Text('⏳', style: TextStyle(fontSize: 22)),
         const SizedBox(width: 10),
-        Text('Waiting for entry — ${slot.entryLabel}',
-            style: const TextStyle(color: kMuted, fontSize: 13)),
+        Text(
+          'Waiting for entry — ${slot.entryLabel}',
+          style: const TextStyle(color: kMuted, fontSize: 13),
+        ),
       ],
     );
   }
 
   Widget _kv(String k, String v) => Padding(
-        padding: const EdgeInsets.symmetric(vertical: 3),
-        child: Row(
-          children: [
-            Text(k, style: const TextStyle(color: kMuted, fontSize: 12.5)),
-            const Spacer(),
-            Text(v,
-                style: const TextStyle(
-                    color: kText, fontSize: 12.5, fontFeatures: [FontFeature.tabularFigures()])),
-          ],
+    padding: const EdgeInsets.symmetric(vertical: 3),
+    child: Row(
+      children: [
+        Text(k, style: const TextStyle(color: kMuted, fontSize: 12.5)),
+        const Spacer(),
+        Text(
+          v,
+          style: const TextStyle(
+            color: kText,
+            fontSize: 12.5,
+            fontFeatures: [FontFeature.tabularFigures()],
+          ),
         ),
-      );
+      ],
+    ),
+  );
 }
 
 class _StatusPill extends StatelessWidget {
@@ -1101,10 +1669,10 @@ class _StatusPill extends StatelessWidget {
     final (color, label) = openCount == 2
         ? (kGreen, 'BOTH OPEN')
         : openCount == 1
-            ? (kGreen, 'TRADE OPEN')
-            : anyClosed
-                ? (kGold, 'CLOSED TODAY')
-                : (kMuted, 'AWAITING');
+        ? (kGreen, 'TRADE OPEN')
+        : anyClosed
+        ? (kGold, 'CLOSED TODAY')
+        : (kMuted, 'AWAITING');
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
       decoration: BoxDecoration(
@@ -1112,8 +1680,15 @@ class _StatusPill extends StatelessWidget {
         color: color.withValues(alpha: 0.1),
         border: Border.all(color: color.withValues(alpha: 0.5)),
       ),
-      child: Text(label,
-          style: TextStyle(color: color, fontSize: 10, fontWeight: FontWeight.w700, letterSpacing: 1)),
+      child: Text(
+        label,
+        style: TextStyle(
+          color: color,
+          fontSize: 10,
+          fontWeight: FontWeight.w700,
+          letterSpacing: 1,
+        ),
+      ),
     );
   }
 }
@@ -1126,16 +1701,26 @@ class _TradeTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final live = trade['_live'] == true;
     final isDryRun = trade['dry_run'] == true;
-    final slotIcon = trade['slot'] == 'morning' ? '🌅 ' : (trade['slot'] == 'evening' ? '🌇 ' : '');
+    final slotIcon = trade['slot'] == 'morning'
+        ? '🌅 '
+        : (trade['slot'] == 'evening' ? '🌇 ' : '');
 
     // DRY-RUN: no real order was placed, so no real numbers exist to show.
     if (isDryRun) {
       return Card(
         child: ListTile(
-          title: Text('$slotIcon${trade['symbol'] ?? '—'}',
-              style: const TextStyle(color: kGold, fontWeight: FontWeight.w600, fontSize: 14)),
-          subtitle: const Text('No real order was placed',
-              style: TextStyle(color: kMuted, fontSize: 12)),
+          title: Text(
+            '$slotIcon${trade['symbol'] ?? '—'}',
+            style: const TextStyle(
+              color: kGold,
+              fontWeight: FontWeight.w600,
+              fontSize: 14,
+            ),
+          ),
+          subtitle: const Text(
+            'No real order was placed',
+            style: TextStyle(color: kMuted, fontSize: 12),
+          ),
           trailing: Container(
             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
             decoration: BoxDecoration(
@@ -1143,20 +1728,32 @@ class _TradeTile extends StatelessWidget {
               border: Border.all(color: kGold),
               color: kGold.withValues(alpha: 0.08),
             ),
-            child: const Text('⚠ SIMULATED',
-                style: TextStyle(color: kGold, fontSize: 10, fontWeight: FontWeight.w800)),
+            child: const Text(
+              '⚠ SIMULATED',
+              style: TextStyle(
+                color: kGold,
+                fontSize: 10,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
           ),
         ),
       );
     }
 
-    final pnl = ((live ? trade['live_pnl'] : trade['pnl_usd']) as num?)?.toDouble();
+    final pnl = ((live ? trade['live_pnl'] : trade['pnl_usd']) as num?)
+        ?.toDouble();
     final pnlColor = pnl == null ? kMuted : (pnl >= 0 ? kGreen : kRed);
     return Card(
       child: ListTile(
-        title: Text('$slotIcon${trade['symbol'] ?? '—'}',
-            style: TextStyle(
-                color: live ? kGold : kText, fontWeight: FontWeight.w600, fontSize: 14)),
+        title: Text(
+          '$slotIcon${trade['symbol'] ?? '—'}',
+          style: TextStyle(
+            color: live ? kGold : kText,
+            fontWeight: FontWeight.w600,
+            fontSize: 14,
+          ),
+        ),
         subtitle: Text(
           '${trade['lots'] ?? ''} lots  ·  entry ${fmtUsd(trade['entry_mark'], dp: 4)}',
           style: const TextStyle(color: kMuted, fontSize: 12),
@@ -1165,11 +1762,22 @@ class _TradeTile extends StatelessWidget {
           mainAxisAlignment: MainAxisAlignment.center,
           crossAxisAlignment: CrossAxisAlignment.end,
           children: [
-            Text(fmtUsd(pnl),
-                style: TextStyle(color: pnlColor, fontWeight: FontWeight.w700, fontSize: 15)),
-            Text(live ? 'LIVE' : (pnl != null && pnl >= 0 ? 'WIN' : 'LOSS'),
-                style: TextStyle(
-                    color: live ? kGold : pnlColor, fontSize: 10, fontWeight: FontWeight.w700)),
+            Text(
+              fmtUsd(pnl),
+              style: TextStyle(
+                color: pnlColor,
+                fontWeight: FontWeight.w700,
+                fontSize: 15,
+              ),
+            ),
+            Text(
+              live ? 'LIVE' : (pnl != null && pnl >= 0 ? 'WIN' : 'LOSS'),
+              style: TextStyle(
+                color: live ? kGold : pnlColor,
+                fontSize: 10,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
           ],
         ),
       ),
@@ -1180,17 +1788,144 @@ class _TradeTile extends StatelessWidget {
 // ─────────────────────────────────────────────────────────────
 // Logs page
 // ─────────────────────────────────────────────────────────────
-class LogsPage extends StatefulWidget {
-  const LogsPage({super.key});
+class _PageIntro extends StatelessWidget {
+  final String title;
+  final String subtitle;
+  final VoidCallback? onRefresh;
+  const _PageIntro(this.title, this.subtitle, {this.onRefresh});
 
   @override
-  State<LogsPage> createState() => _LogsPageState();
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.fromLTRB(4, 4, 4, 16),
+    child: Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                title,
+                style: const TextStyle(
+                  color: kText,
+                  fontSize: 22,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: -.3,
+                ),
+              ),
+              const SizedBox(height: 3),
+              Text(
+                subtitle,
+                style: const TextStyle(color: kMuted, fontSize: 13),
+              ),
+            ],
+          ),
+        ),
+        if (onRefresh != null)
+          IconButton.filledTonal(
+            onPressed: onRefresh,
+            tooltip: 'Refresh',
+            icon: const Icon(Icons.refresh, color: kGold),
+          ),
+      ],
+    ),
+  );
 }
 
-class _LogsPageState extends State<LogsPage> {
-  List<String> _lines = [];
-  bool _loading = false;
-  int _n = 100;
+class _MetricCard extends StatelessWidget {
+  final String label;
+  final String value;
+  final Color? color;
+  final IconData icon;
+  const _MetricCard(this.label, this.value, this.icon, {this.color});
+
+  @override
+  Widget build(BuildContext context) => Card(
+    child: Padding(
+      padding: const EdgeInsets.all(15),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(icon, size: 17, color: color ?? kGold),
+              const SizedBox(width: 7),
+              Expanded(
+                child: Text(
+                  label.toUpperCase(),
+                  style: const TextStyle(
+                    color: kMuted,
+                    fontSize: 10,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: .8,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Text(
+            value,
+            style: TextStyle(
+              color: color ?? kText,
+              fontSize: 19,
+              fontWeight: FontWeight.w700,
+              fontFeatures: const [FontFeature.tabularFigures()],
+            ),
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
+class _EmptyCard extends StatelessWidget {
+  final IconData icon;
+  final String title;
+  final String subtitle;
+  const _EmptyCard(this.icon, this.title, this.subtitle);
+
+  @override
+  Widget build(BuildContext context) => Card(
+    child: Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 34),
+      child: Center(
+        child: Column(
+          children: [
+            Icon(icon, size: 32, color: kMuted),
+            const SizedBox(height: 10),
+            Text(
+              title,
+              style: const TextStyle(color: kText, fontWeight: FontWeight.w700),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              subtitle,
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: kMuted, fontSize: 12),
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
+}
+
+// ─────────────────────────────────────────────────────────────
+// Trades & P&L — mirrors templates/trades.html
+// ─────────────────────────────────────────────────────────────
+class TradesPage extends StatefulWidget {
+  const TradesPage({super.key});
+  @override
+  State<TradesPage> createState() => _TradesPageState();
+}
+
+class _TradesPageState extends State<TradesPage> {
+  List<Map<String, dynamic>> _trades = [];
+  Map<String, dynamic> _summary = {};
+  String _filter = 'all';
+  String? _error;
+  bool _loading = true;
 
   @override
   void initState() {
@@ -1199,91 +1934,930 @@ class _LogsPageState extends State<LogsPage> {
   }
 
   Future<void> _load() async {
-    setState(() => _loading = true);
+    if (mounted) setState(() => _loading = true);
     try {
-      final d = await Api.getJson('/api/logs?n=$_n');
+      final data = await Future.wait([
+        Api.getJson('/api/trades'),
+        Api.getJson('/api/summary'),
+      ]);
       if (!mounted) return;
-      setState(() => _lines = (d['lines'] as List).cast<String>());
+      setState(() {
+        _trades = (data[0] as List)
+            .map((e) => Map<String, dynamic>.from(e as Map))
+            .toList()
+            .reversed
+            .toList();
+        _summary = Map<String, dynamic>.from(data[1] as Map);
+        _error = null;
+      });
     } catch (e) {
-      if (!mounted) return;
-      setState(() => _lines = ['Error loading logs: $e']);
+      if (mounted) setState(() => _error = e.toString());
     } finally {
       if (mounted) setState(() => _loading = false);
     }
   }
 
-  Color _lineColor(String l) {
-    final u = l.toUpperCase();
-    if (u.contains('ERROR')) return kRed;
-    if (u.contains('WARN')) return const Color(0xFFFFA500);
-    if (u.contains('ORDER') || u.contains('ENTRY') || u.contains('EXIT') || u.contains('TP HIT')) {
-      return kGreen;
+  List<Map<String, dynamic>> get _visible => _trades.where((t) {
+    final p = (t['pnl_usd'] as num?)?.toDouble() ?? 0;
+    return _filter == 'all' ||
+        (_filter == 'wins' && p >= 0) ||
+        (_filter == 'losses' && p < 0);
+  }).toList();
+
+  @override
+  Widget build(BuildContext context) => SafeArea(
+    child: RefreshIndicator(
+      color: kGold,
+      onRefresh: _load,
+      child: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          _PageIntro(
+            'Trades & P&L',
+            'Complete live trade history and account performance.',
+            onRefresh: _load,
+          ),
+          if (_error != null)
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(14),
+                child: Text(_error!, style: const TextStyle(color: kRed)),
+              ),
+            ),
+          LayoutBuilder(
+            builder: (_, c) {
+              final width = (c.maxWidth - 12) / 2;
+              final net = (_summary['total_pnl'] as num?)?.toDouble() ?? 0;
+              return Wrap(
+                spacing: 12,
+                runSpacing: 12,
+                children: [
+                  SizedBox(
+                    width: width,
+                    child: _MetricCard(
+                      'Net P&L',
+                      fmtUsd(net),
+                      Icons.account_balance_wallet_outlined,
+                      color: net >= 0 ? kGreen : kRed,
+                    ),
+                  ),
+                  SizedBox(
+                    width: width,
+                    child: _MetricCard(
+                      'Win rate',
+                      '${fmtNum(_summary['win_rate'], dp: 1)}%',
+                      Icons.track_changes_outlined,
+                    ),
+                  ),
+                  SizedBox(
+                    width: width,
+                    child: _MetricCard(
+                      'Trades',
+                      fmtNum(_summary['total_days']),
+                      Icons.swap_vert_outlined,
+                    ),
+                  ),
+                  SizedBox(
+                    width: width,
+                    child: _MetricCard(
+                      'Max drawdown',
+                      fmtUsd(_summary['max_dd']),
+                      Icons.trending_down,
+                      color: kRed,
+                    ),
+                  ),
+                ],
+              );
+            },
+          ),
+          const SizedBox(height: 16),
+          SegmentedButton<String>(
+            segments: const [
+              ButtonSegment(value: 'all', label: Text('All')),
+              ButtonSegment(
+                value: 'wins',
+                label: Text('Wins'),
+                icon: Icon(Icons.arrow_upward, size: 15),
+              ),
+              ButtonSegment(
+                value: 'losses',
+                label: Text('Losses'),
+                icon: Icon(Icons.arrow_downward, size: 15),
+              ),
+            ],
+            selected: {_filter},
+            onSelectionChanged: (v) => setState(() => _filter = v.first),
+          ),
+          const SizedBox(height: 12),
+          if (_loading)
+            const Padding(
+              padding: EdgeInsets.all(40),
+              child: Center(child: CircularProgressIndicator(color: kGold)),
+            )
+          else if (_visible.isEmpty)
+            const _EmptyCard(
+              Icons.show_chart,
+              'No trades to show',
+              'Completed trades will appear here automatically.',
+            )
+          else
+            ..._visible.map(_tradeCard),
+          const SizedBox(height: 20),
+        ],
+      ),
+    ),
+  );
+
+  Widget _tradeCard(Map<String, dynamic> t) {
+    final pnl = (t['pnl_usd'] as num?)?.toDouble() ?? 0;
+    final side = (t['side'] ?? '').toString().toUpperCase();
+    final date = (t['date'] ?? t['entry_date'] ?? '—').toString();
+    final entryTime = (t['entry_time'] ?? t['entry_time_utc'] ?? '').toString();
+    final exitTime = (t['exit_time'] ?? t['exit_time_utc'] ?? '').toString();
+    return Card(
+      margin: const EdgeInsets.only(bottom: 10),
+      child: Padding(
+        padding: const EdgeInsets.all(15),
+        child: Column(
+          children: [
+            Row(
+              children: [
+                Container(
+                  width: 4,
+                  height: 38,
+                  decoration: BoxDecoration(
+                    color: pnl >= 0 ? kGreen : kRed,
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                ),
+                const SizedBox(width: 11),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        (t['symbol'] ?? 'Unknown product').toString(),
+                        style: const TextStyle(
+                          color: kText,
+                          fontWeight: FontWeight.w700,
+                          fontSize: 14,
+                        ),
+                      ),
+                      Text(
+                        '$date${entryTime.isNotEmpty ? ' · ${utcToIstText(entryTime)}' : ''}',
+                        style: const TextStyle(color: kMuted, fontSize: 11.5),
+                      ),
+                    ],
+                  ),
+                ),
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    Text(
+                      fmtUsd(pnl),
+                      style: TextStyle(
+                        color: pnl >= 0 ? kGreen : kRed,
+                        fontSize: 16,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                    Text(
+                      side.isEmpty
+                          ? (t['slot'] ?? '').toString().toUpperCase()
+                          : side,
+                      style: const TextStyle(
+                        color: kMuted,
+                        fontSize: 10,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+            const Divider(height: 22),
+            Row(
+              children: [
+                Expanded(
+                  child: _miniValue('Entry', fmtUsd(t['entry_mark'], dp: 4)),
+                ),
+                Expanded(
+                  child: _miniValue('Exit', fmtUsd(t['exit_mark'], dp: 4)),
+                ),
+                Expanded(child: _miniValue('Lots', fmtNum(t['lots']))),
+                Expanded(
+                  child: _miniValue(
+                    'Exit time',
+                    exitTime.isEmpty ? '—' : utcToIstText(exitTime),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _miniValue(String k, String v) => Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      Text(
+        k.toUpperCase(),
+        style: const TextStyle(
+          color: kMuted,
+          fontSize: 9,
+          fontWeight: FontWeight.w700,
+        ),
+      ),
+      const SizedBox(height: 3),
+      Text(
+        v,
+        overflow: TextOverflow.ellipsis,
+        style: const TextStyle(
+          color: kText,
+          fontSize: 11.5,
+          fontWeight: FontWeight.w600,
+          fontFeatures: [FontFeature.tabularFigures()],
+        ),
+      ),
+    ],
+  );
+}
+
+String utcToIstText(String hhmmss) {
+  try {
+    final p = hhmmss.split(':').map(int.parse).toList();
+    final t = (p[0] * 60 + p[1] + 330) % 1440;
+    final h = t ~/ 60, m = t % 60;
+    return '${(h + 11) % 12 + 1}:${m.toString().padLeft(2, '0')} ${h >= 12 ? 'PM' : 'AM'}';
+  } catch (_) {
+    return hhmmss;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+// Positions — mirrors templates/positions.html
+// ─────────────────────────────────────────────────────────────
+class PositionsPage extends StatefulWidget {
+  const PositionsPage({super.key});
+  @override
+  State<PositionsPage> createState() => _PositionsPageState();
+}
+
+class _PositionsPageState extends State<PositionsPage> {
+  List<Map<String, dynamic>> _positions = [];
+  Map<String, dynamic> _wallet = {};
+  String? _error;
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    if (mounted) setState(() => _loading = true);
+    try {
+      final data = await Future.wait([
+        Api.getJson('/api/all-positions'),
+        Api.getJson('/api/wallet'),
+      ]);
+      if (!mounted) return;
+      setState(() {
+        _positions = data[0] is List
+            ? (data[0] as List)
+                  .map((e) => Map<String, dynamic>.from(e as Map))
+                  .toList()
+            : [];
+        _wallet = data[1] is Map
+            ? Map<String, dynamic>.from(data[1] as Map)
+            : {};
+        _error = null;
+      });
+    } catch (e) {
+      if (mounted) setState(() => _error = e.toString());
+    } finally {
+      if (mounted) setState(() => _loading = false);
     }
-    return kMuted;
   }
 
   @override
   Widget build(BuildContext context) {
+    final livePnl = _positions.fold<double>(
+      0,
+      (a, p) => a + ((p['live_pnl'] as num?)?.toDouble() ?? 0),
+    );
     return SafeArea(
-      child: Column(
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
-            child: Row(
-              children: [
-                const Text('BOT LOGS',
-                    style: TextStyle(color: kMuted, fontSize: 12, letterSpacing: 1.5)),
-                const Spacer(),
-                DropdownButton<int>(
-                  value: _n,
-                  dropdownColor: kSurf,
-                  underline: const SizedBox.shrink(),
-                  style: const TextStyle(color: kText, fontSize: 12),
-                  items: const [
-                    DropdownMenuItem(value: 50, child: Text('50 lines')),
-                    DropdownMenuItem(value: 100, child: Text('100 lines')),
-                    DropdownMenuItem(value: 200, child: Text('200 lines')),
-                    DropdownMenuItem(value: 500, child: Text('500 lines')),
-                  ],
-                  onChanged: (v) {
-                    if (v != null) {
-                      _n = v;
-                      _load();
-                    }
-                  },
-                ),
-                IconButton(onPressed: _load, icon: const Icon(Icons.refresh, color: kGreen)),
-              ],
+      child: RefreshIndicator(
+        color: kGold,
+        onRefresh: _load,
+        child: ListView(
+          padding: const EdgeInsets.all(16),
+          children: [
+            _PageIntro(
+              'Open Positions',
+              'Every live Delta position on this account.',
+              onRefresh: _load,
             ),
-          ),
-          Expanded(
-            child: _loading
-                ? const Center(child: CircularProgressIndicator(color: kGreen))
-                : RefreshIndicator(
-                    color: kGreen,
-                    onRefresh: _load,
-                    child: ListView.builder(
-                      reverse: true,
-                      padding: const EdgeInsets.symmetric(horizontal: 12),
-                      itemCount: _lines.length,
-                      itemBuilder: (ctx, i) {
-                        final line = _lines[_lines.length - 1 - i];
-                        return Padding(
-                          padding: const EdgeInsets.symmetric(vertical: 2),
-                          child: Text(
-                            line,
-                            style: TextStyle(
-                              color: _lineColor(line),
-                              fontSize: 11,
-                              fontFamily: 'monospace',
-                            ),
-                          ),
-                        );
-                      },
+            if (_error != null)
+              Card(
+                child: Padding(
+                  padding: const EdgeInsets.all(14),
+                  child: Text(_error!, style: const TextStyle(color: kRed)),
+                ),
+              ),
+            LayoutBuilder(
+              builder: (_, c) {
+                final w = (c.maxWidth - 12) / 2;
+                return Wrap(
+                  spacing: 12,
+                  runSpacing: 12,
+                  children: [
+                    SizedBox(
+                      width: w,
+                      child: _MetricCard(
+                        'USD balance',
+                        fmtUsd(_wallet['usd_balance']),
+                        Icons.account_balance_outlined,
+                      ),
+                    ),
+                    SizedBox(
+                      width: w,
+                      child: _MetricCard(
+                        'Available',
+                        fmtUsd(_wallet['usd_available']),
+                        Icons.payments_outlined,
+                      ),
+                    ),
+                    SizedBox(
+                      width: w,
+                      child: _MetricCard(
+                        'Open positions',
+                        '${_positions.length}',
+                        Icons.view_list_outlined,
+                      ),
+                    ),
+                    SizedBox(
+                      width: w,
+                      child: _MetricCard(
+                        'Live P&L',
+                        fmtUsd(livePnl),
+                        Icons.query_stats,
+                        color: livePnl >= 0 ? kGreen : kRed,
+                      ),
+                    ),
+                  ],
+                );
+              },
+            ),
+            const SizedBox(height: 16),
+            if (_loading)
+              const Padding(
+                padding: EdgeInsets.all(40),
+                child: Center(child: CircularProgressIndicator(color: kGold)),
+              )
+            else if (_positions.isEmpty)
+              const _EmptyCard(
+                Icons.inbox_outlined,
+                'No open positions',
+                'The account is currently flat.',
+              )
+            else
+              ..._positions.map(_positionCard),
+            const SizedBox(height: 20),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _positionCard(Map<String, dynamic> p) {
+    final pnl = (p['live_pnl'] as num?)?.toDouble() ?? 0;
+    final long = (p['side'] ?? '').toString().toUpperCase() == 'LONG';
+    return Card(
+      margin: const EdgeInsets.only(bottom: 10),
+      child: Padding(
+        padding: const EdgeInsets.all(15),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 4,
+                  ),
+                  decoration: BoxDecoration(
+                    color: (long ? kGreen : kRed).withValues(alpha: .09),
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child: Text(
+                    long ? 'LONG' : 'SHORT',
+                    style: TextStyle(
+                      color: long ? kGreen : kRed,
+                      fontSize: 10,
+                      fontWeight: FontWeight.w800,
                     ),
                   ),
+                ),
+                const SizedBox(width: 9),
+                Expanded(
+                  child: Text(
+                    (p['symbol'] ?? '').toString(),
+                    style: const TextStyle(
+                      color: kText,
+                      fontWeight: FontWeight.w700,
+                      fontSize: 14,
+                    ),
+                  ),
+                ),
+                Text(
+                  fmtUsd(pnl),
+                  style: TextStyle(
+                    color: pnl >= 0 ? kGreen : kRed,
+                    fontWeight: FontWeight.w800,
+                    fontSize: 16,
+                  ),
+                ),
+              ],
+            ),
+            const Divider(height: 22),
+            Row(
+              children: [
+                Expanded(child: _positionValue('Size', fmtNum(p['size']))),
+                Expanded(
+                  child: _positionValue(
+                    'Entry',
+                    fmtUsd(p['entry_price'], dp: 4),
+                  ),
+                ),
+                Expanded(
+                  child: _positionValue('Mark', fmtUsd(p['mark_price'], dp: 4)),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _positionValue(String k, String v) => Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      Text(
+        k.toUpperCase(),
+        style: const TextStyle(
+          color: kMuted,
+          fontSize: 9,
+          fontWeight: FontWeight.w700,
+        ),
+      ),
+      const SizedBox(height: 4),
+      Text(
+        v,
+        style: const TextStyle(
+          color: kText,
+          fontWeight: FontWeight.w600,
+          fontSize: 12,
+          fontFeatures: [FontFeature.tabularFigures()],
+        ),
+      ),
+    ],
+  );
+}
+
+// ─────────────────────────────────────────────────────────────
+// API Accounts — mirrors templates/accounts.html
+// ─────────────────────────────────────────────────────────────
+class AccountsPage extends StatefulWidget {
+  const AccountsPage({super.key});
+  @override
+  State<AccountsPage> createState() => _AccountsPageState();
+}
+
+class _AccountsPageState extends State<AccountsPage> {
+  List<Map<String, dynamic>> _accounts = [];
+  Map<String, dynamic> _bots = {};
+  String? _error;
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    if (mounted) setState(() => _loading = true);
+    try {
+      final data = await Future.wait([
+        Api.getJson('/api/accounts'),
+        Api.getJson('/api/bots').catchError((_) => <String, dynamic>{}),
+      ]);
+      if (!mounted) return;
+      setState(() {
+        _accounts = (data[0] as List)
+            .map((e) => Map<String, dynamic>.from(e as Map))
+            .toList();
+        _bots = data[1] is Map ? Map<String, dynamic>.from(data[1] as Map) : {};
+        _error = null;
+      });
+    } catch (e) {
+      if (mounted) setState(() => _error = e.toString());
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  Future<void> _edit([Map<String, dynamic>? account]) async {
+    final user = TextEditingController(
+      text: (account?['username'] ?? '').toString(),
+    );
+    final name = TextEditingController(
+      text: (account?['display_name'] ?? '').toString(),
+    );
+    final password = TextEditingController();
+    final key = TextEditingController();
+    final secret = TextEditingController();
+    bool busy = false;
+    String? message;
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setLocal) => AlertDialog(
+          title: Text(
+            account == null ? 'Add API account' : 'Edit ${account['username']}',
+          ),
+          content: SizedBox(
+            width: 430,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  TextField(
+                    controller: user,
+                    enabled: account == null,
+                    decoration: const InputDecoration(labelText: 'Username'),
+                  ),
+                  const SizedBox(height: 10),
+                  TextField(
+                    controller: name,
+                    decoration: const InputDecoration(
+                      labelText: 'Display name',
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  TextField(
+                    controller: password,
+                    obscureText: true,
+                    decoration: InputDecoration(
+                      labelText: account == null
+                          ? 'Password'
+                          : 'New password (optional)',
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  TextField(
+                    controller: key,
+                    decoration: const InputDecoration(
+                      labelText: 'Delta API key',
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  TextField(
+                    controller: secret,
+                    obscureText: true,
+                    decoration: const InputDecoration(
+                      labelText: 'Delta API secret',
+                    ),
+                  ),
+                  if (message != null) ...[
+                    const SizedBox(height: 10),
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: Text(
+                        message!,
+                        style: TextStyle(
+                          color: message!.startsWith('✓') ? kGreen : kRed,
+                          fontSize: 12,
+                        ),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: busy ? null : () => Navigator.pop(ctx, false),
+              child: const Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: busy
+                  ? null
+                  : () async {
+                      setLocal(() {
+                        busy = true;
+                        message = null;
+                      });
+                      try {
+                        final d = await Api.postJson('/api/accounts/test', {
+                          'username': user.text.trim(),
+                          'api_key': key.text.trim(),
+                          'api_secret': secret.text.trim(),
+                        });
+                        setLocal(
+                          () => message = d['ok'] == true
+                              ? '✓ Connected · USD ${fmtNum(d['usd_balance'], dp: 2)}'
+                              : 'Connection failed: ${d['error']}',
+                        );
+                      } catch (e) {
+                        setLocal(() => message = 'Connection failed: $e');
+                      } finally {
+                        setLocal(() => busy = false);
+                      }
+                    },
+              child: const Text('Test connection'),
+            ),
+            FilledButton(
+              onPressed: busy
+                  ? null
+                  : () async {
+                      setLocal(() => busy = true);
+                      try {
+                        final d = await Api.postJson('/api/accounts', {
+                          'username': user.text.trim(),
+                          'display_name': name.text.trim(),
+                          'password': password.text,
+                          'api_key': key.text.trim(),
+                          'api_secret': secret.text.trim(),
+                        });
+                        if (d['ok'] == true && ctx.mounted) {
+                          Navigator.pop(ctx, true);
+                        } else {
+                          setLocal(
+                            () => message =
+                                'Save failed: ${d['error'] ?? 'Unknown error'}',
+                          );
+                        }
+                      } catch (e) {
+                        setLocal(() => message = 'Save failed: $e');
+                      } finally {
+                        if (ctx.mounted) setLocal(() => busy = false);
+                      }
+                    },
+              child: Text(busy ? 'Saving…' : 'Save'),
+            ),
+          ],
+        ),
+      ),
+    );
+    user.dispose();
+    name.dispose();
+    password.dispose();
+    key.dispose();
+    secret.dispose();
+    if (saved == true) {
+      await _load();
+      _toast('Account saved');
+    }
+  }
+
+  Future<void> _botAction(String user, bool active) async {
+    final d = await Api.postJson(
+      '/api/bots/$user/${active ? 'stop' : 'start'}',
+    );
+    if (d['ok'] == true) {
+      _toast('Bot ${active ? 'stopped' : 'started'}');
+      await _load();
+    } else {
+      _toast((d['error'] ?? 'Bot action failed').toString(), error: true);
+    }
+  }
+
+  Future<void> _delete(String user) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Delete account?'),
+        content: Text(
+          'Remove the login for “$user”? Trade history remains on the server.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: kRed),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Delete'),
           ),
         ],
+      ),
+    );
+    if (ok != true) return;
+    final d = await Api.deleteJson(
+      '/api/accounts/${Uri.encodeComponent(user)}',
+    );
+    if (d['ok'] == true) {
+      _toast('Account removed');
+      await _load();
+    } else {
+      _toast((d['error'] ?? 'Delete failed').toString(), error: true);
+    }
+  }
+
+  void _toast(String text, {bool error = false}) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(text), backgroundColor: error ? kRed : kGreen),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) => SafeArea(
+    child: RefreshIndicator(
+      color: kGold,
+      onRefresh: _load,
+      child: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          _PageIntro(
+            'API Accounts',
+            'Manage Delta credentials and one bot instance per account.',
+            onRefresh: _load,
+          ),
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(14),
+              child: Row(
+                children: [
+                  const Icon(Icons.security_outlined, color: kGold),
+                  const SizedBox(width: 10),
+                  const Expanded(
+                    child: Text(
+                      'API secrets remain on the server and are never displayed after saving.',
+                      style: TextStyle(color: kMuted, fontSize: 12.5),
+                    ),
+                  ),
+                  FilledButton.icon(
+                    onPressed: () => _edit(),
+                    icon: const Icon(Icons.add, size: 18),
+                    label: const Text('Add account'),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 12),
+          if (_error != null)
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(14),
+                child: Text(_error!, style: const TextStyle(color: kRed)),
+              ),
+            ),
+          if (_loading)
+            const Padding(
+              padding: EdgeInsets.all(40),
+              child: Center(child: CircularProgressIndicator(color: kGold)),
+            )
+          else if (_accounts.isEmpty)
+            const _EmptyCard(
+              Icons.manage_accounts_outlined,
+              'No accounts',
+              'Add a Delta account to begin.',
+            )
+          else
+            ..._accounts.map(_accountCard),
+          const SizedBox(height: 20),
+        ],
+      ),
+    ),
+  );
+
+  Widget _accountCard(Map<String, dynamic> a) {
+    final user = (a['username'] ?? '').toString();
+    final bot = _bots[user] is Map
+        ? Map<String, dynamic>.from(_bots[user] as Map)
+        : <String, dynamic>{};
+    final supported = bot['supported'] == true;
+    final active = bot['active'] == true;
+    final protected = a['bot'] == true;
+    return Card(
+      margin: const EdgeInsets.only(bottom: 10),
+      child: Padding(
+        padding: const EdgeInsets.all(15),
+        child: Column(
+          children: [
+            Row(
+              children: [
+                CircleAvatar(
+                  backgroundColor: const Color(0xFFEEF3FE),
+                  child: Text(
+                    ((a['display_name'] ?? user).toString().isEmpty
+                            ? '?'
+                            : (a['display_name'] ?? user).toString()[0])
+                        .toUpperCase(),
+                    style: const TextStyle(
+                      color: kGold,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 11),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Flexible(
+                            child: Text(
+                              (a['display_name'] ?? user).toString(),
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                color: kText,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ),
+                          if (protected)
+                            const Padding(
+                              padding: EdgeInsets.only(left: 7),
+                              child: Icon(
+                                Icons.shield_outlined,
+                                size: 15,
+                                color: kGold,
+                              ),
+                            ),
+                        ],
+                      ),
+                      Text(
+                        '@$user · ${a['api_key'] ?? 'No key'}',
+                        style: const TextStyle(color: kMuted, fontSize: 11.5),
+                      ),
+                    ],
+                  ),
+                ),
+                if (supported)
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 4,
+                    ),
+                    decoration: BoxDecoration(
+                      color: (active ? kGreen : kMuted).withValues(alpha: .10),
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                    child: Text(
+                      active ? 'RUNNING' : 'STOPPED',
+                      style: TextStyle(
+                        color: active ? kGreen : kMuted,
+                        fontSize: 9,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+            const Divider(height: 22),
+            Row(
+              children: [
+                OutlinedButton.icon(
+                  onPressed: () => _edit(a),
+                  icon: const Icon(Icons.edit_outlined, size: 16),
+                  label: const Text('Edit'),
+                ),
+                if (supported) ...[
+                  const SizedBox(width: 8),
+                  OutlinedButton.icon(
+                    onPressed: () => _botAction(user, active),
+                    icon: Icon(
+                      active
+                          ? Icons.stop_circle_outlined
+                          : Icons.play_circle_outline,
+                      size: 17,
+                    ),
+                    label: Text(active ? 'Stop bot' : 'Start bot'),
+                  ),
+                ],
+                const Spacer(),
+                IconButton(
+                  onPressed: protected ? null : () => _delete(user),
+                  tooltip: 'Delete account',
+                  icon: const Icon(Icons.delete_outline, color: kRed),
+                ),
+              ],
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -1328,12 +2902,15 @@ class _ConfigsPageState extends State<ConfigsPage> {
   // TP/SL/TSL and poll are deliberately NOT here — the monitor is configured
   // on the Dashboard tab, on the running trade's own card.
   static const _numKeys = [
-    'STRADDLE_LOTS', 'MORNING_LOTS', 'MAX_TRADES_PER_DAY', 'STRIKE_STEP',
+    'STRADDLE_LOTS',
+    'MORNING_LOTS',
+    'MAX_TRADES_PER_DAY',
+    'STRIKE_STEP',
   ];
   static const _timePairs = {
-    'entry':        ('ENTRY_H_UTC', 'ENTRY_M_UTC'),
-    'exit':         ('EXIT_H_UTC', 'EXIT_M_UTC'),
-    'morning':      ('MORNING_H_UTC', 'MORNING_M_UTC'),
+    'entry': ('ENTRY_H_UTC', 'ENTRY_M_UTC'),
+    'exit': ('EXIT_H_UTC', 'EXIT_M_UTC'),
+    'morning': ('MORNING_H_UTC', 'MORNING_M_UTC'),
     'morning_exit': ('MORNING_EXIT_H_UTC', 'MORNING_EXIT_M_UTC'),
   };
 
@@ -1365,7 +2942,10 @@ class _ConfigsPageState extends State<ConfigsPage> {
   }
 
   Future<void> _load() async {
-    setState(() { _loading = true; _error = null; });
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
     try {
       final d = await Api.getJson('/api/config') as Map<String, dynamic>;
       for (final k in _numKeys) {
@@ -1380,33 +2960,42 @@ class _ConfigsPageState extends State<ConfigsPage> {
           _ctl['${pair}_m']!.text = im.toString().padLeft(2, '0');
         }
       });
-      _dryRun             = _envBool(d['DRY_RUN'], dflt: false);
-      _morningEnabled     = _envBool(d['MORNING_ENABLED']);
+      _dryRun = _envBool(d['DRY_RUN'], dflt: false);
+      _morningEnabled = _envBool(d['MORNING_ENABLED']);
       _morningExitEnabled = _envBool(d['MORNING_EXIT_ENABLED']);
-      _eveningEnabled     = _envBool(d['EVENING_ENABLED']);
+      _eveningEnabled = _envBool(d['EVENING_ENABLED']);
       _eveningExitEnabled = _envBool(d['EVENING_EXIT_ENABLED']);
-      _morningSide        = (d['MORNING_SIDE'] ?? '').toString().toLowerCase() == 'sell' ? 'sell' : 'buy';
-      _eveningSide        = (d['EVENING_SIDE'] ?? '').toString().toLowerCase() == 'sell' ? 'sell' : 'buy';
-      _telegramAlerts     = _envBool(d['TELEGRAM_ALERTS']);
-      _dynamicLots        = _envBool(d['DYNAMIC_LOTS']);
+      _morningSide =
+          (d['MORNING_SIDE'] ?? '').toString().toLowerCase() == 'sell'
+          ? 'sell'
+          : 'buy';
+      _eveningSide =
+          (d['EVENING_SIDE'] ?? '').toString().toLowerCase() == 'sell'
+          ? 'sell'
+          : 'buy';
+      _telegramAlerts = _envBool(d['TELEGRAM_ALERTS']);
+      _dynamicLots = _envBool(d['DYNAMIC_LOTS']);
       setState(() => _loading = false);
     } catch (e) {
-      setState(() { _loading = false; _error = 'Cannot load config: $e'; });
+      setState(() {
+        _loading = false;
+        _error = 'Cannot load config: $e';
+      });
     }
   }
 
   Future<void> _save() async {
     setState(() => _saving = true);
     final body = <String, dynamic>{
-      'DRY_RUN':              _dryRun ? 'true' : 'false',
-      'MORNING_ENABLED':      _morningEnabled ? 'true' : 'false',
+      'DRY_RUN': _dryRun ? 'true' : 'false',
+      'MORNING_ENABLED': _morningEnabled ? 'true' : 'false',
       'MORNING_EXIT_ENABLED': _morningExitEnabled ? 'true' : 'false',
-      'EVENING_ENABLED':      _eveningEnabled ? 'true' : 'false',
+      'EVENING_ENABLED': _eveningEnabled ? 'true' : 'false',
       'EVENING_EXIT_ENABLED': _eveningExitEnabled ? 'true' : 'false',
-      'MORNING_SIDE':         _morningSide,
-      'EVENING_SIDE':         _eveningSide,
-      'TELEGRAM_ALERTS':      _telegramAlerts ? 'true' : 'false',
-      'DYNAMIC_LOTS':         _dynamicLots ? 'true' : 'false',
+      'MORNING_SIDE': _morningSide,
+      'EVENING_SIDE': _eveningSide,
+      'TELEGRAM_ALERTS': _telegramAlerts ? 'true' : 'false',
+      'DYNAMIC_LOTS': _dynamicLots ? 'true' : 'false',
     };
     for (final k in _numKeys) {
       final v = _ctl[k]!.text.trim();
@@ -1424,133 +3013,162 @@ class _ConfigsPageState extends State<ConfigsPage> {
     try {
       final d = await Api.postJson('/api/config', body);
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text(d['ok'] == true
-            ? 'Saved ✓ — restart the bot service to apply times/lots'
-            : 'Save failed: ${d['error']}'),
-        backgroundColor: d['ok'] == true ? const Color(0xFF0A3524) : const Color(0xFF3A0F1E),
-      ));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            d['ok'] == true
+                ? 'Saved ✓ — restart the bot service to apply times/lots'
+                : 'Save failed: ${d['error']}',
+          ),
+          backgroundColor: d['ok'] == true ? kGreen : kRed,
+        ),
+      );
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Error: $e')));
     } finally {
       if (mounted) setState(() => _saving = false);
     }
   }
 
   Widget _section(String title) => Padding(
-        padding: const EdgeInsets.only(left: 4, top: 18, bottom: 8),
-        child: Text(title,
-            style: const TextStyle(color: kMuted, fontSize: 11, letterSpacing: 1.5)),
-      );
+    padding: const EdgeInsets.only(left: 4, top: 18, bottom: 8),
+    child: Text(
+      title,
+      style: const TextStyle(color: kMuted, fontSize: 11, letterSpacing: 1.5),
+    ),
+  );
 
   Widget _numField(String key, String label) => Padding(
-        padding: const EdgeInsets.symmetric(vertical: 6),
-        child: TextField(
-          controller: _ctl[key],
-          keyboardType: TextInputType.number,
-          decoration: InputDecoration(
-            labelText: label,
-            isDense: true,
-            border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
-          ),
-        ),
-      );
+    padding: const EdgeInsets.symmetric(vertical: 6),
+    child: TextField(
+      controller: _ctl[key],
+      keyboardType: TextInputType.number,
+      decoration: InputDecoration(
+        labelText: label,
+        isDense: true,
+        border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+      ),
+    ),
+  );
 
   Widget _timeField(String pair, String label) => Padding(
-        padding: const EdgeInsets.symmetric(vertical: 6),
-        child: Row(
-          children: [
-            Expanded(
-              flex: 3,
-              child: Text(label, style: const TextStyle(color: kText, fontSize: 13.5)),
-            ),
-            Expanded(
-              flex: 2,
-              child: TextField(
-                controller: _ctl['${pair}_h'],
-                keyboardType: TextInputType.number,
-                textAlign: TextAlign.center,
-                decoration: InputDecoration(
-                  labelText: 'HH', isDense: true,
-                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
-                ),
-              ),
-            ),
-            const Padding(
-              padding: EdgeInsets.symmetric(horizontal: 6),
-              child: Text(':', style: TextStyle(color: kMuted, fontSize: 18)),
-            ),
-            Expanded(
-              flex: 2,
-              child: TextField(
-                controller: _ctl['${pair}_m'],
-                keyboardType: TextInputType.number,
-                textAlign: TextAlign.center,
-                decoration: InputDecoration(
-                  labelText: 'MM', isDense: true,
-                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
-                ),
-              ),
-            ),
-            const SizedBox(width: 6),
-            const Text('IST', style: TextStyle(color: kGold, fontSize: 11)),
-          ],
+    padding: const EdgeInsets.symmetric(vertical: 6),
+    child: Row(
+      children: [
+        Expanded(
+          flex: 3,
+          child: Text(
+            label,
+            style: const TextStyle(color: kText, fontSize: 13.5),
+          ),
         ),
-      );
+        Expanded(
+          flex: 2,
+          child: TextField(
+            controller: _ctl['${pair}_h'],
+            keyboardType: TextInputType.number,
+            textAlign: TextAlign.center,
+            decoration: InputDecoration(
+              labelText: 'HH',
+              isDense: true,
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(8),
+              ),
+            ),
+          ),
+        ),
+        const Padding(
+          padding: EdgeInsets.symmetric(horizontal: 6),
+          child: Text(':', style: TextStyle(color: kMuted, fontSize: 18)),
+        ),
+        Expanded(
+          flex: 2,
+          child: TextField(
+            controller: _ctl['${pair}_m'],
+            keyboardType: TextInputType.number,
+            textAlign: TextAlign.center,
+            decoration: InputDecoration(
+              labelText: 'MM',
+              isDense: true,
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(8),
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(width: 6),
+        const Text('IST', style: TextStyle(color: kGold, fontSize: 11)),
+      ],
+    ),
+  );
 
-  Widget _switchTile(String label, bool value, ValueChanged<bool> onChanged, {String? subtitle}) =>
-      SwitchListTile(
-        title: Text(label, style: const TextStyle(fontSize: 14)),
-        subtitle: subtitle == null
-            ? null
-            : Text(subtitle, style: const TextStyle(color: kMuted, fontSize: 11)),
-        value: value,
-        activeColor: kGreen,
-        contentPadding: EdgeInsets.zero,
-        onChanged: onChanged,
-      );
+  Widget _switchTile(
+    String label,
+    bool value,
+    ValueChanged<bool> onChanged, {
+    String? subtitle,
+  }) => SwitchListTile(
+    title: Text(label, style: const TextStyle(fontSize: 14)),
+    subtitle: subtitle == null
+        ? null
+        : Text(subtitle, style: const TextStyle(color: kMuted, fontSize: 11)),
+    value: value,
+    activeThumbColor: kGold,
+    contentPadding: EdgeInsets.zero,
+    onChanged: onChanged,
+  );
 
   Widget _sideField(String value, ValueChanged<String> onChanged) => Padding(
-        padding: const EdgeInsets.symmetric(vertical: 6),
-        child: DropdownButtonFormField<String>(
-          initialValue: value,
-          decoration: InputDecoration(
-            labelText: 'Direction',
-            isDense: true,
-            border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+    padding: const EdgeInsets.symmetric(vertical: 6),
+    child: DropdownButtonFormField<String>(
+      initialValue: value,
+      decoration: InputDecoration(
+        labelText: 'Direction',
+        isDense: true,
+        border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+      ),
+      dropdownColor: kSurf,
+      items: const [
+        DropdownMenuItem(
+          value: 'buy',
+          child: Text(
+            'BUY straddle — long (big move)',
+            style: TextStyle(fontSize: 13.5),
           ),
-          dropdownColor: kSurf,
-          items: const [
-            DropdownMenuItem(value: 'buy',
-                child: Text('BUY straddle — long (big move)', style: TextStyle(fontSize: 13.5))),
-            DropdownMenuItem(value: 'sell',
-                child: Text('SELL straddle — short (premium)', style: TextStyle(fontSize: 13.5))),
-          ],
-          onChanged: (v) => onChanged(v ?? 'buy'),
         ),
-      );
+        DropdownMenuItem(
+          value: 'sell',
+          child: Text(
+            'SELL straddle — short (premium)',
+            style: TextStyle(fontSize: 13.5),
+          ),
+        ),
+      ],
+      onChanged: (v) => onChanged(v ?? 'buy'),
+    ),
+  );
 
   @override
   Widget build(BuildContext context) {
     if (_loading) {
       return const SafeArea(
-          child: Center(child: CircularProgressIndicator(color: kGreen)));
+        child: Center(child: CircularProgressIndicator(color: kGold)),
+      );
     }
     return SafeArea(
       child: RefreshIndicator(
-        color: kGreen,
+        color: kGold,
         onRefresh: _load,
         child: ListView(
           padding: const EdgeInsets.all(16),
           children: [
-            Row(
-              children: [
-                const Text('CONFIGS',
-                    style: TextStyle(color: kMuted, fontSize: 12, letterSpacing: 1.5)),
-                const Spacer(),
-                IconButton(onPressed: _load, icon: const Icon(Icons.refresh, color: kGreen)),
-              ],
+            _PageIntro(
+              'Bot Config',
+              'Account-specific strategy, schedule, sizing, and alert settings.',
+              onRefresh: _load,
             ),
             if (_error != null)
               Card(
@@ -1566,13 +3184,24 @@ class _ConfigsPageState extends State<ConfigsPage> {
                 padding: const EdgeInsets.fromLTRB(16, 6, 16, 10),
                 child: Column(
                   children: [
-                    _switchTile('Dry Run', _dryRun, (v) => setState(() => _dryRun = v),
-                        subtitle: 'No real orders when enabled'),
-                    _switchTile('Telegram Alerts', _telegramAlerts,
-                        (v) => setState(() => _telegramAlerts = v)),
-                    _switchTile('Dynamic Lots', _dynamicLots,
-                        (v) => setState(() => _dynamicLots = v),
-                        subtitle: 'At entry, buy min(configured, affordable with balance)'),
+                    _switchTile(
+                      'Dry Run',
+                      _dryRun,
+                      (v) => setState(() => _dryRun = v),
+                      subtitle: 'No real orders when enabled',
+                    ),
+                    _switchTile(
+                      'Telegram Alerts',
+                      _telegramAlerts,
+                      (v) => setState(() => _telegramAlerts = v),
+                    ),
+                    _switchTile(
+                      'Dynamic Lots',
+                      _dynamicLots,
+                      (v) => setState(() => _dynamicLots = v),
+                      subtitle:
+                          'At entry, buy min(configured, affordable with balance)',
+                    ),
                     _numField('MAX_TRADES_PER_DAY', 'Max trades per day'),
                     _numField('STRIKE_STEP', 'Strike step (\$)'),
                   ],
@@ -1586,14 +3215,23 @@ class _ConfigsPageState extends State<ConfigsPage> {
                 padding: const EdgeInsets.fromLTRB(16, 6, 16, 10),
                 child: Column(
                   children: [
-                    _switchTile('Enabled', _morningEnabled,
-                        (v) => setState(() => _morningEnabled = v)),
-                    _sideField(_morningSide, (v) => setState(() => _morningSide = v)),
+                    _switchTile(
+                      'Enabled',
+                      _morningEnabled,
+                      (v) => setState(() => _morningEnabled = v),
+                    ),
+                    _sideField(
+                      _morningSide,
+                      (v) => setState(() => _morningSide = v),
+                    ),
                     _numField('MORNING_LOTS', 'Lots'),
                     _timeField('morning', 'Entry time'),
-                    _switchTile('Scheduled Exit', _morningExitEnabled,
-                        (v) => setState(() => _morningExitEnabled = v),
-                        subtitle: 'Off = close via TP/SL / settlement only'),
+                    _switchTile(
+                      'Scheduled Exit',
+                      _morningExitEnabled,
+                      (v) => setState(() => _morningExitEnabled = v),
+                      subtitle: 'Off = close via TP/SL / settlement only',
+                    ),
                     _timeField('morning_exit', 'Exit time'),
                   ],
                 ),
@@ -1606,14 +3244,23 @@ class _ConfigsPageState extends State<ConfigsPage> {
                 padding: const EdgeInsets.fromLTRB(16, 6, 16, 10),
                 child: Column(
                   children: [
-                    _switchTile('Enabled', _eveningEnabled,
-                        (v) => setState(() => _eveningEnabled = v)),
-                    _sideField(_eveningSide, (v) => setState(() => _eveningSide = v)),
+                    _switchTile(
+                      'Enabled',
+                      _eveningEnabled,
+                      (v) => setState(() => _eveningEnabled = v),
+                    ),
+                    _sideField(
+                      _eveningSide,
+                      (v) => setState(() => _eveningSide = v),
+                    ),
                     _numField('STRADDLE_LOTS', 'Lots'),
                     _timeField('entry', 'Entry time'),
-                    _switchTile('Scheduled Exit', _eveningExitEnabled,
-                        (v) => setState(() => _eveningExitEnabled = v),
-                        subtitle: 'Off = close via TP/SL / settlement only'),
+                    _switchTile(
+                      'Scheduled Exit',
+                      _eveningExitEnabled,
+                      (v) => setState(() => _eveningExitEnabled = v),
+                      subtitle: 'Off = close via TP/SL / settlement only',
+                    ),
                     _timeField('exit', 'Exit time'),
                   ],
                 ),
@@ -1625,19 +3272,22 @@ class _ConfigsPageState extends State<ConfigsPage> {
               width: double.infinity,
               child: FilledButton(
                 style: FilledButton.styleFrom(
-                  backgroundColor: kGreen.withValues(alpha: 0.15),
-                  foregroundColor: kGreen,
                   padding: const EdgeInsets.symmetric(vertical: 14),
                 ),
                 onPressed: _saving ? null : _save,
-                child: Text(_saving ? 'Saving…' : 'SAVE ALL CONFIGS',
-                    style: const TextStyle(fontWeight: FontWeight.w700, letterSpacing: 1)),
+                child: Text(
+                  _saving ? 'Saving…' : 'SAVE ALL CONFIGS',
+                  style: const TextStyle(
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 1,
+                  ),
+                ),
               ),
             ),
             const SizedBox(height: 8),
             const Center(
               child: Text(
-                'Time/lot changes need a bot restart to take effect',
+                'The account bot reloads saved changes automatically within about 30 seconds.',
                 style: TextStyle(color: kMuted, fontSize: 11),
               ),
             ),
@@ -1691,7 +3341,10 @@ class _SettingsPageState extends State<SettingsPage> {
     await Api.saveBaseUrl(_urlCtl.text, _userCtl.text, _passCtl.text);
     try {
       final d = await Api.getJson('/api/status');
-      setState(() => _testResult = '✅ Connected — evening: ${d['status'] ?? '?'}, morning: ${d['morning']?['status'] ?? '—'}');
+      setState(
+        () => _testResult =
+            '✅ Connected — evening: ${d['status'] ?? '?'}, morning: ${d['morning']?['status'] ?? '—'}',
+      );
     } catch (e) {
       setState(() => _testResult = '❌ Cannot connect: $e');
     } finally {
@@ -1705,23 +3358,31 @@ class _SettingsPageState extends State<SettingsPage> {
       child: ListView(
         padding: const EdgeInsets.all(16),
         children: [
-          const Text('SETTINGS', style: TextStyle(color: kMuted, fontSize: 12, letterSpacing: 1.5)),
-          const SizedBox(height: 16),
+          const _PageIntro(
+            'Settings',
+            'Connection, signed-in account, and app information.',
+          ),
           Card(
             child: ListTile(
               leading: const CircleAvatar(
-                backgroundColor: kGreen,
-                foregroundColor: kBg,
+                backgroundColor: Color(0xFFEEF3FE),
+                foregroundColor: kGold,
                 child: Icon(Icons.person),
               ),
-              title: Text(Api.displayName.isEmpty ? Api.user : Api.displayName,
-                  style: const TextStyle(fontWeight: FontWeight.w700)),
-              subtitle: Text('Signed in as ${Api.user}',
-                  style: const TextStyle(color: kMuted, fontSize: 12)),
+              title: Text(
+                Api.displayName.isEmpty ? Api.user : Api.displayName,
+                style: const TextStyle(fontWeight: FontWeight.w700),
+              ),
+              subtitle: Text(
+                'Signed in as ${Api.user}',
+                style: const TextStyle(color: kMuted, fontSize: 12),
+              ),
               trailing: TextButton(
                 onPressed: widget.onSignOut,
-                child: const Text('Switch account',
-                    style: TextStyle(color: kGold)),
+                child: const Text(
+                  'Switch account',
+                  style: TextStyle(color: kGold),
+                ),
               ),
             ),
           ),
@@ -1732,11 +3393,13 @@ class _SettingsPageState extends State<SettingsPage> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Text('Bot Server URL',
-                      style: TextStyle(color: kText, fontWeight: FontWeight.w600)),
+                  const Text(
+                    'Bot Server URL',
+                    style: TextStyle(color: kText, fontWeight: FontWeight.w600),
+                  ),
                   const SizedBox(height: 4),
                   const Text(
-                    'The PC running dashboard.py — must be reachable from this phone (same Wi-Fi).',
+                    'The AWS dashboard address used by this phone. HTTPS is recommended when a domain is available.',
                     style: TextStyle(color: kMuted, fontSize: 12),
                   ),
                   const SizedBox(height: 12),
@@ -1746,7 +3409,9 @@ class _SettingsPageState extends State<SettingsPage> {
                     style: const TextStyle(fontFamily: 'monospace'),
                     decoration: InputDecoration(
                       hintText: 'http://13.207.78.56:5001',
-                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(8),
+                      ),
                     ),
                   ),
                   const SizedBox(height: 12),
@@ -1757,7 +3422,9 @@ class _SettingsPageState extends State<SettingsPage> {
                           controller: _userCtl,
                           decoration: InputDecoration(
                             labelText: 'Username',
-                            border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                            border: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(8),
+                            ),
                           ),
                         ),
                       ),
@@ -1768,7 +3435,9 @@ class _SettingsPageState extends State<SettingsPage> {
                           obscureText: true,
                           decoration: InputDecoration(
                             labelText: 'Password',
-                            border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                            border: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(8),
+                            ),
                           ),
                         ),
                       ),
@@ -1778,19 +3447,21 @@ class _SettingsPageState extends State<SettingsPage> {
                   SizedBox(
                     width: double.infinity,
                     child: FilledButton(
-                      style: FilledButton.styleFrom(
-                        backgroundColor: kGreen.withValues(alpha: 0.15),
-                        foregroundColor: kGreen,
-                      ),
                       onPressed: _testing ? null : _saveAndTest,
-                      child: Text(_testing ? 'Testing…' : 'Save & Test Connection'),
+                      child: Text(
+                        _testing ? 'Testing…' : 'Save & Test Connection',
+                      ),
                     ),
                   ),
                   if (_testResult != null) ...[
                     const SizedBox(height: 12),
-                    Text(_testResult!,
-                        style: TextStyle(
-                            color: _testResult!.startsWith('✅') ? kGreen : kRed, fontSize: 13)),
+                    Text(
+                      _testResult!,
+                      style: TextStyle(
+                        color: _testResult!.startsWith('✅') ? kGreen : kRed,
+                        fontSize: 13,
+                      ),
+                    ),
                   ],
                 ],
               ),
@@ -1803,13 +3474,16 @@ class _SettingsPageState extends State<SettingsPage> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text('About', style: TextStyle(color: kText, fontWeight: FontWeight.w600)),
+                  Text(
+                    'About',
+                    style: TextStyle(color: kText, fontWeight: FontWeight.w600),
+                  ),
                   SizedBox(height: 8),
                   Text(
                     'Nithi-bot mobile — MV-BTC daily straddle bot on Delta Exchange India.\n\n'
                     '🌅 Morning trade: 5:45 AM IST (settles 5:30 PM)\n'
-                    '🌇 Evening trade: 5:35 PM IST (exits 2:30 AM)\n\n'
-                    'This app is a remote control for the bot running on your PC.',
+                    '🌇 Evening trade: 5:35 PM IST (default exit 1:00 AM)\n\n'
+                    'This app is a secure remote control for the bot and dashboard running on AWS.',
                     style: TextStyle(color: kMuted, fontSize: 12, height: 1.5),
                   ),
                 ],
@@ -1828,7 +3502,12 @@ class _SettingsPageState extends State<SettingsPage> {
 class PayoffPainter extends CustomPainter {
   final List<double> xs, ys;
   final double spot, spotPnl;
-  PayoffPainter({required this.xs, required this.ys, required this.spot, required this.spotPnl});
+  PayoffPainter({
+    required this.xs,
+    required this.ys,
+    required this.spot,
+    required this.spotPnl,
+  });
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -1846,24 +3525,46 @@ class PayoffPainter extends CustomPainter {
     double px(double x) => padL + (x - xMin) / xSpan * w;
     double py(double y) => padT + (yMax - y) / ySpan * h;
 
-    final grid = Paint()..color = const Color(0xFF1E2A45)..strokeWidth = 1;
-    final txt = TextStyle(color: const Color(0xFF8CA0BC), fontSize: 9);
+    final grid = Paint()
+      ..color = kBorder
+      ..strokeWidth = 1;
+    final txt = TextStyle(color: kMuted, fontSize: 9);
 
     // Horizontal gridlines + y labels (min, 0, max)
     for (final y in {yMin, 0.0, yMax}) {
-      canvas.drawLine(Offset(padL, py(y)), Offset(padL + w, py(y)),
-          y == 0 ? (Paint()..color = const Color(0xFF8CA0BC)..strokeWidth = 1.2) : grid);
+      canvas.drawLine(
+        Offset(padL, py(y)),
+        Offset(padL + w, py(y)),
+        y == 0
+            ? (Paint()
+                ..color = kMuted
+                ..strokeWidth = 1.2)
+            : grid,
+      );
       final tp = TextPainter(
-          text: TextSpan(text: '${y < 0 ? '-' : y > 0 ? '+' : ''}\$${y.abs().round()}', style: txt),
-          textDirection: TextDirection.ltr)..layout();
+        text: TextSpan(
+          text:
+              '${y < 0
+                  ? '-'
+                  : y > 0
+                  ? '+'
+                  : ''}\$${y.abs().round()}',
+          style: txt,
+        ),
+        textDirection: TextDirection.ltr,
+      )..layout();
       tp.paint(canvas, Offset(padL - tp.width - 4, py(y) - tp.height / 2));
     }
     // X labels (first, strike-ish middle, last)
     for (final i in [0, xs.length ~/ 2, xs.length - 1]) {
       final tp = TextPainter(
-          text: TextSpan(text: '\$${xs[i].round()}', style: txt),
-          textDirection: TextDirection.ltr)..layout();
-      tp.paint(canvas, Offset(px(xs[i]) - tp.width / 2, size.height - padB + 6));
+        text: TextSpan(text: '\$${xs[i].round()}', style: txt),
+        textDirection: TextDirection.ltr,
+      )..layout();
+      tp.paint(
+        canvas,
+        Offset(px(xs[i]) - tp.width / 2, size.height - padB + 6),
+      );
     }
 
     // Payoff polyline, green above zero / red below, per segment
@@ -1872,17 +3573,36 @@ class PayoffPainter extends CustomPainter {
         ..color = (ys[i] + ys[i + 1]) / 2 >= 0 ? kGreen : kRed
         ..strokeWidth = 2.2
         ..style = PaintingStyle.stroke;
-      canvas.drawLine(Offset(px(xs[i]), py(ys[i])),
-          Offset(px(xs[i + 1]), py(ys[i + 1])), paint);
+      canvas.drawLine(
+        Offset(px(xs[i]), py(ys[i])),
+        Offset(px(xs[i + 1]), py(ys[i + 1])),
+        paint,
+      );
     }
 
     // Current spot marker
-    final sx = px(spot.clamp(xs.first, xs.last)), sy = py(spotPnl.clamp(yMin, yMax));
-    canvas.drawLine(Offset(sx, padT), Offset(sx, padT + h),
-        Paint()..color = const Color(0x552563EB)..strokeWidth = 1);
-    canvas.drawCircle(Offset(sx, sy), 4.5, Paint()..color = const Color(0xFF2563EB));
-    canvas.drawCircle(Offset(sx, sy), 4.5,
-        Paint()..color = Colors.white..style = PaintingStyle.stroke..strokeWidth = 1.2);
+    final sx = px(spot.clamp(xs.first, xs.last)),
+        sy = py(spotPnl.clamp(yMin, yMax));
+    canvas.drawLine(
+      Offset(sx, padT),
+      Offset(sx, padT + h),
+      Paint()
+        ..color = const Color(0x552563EB)
+        ..strokeWidth = 1,
+    );
+    canvas.drawCircle(
+      Offset(sx, sy),
+      4.5,
+      Paint()..color = const Color(0xFF2563EB),
+    );
+    canvas.drawCircle(
+      Offset(sx, sy),
+      4.5,
+      Paint()
+        ..color = Colors.white
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.2,
+    );
   }
 
   @override
