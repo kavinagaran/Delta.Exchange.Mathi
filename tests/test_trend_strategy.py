@@ -22,6 +22,11 @@ class TrendCalculationTests(unittest.TestCase):
         result = dashboard._trend_metrics([100.0] * 70)
         self.assertEqual(result["trend"], "neutral")
 
+    def test_only_hourly_trend_uses_the_in_progress_candle(self):
+        self.assertFalse(dashboard.TREND_TIMEFRAMES["5m"]["include_live"])
+        self.assertFalse(dashboard.TREND_TIMEFRAMES["15m"]["include_live"])
+        self.assertTrue(dashboard.TREND_TIMEFRAMES["1h"]["include_live"])
+
 
 class OptionSelectionTests(unittest.TestCase):
     @staticmethod

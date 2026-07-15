@@ -21,7 +21,7 @@
     <span class="pill idle mini" id="trend-alignment-pill"><span class="dot"></span>CHECKING</span>
   </div>
   <div class="card-bd trend-workbench">
-    <div class="trend-frames" title="EMA 9/21 crossover confirmed by RSI(14), calculated only on completed candles.">
+    <div class="trend-frames" title="5M and 15M use completed candles. 1H uses the live candle so direction changes can unlock entry immediately.">
       {% for key, label in [('5m', '5 Mins'), ('15m', '15 Mins'), ('1h', '1 Hour')] %}
       <div class="trend-box" id="trend-box-{{ key }}">
         <div class="lbl">BTC Trend · {{ label }}</div>
@@ -385,7 +385,7 @@ async function loadTrend() {
     dir.textContent = label;
     dir.className = 'dir ' + cls;
     sub.textContent = f.ema9
-      ? `EMA9 ${fN(f.ema9)} · EMA21 ${fN(f.ema21)} · RSI ${fN(f.rsi, 1)}`
+      ? `EMA9 ${fN(f.ema9)} · EMA21 ${fN(f.ema21)} · RSI ${fN(f.rsi, 1)}${f.live_candle ? ' · LIVE' : ''}`
       : (t.error || 'Unavailable');
   }
 
@@ -443,6 +443,6 @@ function loadAll() { loadSlots(); loadStats(); loadToday(); loadTrend(); refresh
 loadAll();
 setInterval(() => { loadSlots(); loadToday(); }, 12_000);
 setInterval(loadStats, 60_000);
-setInterval(loadTrend, 60_000);
+setInterval(loadTrend, 15_000);
 </script>
 {% endblock %}

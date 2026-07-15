@@ -1680,9 +1680,11 @@ def _rsi(vals: list, n: int = 14) -> float:
 
 
 TREND_TIMEFRAMES = {
-    "5m":  {"resolution": "5m",  "seconds": 300,  "label": "5M"},
-    "15m": {"resolution": "15m", "seconds": 900,  "label": "15M"},
-    "1h":  {"resolution": "1h",  "seconds": 3600, "label": "1H"},
+    "5m":  {"resolution": "5m",  "seconds": 300,  "label": "5M", "include_live": False},
+    "15m": {"resolution": "15m", "seconds": 900,  "label": "15M", "include_live": False},
+    # The hourly candle is deliberately live: a direction change should
+    # unlock a Trend entry immediately, without waiting for the hour to close.
+    "1h":  {"resolution": "1h",  "seconds": 3600, "label": "1H", "include_live": True},
 }
 
 _trend_cache = {"ts": 0.0, "data": None}
@@ -1706,8 +1708,8 @@ def _trend_metrics(closes: list, candle_time=None) -> dict:
 
 
 def _trend_snapshot(force: bool = False) -> dict:
-    """Return 5m/15m/1h metrics computed only from completed candles."""
-    if not force and _trend_cache["data"] and time.time() - _trend_cache["ts"] < 60:
+    """Return closed 5m/15m metrics plus a live 1h metric."""
+    if not force and _trend_cache["data"] and time.time() - _trend_cache["ts"] < 15:
         return _trend_cache["data"]
     end = int(time.time())
     frames = {}
@@ -1719,10 +1721,12 @@ def _trend_snapshot(force: bool = False) -> dict:
                     timeout=10).json()
         candles = sorted(r.get("result") or [], key=lambda c: c.get("time", 0))
         current_bucket = end - end % seconds
-        if candles and candles[-1].get("time", 0) >= current_bucket:
+        if (not spec["include_live"] and candles
+                and candles[-1].get("time", 0) >= current_bucket):
             candles = candles[:-1]
         closes = [float(c["close"]) for c in candles]
         frames[key] = _trend_metrics(closes, candles[-1].get("time") if candles else None)
+        frames[key]["live_candle"] = bool(spec["include_live"])
 
     directions = [frames[k]["trend"] for k in TREND_TIMEFRAMES]
     combined = directions[0] if len(set(directions)) == 1 and directions[0] in ("up", "down") else "neutral"
@@ -1992,7 +1996,7 @@ def _trend_auto_loop() -> None:
                     pass
         except Exception:
             pass
-        time.sleep(30)
+        time.sleep(15)
 
 
 @app.route("/api/wallet")
