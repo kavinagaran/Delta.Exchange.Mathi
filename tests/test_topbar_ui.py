@@ -67,3 +67,49 @@ if (!(overnight > sameDay)) throw new Error('overnight close ordering failed');
         check=False,
     )
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.skipif(NODE is None, reason="Node.js is required for frontend JavaScript tests")
+def test_theme_toggle_persists_choice_and_updates_accessibility_state():
+    script = r"""
+const fs = require('fs');
+const vm = require('vm');
+const root = { dataset: {} };
+const attributes = {};
+const toggle = {
+  title: '',
+  setAttribute(k, v) { attributes[k] = String(v); },
+  addEventListener(kind, handler) { if (kind === 'click') this.click = handler; },
+};
+const storage = new Map();
+global.document = {
+  documentElement: root,
+  addEventListener() {},
+  getElementById(id) { return id === 'theme-toggle' ? toggle : null; },
+  dispatchEvent() {},
+};
+global.localStorage = { setItem(k, v) { storage.set(k, v); } };
+global.CustomEvent = function(type, init) { this.type = type; this.detail = init.detail; };
+vm.runInThisContext(fs.readFileSync('static/js/app.js', 'utf8'));
+
+initThemeToggle();
+if (attributes['aria-pressed'] !== 'false' || !attributes['aria-label'].includes('dark')) {
+  throw new Error('light toggle state was not initialized');
+}
+toggle.click();
+if (root.dataset.theme !== 'dark' || storage.get('nithi-theme') !== 'dark') {
+  throw new Error('dark theme was not persisted');
+}
+if (attributes['aria-pressed'] !== 'true' || !attributes['aria-label'].includes('light')) {
+  throw new Error('dark toggle accessibility state was not updated');
+}
+toggle.click();
+if ('theme' in root.dataset || storage.get('nithi-theme') !== 'light') {
+  throw new Error('light theme was not restored');
+}
+"""
+    result = subprocess.run(
+        [NODE, "-e", script], cwd=ROOT, text=True, capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr

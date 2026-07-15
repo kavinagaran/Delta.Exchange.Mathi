@@ -30,7 +30,7 @@
 
 {% block scripts %}
 <script>
-let chart = null;
+let chart = null, latestTrades = [];
 
 function drawChart(trades) {
   /* One bar per calendar day (all of that day's real trades summed);
@@ -50,6 +50,9 @@ function drawChart(trades) {
 
   const css = getComputedStyle(document.documentElement);
   const POS = css.getPropertyValue('--pos').trim(), NEG = css.getPropertyValue('--neg').trim();
+  const MUTED = css.getPropertyValue('--muted').trim();
+  const WARN = css.getPropertyValue('--warn').trim();
+  const GRID = css.getPropertyValue('--chart-grid').trim();
   const ctx = document.getElementById('pnl-chart').getContext('2d');
   if (chart) chart.destroy();
   chart = new Chart(ctx, {
@@ -61,24 +64,24 @@ function drawChart(trades) {
           borderColor: daily.map(v => v >= 0 ? POS : NEG), borderWidth: 1, borderRadius: 4,
           maxBarThickness: 46 },
         { type: 'line', label: 'Cumulative P&L', data: cumu, yAxisID: 'yC',
-          borderColor: '#b45309', backgroundColor: 'rgba(180,83,9,.06)',
-          borderWidth: 2.5, pointRadius: 3, pointBackgroundColor: '#b45309', tension: .3, fill: true },
+          borderColor: WARN, backgroundColor: 'rgba(180,83,9,.06)',
+          borderWidth: 2.5, pointRadius: 3, pointBackgroundColor: WARN, tension: .3, fill: true },
       ],
     },
     options: {
       responsive: true, maintainAspectRatio: false,
       interaction: { mode: 'index', intersect: false },
       plugins: {
-        legend: { labels: { color: '#68758a', font: { size: 12 } } },
+        legend: { labels: { color: MUTED, font: { size: 12 } } },
         tooltip: { callbacks: { label: c => ` ${c.dataset.label}: ${f$(c.raw)}` } },
       },
       scales: {
-        x:  { ticks: { color: '#68758a', font: { size: 11 } }, grid: { color: 'rgba(100,116,139,.12)' } },
-        yD: { position: 'left', title: { display: true, text: 'Daily P&L', color: '#68758a' },
-              ticks: { color: '#68758a', callback: v => (v >= 0 ? '+$' : '-$') + Math.abs(v).toLocaleString() },
-              grid: { color: 'rgba(100,116,139,.12)' } },
-        yC: { position: 'right', title: { display: true, text: 'Cumulative P&L', color: '#b45309' },
-              ticks: { color: '#b45309', callback: v => '$' + v.toLocaleString() },
+        x:  { ticks: { color: MUTED, font: { size: 11 } }, grid: { color: GRID } },
+        yD: { position: 'left', title: { display: true, text: 'Daily P&L', color: MUTED },
+              ticks: { color: MUTED, callback: v => (v >= 0 ? '+$' : '-$') + Math.abs(v).toLocaleString() },
+              grid: { color: GRID } },
+        yC: { position: 'right', title: { display: true, text: 'Cumulative P&L', color: WARN },
+              ticks: { color: WARN, callback: v => '$' + v.toLocaleString() },
               grid: { drawOnChartArea: false } },
       },
     },
@@ -134,10 +137,12 @@ async function loadStats() {
 
 async function load() {
   const trades = await jget('/api/trades');
+  latestTrades = trades;
   drawChart(trades);
   renderTable(trades);
   loadStats();
 }
+window.addEventListener('themechange', () => { if (latestTrades.length) drawChart(latestTrades); });
 load();
 setInterval(load, 60_000);
 </script>

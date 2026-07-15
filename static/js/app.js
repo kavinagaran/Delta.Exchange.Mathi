@@ -16,6 +16,40 @@ async function jpost(url, body) {
   return r.json();
 }
 
+/* ── Persistent site theme ──────────────────────────────── */
+const THEME_STORAGE_KEY = 'nithi-theme';
+
+function currentTheme() {
+  return document.documentElement?.dataset?.theme === 'dark' ? 'dark' : 'light';
+}
+
+function applyTheme(theme, persist = true) {
+  const next = theme === 'dark' ? 'dark' : 'light';
+  if (next === 'dark') document.documentElement.dataset.theme = 'dark';
+  else delete document.documentElement.dataset.theme;
+  if (persist) {
+    try { localStorage.setItem(THEME_STORAGE_KEY, next); } catch (_) { /* storage unavailable */ }
+  }
+  document.dispatchEvent(new CustomEvent('themechange', { detail: { theme: next } }));
+  return next;
+}
+
+function initThemeToggle() {
+  const toggle = document.getElementById('theme-toggle');
+  if (!toggle) return;
+  const sync = () => {
+    const dark = currentTheme() === 'dark';
+    toggle.setAttribute('aria-pressed', String(dark));
+    toggle.setAttribute('aria-label', `Switch to ${dark ? 'light' : 'dark'} theme`);
+    toggle.title = `Switch to ${dark ? 'light' : 'dark'} theme`;
+  };
+  sync();
+  toggle.addEventListener('click', () => {
+    applyTheme(currentTheme() === 'dark' ? 'light' : 'dark');
+    sync();
+  });
+}
+
 /* formatting */
 const fN = (v, d = 0) => (v == null || isNaN(+v)) ? '—' : (+v).toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
 const f$ = v => (v == null || isNaN(+v)) ? '—' : (v < 0 ? '-$' : '+$') + Math.abs(+v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -142,6 +176,7 @@ function tickClock() {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
+  initThemeToggle();
   tickClock();
   setInterval(tickClock, 10_000);
   refreshTopbar();

@@ -4,6 +4,14 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{ page_title }} · NITHI-BOT</title>
+<script>
+  /* Apply a saved choice before the stylesheet loads, avoiding a light-theme flash. */
+  try {
+    if (localStorage.getItem('nithi-theme') === 'dark') {
+      document.documentElement.dataset.theme = 'dark';
+    }
+  } catch (_) {}
+</script>
 <link rel="icon" type="image/png" href="/static/img/favicon.png?v={{ asset_v('img/favicon.png') }}">
 <link rel="stylesheet" href="/static/css/app.css?v={{ asset_v('css/app.css') }}">
 <script src="/static/js/app.js?v={{ asset_v('js/app.js') }}"></script>
@@ -47,6 +55,13 @@
   <div class="main">
     <header class="topbar">
       <h1>{{ page_title }}</h1>
+      <button class="theme-toggle" id="theme-toggle" type="button"
+              aria-label="Switch to dark theme" aria-pressed="false" title="Switch theme">
+        <span class="theme-icon theme-sun" aria-hidden="true">☀</span>
+        <span class="theme-knob" aria-hidden="true"></span>
+        <span class="theme-icon theme-moon" aria-hidden="true">☾</span>
+      </button>
+      <span class="topbar-spacer" aria-hidden="true"></span>
       <span class="chip" id="tb-btc">BTC <b>—</b></span>
       <span class="chip" id="tb-bal">Balance <b>—</b></span>
       <span class="pill idle" id="tb-pill"><span class="dot"></span>Loading…</span>
