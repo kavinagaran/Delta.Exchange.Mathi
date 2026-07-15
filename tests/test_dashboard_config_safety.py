@@ -94,3 +94,36 @@ def test_config_page_is_fail_safe_until_verified_load():
     assert "if (!configReady)" in html
     assert "saveButton.disabled = false" in html
     assert "Configuration could not be verified — Save remains locked" in html
+    assert "function shortMoveUi()" in html
+    assert "Short MOVE is enabled. Enter a positive Maximum short risk $" in html
+
+
+def test_short_move_requires_explicit_positive_risk_cap():
+    current = {
+        "ALLOW_SHORT_MOVE": "false",
+        "SHORT_MAX_RISK_USD": "0",
+    }
+    assert dashboard._validate_config_update({}, current) is None
+    assert dashboard._validate_config_update({
+        "ALLOW_SHORT_MOVE": "false", "SHORT_MAX_RISK_USD": "0",
+    }, current) is None
+    error = dashboard._validate_config_update({
+        "ALLOW_SHORT_MOVE": "true", "SHORT_MAX_RISK_USD": "0",
+    }, current)
+    assert "Maximum short risk" in error
+    assert dashboard._validate_config_update({
+        "ALLOW_SHORT_MOVE": "true", "SHORT_MAX_RISK_USD": "100",
+    }, current) is None
+
+    # A full-form save can explicitly turn an invalid/stale current flag off.
+    stale_enabled = {
+        "ALLOW_SHORT_MOVE": "true",
+        "SHORT_MAX_RISK_USD": "0",
+    }
+    assert dashboard._validate_config_update({
+        "ALLOW_SHORT_MOVE": "false", "SHORT_MAX_RISK_USD": "0",
+    }, stale_enabled) is None
+
+    # An unrelated partial client may not bypass an already-invalid short setup.
+    error = dashboard._validate_config_update({"DRY_RUN": "true"}, stale_enabled)
+    assert "Short MOVE is enabled" in error

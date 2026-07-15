@@ -4242,7 +4242,8 @@ def _validate_config_update(data: dict, current: dict) -> str | None:
     if str(merged.get("ALLOW_SHORT_MOVE") or "false").lower() in {"1", "true", "yes", "on"}:
         try:
             if float(merged.get("SHORT_MAX_RISK_USD") or 0) <= 0:
-                return "SHORT_MAX_RISK_USD must be positive before short MOVE is enabled"
+                return ("Short MOVE is enabled. Enter a positive Maximum short risk $, "
+                        "or select Disabled under Short MOVE entries.")
         except (TypeError, ValueError):
             return "SHORT_MAX_RISK_USD must be numeric"
     return None

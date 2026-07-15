@@ -98,8 +98,8 @@
     <div class="form-sec">
       <div class="form-sec-title">Exposure policy</div>
       <div class="form-grid">
-        <label class="fld"><span>Short MOVE entries</span><select id="c-ALLOW_SHORT_MOVE"><option value="false">Disabled (recommended)</option><option value="true">Enabled with explicit SL</option></select></label>
-        <label class="fld"><span>Maximum short risk $</span><input id="c-SHORT_MAX_RISK_USD" type="number" min="0" step="1"></label>
+        <label class="fld"><span>Short MOVE entries</span><select id="c-ALLOW_SHORT_MOVE" onchange="shortMoveUi()"><option value="false">Disabled (recommended)</option><option value="true">Enabled with explicit SL</option></select></label>
+        <label class="fld"><span>Maximum short risk $</span><input id="c-SHORT_MAX_RISK_USD" type="number" min="1" step="1" oninput="shortMoveUi()"><em class="fld-hint" id="short-risk-hint">Not required while short MOVE is disabled.</em></label>
         <label class="fld"><span>Concurrent MOVE positions</span><input id="c-MAX_CONCURRENT_MOVE_POSITIONS" type="number" min="1" max="2"></label>
       </div>
     </div>
@@ -273,6 +273,24 @@ function dryBanner() {
   document.getElementById('dry-banner').style.display = on ? 'flex' : 'none';
 }
 
+function shortMoveUi() {
+  const enabled = document.getElementById('c-ALLOW_SHORT_MOVE').value === 'true';
+  const risk = document.getElementById('c-SHORT_MAX_RISK_USD');
+  const hint = document.getElementById('short-risk-hint');
+  const valid = !enabled || (Number.isFinite(Number(risk.value)) && Number(risk.value) > 0);
+  risk.disabled = !enabled;
+  risk.required = enabled;
+  risk.setAttribute('aria-invalid', valid ? 'false' : 'true');
+  risk.style.borderColor = valid ? '' : '#dc2626';
+  hint.style.color = valid ? '' : '#b91c1c';
+  hint.textContent = enabled
+      ? (valid
+      ? 'Required cap is set. Configure a positive SL on each short-enabled slot as well.'
+      : 'Short MOVE is enabled. Enter a positive Maximum short risk $, or select Disabled under Short MOVE entries.')
+    : 'Not required while short MOVE is disabled.';
+  return valid;
+}
+
 function utcHints() {
   const utcOf = id => {
     const v = document.getElementById(id).value;
@@ -318,6 +336,7 @@ async function loadConfig() {
       if (!isNaN(h) && !isNaN(m)) document.getElementById(id).value = utcToIstHHMM(h, m);
     }
     dryBanner();
+    shortMoveUi();
     utcHints();
     window._loadedTrendAutoMode = document.getElementById('c-TREND_AUTO_ENTRY_MODE').value;
     window._loadedMarketFallback = document.getElementById('c-TREND_MARKET_FALLBACK_ENABLED').value;
@@ -349,6 +368,13 @@ async function saveConfig() {
   if (externalOverride === 'true' && window._loadedExternalOverride !== 'true' &&
       !confirm('Allow bot entries while manual/external positions are open? Their full risk may be unknown to the bot.')) return;
   const shortMove = document.getElementById('c-ALLOW_SHORT_MOVE').value;
+  if (!shortMoveUi()) {
+    const risk = document.getElementById('c-SHORT_MAX_RISK_USD');
+    risk.disabled = false;
+    risk.focus();
+    toast('Short MOVE is enabled. Enter a positive Maximum short risk $, or select Disabled under Short MOVE entries.', 'err');
+    return;
+  }
   if (shortMove === 'true' && window._loadedShortMove !== 'true' &&
       !confirm('Enable short MOVE entries? Short MOVE loss can be very large; an explicit SL and short-risk cap are required.')) return;
   const body = {};
