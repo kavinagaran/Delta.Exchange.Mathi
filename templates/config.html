@@ -2,22 +2,45 @@
 
 {% block content %}
 <div class="banner info">These settings apply to <b>{{ display_name }}'s account only</b> — its bot instance, TP monitors and manual trading. Every account has its own configuration.</div>
-<div class="banner warn" id="dry-banner" style="display:none">⚠ DRY RUN is ON — entries are simulated, no real orders are placed.</div>
+<div class="banner warn" id="config-load-banner">Loading verified account configuration — Save is locked.</div>
+<div class="banner warn" id="dry-banner">⚠ DRY RUN is ON — entries are simulated, no real orders are placed.</div>
 
 <div class="card">
   <div class="card-hd">Trading Mode</div>
-  <div class="card-bd form-grid">
-    <label class="fld"><span>Mode</span>
-      <select id="c-DRY_RUN" onchange="dryBanner()">
-        <option value="false">LIVE — real orders</option>
-        <option value="true">DRY RUN — simulate</option>
-      </select>
-    </label>
-    <label class="fld"><span>Max trades / day</span><input id="c-MAX_TRADES_PER_DAY" type="number" min="1" max="10"></label>
-    <label class="fld"><span>Dynamic lot sizing</span>
-      <select id="c-DYNAMIC_LOTS"><option value="true">ON — min(configured, affordable)</option><option value="false">OFF — configured lots only</option></select>
-    </label>
-    <label class="fld"><span>Strike step $</span><input id="c-STRIKE_STEP" type="number" min="50"></label>
+  <div class="card-bd">
+    <div class="form-sec">
+      <div class="form-sec-title">Operation</div>
+      <div class="form-grid">
+        <label class="fld"><span>Mode</span>
+          <select id="c-DRY_RUN" onchange="dryBanner()">
+            <option value="true">DRY RUN — simulate</option>
+            <option value="false">LIVE — real orders</option>
+          </select>
+        </label>
+        <label class="fld"><span>MOVE lot sizing</span>
+          <div class="hint" style="padding-top:9px">Mandatory min(configured, affordable, risk and liquidity caps)</div>
+        </label>
+        <label class="fld"><span>Strike step $</span><input id="c-STRIKE_STEP" type="number" min="50"></label>
+        <label class="fld"><span>Hard order ceiling lots</span><input id="c-MAX_ORDER_LOTS" type="number" min="1" max="5000"><em class="fld-hint">Default safety ceiling: 1,000</em></label>
+        <label class="fld"><span>Risk data failure</span>
+          <select id="c-RISK_FAIL_CLOSED"><option value="true">Block entries (recommended)</option><option value="false">Allow without verified P&amp;L</option></select>
+        </label>
+        <label class="fld"><span>External/manual positions</span>
+          <select id="c-ALLOW_EXTERNAL_POSITIONS_WITH_BOT"><option value="false">Block bot entries (recommended)</option><option value="true">Allow alongside bot</option></select>
+        </label>
+      </div>
+    </div>
+    <div class="form-sec">
+      <div class="form-sec-title">Shared portfolio guardrails · all strategies</div>
+      <div class="form-grid">
+        <label class="fld"><span>Global trades / day</span><input id="c-MAX_TRADES_PER_DAY_GLOBAL" type="number" min="1" max="100"></label>
+        <label class="fld"><span>Maximum daily loss $</span><input id="c-MAX_DAILY_LOSS_USD" type="number" min="0" step="1"><em class="fld-hint">Realized + unrealized</em></label>
+        <label class="fld"><span>Maximum open risk $</span><input id="c-MAX_OPEN_RISK_USD" type="number" min="0" step="1"></label>
+        <label class="fld"><span>Maximum premium at risk $</span><input id="c-MAX_ACCOUNT_PREMIUM_AT_RISK_USD" type="number" min="0" step="1"></label>
+        <label class="fld"><span>Consecutive-loss lock</span><input id="c-MAX_CONSECUTIVE_LOSSES" type="number" min="0" max="100"></label>
+        <label class="fld"><span>Loss cooldown mins</span><input id="c-LOSS_COOLDOWN_MINUTES" type="number" min="0" max="1440"></label>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -26,7 +49,7 @@
     <div class="card-hd">🌅 Morning Slot</div>
     <div class="card-bd form-grid two">
       <label class="fld"><span>Enabled</span>
-        <select id="c-MORNING_ENABLED"><option value="true">Yes</option><option value="false">No</option></select>
+        <select id="c-MORNING_ENABLED"><option value="false">No</option><option value="true">Yes</option></select>
       </label>
       <label class="fld"><span>Direction</span>
         <select id="c-MORNING_SIDE">
@@ -35,8 +58,9 @@
         </select>
       </label>
       <label class="fld"><span>Lots</span><input id="c-MORNING_LOTS" type="number" min="1" max="5000"></label>
+      <label class="fld"><span>Risk budget $</span><input id="c-RISK_PER_TRADE_USD_MORNING" type="number" min="1" step="1"></label>
       <label class="fld"><span>Scheduled exit</span>
-        <select id="c-MORNING_EXIT_ENABLED"><option value="true">Enabled</option><option value="false">Disabled (TP/SL/settlement only)</option></select>
+        <select id="c-MORNING_EXIT_ENABLED"><option value="false">Disabled (TP/SL/settlement only)</option><option value="true">Enabled</option></select>
       </label>
       <label class="fld"><span>Entry time (IST)</span><input id="t-morning-entry" type="time" step="60"></label>
       <label class="fld"><span>Exit time (IST)</span><input id="t-morning-exit" type="time" step="60"></label>
@@ -48,7 +72,7 @@
     <div class="card-hd">🌇 Evening Slot</div>
     <div class="card-bd form-grid two">
       <label class="fld"><span>Enabled</span>
-        <select id="c-EVENING_ENABLED"><option value="true">Yes</option><option value="false">No</option></select>
+        <select id="c-EVENING_ENABLED"><option value="false">No</option><option value="true">Yes</option></select>
       </label>
       <label class="fld"><span>Direction</span>
         <select id="c-EVENING_SIDE">
@@ -57,8 +81,9 @@
         </select>
       </label>
       <label class="fld"><span>Lots</span><input id="c-STRADDLE_LOTS" type="number" min="1" max="5000"></label>
+      <label class="fld"><span>Risk budget $</span><input id="c-RISK_PER_TRADE_USD_EVENING" type="number" min="1" step="1"></label>
       <label class="fld"><span>Scheduled exit</span>
-        <select id="c-EVENING_EXIT_ENABLED"><option value="true">Enabled</option><option value="false">Disabled (TP/SL/settlement only)</option></select>
+        <select id="c-EVENING_EXIT_ENABLED"><option value="false">Disabled (TP/SL/settlement only)</option><option value="true">Enabled</option></select>
       </label>
       <label class="fld"><span>Entry time (IST)</span><input id="t-evening-entry" type="time" step="60"></label>
       <label class="fld"><span>Exit time (IST)</span><input id="t-evening-exit" type="time" step="60"></label>
@@ -68,21 +93,94 @@
 </div>
 
 <div class="card">
+  <div class="card-hd">🛡️ MOVE Strategy Safety &amp; Value Gates</div>
+  <div class="card-bd">
+    <div class="form-sec">
+      <div class="form-sec-title">Exposure policy</div>
+      <div class="form-grid">
+        <label class="fld"><span>Short MOVE entries</span><select id="c-ALLOW_SHORT_MOVE"><option value="false">Disabled (recommended)</option><option value="true">Enabled with explicit SL</option></select></label>
+        <label class="fld"><span>Maximum short risk $</span><input id="c-SHORT_MAX_RISK_USD" type="number" min="0" step="1"></label>
+        <label class="fld"><span>Concurrent MOVE positions</span><input id="c-MAX_CONCURRENT_MOVE_POSITIONS" type="number" min="1" max="2"></label>
+      </div>
+    </div>
+    <div class="form-sec">
+      <div class="form-sec-title">Quote and execution quality</div>
+      <div class="form-grid">
+        <label class="fld"><span>Safe IOC execution</span><select id="c-SAFE_EXECUTION_ENABLED"><option value="true">Enabled (required for entries)</option><option value="false">Disabled — blocks scheduled entries</option></select></label>
+        <label class="fld"><span>Maximum spread %</span><input id="c-MAX_SPREAD_PCT" type="number" min="0.1" max="100" step="0.1"></label>
+        <label class="fld"><span>Maximum slippage %</span><input id="c-MAX_SLIPPAGE_PCT" type="number" min="0.01" max="20" step="0.1"></label>
+        <label class="fld"><span>Book depth multiple</span><input id="c-MIN_BOOK_DEPTH_MULTIPLE" type="number" min="0.01" max="100" step="0.1"><em class="fld-hint">1.0 requires depth for the full order</em></label>
+        <label class="fld"><span>Maximum quote age secs</span><input id="c-MAX_QUOTE_AGE_SEC" type="number" min="1" max="300"></label>
+        <label class="fld"><span>IOC chunk lots</span><input id="c-ORDER_CHUNK_LOTS" type="number" min="1" max="5000"></label>
+      </div>
+    </div>
+    <div class="form-sec">
+      <div class="form-sec-title">MOVE premium edge</div>
+      <div class="form-grid">
+        <label class="fld"><span>Value filter</span><select id="c-MOVE_VALUE_FILTER_ENABLED"><option value="true">Enabled (recommended)</option><option value="false">Disabled</option></select></label>
+        <label class="fld"><span>Minimum forecast edge %</span><input id="c-MOVE_MIN_EDGE_PCT" type="number" min="0" step="0.5"></label>
+        <label class="fld"><span>Minimum TTE mins</span><input id="c-MOVE_MIN_TTE_MINUTES" type="number" min="1" max="1440"></label>
+        <label class="fld"><span>Maximum TTE hrs</span><input id="c-MOVE_MAX_TTE_HOURS" type="number" min="1" max="168" step="0.5"></label>
+        <label class="fld"><span>15M volatility lookback</span><input id="c-MOVE_VOL_LOOKBACK" type="number" min="30" max="1000"><em class="fld-hint">Completed candles only</em></label>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="card">
   <div class="card-hd">📈 Trend Option Strategy</div>
-  <div class="card-bd form-grid">
-    <label class="fld"><span>CE / PE lots</span><input id="c-TREND_LOTS" type="number" min="1" max="5000"></label>
-    <label class="fld"><span>Automatic entry</span>
-      <select id="c-TREND_AUTO_ENTRY_ENABLED">
-        <option value="false">Disabled — require confirmation</option>
-        <option value="true">Enabled — buy on alignment</option>
-      </select>
-    </label>
-    <label class="fld" style="grid-column:span 2"><span>Entry rule</span>
-      <div class="hint" style="padding-top:9px">Completed 5M and 15M candles plus the live 1H candle must all confirm UP (2-step ITM CE) or DOWN (2-step ITM PE). Automatic entries use min(configured, affordable) lots.</div>
-    </label>
-    <label class="fld"><span>Protection</span>
-      <div class="hint" style="padding-top:9px">Configure this strategy's TP / SL / TSL on its Overview card.</div>
-    </label>
+  <div class="card-bd">
+    <div class="form-sec">
+      <div class="form-sec-title">Activation and sizing</div>
+      <div class="form-grid">
+        <label class="fld"><span>Maximum CE / PE lots</span><input id="c-TREND_LOTS" type="number" min="1" max="5000"></label>
+        <label class="fld"><span>Automatic entry mode</span>
+          <select id="c-TREND_AUTO_ENTRY_MODE">
+            <option value="shadow">SHADOW — record signals, no orders</option>
+            <option value="disabled">DISABLED — manual confirmation only</option>
+            <option value="live">LIVE — automatically place orders</option>
+          </select>
+        </label>
+        <label class="fld"><span>Risk budget / Trend trade $</span><input id="c-TREND_RISK_BUDGET_USD" type="number" min="1" step="1"></label>
+        <label class="fld"><span>Loss re-entry cooldown mins</span><input id="c-TREND_REENTRY_COOLDOWN_MIN" type="number" min="0" max="1440"></label>
+      </div>
+    </div>
+    <div class="form-sec">
+      <div class="form-sec-title">Signal quality · closed 5M/15M + live 1H</div>
+      <div class="form-grid">
+        <label class="fld"><span>Minimum EMA gap %</span><input id="c-TREND_EMA_GAP_PCT" type="number" min="0" max="5" step="0.01"></label>
+        <label class="fld"><span>UP RSI threshold</span><input id="c-TREND_RSI_UP" type="number" min="50" max="100" step="1"></label>
+        <label class="fld"><span>DOWN RSI threshold</span><input id="c-TREND_RSI_DOWN" type="number" min="0" max="50" step="1"></label>
+        <label class="fld"><span>Minimum 15M ADX</span><input id="c-TREND_ADX_MIN" type="number" min="0" max="100" step="1"></label>
+        <label class="fld"><span>15M EMA21 slope bars</span><input id="c-TREND_15M_SLOPE_BARS" type="number" min="1" max="20"></label>
+        <label class="fld"><span>Minimum 15M slope %</span><input id="c-TREND_MIN_15M_SLOPE_PCT" type="number" min="0" max="5" step="0.01"></label>
+        <label class="fld"><span>Live 1H persistence samples</span><input id="c-TREND_1H_CONFIRM_SAMPLES" type="number" min="1" max="10"></label>
+      </div>
+    </div>
+    <div class="form-sec">
+      <div class="form-sec-title">Contract and liquidity gates</div>
+      <div class="form-grid">
+        <label class="fld"><span>Minimum time to expiry hrs</span><input id="c-TREND_MIN_TTE_HOURS" type="number" min="1" max="168" step="0.5"></label>
+        <label class="fld"><span>Target absolute delta</span><input id="c-TREND_TARGET_DELTA" type="number" min="0.05" max="0.99" step="0.05"></label>
+        <label class="fld"><span>Maximum spread %</span><input id="c-TREND_MAX_SPREAD_PCT" type="number" min="0.1" max="100" step="0.1"></label>
+        <label class="fld"><span>Minimum ask depth lots</span><input id="c-TREND_MIN_BOOK_DEPTH_LOTS" type="number" min="0" step="1"></label>
+        <label class="fld"><span>Book participation %</span><input id="c-TREND_BOOK_PARTICIPATION_PCT" type="number" min="0.1" max="100" step="1"></label>
+        <label class="fld"><span>Maximum quote age secs</span><input id="c-TREND_QUOTE_MAX_AGE_SECS" type="number" min="1" max="300"></label>
+        <label class="fld"><span>Maximum mark IV</span><input id="c-TREND_MAX_MARK_IV" type="number" min="0" max="10" step="0.05"><em class="fld-hint">0 disables the IV ceiling</em></label>
+        <label class="fld"><span>Missing book data</span><select id="c-TREND_ALLOW_MISSING_BOOK"><option value="false">Block entry (recommended)</option><option value="true">Allow unverified book</option></select></label>
+      </div>
+    </div>
+    <div class="form-sec">
+      <div class="form-sec-title">Execution controls</div>
+      <div class="form-grid">
+        <label class="fld"><span>Maximum slippage %</span><input id="c-TREND_MAX_SLIPPAGE_PCT" type="number" min="0.01" max="20" step="0.1"></label>
+        <label class="fld"><span>IOC chunk lots</span><input id="c-TREND_ORDER_CHUNK_LOTS" type="number" min="1" max="5000"></label>
+        <label class="fld"><span>Market fallback</span><select id="c-TREND_MARKET_FALLBACK_ENABLED"><option value="false">Disabled (recommended)</option><option value="true">Enabled after IOC partial</option></select></label>
+        <label class="fld"><span>Option fee rate</span><input id="c-OPTION_FEE_RATE" type="number" min="0" max="0.01" step="0.00001"></label>
+        <label class="fld"><span>Option fee premium cap</span><input id="c-OPTION_FEE_CAP_PCT" type="number" min="0" max="1" step="0.001"></label>
+        <label class="fld"><span>Protection</span><div class="hint" style="padding-top:9px">Configure this strategy's TP, SL and split TSL policy on its Overview card.</div></label>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -99,7 +197,7 @@
 </div>
 
 <div class="btn-row">
-  <button class="btn" onclick="saveConfig()" style="padding:10px 26px">💾 Save configuration</button>
+  <button class="btn" id="config-save" onclick="saveConfig()" style="padding:10px 26px" disabled>💾 Save configuration</button>
   <span class="hint" style="align-self:center">This account's bot instance picks up saved changes within ~30 s.</span>
 </div>
 {% endblock %}
@@ -109,10 +207,48 @@
 // TP/SL/TSL and poll are deliberately NOT here — the monitor is configured
 // on the Overview page, on the running trade's own card.
 const KEYS = ['DRY_RUN','STRADDLE_LOTS','STRIKE_STEP','EVENING_ENABLED','EVENING_EXIT_ENABLED',
-  'EVENING_SIDE','MORNING_SIDE',
+  'EVENING_SIDE','MORNING_SIDE','MAX_ORDER_LOTS',
   'TELEGRAM_BOT_TOKEN','TELEGRAM_CHAT_ID','TELEGRAM_ALERTS',
-  'MORNING_ENABLED','MORNING_LOTS','MORNING_EXIT_ENABLED','TREND_LOTS','TREND_AUTO_ENTRY_ENABLED',
-  'DYNAMIC_LOTS','MAX_TRADES_PER_DAY'];
+  'MORNING_ENABLED','MORNING_LOTS','MORNING_EXIT_ENABLED','TREND_LOTS','TREND_AUTO_ENTRY_MODE',
+  'MAX_TRADES_PER_DAY_GLOBAL','MAX_DAILY_LOSS_USD','MAX_OPEN_RISK_USD',
+  'MAX_CONSECUTIVE_LOSSES','LOSS_COOLDOWN_MINUTES','MAX_ACCOUNT_PREMIUM_AT_RISK_USD','RISK_FAIL_CLOSED',
+  'ALLOW_EXTERNAL_POSITIONS_WITH_BOT',
+  'RISK_PER_TRADE_USD_MORNING','RISK_PER_TRADE_USD_EVENING','ALLOW_SHORT_MOVE','SHORT_MAX_RISK_USD',
+  'SAFE_EXECUTION_ENABLED','MAX_SPREAD_PCT','MAX_SLIPPAGE_PCT',
+  'MIN_BOOK_DEPTH_MULTIPLE','MAX_QUOTE_AGE_SEC','ORDER_CHUNK_LOTS','MOVE_VALUE_FILTER_ENABLED',
+  'MOVE_MIN_EDGE_PCT','MOVE_MIN_TTE_MINUTES','MOVE_MAX_TTE_HOURS','MOVE_VOL_LOOKBACK',
+  'MAX_CONCURRENT_MOVE_POSITIONS',
+  'TREND_EMA_GAP_PCT','TREND_RSI_UP','TREND_RSI_DOWN','TREND_15M_SLOPE_BARS',
+  'TREND_MIN_15M_SLOPE_PCT','TREND_ADX_MIN','TREND_1H_CONFIRM_SAMPLES',
+  'TREND_MIN_TTE_HOURS','TREND_TARGET_DELTA','TREND_MAX_SPREAD_PCT',
+  'TREND_MIN_BOOK_DEPTH_LOTS','TREND_BOOK_PARTICIPATION_PCT','TREND_QUOTE_MAX_AGE_SECS',
+  'TREND_MAX_MARK_IV','TREND_RISK_BUDGET_USD','TREND_MAX_SLIPPAGE_PCT',
+  'TREND_ORDER_CHUNK_LOTS','TREND_MARKET_FALLBACK_ENABLED','TREND_REENTRY_COOLDOWN_MIN',
+  'TREND_ALLOW_MISSING_BOOK','OPTION_FEE_RATE','OPTION_FEE_CAP_PCT'];
+
+let configReady = false;
+const DEFAULTS = {
+  DRY_RUN:'true', MORNING_ENABLED:'false', MORNING_EXIT_ENABLED:'false',
+  EVENING_ENABLED:'false', EVENING_EXIT_ENABLED:'false',
+  TREND_LOTS:'100', TREND_AUTO_ENTRY_MODE:'shadow', MAX_ORDER_LOTS:'1000', MAX_TRADES_PER_DAY_GLOBAL:'3',
+  MAX_DAILY_LOSS_USD:'500', MAX_OPEN_RISK_USD:'500', MAX_CONSECUTIVE_LOSSES:'3',
+  LOSS_COOLDOWN_MINUTES:'30', MAX_ACCOUNT_PREMIUM_AT_RISK_USD:'500', RISK_FAIL_CLOSED:'true',
+  ALLOW_EXTERNAL_POSITIONS_WITH_BOT:'false',
+  RISK_PER_TRADE_USD_MORNING:'200', RISK_PER_TRADE_USD_EVENING:'200',
+  ALLOW_SHORT_MOVE:'false', SHORT_MAX_RISK_USD:'0', SAFE_EXECUTION_ENABLED:'true',
+  MAX_SPREAD_PCT:'3', MAX_SLIPPAGE_PCT:'1',
+  MIN_BOOK_DEPTH_MULTIPLE:'1', MAX_QUOTE_AGE_SEC:'20', ORDER_CHUNK_LOTS:'1000',
+  MOVE_VALUE_FILTER_ENABLED:'true', MOVE_MIN_EDGE_PCT:'5', MOVE_MIN_TTE_MINUTES:'90',
+  MOVE_MAX_TTE_HOURS:'30', MOVE_VOL_LOOKBACK:'96', MAX_CONCURRENT_MOVE_POSITIONS:'1',
+  TREND_EMA_GAP_PCT:'0.05', TREND_RSI_UP:'55', TREND_RSI_DOWN:'45',
+  TREND_15M_SLOPE_BARS:'3', TREND_MIN_15M_SLOPE_PCT:'0', TREND_ADX_MIN:'18',
+  TREND_1H_CONFIRM_SAMPLES:'2', TREND_MIN_TTE_HOURS:'4', TREND_TARGET_DELTA:'0.65',
+  TREND_MAX_SPREAD_PCT:'12', TREND_MIN_BOOK_DEPTH_LOTS:'10',
+  TREND_BOOK_PARTICIPATION_PCT:'25', TREND_QUOTE_MAX_AGE_SECS:'20', TREND_MAX_MARK_IV:'0',
+  TREND_RISK_BUDGET_USD:'100', TREND_MAX_SLIPPAGE_PCT:'1', TREND_ORDER_CHUNK_LOTS:'1000',
+  TREND_MARKET_FALLBACK_ENABLED:'false', TREND_REENTRY_COOLDOWN_MIN:'30',
+  TREND_ALLOW_MISSING_BOOK:'false', OPTION_FEE_RATE:'0.00010', OPTION_FEE_CAP_PCT:'0.035'
+};
 
 /* Times are edited in IST but the bot's .env stores UTC (IST = UTC+5:30). */
 const TIME_FIELDS = {
@@ -151,31 +287,70 @@ function utcHints() {
 }
 
 async function loadConfig() {
-  const cfg = await jget('/api/config');
-  for (const k of KEYS) {
-    const el = document.getElementById('c-' + k);
-    if (!el) continue;
-    let v = (cfg[k] ?? '').toString().trim();
-    if (!v && k === 'TREND_LOTS') v = '100';
-    if (!v && k === 'TREND_AUTO_ENTRY_ENABLED') v = 'false';
-    if (el.tagName === 'SELECT') {
-      // Boolean selects (true/false options) coerce env-style values; value
-      // selects (e.g. Direction buy/sell) just normalize case + default.
-      const isBool = [...el.options].some(o => o.value === 'true');
-      if (isBool) v = ['1','true','yes'].includes(v.toLowerCase()) ? 'true' : 'false';
-      else        v = v.toLowerCase() || el.options[0].value;
+  const saveButton = document.getElementById('config-save');
+  const loadBanner = document.getElementById('config-load-banner');
+  configReady = false;
+  saveButton.disabled = true;
+  try {
+    const cfg = await jget('/api/config');
+    const owns = (key) => Object.prototype.hasOwnProperty.call(cfg || {}, key);
+    if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg) || cfg.error ||
+        !owns('DRY_RUN') || !owns('TREND_AUTO_ENTRY_MODE')) {
+      throw new Error((cfg && cfg.error) || 'Configuration response was incomplete');
     }
-    el.value = v;
+    for (const k of KEYS) {
+      const el = document.getElementById('c-' + k);
+      if (!el) continue;
+      let v = (cfg[k] ?? '').toString().trim();
+      if (!v && k === 'MAX_TRADES_PER_DAY_GLOBAL') v = (cfg.MAX_TRADES_PER_DAY || DEFAULTS[k]);
+      if (!v && DEFAULTS[k] !== undefined) v = DEFAULTS[k];
+      if (el.tagName === 'SELECT') {
+        // Boolean selects (true/false options) coerce env-style values; value
+        // selects (e.g. Direction buy/sell) just normalize case + default.
+        const isBool = [...el.options].some(o => o.value === 'true');
+        if (isBool) v = ['1','true','yes'].includes(v.toLowerCase()) ? 'true' : 'false';
+        else        v = v.toLowerCase() || el.options[0].value;
+      }
+      el.value = v;
+    }
+    for (const [id, [hk, mk]] of Object.entries(TIME_FIELDS)) {
+      const h = parseInt(cfg[hk], 10), m = parseInt(cfg[mk], 10);
+      if (!isNaN(h) && !isNaN(m)) document.getElementById(id).value = utcToIstHHMM(h, m);
+    }
+    dryBanner();
+    utcHints();
+    window._loadedTrendAutoMode = document.getElementById('c-TREND_AUTO_ENTRY_MODE').value;
+    window._loadedMarketFallback = document.getElementById('c-TREND_MARKET_FALLBACK_ENABLED').value;
+    window._loadedExternalOverride = document.getElementById('c-ALLOW_EXTERNAL_POSITIONS_WITH_BOT').value;
+    window._loadedShortMove = document.getElementById('c-ALLOW_SHORT_MOVE').value;
+    configReady = true;
+    saveButton.disabled = false;
+    loadBanner.style.display = 'none';
+  } catch (error) {
+    loadBanner.style.display = 'flex';
+    loadBanner.textContent = 'Configuration could not be verified — Save remains locked. ' +
+      (error && error.message ? error.message : 'Reload this page or contact the operator.');
+    toast('Configuration load failed; no settings can be saved', 'err');
   }
-  for (const [id, [hk, mk]] of Object.entries(TIME_FIELDS)) {
-    const h = parseInt(cfg[hk], 10), m = parseInt(cfg[mk], 10);
-    if (!isNaN(h) && !isNaN(m)) document.getElementById(id).value = utcToIstHHMM(h, m);
-  }
-  dryBanner();
-  utcHints();
 }
 
 async function saveConfig() {
+  if (!configReady) {
+    toast('Configuration is not verified; Save is locked', 'err');
+    return;
+  }
+  const mode = document.getElementById('c-TREND_AUTO_ENTRY_MODE').value;
+  if (mode === 'live' && window._loadedTrendAutoMode !== 'live' &&
+      !confirm('Enable LIVE automatic Trend orders? Eligible signals will place real IOC orders when Trading Mode is LIVE.')) return;
+  const fallback = document.getElementById('c-TREND_MARKET_FALLBACK_ENABLED').value;
+  if (fallback === 'true' && window._loadedMarketFallback !== 'true' &&
+      !confirm('Market fallback removes the IOC price guarantee for an unfilled remainder. Save this higher-risk setting?')) return;
+  const externalOverride = document.getElementById('c-ALLOW_EXTERNAL_POSITIONS_WITH_BOT').value;
+  if (externalOverride === 'true' && window._loadedExternalOverride !== 'true' &&
+      !confirm('Allow bot entries while manual/external positions are open? Their full risk may be unknown to the bot.')) return;
+  const shortMove = document.getElementById('c-ALLOW_SHORT_MOVE').value;
+  if (shortMove === 'true' && window._loadedShortMove !== 'true' &&
+      !confirm('Enable short MOVE entries? Short MOVE loss can be very large; an explicit SL and short-risk cap are required.')) return;
   const body = {};
   for (const k of KEYS) {
     const el = document.getElementById('c-' + k);
@@ -188,10 +363,24 @@ async function saveConfig() {
     body[hk] = String(h);
     body[mk] = String(m);
   }
-  const d = await jpost('/api/config', body);
-  if (d.ok) toast('Saved for this account — its bot reloads within ~30 s' +
-                  (d.tp_restarted?.length ? ` (TP restarted: ${d.tp_restarted.join(', ')})` : ''), 'ok');
-  else toast('Save failed', 'err');
+  const saveButton = document.getElementById('config-save');
+  saveButton.disabled = true;
+  try {
+    const d = await jpost('/api/config', body);
+    if (d.ok) {
+      window._loadedTrendAutoMode = mode;
+      window._loadedMarketFallback = fallback;
+      window._loadedExternalOverride = externalOverride;
+      window._loadedShortMove = shortMove;
+      toast('Saved for this account — its bot reloads within ~30 s' +
+            (d.tp_restarted?.length ? ` (TP restarted: ${d.tp_restarted.join(', ')})` : ''), 'ok');
+    }
+    else toast('Save failed: ' + (d.error || 'unknown error'), 'err');
+  } catch (error) {
+    toast('Save failed: ' + (error && error.message ? error.message : 'network error'), 'err');
+  } finally {
+    saveButton.disabled = !configReady;
+  }
 }
 
 async function testTelegram() {

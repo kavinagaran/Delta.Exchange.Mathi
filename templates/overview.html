@@ -18,10 +18,13 @@
       <span class="strategy-kicker">TREND OPTION STRATEGY</span>
       <strong>BTC multi-timeframe confirmation</strong>
     </div>
-    <span class="pill idle mini" id="trend-alignment-pill"><span class="dot"></span>CHECKING</span>
+    <div class="strategy-status-pills">
+      <span class="pill idle mini" id="trend-auto-pill"><span class="dot"></span>AUTO CHECKING</span>
+      <span class="pill idle mini" id="trend-alignment-pill"><span class="dot"></span>CHECKING</span>
+    </div>
   </div>
   <div class="card-bd trend-workbench">
-    <div class="trend-frames" title="5M and 15M use completed candles. 1H uses the live candle so direction changes can unlock entry immediately.">
+    <div class="trend-frames" title="5M and 15M use completed candles. 1H stays live, with configurable persistence before a direction flip is accepted.">
       {% for key, label in [('5m', '5 Mins'), ('15m', '15 Mins'), ('1h', '1 Hour')] %}
       <div class="trend-box" id="trend-box-{{ key }}">
         <div class="lbl">BTC Trend · {{ label }}</div>
@@ -57,8 +60,13 @@
 
 <div class="section-title"><span>Trend option position</span><small>Independent CE / PE position with its own protection</small></div>
 <div class="card trend-position-card">
-  <div class="card-hd slot-hd">📈 <span>Trend-Based CE / PE Buy</span><span class="when">2-step ITM · 5M + 15M + 1H</span></div>
+  <div class="card-hd slot-hd">📈 <span>Trend-Based CE / PE Buy</span><span class="when">Target-delta ITM · 5M + 15M + live 1H</span></div>
   <div class="card-bd" id="slot-trend"><div class="no-pos">Loading…</div></div>
+</div>
+
+<div class="card external-options-card" id="external-options-card" style="display:none">
+  <div class="card-hd slot-hd">🔗 <span>External / manual BTC options</span><span class="when">Visible only · never adopted by Trend</span></div>
+  <div class="card-bd" id="external-options"></div>
 </div>
 
 <div class="modal-back" id="payoff-modal" onclick="if(event.target===this)closePayoff()">
@@ -112,7 +120,9 @@ function tpRow(slot, tp, positionOpen = true) {
       <div class="tp-fields">
         <label class="fld"><span>Take profit $</span><input id="tp-target-${slot}" type="number" step="1" min="1" value="${t.target_pnl ?? ''}"></label>
         <label class="fld"><span>Stop loss $</span><input id="tp-sl-${slot}" type="number" step="1" min="0" value="${t.sl_pnl ?? 0}" placeholder="0 = off"></label>
-        <label class="fld"><span>Trailing SL $</span><input id="tp-tsl-${slot}" type="number" step="1" min="0" value="${t.tsl_pnl ?? 0}" placeholder="0 = off"></label>
+        <label class="fld"><span>TSL arm P&amp;L $</span><input id="tp-tsl-arm-${slot}" type="number" step="1" min="0" value="${t.tsl_arm_pnl ?? t.tsl_pnl ?? 0}" placeholder="0 = off"></label>
+        <label class="fld"><span>TSL trail $</span><input id="tp-tsl-trail-${slot}" type="number" step="1" min="0" value="${t.tsl_trail_pnl ?? t.tsl_pnl ?? 0}" placeholder="0 = off"></label>
+        <label class="fld"><span>Minimum locked $</span><input id="tp-tsl-lock-${slot}" type="number" step="1" min="0" value="${t.tsl_lock_min_pnl ?? 0}"></label>
         <label class="fld"><span>Poll secs</span><input id="tp-poll-${slot}" type="number" step="5" min="10" value="${t.poll_secs ?? ''}"></label>
       </div>
       <span class="tp-actions">
@@ -123,7 +133,7 @@ function tpRow(slot, tp, positionOpen = true) {
     <div class="tp-note">${t.tsl_armed
         ? `<b class="c-pos">TSL armed — floor ${f$(t.tsl_floor)}${t.tsl_on_exchange ? ' · resting stop on exchange' : ''}</b> · `
         : (t.sl_on_exchange ? `<b class="c-neg">SL resting on exchange</b> · ` : '')
-      }${t.tp_on_exchange ? '<b class="c-pos">TP resting on exchange</b> · ' : ''}SL / TSL: 0 = off · TP, SL and TSL all rest as reduce-only orders on the exchange (SL placed at open, ratcheted up into the TSL once armed — never below breakeven)</div>
+      }${t.tp_on_exchange ? '<b class="c-pos">TP resting on exchange</b> · ' : ''}${t.monitor_error ? `<b class="c-neg">Monitor: ${esc(t.monitor_error)}</b> · ` : ''}0 disables that protection · TSL activation, allowed giveback and minimum locked profit are configured independently.</div>
   </div>`;
 }
 
@@ -174,6 +184,19 @@ function slotHtml(s, slot, tp) {
     ${manualBtns(slot)}${slot === 'trend' ? tpRow(slot, tp, false) : ''}`;
 }
 
+function renderExternalOptions(rows) {
+  const card = document.getElementById('external-options-card');
+  const body = document.getElementById('external-options');
+  if (!rows || !rows.length) { card.style.display = 'none'; body.innerHTML = ''; return; }
+  card.style.display = '';
+  body.innerHTML = `<div class="external-option-grid">${rows.map(p => `
+    <div class="external-option-row">
+      <div><strong>${esc(p.symbol)}</strong><small>${esc((p.side || '').toUpperCase())} · ${fN(p.lots)} lots</small></div>
+      <div><span class="${pnlCls(p.live_pnl)}">${f$(p.live_pnl)}</span><small>External P&amp;L</small></div>
+      <span class="badge sim">NOT BOT-OWNED</span>
+    </div>`).join('')}</div>`;
+}
+
 async function loadSlots() {
   const [st, tp] = await Promise.all([jget('/api/status'), jget('/api/tp-monitor').catch(() => ({}))]);
   const evening = { ...st }; delete evening.morning; delete evening.trend;
@@ -181,6 +204,7 @@ async function loadSlots() {
   document.getElementById('slot-morning').innerHTML = slotHtml(st.morning, 'morning', tp);
   document.getElementById('slot-evening').innerHTML = slotHtml(evening, 'evening', tp);
   document.getElementById('slot-trend').innerHTML = slotHtml(st.trend, 'trend', tp);
+  renderExternalOptions(st.external_options || []);
   if (st.morning_entry_ist) document.getElementById('when-morning').textContent = 'Entry ' + st.morning_entry_ist;
   if (st.entry_ist)         document.getElementById('when-evening').textContent = 'Entry ' + st.entry_ist;
 }
@@ -262,15 +286,20 @@ async function toggleTp(slot, running) {
 
 async function saveTp(slot) {
   const keys = slot === 'morning'
-    ? { t: 'TP_TARGET_PNL_MORNING', p: 'TP_POLL_SECS_MORNING', s: 'SL_TARGET_PNL_MORNING', ts: 'TSL_TARGET_PNL_MORNING' }
+    ? { t: 'TP_TARGET_PNL_MORNING', p: 'TP_POLL_SECS_MORNING', s: 'SL_TARGET_PNL_MORNING',
+        a: 'TSL_ARM_PNL_MORNING', tr: 'TSL_TRAIL_PNL_MORNING', l: 'TSL_LOCK_MIN_PNL_MORNING' }
     : slot === 'trend'
-      ? { t: 'TP_TARGET_PNL_TREND', p: 'TP_POLL_SECS_TREND', s: 'SL_TARGET_PNL_TREND', ts: 'TSL_TARGET_PNL_TREND' }
-      : { t: 'TP_TARGET_PNL',       p: 'TP_POLL_SECS',       s: 'SL_TARGET_PNL',       ts: 'TSL_TARGET_PNL' };
+      ? { t: 'TP_TARGET_PNL_TREND', p: 'TP_POLL_SECS_TREND', s: 'SL_TARGET_PNL_TREND',
+          a: 'TSL_ARM_PNL_TREND', tr: 'TSL_TRAIL_PNL_TREND', l: 'TSL_LOCK_MIN_PNL_TREND' }
+      : { t: 'TP_TARGET_PNL', p: 'TP_POLL_SECS', s: 'SL_TARGET_PNL',
+          a: 'TSL_ARM_PNL', tr: 'TSL_TRAIL_PNL', l: 'TSL_LOCK_MIN_PNL' };
   const body = {};
   body[keys.t]  = document.getElementById(`tp-target-${slot}`).value;
   body[keys.p]  = document.getElementById(`tp-poll-${slot}`).value;
   body[keys.s]  = document.getElementById(`tp-sl-${slot}`).value || '0';
-  body[keys.ts] = document.getElementById(`tp-tsl-${slot}`).value || '0';
+  body[keys.a]  = document.getElementById(`tp-tsl-arm-${slot}`).value || '0';
+  body[keys.tr] = document.getElementById(`tp-tsl-trail-${slot}`).value || '0';
+  body[keys.l]  = document.getElementById(`tp-tsl-lock-${slot}`).value || '0';
   const d = await jpost('/api/config', body);
   if (d.ok) toast('TP/SL settings saved' + (d.tp_restarted?.length ? ' — monitor restarted' : ''), 'ok');
   else toast('Save failed', 'err');
@@ -370,8 +399,9 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape') closePayoff(
 
 /* ── BTC multi-timeframe trend + gated CE/PE entry ─────── */
 async function loadTrend() {
-  let t;
-  try { t = await jget('/api/trend'); } catch (e) { return; }
+  let t, auto = {};
+  try { [t, auto] = await Promise.all([jget('/api/trend'), jget('/api/trend-auto/status').catch(() => ({}))]); }
+  catch (e) { return; }
   const map = {
     up:      ['▲ UPTREND',   'c-pos'],
     down:    ['▼ DOWNTREND', 'c-neg'],
@@ -384,8 +414,13 @@ async function loadTrend() {
     const sub = document.getElementById('trend-sub-' + key);
     dir.textContent = label;
     dir.className = 'dir ' + cls;
+    const quality = key === '15m'
+      ? ` · slope ${fN(f.ema21_slope_pct, 3)}% · ADX ${fN(f.adx, 1)}`
+      : ` · gap ${fN(f.ema_gap_pct, 3)}%`;
+    const pending = f.debounce_pending
+      ? ` · confirming ${f.debounce?.count || 0}/${t.filters?.hour_confirm_samples || 1}` : '';
     sub.textContent = f.ema9
-      ? `EMA9 ${fN(f.ema9)} · EMA21 ${fN(f.ema21)} · RSI ${fN(f.rsi, 1)}${f.live_candle ? ' · LIVE' : ''}`
+      ? `EMA9 ${fN(f.ema9)} · EMA21 ${fN(f.ema21)} · RSI ${fN(f.rsi, 1)}${quality}${f.live_candle ? ' · LIVE' : ''}${pending}`
       : (t.error || 'Unavailable');
   }
 
@@ -393,6 +428,13 @@ async function loadTrend() {
   const aligned = t.combined === 'up' || t.combined === 'down';
   pill.className = `pill ${aligned ? 'live' : 'idle'} mini`;
   pill.innerHTML = `<span class="dot"></span>${aligned ? 'ALL ' + t.combined.toUpperCase() : 'NOT ALIGNED'}`;
+
+  const autoPill = document.getElementById('trend-auto-pill');
+  const autoMode = (auto.mode || 'shadow').toUpperCase();
+  const autoHealthy = !auto.last_error && auto.status !== 'error';
+  autoPill.className = `pill ${autoMode === 'LIVE' && autoHealthy ? 'live' : 'idle'} mini`;
+  autoPill.title = auto.last_error || auto.last_action || '';
+  autoPill.innerHTML = `<span class="dot"></span>AUTO ${esc(autoMode)}${auto.last_error ? ' · ERROR' : ''}`;
 
   let p = null;
   try { p = await jget('/api/trend-entry/preview'); } catch (e) {}
@@ -402,7 +444,7 @@ async function loadTrend() {
     action.className = 'trend-action waiting';
     action.innerHTML = `<div class="trend-action-copy">
       <span class="strategy-kicker">ENTRY GATE</span><strong>${esc(reason)}</strong>
-      <small>No order can be placed until every timeframe confirms one direction.</small>
+      <small>Signal, re-entry, portfolio-risk, expiry and liquidity gates must all pass.</small>
     </div><button class="btn secondary" disabled>Entry locked</button>`;
     window._trendPreview = null;
     return;
@@ -412,11 +454,11 @@ async function loadTrend() {
   action.className = 'trend-action ready ' + (up ? 'up' : 'down');
   action.innerHTML = `<div class="trend-action-copy">
     <span class="strategy-kicker">ALL TIMEFRAMES ${up ? 'UP' : 'DOWN'}</span>
-    <strong>Buy 2-step ITM ${esc(p.option_type)} option</strong>
-    <small>${esc(p.symbol)} · Strike $${fN(p.strike)} · ${fN(p.lots)} lots · ~$${fN(p.est_value)}</small>
+    <strong>Buy target-delta ITM ${esc(p.option_type)} option</strong>
+    <small>${esc(p.symbol)} · Δ ${fN(Math.abs(p.delta), 2)} · spread ${fN(p.spread_pct, 2)}% · ${fN(p.lots)} lots · ~$${fN(p.est_value)}</small>
   </div>
   <button class="btn ${up ? 'success' : 'danger'} trend-buy-btn" onclick="trendEntry()">
-    ${up ? '▲' : '▼'} Buy 2-step ITM ${esc(p.option_type)}
+    ${up ? '▲' : '▼'} Buy ITM ${esc(p.option_type)}
   </button>`;
 }
 
@@ -424,16 +466,17 @@ async function trendEntry() {
   const p = window._trendPreview;
   if (!p) { toast('The trend entry is no longer available', 'err'); return; }
   const expiry = String(p.settlement || '').replace('T', ' ').replace('Z', ' UTC');
-  const msg = `BUY 2-STEP ITM ${p.option_type} — ALL TRENDS ${p.direction.toUpperCase()}\n\n` +
+  const msg = `BUY TARGET-DELTA ITM ${p.option_type} — ALL TRENDS ${p.direction.toUpperCase()}\n\n` +
     `Contract: ${p.symbol}\nBTC spot: $${fN(p.spot)}\nStrike:   $${fN(p.strike)}\n` +
-    `Mark:     $${fN(p.mark, 4)}\nLots:     ${fN(p.lots)}\nValue:    ~$${fN(p.est_value)}\n` +
+    `Bid/Ask:  $${fN(p.bid, 4)} / $${fN(p.ask, 4)} (${fN(p.spread_pct, 2)}%)\n` +
+    `Delta:    ${fN(p.delta, 3)}\nLots:     ${fN(p.lots)}\nRisk cap: $${fN(p.sizing?.proposed_risk_usd)}\nValue:    ~$${fN(p.est_value)}\n` +
     `Expiry:   ${expiry}\n\n` +
     (p.dry_run ? '⚠ Mode is DRY RUN — no real order will be placed.\n\n' : '') +
-    `Place market BUY order?`;
+    `Place slippage-capped IOC limit BUY order?`;
   if (!confirm(msg)) return;
   const d = await jpost('/api/trend-entry');
   if (d.ok) {
-    toast(`Trend ${d.option_type} bought${d.dry_run ? ' (SIMULATED)' : ''}: ${fN(d.lots)} lots @ $${fN(d.fill, 4)}`, 'ok');
+    toast(`Trend ${d.option_type} bought${d.dry_run ? ' (SIMULATED)' : ''}: ${fN(d.lots)} lots @ $${fN(d.fill, 4)}${d.partial_fill ? ' (partial)' : ''}`, 'ok');
     window._trendPreview = null;
     loadAll();
   } else toast('Trend order failed: ' + JSON.stringify(d.error || d.reason), 'err');

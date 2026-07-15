@@ -7,9 +7,10 @@ Schedule (IST):
   Exit  : 1:00 AM IST  = 19:30 UTC  (next morning IST, same UTC day)
 
 Guarantees:
-  - Exactly ONE order per calendar day (UTC date guard + fired flag)
-  - Hard cap of 1000 lots per order — refuses to place if lots != 1000
-  - Crash-safe: persists state to straddle_state.json and resumes on restart
+  - Portfolio-wide daily loss/trade/open-risk controls shared with Trend
+  - Lots capped by configured, affordable, risk, liquidity and exchange limits
+  - Spread/slippage-bounded IOC entry execution with crash recovery journals
+  - Crash-safe state and automatic protection-monitor recovery
 """
 
 import hashlib
@@ -20,6 +21,8 @@ import os
 import subprocess
 import sys
 import time
+import math
+import statistics
 from datetime import datetime, timezone, timedelta
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
@@ -27,6 +30,17 @@ from urllib.parse import urlencode
 
 import requests
 from dotenv import load_dotenv
+
+from risk_controls import (
+    account_entry_lock,
+    account_file_lock,
+    audit_event,
+    decision_dict,
+    evaluate_entry,
+    load_states,
+    risk_based_lots,
+    trading_date,
+)
 
 # Force IPv4: Delta's IP whitelist holds our stable IPv4; Windows rotates
 # IPv6 privacy addresses hourly, which gets requests rejected.
@@ -55,6 +69,7 @@ MORNING_STATE_FILE = DATA_DIR / "morning_state.json"
 HISTORY_FILE       = DATA_DIR / "trade_history.json"
 ENV_FILE           = Path(__file__).parent / ".env"
 CFG_FILE           = DATA_DIR / "config.json"
+ENTRY_CONFIGURATION_ERRORS: list[str] = []
 
 # One-time migration: these files used to live in the repo root — move them
 # into the bot account's folder if they're still there.
@@ -67,27 +82,46 @@ for _f in ("straddle_state.json", "morning_state.json", "trade_history.json"):
 
 # Each bot instance trades ITS user's own credentials (account.json),
 # falling back to the .env keys — one `mathi-bot@<user>` service per account.
-try:
-    _acct = json.loads((DATA_DIR / "account.json").read_text(encoding="utf-8"))
-    API_KEY    = _acct.get("api_key")    or API_KEY
-    API_SECRET = _acct.get("api_secret") or API_SECRET
-except Exception:
-    pass
+_account_path = DATA_DIR / "account.json"
+if _account_path.exists():
+    try:
+        _acct = json.loads(_account_path.read_text(encoding="utf-8"))
+        if not isinstance(_acct, dict):
+            raise ValueError("account document is not an object")
+        if not _acct.get("api_key") or not _acct.get("api_secret"):
+            raise ValueError("account API credentials are missing")
+        API_KEY = str(_acct["api_key"])
+        API_SECRET = str(_acct["api_secret"])
+    except (OSError, ValueError, TypeError) as exc:
+        # Never fall back to another account's global credentials when this
+        # account file exists but is corrupt. Exits will fail visibly instead
+        # of mutating the wrong account; all new entries are blocked below.
+        API_KEY = API_SECRET = ""
+        ENTRY_CONFIGURATION_ERRORS.append(f"invalid account.json: {exc}")
 
 # Per-account strategy config: users/<name>/config.json overrides the .env
 # defaults key by key, so every os.getenv below is account-scoped.
-try:
-    for _k, _v in json.loads(CFG_FILE.read_text(encoding="utf-8")).items():
-        os.environ[str(_k)] = str(_v)
-except Exception:
-    pass
+if CFG_FILE.exists():
+    try:
+        _config_document = json.loads(CFG_FILE.read_text(encoding="utf-8"))
+        if not isinstance(_config_document, dict):
+            raise ValueError("config document is not an object")
+        for _k, _v in _config_document.items():
+            os.environ[str(_k)] = str(_v)
+    except (OSError, ValueError, TypeError) as exc:
+        ENTRY_CONFIGURATION_ERRORS.append(f"invalid config.json: {exc}")
 
 TAG = BOT_USER.upper()   # identifies this instance in alerts and logs
 
-# Capped at 1000 — env can only decrease, never increase
+# One per-order ceiling for every strategy; risk/affordability/liquidity caps
+# normally bind first.  Do not maintain a different hidden Evening ceiling.
+# Preserve the historical 1,000-lot ceiling unless an account explicitly
+# opts into a larger per-order limit.  A software upgrade must never enlarge
+# live exposure merely because a new setting was introduced.
+MAX_ORDER_LOTS = int(os.getenv("MAX_ORDER_LOTS", 1000))
 _env_lots = int(os.getenv("STRADDLE_LOTS", 1000))
-LOTS      = min(_env_lots, 1000)            # safety cap: never exceed 1000
-assert 1 <= LOTS <= 1000, f"LOTS must be between 1 and 1000, got {LOTS}"
+LOTS      = min(_env_lots, MAX_ORDER_LOTS)
+assert 1 <= LOTS <= MAX_ORDER_LOTS, f"LOTS must be between 1 and {MAX_ORDER_LOTS}, got {LOTS}"
 
 # Evening slot toggles (defaults on — this is the core trade).
 # EVENING_EXIT_ENABLED=false skips only the scheduled exit: the position then
@@ -128,7 +162,6 @@ MORNING_ENABLED = os.getenv("MORNING_ENABLED", "true").lower() in ("1", "true", 
 MORNING_H_UTC   = int(os.getenv("MORNING_H_UTC", 0))     # 00:15 UTC = 5:45 AM IST
 MORNING_M_UTC   = int(os.getenv("MORNING_M_UTC", 15))
 _morning_lots   = int(os.getenv("MORNING_LOTS", 2000))
-MAX_ORDER_LOTS  = int(os.getenv("MAX_ORDER_LOTS", 5000))  # hard per-order cap
 MORNING_LOTS    = min(_morning_lots, MAX_ORDER_LOTS)
 # Dynamic sizing: buy max(configured, affordable-with-balance) at entry time
 DYNAMIC_LOTS    = os.getenv("DYNAMIC_LOTS", "true").lower() in ("1", "true", "yes")
@@ -144,6 +177,42 @@ MORNING_EXIT_H_UTC = int(os.getenv("MORNING_EXIT_H_UTC", 11))
 MORNING_EXIT_M_UTC = int(os.getenv("MORNING_EXIT_M_UTC", 30))
 assert 0 <= MORNING_EXIT_H_UTC <= 23 and 0 <= MORNING_EXIT_M_UTC <= 59, "invalid morning exit time"
 MORNING_EXIT_WIN_START = MORNING_EXIT_M_UTC   # fires from this time ONWARD (catch-up)
+
+# Account-wide risk and execution rules.  Defaults intentionally fail toward
+# smaller/no entries; every value can be overridden per account in config.json.
+MAX_TRADES_GLOBAL = int(os.getenv("MAX_TRADES_PER_DAY_GLOBAL",
+                                  os.getenv("MAX_TRADES_PER_DAY", "3")))
+MAX_OPEN_RISK_USD = float(os.getenv("MAX_OPEN_RISK_USD", "500"))
+MAX_DAILY_LOSS_USD = float(os.getenv("MAX_DAILY_LOSS_USD", "500"))
+MAX_CONSECUTIVE_LOSSES = int(os.getenv("MAX_CONSECUTIVE_LOSSES", "3"))
+LOSS_COOLDOWN_MINUTES = int(os.getenv("LOSS_COOLDOWN_MINUTES", "30"))
+RISK_DAY_TZ_OFFSET_MIN = int(os.getenv("RISK_DAY_TZ_OFFSET_MIN", "330"))
+RISK_PER_TRADE_MORNING = float(os.getenv("RISK_PER_TRADE_USD_MORNING", "200"))
+RISK_PER_TRADE_EVENING = float(os.getenv("RISK_PER_TRADE_USD_EVENING", "200"))
+ALLOW_SHORT_MOVE = os.getenv("ALLOW_SHORT_MOVE", "false").lower() in ("1", "true", "yes")
+SHORT_MAX_RISK_USD = float(os.getenv("SHORT_MAX_RISK_USD", "0"))
+
+SAFE_EXECUTION_ENABLED = os.getenv("SAFE_EXECUTION_ENABLED", "true").lower() in ("1", "true", "yes")
+ALLOW_MARKET_ENTRY_FALLBACK = os.getenv("ALLOW_MARKET_ENTRY_FALLBACK", "false").lower() in ("1", "true", "yes")
+MAX_SPREAD_PCT = float(os.getenv("MAX_SPREAD_PCT", "3.0"))
+MAX_SLIPPAGE_PCT = float(os.getenv("MAX_SLIPPAGE_PCT", "1.0"))
+MIN_BOOK_DEPTH_MULTIPLE = float(os.getenv("MIN_BOOK_DEPTH_MULTIPLE", "1.0"))
+MAX_QUOTE_AGE_SEC = int(os.getenv("MAX_QUOTE_AGE_SEC", "20"))
+ORDER_CHUNK_LOTS = max(int(os.getenv("ORDER_CHUNK_LOTS", "1000")), 1)
+
+# Keep the fee model configurable and conservative. Actual paid commissions
+# from order fills are persisted and supersede this estimate in reporting.
+OPTION_FEE_RATE = float(os.getenv("OPTION_FEE_RATE", "0.00010"))
+OPTION_FEE_CAP_PCT = float(os.getenv("OPTION_FEE_CAP_PCT", "0.035"))
+
+MOVE_VALUE_FILTER_ENABLED = os.getenv("MOVE_VALUE_FILTER_ENABLED", "true").lower() in ("1", "true", "yes")
+MOVE_MIN_EDGE_PCT = float(os.getenv("MOVE_MIN_EDGE_PCT", "5.0"))
+MOVE_MIN_TTE_MINUTES = int(os.getenv("MOVE_MIN_TTE_MINUTES", "90"))
+MOVE_MAX_TTE_HOURS = float(os.getenv("MOVE_MAX_TTE_HOURS", "30"))
+MOVE_VOL_LOOKBACK = max(int(os.getenv("MOVE_VOL_LOOKBACK", "96")), 30)
+MAX_CONCURRENT_MOVE_POSITIONS = max(int(os.getenv("MAX_CONCURRENT_MOVE_POSITIONS", "1")), 1)
+ALLOW_EXTERNAL_POSITIONS_WITH_BOT = os.getenv(
+    "ALLOW_EXTERNAL_POSITIONS_WITH_BOT", "false").lower() in ("1", "true", "yes")
 
 # Telegram alerts
 TELEGRAM_TOKEN  = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -233,66 +302,154 @@ def _retry(fn, *args, retries=3, delay=3, **kwargs):
 # ─────────────────────────────────────────────────────────────
 # STATE PERSISTENCE
 # ─────────────────────────────────────────────────────────────
+def _atomic_json(path: Path, value) -> None:
+    if path.exists():
+        raw = path.read_text(encoding="utf-8")
+        try:
+            json.loads(raw)
+        except (ValueError, TypeError) as exc:
+            raise RuntimeError(f"refusing to overwrite corrupt JSON state: {path}") from exc
+        backup = path.with_suffix(path.suffix + ".bak")
+        backup_tmp = backup.with_suffix(backup.suffix + ".tmp")
+        backup_tmp.write_text(raw, encoding="utf-8")
+        os.replace(backup_tmp, backup)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(value, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
+
+
 def save_state(state: dict):
-    STATE_FILE.write_text(json.dumps(state, indent=2))
+    _atomic_json(STATE_FILE, state)
     log.info("State saved → %s", STATE_FILE.name)
 
 def load_state() -> dict | None:
     if STATE_FILE.exists():
         try:
-            return json.loads(STATE_FILE.read_text())
-        except Exception:
-            pass
+            state = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+            if not isinstance(state, dict):
+                raise ValueError("state is not an object")
+            return state
+        except (OSError, ValueError, TypeError) as exc:
+            backup = STATE_FILE.with_suffix(STATE_FILE.suffix + ".bak")
+            try:
+                state = json.loads(backup.read_text(encoding="utf-8"))
+                if not isinstance(state, dict):
+                    raise ValueError("backup state is not an object")
+                log.critical("Primary state corrupt (%s); using validated backup %s", exc, backup)
+                return state
+            except (OSError, ValueError, TypeError):
+                raise RuntimeError(f"state and backup are unreadable: {STATE_FILE}") from exc
     return None
 
 def clear_state():
     STATE_FILE.unlink(missing_ok=True)
 
 def save_morning_state(state: dict):
-    MORNING_STATE_FILE.write_text(json.dumps(state, indent=2))
+    _atomic_json(MORNING_STATE_FILE, state)
     log.info("State saved → %s", MORNING_STATE_FILE.name)
 
 def load_morning_state() -> dict | None:
     if MORNING_STATE_FILE.exists():
         try:
-            return json.loads(MORNING_STATE_FILE.read_text())
-        except Exception:
-            pass
+            state = json.loads(MORNING_STATE_FILE.read_text(encoding="utf-8"))
+            if not isinstance(state, dict):
+                raise ValueError("state is not an object")
+            return state
+        except (OSError, ValueError, TypeError) as exc:
+            backup = MORNING_STATE_FILE.with_suffix(MORNING_STATE_FILE.suffix + ".bak")
+            try:
+                state = json.loads(backup.read_text(encoding="utf-8"))
+                if not isinstance(state, dict):
+                    raise ValueError("backup state is not an object")
+                log.critical("Primary morning state corrupt (%s); using validated backup %s", exc, backup)
+                return state
+            except (OSError, ValueError, TypeError):
+                raise RuntimeError(f"state and backup are unreadable: {MORNING_STATE_FILE}") from exc
     return None
 
 def log_trade(state: dict):
     """Append closed trade to trade_history.json for the dashboard."""
     record = {
+        "slot":         state.get("slot", "evening"),
         "date":         state.get("entry_date", ""),
+        "entry_date":   state.get("entry_date", ""),
+        "trading_date": state.get("trading_date", state.get("entry_date", "")),
         "symbol":       state.get("symbol", ""),
         "strike":       state.get("strike", 0),
-        "lots":         state.get("lots", 0),
+        "lots":         state.get("owned_entry_lots") or state.get("entry_lots")
+                        or state.get("lots", 0),
+        "exit_lots":    state.get("closed_lots") or state.get("lots", 0),
         "entry_mark":   state.get("entry_mark", 0),
         "exit_mark":    state.get("exit_mark", 0),
         "btc_entry":    state.get("btc_at_entry", 0),
         "btc_exit":     state.get("btc_at_exit", 0),
         "btc_move_pct": state.get("btc_move_pct", 0),
         "pnl_usd":      state.get("pnl_usd", 0),
+        "gross_pnl_usd": state.get("gross_pnl_usd", state.get("pnl_usd", 0)),
+        "fees_usd":     state.get("fees_usd", 0),
+        "pnl_includes_fees": state.get("pnl_includes_fees", False),
         "cost_usd":     state.get("total_cost_usd", 0),
         "entry_time":   state.get("entry_time_utc", ""),
         "exit_time":    state.get("exit_time_utc", ""),
         "dry_run":      state.get("dry_run", False),
+        "side":         state.get("side", "long"),
+        "order_id":     state.get("order_id"),
+        "order_ids":    state.get("order_ids", []),
+        "client_order_id": state.get("client_order_id"),
+        "client_order_ids": state.get("client_order_ids", []),
+        "exit_order_id": state.get("exit_order_id"),
+        "entry_trigger": state.get("entry_trigger"),
+        "exit_trigger": state.get("exit_trigger"),
+        "risk_at_entry_usd": state.get("risk_at_entry_usd"),
+        "move_value_signal": state.get("move_value_signal"),
+        "execution_snapshot": state.get("execution_snapshot"),
     }
-    history = []
-    if HISTORY_FILE.exists():
-        try:
-            history = json.loads(HISTORY_FILE.read_text())
-        except Exception:
-            history = []
-    # Dedupe on date+symbol+entry_time so multiple trades per day are kept
-    history = [r for r in history
-               if not (r.get("date") == record["date"]
-                       and r.get("symbol") == record["symbol"]
-                       and r.get("entry_time") == record["entry_time"])]
-    history.append(record)
-    history.sort(key=lambda r: (r.get("date", ""), r.get("entry_time", "")))
-    HISTORY_FILE.write_text(json.dumps(history, indent=2))
+    owner = f"move-history-{state.get('slot', 'unknown')}"
+    with account_file_lock(DATA_DIR, "history", owner, stale_after_sec=30,
+                           wait_sec=5) as acquired:
+        if not acquired:
+            raise RuntimeError("trade-history lock unavailable; refusing an unsafe overwrite")
+        history = []
+        if HISTORY_FILE.exists():
+            try:
+                history = json.loads(HISTORY_FILE.read_text())
+            except (OSError, ValueError, TypeError) as exc:
+                raise RuntimeError(
+                    f"existing trade history is unreadable; refusing to overwrite {HISTORY_FILE}") from exc
+            if not isinstance(history, list) or any(not isinstance(row, dict) for row in history):
+                raise RuntimeError(
+                    f"existing trade history has invalid schema; refusing to overwrite {HISTORY_FILE}")
+        # Dedupe on date+symbol+entry_time so multiple trades per day are kept
+        history = [r for r in history
+                   if not (r.get("date") == record["date"]
+                           and r.get("symbol") == record["symbol"]
+                           and r.get("entry_time") == record["entry_time"])]
+        history.append(record)
+        history.sort(key=lambda r: (r.get("date", ""), r.get("entry_time", "")))
+        _atomic_json(HISTORY_FILE, history)
     log.info("Trade logged → %s  P&L=$%.2f", record["date"], record.get("pnl_usd", 0))
+
+
+def _flush_pending_move_history() -> bool:
+    """Drain CLOSED-state history outboxes without ever overwriting them."""
+    complete = True
+    for slot, load_fn, save_fn in (
+        ("morning", load_morning_state, save_morning_state),
+        ("evening", load_state, save_state),
+    ):
+        state = load_fn() or {}
+        if not state.get("history_pending"):
+            continue
+        try:
+            log_trade(state)
+            state["history_pending"] = False
+            state["history_logged"] = True
+            state["history_logged_at_utc"] = datetime.now(timezone.utc).isoformat()
+            save_fn(state)
+        except Exception as exc:
+            complete = False
+            log.error("%s history outbox remains pending: %s", slot, exc)
+    return complete
 
 # ─────────────────────────────────────────────────────────────
 # TELEGRAM ALERTS
@@ -329,6 +486,12 @@ def already_traded_today() -> bool:
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     state = load_state() or {}
 
+    if state.get("history_pending"):
+        if not _flush_pending_move_history():
+            log.error("Previous evening trade history is not durable — new entry blocked.")
+            return True
+        state = load_state() or {}
+
     if state.get("status") == "OPEN":
         # Position may have settled or been closed outside the bot
         settled = False
@@ -347,7 +510,10 @@ def already_traded_today() -> bool:
         log.info("Stale OPEN state — position settled/closed externally. Marking CLOSED.")
         state["status"]       = "CLOSED"
         state["exit_trigger"] = "settlement_or_external"
+        state["history_pending"] = True
         save_state(state)
+        if not _flush_pending_move_history():
+            return True
 
     # Count today's completed trades (history uses 'date' from the bot,
     # 'entry_date' from dashboard square-offs)
@@ -355,8 +521,10 @@ def already_traded_today() -> bool:
     if HISTORY_FILE.exists():
         try:
             trades = json.loads(HISTORY_FILE.read_text())
-        except Exception:
-            trades = []
+        except (OSError, ValueError, TypeError) as exc:
+            raise RuntimeError("trade history is unreadable; entry blocked") from exc
+        if not isinstance(trades, list) or any(not isinstance(row, dict) for row in trades):
+            raise RuntimeError("trade history schema is invalid; entry blocked")
     count = sum(1 for t in trades
                 if (t.get("entry_date") or t.get("date", "")) == today)
 
@@ -400,11 +568,11 @@ def find_active_mv_contract() -> dict:
     """
     At 12:05 UTC, today's MV (settling at 12:00 UTC) has already expired.
     We buy the contract settling at 12:00 UTC TOMORROW.
-    Falls back to today's contract if entry is before 12:00 UTC.
+    Never substitutes a different settlement when tomorrow's target is absent;
+    silently changing the volatility horizon changes the strategy itself.
     """
     now      = datetime.now(timezone.utc)
     tmrw_str = (now.date() + timedelta(days=1)).strftime("%Y-%m-%d")
-    today_str = now.date().strftime("%Y-%m-%d")
 
     contract = get_mv_contract(tmrw_str)
     if contract:
@@ -413,14 +581,7 @@ def find_active_mv_contract() -> dict:
                  contract.get("strike_price"), contract.get("settlement_time"))
         return contract
 
-    contract = get_mv_contract(today_str)
-    if contract:
-        log.warning("Falling back to today's MV contract: %s", contract["symbol"])
-        return contract
-
-    raise LookupError(
-        f"No live BTC MV contract found for {tmrw_str} or {today_str}."
-    )
+    raise LookupError(f"No live BTC MV contract found for target settlement {tmrw_str}.")
 
 # ─────────────────────────────────────────────────────────────
 # MARKET DATA
@@ -440,11 +601,177 @@ def get_mv_mark(symbol: str) -> float:
         log.warning("Could not fetch mark for %s: %s", symbol, e)
         return 0.0
 
+
+def get_execution_snapshot(symbol: str, side: str) -> dict:
+    """Return a validated top-of-book snapshot and executable depth.
+
+    Entries are priced from the side we actually consume (ask for buys, bid
+    for sells), never from mark.  The liquidity cap only counts levels inside
+    the configured slippage envelope.
+    """
+    ticker = _retry(_get, f"/v2/tickers/{symbol}").get("result") or {}
+    book = _retry(_get, f"/v2/l2orderbook/{symbol}").get("result") or {}
+    quotes = ticker.get("quotes") or {}
+    try:
+        bid = float(quotes.get("best_bid") or (book.get("buy") or [{}])[0].get("price") or 0)
+        ask = float(quotes.get("best_ask") or (book.get("sell") or [{}])[0].get("price") or 0)
+    except (TypeError, ValueError, IndexError):
+        bid = ask = 0.0
+    if bid <= 0 or ask <= 0 or ask < bid:
+        raise RuntimeError(f"invalid order book for {symbol}: bid={bid}, ask={ask}")
+    mid = (bid + ask) / 2
+    spread_pct = (ask - bid) / mid * 100
+    if spread_pct > MAX_SPREAD_PCT:
+        raise RuntimeError(
+            f"spread gate blocked {symbol}: {spread_pct:.2f}% > {MAX_SPREAD_PCT:.2f}%")
+
+    # A two-sided price without a trustworthy timestamp is not a verified
+    # executable quote. Delta has exposed both numeric ``timestamp`` (seconds
+    # or milliseconds) and ISO ``time`` fields, so accept either but fail
+    # closed when neither can be parsed.
+    try:
+        raw_timestamp = float(ticker.get("timestamp") or 0)
+    except (TypeError, ValueError):
+        raw_timestamp = 0.0
+    while raw_timestamp > 100_000_000_000:
+        raw_timestamp /= 1000.0
+    if raw_timestamp > 0:
+        quoted_at = datetime.fromtimestamp(raw_timestamp, timezone.utc)
+    else:
+        quote_time = str(ticker.get("time") or "")
+        try:
+            quoted_at = datetime.fromisoformat(quote_time.replace("Z", "+00:00"))
+            if quoted_at.tzinfo is None:
+                quoted_at = quoted_at.replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError):
+            raise RuntimeError(f"quote timestamp unavailable for {symbol}")
+    age = (datetime.now(timezone.utc) - quoted_at.astimezone(timezone.utc)).total_seconds()
+    if age < -MAX_QUOTE_AGE_SEC:
+        raise RuntimeError(f"quote timestamp is {abs(age):.1f}s in the future for {symbol}")
+    if age > MAX_QUOTE_AGE_SEC:
+        raise RuntimeError(f"stale quote for {symbol}: {age:.1f}s old")
+
+    levels = book.get("sell" if side == "buy" else "buy") or []
+    best = ask if side == "buy" else bid
+    limit = (best * (1 + MAX_SLIPPAGE_PCT / 100)
+             if side == "buy" else best * (1 - MAX_SLIPPAGE_PCT / 100))
+    depth = 0
+    for level in levels:
+        try:
+            price, size = float(level["price"]), int(float(level["size"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+        inside = price <= limit if side == "buy" else price >= limit
+        if inside:
+            depth += max(size, 0)
+    liquidity_cap = int(depth / max(MIN_BOOK_DEPTH_MULTIPLE, 0.01))
+    if liquidity_cap < 1:
+        raise RuntimeError(f"no executable depth inside slippage gate for {symbol}")
+    return {
+        "bid": bid, "ask": ask, "mid": mid, "spread_pct": spread_pct,
+        "limit_price": limit, "liquidity_cap": liquidity_cap,
+        "quote_age_sec": age, "mark": float(ticker.get("mark_price") or mid),
+        "spot": float(ticker.get("spot_price") or 0),
+        "bid_size": int(float(quotes.get("bid_size") or 0)),
+        "ask_size": int(float(quotes.get("ask_size") or 0)),
+        "tick_size": float(ticker.get("tick_size") or 0.1),
+    }
+
+
+def _settlement_time(contract: dict) -> datetime:
+    try:
+        return datetime.fromisoformat(
+            str(contract.get("settlement_time") or "").replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise RuntimeError(f"invalid settlement time for {contract.get('symbol')}") from exc
+
+
+def move_value_signal(contract: dict, snapshot: dict, side: str) -> dict:
+    """Estimate MOVE fair absolute movement from realised volatility and ATR.
+
+    This is a transparent gating model, not a price oracle.  Its inputs and
+    output are persisted so the threshold can be walk-forward calibrated.
+    """
+    now = datetime.now(timezone.utc)
+    settlement = _settlement_time(contract)
+    tte_sec = (settlement - now).total_seconds()
+    if tte_sec < MOVE_MIN_TTE_MINUTES * 60:
+        raise RuntimeError(
+            f"MOVE expiry gate: only {tte_sec / 60:.0f}m remains; minimum is {MOVE_MIN_TTE_MINUTES}m")
+    if tte_sec > MOVE_MAX_TTE_HOURS * 3600:
+        raise RuntimeError(
+            f"MOVE expiry gate: {tte_sec / 3600:.1f}h exceeds {MOVE_MAX_TTE_HOURS:.1f}h")
+
+    end = int(now.timestamp())
+    response = _retry(
+        _get, "/v2/history/candles",
+        params={"resolution": "15m", "symbol": PERPETUAL_SYMBOL,
+                "start": end - (MOVE_VOL_LOOKBACK + 5) * 900, "end": end},
+    )
+    candles = sorted(response.get("result") or [], key=lambda c: c.get("time", 0))
+    current_bucket = end - end % 900
+    if candles and int(candles[-1].get("time") or 0) >= current_bucket:
+        candles = candles[:-1]
+    candles = candles[-MOVE_VOL_LOOKBACK:]
+    if len(candles) < 30:
+        raise RuntimeError("not enough completed candles for MOVE value filter")
+    closes = [float(c["close"]) for c in candles]
+    highs = [float(c["high"]) for c in candles]
+    lows = [float(c["low"]) for c in candles]
+    log_returns = [math.log(b / a) for a, b in zip(closes, closes[1:]) if a > 0 and b > 0]
+    if len(log_returns) < 20:
+        raise RuntimeError("not enough valid returns for MOVE value filter")
+    sigma_15m = statistics.stdev(log_returns)
+    remaining_bars = max(tte_sec / 900, 1)
+    current_spot = float(snapshot.get("spot") or closes[-1])
+    strike = float(contract.get("strike_price") or current_spot)
+    displacement = current_spot - strike
+    future_sigma_usd = closes[-1] * sigma_15m * math.sqrt(remaining_bars)
+    # E|N(mu, sigma)|: current movement from the fixed MOVE strike matters,
+    # especially for the morning slot when half the measurement window is gone.
+    if future_sigma_usd > 0:
+        z = displacement / future_sigma_usd
+        expected_rv = (
+            future_sigma_usd * math.sqrt(2 / math.pi) * math.exp(-0.5 * z * z)
+            + displacement * math.erf(z / math.sqrt(2))
+        )
+    else:
+        expected_rv = abs(displacement)
+    true_ranges = []
+    for i in range(max(1, len(candles) - 14), len(candles)):
+        prev = closes[i - 1]
+        true_ranges.append(max(highs[i] - lows[i], abs(highs[i] - prev), abs(lows[i] - prev)))
+    atr14 = statistics.mean(true_ranges)
+    expected_atr = math.sqrt(displacement * displacement
+                             + (atr14 * math.sqrt(remaining_bars)) ** 2)
+    forecast = (expected_rv + expected_atr) / 2
+    premium = snapshot["ask"] if side == "buy" else snapshot["bid"]
+    raw_edge = forecast - premium if side == "buy" else premium - forecast
+    edge_pct = raw_edge / premium * 100 if premium > 0 else -100.0
+    result = {
+        "forecast_abs_move": round(forecast, 2),
+        "forecast_rv_move": round(expected_rv, 2),
+        "forecast_atr_move": round(expected_atr, 2),
+        "atr14": round(atr14, 2),
+        "sigma_15m": round(sigma_15m, 8),
+        "current_displacement": round(displacement, 2),
+        "premium": premium,
+        "edge_usd": round(raw_edge, 2),
+        "edge_pct": round(edge_pct, 2),
+        "tte_minutes": round(tte_sec / 60, 1),
+        "passed": edge_pct >= MOVE_MIN_EDGE_PCT,
+    }
+    if MOVE_VALUE_FILTER_ENABLED and not result["passed"]:
+        raise RuntimeError(
+            f"MOVE value gate blocked entry: edge {edge_pct:.2f}% < {MOVE_MIN_EDGE_PCT:.2f}%")
+    return result
+
 # ─────────────────────────────────────────────────────────────
 # ORDER MANAGEMENT
 # ─────────────────────────────────────────────────────────────
 def place_market_order(product_id: int, symbol: str, side: str, size: int,
-                       force_real: bool = False) -> dict:
+                       force_real: bool = False, client_order_id: str | None = None,
+                       reduce_only: bool = False) -> dict:
     """force_real=True bypasses DRY_RUN. Used for CLOSING an existing position —
     DRY_RUN must only ever gate opening NEW exposure, never faking the close of
     a position that may be real. Faking a close (as the old exit code did)
@@ -452,7 +779,9 @@ def place_market_order(product_id: int, symbol: str, side: str, size: int,
     position sits open and unmanaged — the exact bug that caused a live
     2395-lot position to go untracked for 6+ hours on 2026-07-09."""
     # Hard safety check — never exceed the configured per-order cap
-    if size > MAX_ORDER_LOTS:
+    if size < 1:
+        raise ValueError("Order size must be positive.")
+    if size > MAX_ORDER_LOTS and not reduce_only:
         raise ValueError(f"Order size {size} exceeds hard cap of {MAX_ORDER_LOTS} lots. Aborting.")
 
     if DRY_RUN and not force_real:
@@ -467,8 +796,15 @@ def place_market_order(product_id: int, symbol: str, side: str, size: int,
         "size":        size,
         "side":        side,
         "order_type": "market_order",
+        "reduce_only": bool(reduce_only),
     }
-    resp  = _retry(_post, "/v2/orders", payload)
+    if client_order_id:
+        payload["client_order_id"] = client_order_id[:32]
+    # Order creation is non-idempotent at the HTTP layer.  The caller journals
+    # ``client_order_id`` before reaching here and owns response-loss recovery;
+    # retrying this POST internally would submit the same close again before
+    # the exchange can be queried for that exact durable identity.
+    resp = _post("/v2/orders", payload)
     order = resp.get("result", {})
     # A 200 response with success:false (or no order id) is NOT a fill — never
     # let a caller silently treat a rejected order as a completed one.
@@ -478,6 +814,287 @@ def place_market_order(product_id: int, symbol: str, side: str, size: int,
              order.get("id"), order.get("state"),
              order.get("average_fill_price", "pending"))
     return resp
+
+
+def _entry_client_id(slot: str, sequence: int = 0) -> str:
+    stamp = datetime.now(timezone.utc).strftime("%y%m%d%H%M%S")
+    clean_user = "".join(c for c in BOT_USER.lower() if c.isalnum())[:6] or "bot"
+    return f"mb-{clean_user}-{slot[:1]}-{stamp}-{sequence}"[:32]
+
+
+def _close_client_id(slot: str) -> str:
+    """Unique durable identity for each separate close attempt."""
+    clean_user = "".join(c for c in BOT_USER.lower() if c.isalnum())[:6] or "bot"
+    return f"mc-{clean_user}-{slot[:1]}-{time.time_ns():x}"[:32]
+
+
+def _write_entry_journal(slot: str, data: dict | None) -> Path:
+    path = DATA_DIR / f"pending_{slot}_entry.json"
+    if data is None:
+        path.unlink(missing_ok=True)
+    else:
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        os.replace(tmp, path)
+    return path
+
+
+_ACTIVE_ORDER_STATES = {
+    "open", "pending", "partially_filled", "partially-filled", "untriggered", "triggered",
+}
+_TERMINAL_ORDER_STATES = {
+    "closed", "filled", "cancelled", "canceled", "rejected", "expired", "failed",
+}
+
+
+def _order_state(order: dict | None) -> str:
+    return str((order or {}).get("state") or (order or {}).get("status") or "").lower()
+
+
+def _lookup_owned_order(order_id=None, client_order_id=None, product_id=None) -> dict | None:
+    """Find an order using exchange-owned identity, never product alone.
+
+    The history fallback is essential when the POST reached Delta but its HTTP
+    response was lost.  In that case the pre-journalled client order ID is the
+    only safe way to distinguish our fill from a manual trade in the product.
+    """
+    if order_id:
+        try:
+            params = {"product_id": product_id} if product_id else None
+            response = _retry(_get, f"/v2/orders/{order_id}", params=params, auth=True,
+                              retries=2, delay=0.25)
+            result = response.get("result") or {}
+            if response.get("success") and isinstance(result, dict):
+                return result
+        except Exception:
+            pass
+    if not client_order_id:
+        return None
+    for path, params in (
+        ("/v2/orders", {"states": "open", "page_size": 100}),
+        ("/v2/orders/history", {"page_size": 100}),
+    ):
+        try:
+            response = _retry(_get, path, params=params, auth=True, retries=2, delay=0.25)
+            for order in response.get("result") or []:
+                if str(order.get("client_order_id") or "") != str(client_order_id):
+                    continue
+                if product_id and int(order.get("product_id") or 0) != int(product_id):
+                    continue
+                return order
+        except Exception:
+            continue
+    return None
+
+
+def _verified_terminal_fill(order: dict | None, requested: int) -> int | None:
+    """Return a proven fill count, or None while execution is ambiguous."""
+    state = _order_state(order)
+    if state not in _TERMINAL_ORDER_STATES:
+        return None
+    for key in ("filled_size", "filled_quantity", "executed_size"):
+        value = (order or {}).get(key)
+        if value not in (None, ""):
+            try:
+                return min(max(int(float(value)), 0), requested)
+            except (TypeError, ValueError):
+                return None
+    unfilled = (order or {}).get("unfilled_size")
+    if unfilled not in (None, ""):
+        try:
+            return min(max(requested - int(float(unfilled)), 0), requested)
+        except (TypeError, ValueError):
+            return None
+    # A rejected/failed order never entered the book. Cancelled/expired orders
+    # may have partial fills, so they still require an explicit size field.
+    if state == "rejected":
+        return 0
+    return None
+
+
+def _wait_for_terminal_fill(initial: dict, requested: int, product_id: int,
+                            client_order_id: str, timeout_sec: float | None = None
+                            ) -> tuple[dict, int | None]:
+    timeout = (float(os.getenv("ENTRY_ORDER_VERIFY_TIMEOUT_SEC", "8"))
+               if timeout_sec is None else max(float(timeout_sec), 0))
+    order = dict(initial or {})
+    deadline = time.monotonic() + timeout
+    while True:
+        filled = _verified_terminal_fill(order, requested)
+        if filled is not None:
+            if filled > 0 and float(order.get("average_fill_price") or 0) <= 0:
+                filled = None
+            else:
+                return order, filled
+        if time.monotonic() >= deadline:
+            return order, None
+        refreshed = _lookup_owned_order(order.get("id"), client_order_id, product_id)
+        if refreshed:
+            order = refreshed
+        time.sleep(0.25)
+
+
+def _place_controlled_entry_impl(product_id: int, symbol: str, side: str, size: int,
+                                 slot: str, initial_snapshot: dict | None = None,
+                                 entry_context: dict | None = None,
+                                 ) -> tuple[dict, int]:
+    """Fill an entry with bounded IOC chunks and a crash-recovery journal."""
+    if size < 1 or size > MAX_ORDER_LOTS:
+        raise ValueError(f"invalid controlled entry size {size}")
+    if DRY_RUN:
+        cid = _entry_client_id(slot)
+        log.info("[DRY-RUN] controlled %s %d lots %s", side.upper(), size, symbol)
+        return {"result": {"id": 0, "client_order_id": cid, "state": "dry_run",
+                           "average_fill_price": (initial_snapshot or {}).get(
+                               "ask" if side == "buy" else "bid", 0),
+                           "paid_commission": 0}}, size
+
+    remaining = size
+    fills: list[dict] = []
+    journal = {
+        "slot": slot, "symbol": symbol, "product_id": product_id, "side": side,
+        "requested_lots": size, "started_at_utc": datetime.now(timezone.utc).isoformat(),
+        "fills": fills, "orders": [],
+        "protection_config": (entry_context or {}).get("protection_config"),
+        "risk_at_entry_usd": (entry_context or {}).get("risk_at_entry_usd"),
+        "move_value_signal": (entry_context or {}).get("value_signal"),
+    }
+    _write_entry_journal(slot, journal)
+    sequence = 0
+    while remaining > 0:
+        snap = initial_snapshot if sequence == 0 and initial_snapshot else get_execution_snapshot(symbol, side)
+        available = min(int(snap["liquidity_cap"]), remaining, ORDER_CHUNK_LOTS)
+        if available < 1:
+            break
+        tick = max(float(snap.get("tick_size") or 0.1), 1e-8)
+        raw_limit = float(snap["limit_price"])
+        # Round inward, never beyond the configured slippage boundary. If the
+        # inward tick is no longer marketable there is no valid bounded price.
+        units = math.floor(raw_limit / tick) if side == "buy" else math.ceil(raw_limit / tick)
+        limit_price = units * tick
+        market_price = float(snap["ask"] if side == "buy" else snap["bid"])
+        if ((side == "buy" and limit_price + tick * 1e-9 < market_price)
+                or (side == "sell" and limit_price - tick * 1e-9 > market_price)):
+            raise RuntimeError(
+                f"no marketable tick inside slippage boundary for {symbol}: "
+                f"market={market_price}, boundary={raw_limit}, tick={tick}")
+        client_id = _entry_client_id(slot, sequence)
+        payload = {
+            "product_id": product_id, "size": available, "side": side,
+            "order_type": "limit_order", "limit_price": f"{limit_price:.8f}".rstrip("0").rstrip("."),
+            "time_in_force": "ioc", "post_only": False,
+            "client_order_id": client_id,
+        }
+        intent = {
+            "client_order_id": client_id, "requested_lots": available,
+            "limit_price": limit_price, "side": side, "status": "submitting",
+            "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        }
+        journal["orders"].append(intent)
+        _write_entry_journal(slot, journal)  # durable identity before network I/O
+        try:
+            response = _post("/v2/orders", payload)
+        except Exception:
+            intent["status"] = "submission_unknown"
+            _write_entry_journal(slot, journal)
+            raise
+        result = response.get("result") or {}
+        if not response.get("success") or not result.get("id"):
+            error = response.get("error") or {}
+            intent.update({"status": "rejected", "error": error, "verified_filled_lots": 0})
+            _write_entry_journal(slot, journal)
+            new = (downsized_lots(available, error.get("context") or {})
+                   if str(error.get("code")) in BALANCE_REJECTIONS else None)
+            if new and not fills:
+                remaining = min(remaining, new)
+                initial_snapshot = None
+                sequence += 1  # never reuse a pre-journalled client order ID
+                continue
+            if fills:
+                log.error("Later entry chunk rejected; preserving %d already-filled lots: %s",
+                          sum(f["lots"] for f in fills), error)
+                break
+            _write_entry_journal(slot, None)  # explicit exchange rejection: no ambiguous fill
+            raise RuntimeError(f"controlled entry rejected for {symbol}: {response}")
+        intent.update({"status": "acknowledged", "order_id": result.get("id")})
+        _write_entry_journal(slot, journal)
+        verified_order, filled = _wait_for_terminal_fill(
+            result, available, product_id, client_id)
+        if filled is None:
+            intent["status"] = "ambiguous"
+            _write_entry_journal(slot, journal)
+            raise RuntimeError(
+                f"IOC order {result.get('id')} did not reach a verifiable terminal state")
+        price = float(verified_order.get("average_fill_price") or 0)
+        intent.update({
+            "status": "terminal", "order_id": verified_order.get("id") or result.get("id"),
+            "order_state": _order_state(verified_order), "verified_filled_lots": filled,
+        })
+        _write_entry_journal(slot, journal)
+        if filled <= 0:
+            if fills:
+                break
+            _write_entry_journal(slot, None)  # completed IOC with zero fill is unambiguous
+            raise RuntimeError(f"IOC entry produced no verified fill for {symbol}: {verified_order}")
+        fill = {
+            "order_id": verified_order.get("id") or result.get("id"),
+            "client_order_id": client_id,
+            "lots": filled, "average_fill_price": price,
+            "paid_commission": float(verified_order.get("paid_commission")
+                                     or verified_order.get("commission")
+                                     or verified_order.get("total_commission") or 0),
+            "commission_reported": any(
+                verified_order.get(key) not in (None, "")
+                for key in ("paid_commission", "commission", "total_commission")
+            ),
+        }
+        fills.append(fill)
+        remaining -= filled
+        journal["fills"] = fills
+        journal["remaining_lots"] = remaining
+        _write_entry_journal(slot, journal)
+        sequence += 1
+        initial_snapshot = None
+        if filled < available:
+            log.warning("IOC chunk partially filled %d/%d; not chasing remaining liquidity.",
+                        filled, available)
+            break
+
+    total = sum(f["lots"] for f in fills)
+    if total < 1:
+        raise RuntimeError(f"controlled entry did not fill any lots for {symbol}")
+    avg = sum(f["average_fill_price"] * f["lots"] for f in fills) / total
+    paid = sum(f["paid_commission"] for f in fills)
+    aggregate = {
+        "id": fills[0]["order_id"], "order_ids": [f["order_id"] for f in fills],
+        "client_order_id": fills[0]["client_order_id"],
+        "client_order_ids": [f["client_order_id"] for f in fills],
+        "average_fill_price": avg, "paid_commission": paid,
+        "commission_reported": all(f.get("commission_reported") for f in fills),
+        "size": total, "unfilled_size": size - total, "state": "closed",
+    }
+    log.info("Controlled entry filled %d/%d lots in %d chunk(s) @ %.4f.",
+             total, size, len(fills), avg)
+    return {"success": True, "result": aggregate}, total
+
+
+def place_controlled_entry(product_id: int, symbol: str, side: str, size: int,
+                           slot: str, initial_snapshot: dict | None = None,
+                           entry_context: dict | None = None) -> tuple[dict, int]:
+    """Execute an IOC entry and immediately protect any exposure on error."""
+    try:
+        return _place_controlled_entry_impl(
+            product_id, symbol, side, size, slot, initial_snapshot, entry_context)
+    except Exception:
+        # A timeout/transport failure can occur after Delta accepted an order.
+        # Reconcile now (not only at next service restart), persist any proven
+        # exposure, and start its monitor before propagating the failure.
+        try:
+            if (DATA_DIR / f"pending_{slot}_entry.json").exists():
+                recover_pending_entries((slot,))
+        except Exception:
+            log.exception("Immediate %s partial-entry recovery failed", slot)
+        raise
 
 
 # Rejection codes that mean "the balance doesn't cover this size" — the fix
@@ -513,7 +1130,9 @@ def downsized_lots(size: int, ctx: dict) -> int | None:
     return new if new >= 1 else None
 
 
-def place_entry_order(product_id: int, symbol: str, side: str, size: int) -> tuple[dict, int]:
+def place_entry_order(product_id: int, symbol: str, side: str, size: int,
+                      slot: str = "evening", snapshot: dict | None = None,
+                      entry_context: dict | None = None) -> tuple[dict, int]:
     """Place an ENTRY order, auto-downsizing when the exchange rejects it for
     balance/commission/margin. Client-side sizing estimates cannot perfectly
     model Delta's margin+fee formulas (SELL/short entries especially — margin
@@ -521,26 +1140,28 @@ def place_entry_order(product_id: int, symbol: str, side: str, size: int) -> tup
     rejection context is authoritative, so resize from it and retry.
     Returns (order_response, actual_lots). Closes must NEVER go through this:
     a close must be for the full position size or not at all."""
-    for _ in range(3):
-        try:
-            return place_market_order(product_id, symbol, side, size), size
-        except requests.HTTPError as exc:
-            code, ctx = _rejection(exc)
-            new_size = downsized_lots(size, ctx) if code in BALANCE_REJECTIONS else None
-            if not new_size:
-                raise
-            log.warning("%s %s rejected for %d lots (%s: needs %s more) — "
-                        "downsizing to %d and retrying.",
-                        side.upper(), symbol, size, code,
-                        ctx.get("required_additional_balance", "?"), new_size)
-            size = new_size
-    return place_market_order(product_id, symbol, side, size), size
+    if SAFE_EXECUTION_ENABLED:
+        return place_controlled_entry(
+            product_id, symbol, side, size, slot, snapshot, entry_context)
+    raise RuntimeError(
+        "scheduled market entry is disabled: SAFE_EXECUTION_ENABLED must remain true")
 
 
 def get_mv_position(product_id: int) -> dict | None:
     data = _retry(_get, "/v2/positions/margined", auth=True)
-    for pos in data.get("result", []):
-        if pos.get("product_id") == product_id and float(pos.get("size", 0)) != 0:
+    positions = data.get("result")
+    if not data.get("success") or not isinstance(positions, list):
+        raise RuntimeError(f"exchange position check failed: {data}")
+    for pos in positions:
+        if not isinstance(pos, dict):
+            raise RuntimeError("exchange position response contained a malformed row")
+        if str(pos.get("product_id")) != str(product_id):
+            continue
+        try:
+            size = float(pos.get("size", 0))
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(f"invalid exchange position size for product {product_id}") from exc
+        if size != 0:
             return pos
     return None
 
@@ -556,30 +1177,456 @@ def _effective_lots(configured: int, mark: float, contract_val: float, label: st
     current mark. Per spec we buy whichever is LOWER — configured or
     affordable — so the order never exceeds either the configured size or the
     balance (capped at MAX_ORDER_LOTS, floor 1). Falls back to the configured
-    size if the balance check fails. Delta charges the options taker fee on
-    the underlying NOTIONAL, not the premium — each lot must be funded for
-    premium + fee or the order bounces with insufficient_commission."""
-    if not DYNAMIC_LOTS:
-        return configured
+    size only after a verified balance read. A failed/zero affordability check
+    returns zero and blocks the entry (fail closed)."""
+    # Affordability is a mandatory safety cap for scheduled automation.  The
+    # legacy DYNAMIC_LOTS toggle remains readable for old clients but can no
+    # longer authorise an order larger than the verified wallet can fund.
     try:
         bal  = get_available_usd()
-        # 0.05% of notional pads Delta's 0.03% taker rate; the exchange caps
-        # the fee at 10% of premium. 2% buffer stays for slippage.
         spot = get_btc_price()
-        fee  = min(0.0005 * spot, 0.10 * mark) * contract_val
+        fee  = min(OPTION_FEE_RATE * spot, OPTION_FEE_CAP_PCT * mark) * contract_val
         cost = mark * contract_val + fee
         afford = int((bal * 0.98) / cost) if cost > 0 else 0
     except Exception as e:
-        log.warning("%s: balance check failed (%s) — using configured %d lots.",
-                    label, e, configured)
-        return configured
-    lots = max(min(configured, afford, MAX_ORDER_LOTS), 1)
+        log.error("%s: balance check failed (%s) — entry blocked.", label, e)
+        return 0
+    lots = max(min(configured, afford, MAX_ORDER_LOTS), 0)
     log.info("%s lot sizing: configured=%d  affordable=%d  (bal $%.2f, $%.4f/lot incl. fee)  -> using %d",
              label, configured, afford, bal, cost, lots)
     if afford < configured:
         log.info("%s: sized DOWN to %d lots — balance covers fewer than the configured %d.",
                  label, lots, configured)
     return lots
+
+
+def _risk_config() -> dict:
+    return {
+        "MAX_TRADES_PER_DAY_GLOBAL": MAX_TRADES_GLOBAL,
+        "MAX_TRADES_PER_DAY": MAX_TRADES_PER_DAY,
+        "MAX_OPEN_RISK_USD": MAX_OPEN_RISK_USD,
+        "MAX_DAILY_LOSS_USD": MAX_DAILY_LOSS_USD,
+        "MAX_CONSECUTIVE_LOSSES": MAX_CONSECUTIVE_LOSSES,
+        "LOSS_COOLDOWN_MINUTES": LOSS_COOLDOWN_MINUTES,
+        "RISK_DAY_TZ_OFFSET_MIN": RISK_DAY_TZ_OFFSET_MIN,
+        "SHORT_MAX_RISK_USD": SHORT_MAX_RISK_USD,
+    }
+
+
+def _assert_entry_configuration() -> None:
+    errors = list(ENTRY_CONFIGURATION_ERRORS)
+    if not API_KEY or not API_SECRET:
+        errors.append("account API credentials are unavailable")
+    if errors:
+        raise RuntimeError("new entries disabled: " + "; ".join(errors))
+
+
+def _slot_risk(slot: str) -> tuple[float, float]:
+    if slot == "morning":
+        return RISK_PER_TRADE_MORNING, abs(float(os.getenv("SL_TARGET_PNL_MORNING", "0") or 0))
+    return RISK_PER_TRADE_EVENING, abs(float(os.getenv("SL_TARGET_PNL", "0") or 0))
+
+
+def _protection_snapshot(slot: str) -> dict:
+    suffix = "_MORNING" if slot == "morning" else ""
+    tp_default = "300" if slot == "morning" else "105"
+    legacy = float(os.getenv(f"TSL_TARGET_PNL{suffix}", "0") or 0)
+    snapshot = {
+        "tp_target_pnl": float(os.getenv(f"TP_TARGET_PNL{suffix}", tp_default) or tp_default),
+        "sl_target_pnl": abs(float(os.getenv(f"SL_TARGET_PNL{suffix}", "0") or 0)),
+        "tsl_target_pnl": abs(legacy),
+        "tsl_arm_pnl": abs(float(os.getenv(f"TSL_ARM_PNL{suffix}", str(legacy)) or legacy)),
+        "tsl_trail_pnl": abs(float(os.getenv(f"TSL_TRAIL_PNL{suffix}", str(legacy)) or legacy)),
+        "tsl_lock_min_pnl": abs(float(os.getenv(f"TSL_LOCK_MIN_PNL{suffix}", "0") or 0)),
+        "poll_secs": max(int(float(os.getenv(f"TP_POLL_SECS{suffix}", "30") or 30)), 10),
+    }
+    numeric = [value for value in snapshot.values() if isinstance(value, (int, float))]
+    if any(not math.isfinite(float(value)) for value in numeric):
+        raise ValueError(f"{slot} protection configuration contains a non-finite value")
+    if snapshot["tp_target_pnl"] <= 0:
+        raise ValueError(f"{slot} take-profit must be positive")
+    if bool(snapshot["tsl_arm_pnl"]) != bool(snapshot["tsl_trail_pnl"]):
+        raise ValueError(f"{slot} TSL arm and trail must both be positive or both be zero")
+    return snapshot
+
+
+def _entry_fee_accounting(order: dict, plan: dict) -> tuple[float, str]:
+    """Prefer exchange commission, otherwise persist the configured estimate."""
+    result = order.get("result") or {}
+    if DRY_RUN:
+        return 0.0, "dry_run"
+    marker_present = "commission_reported" in result
+    if ((marker_present and bool(result.get("commission_reported")))
+            or (not marker_present
+                and any(result.get(key) not in (None, "")
+                        for key in ("paid_commission", "commission", "total_commission")))):
+        return abs(float(result.get("paid_commission") or result.get("commission")
+                         or result.get("total_commission") or 0)), "exchange"
+    return abs(float(plan.get("estimated_entry_fee_usd") or 0)), "configured_estimate"
+
+
+def _persist_entry_state(slot: str, state: dict, save_fn) -> None:
+    """Close the final fill-to-state crash gap with immediate reconciliation."""
+    try:
+        save_fn(state)
+    except Exception:
+        log.exception("Could not persist filled %s entry; flattening immediately", slot)
+        # We still have authoritative in-memory fill identity. Do not make a
+        # second disk write a prerequisite to the reduce-only fail-safe.
+        _close_position_job(
+            state, save_fn, slot.upper(), exit_trigger_override="entry_state_persist_failure")
+        raise
+
+
+def _account_unrealized_pnl() -> float:
+    """Use the exchange's whole-account snapshot, including manual exposure."""
+    response = _retry(_get, "/v2/positions/margined", auth=True)
+    if not response.get("success"):
+        raise RuntimeError("account positions unavailable for unrealized-risk check")
+    positions = [p for p in response.get("result", []) if float(p.get("size") or 0) != 0]
+    owned_pids = {
+        int(state.get("product_id") or 0)
+        for state in load_states(DATA_DIR).values()
+        if str(state.get("status", "")).upper() == "OPEN"
+    }
+    external = [str(p.get("product_symbol") or p.get("product_id")) for p in positions
+                if int(p.get("product_id") or 0) not in owned_pids]
+    if external and not ALLOW_EXTERNAL_POSITIONS_WITH_BOT:
+        raise RuntimeError(
+            "external/manual position blocks new automated exposure: " + ", ".join(external[:5]))
+    total = 0.0
+    for position in positions:
+        value = position.get("unrealized_pnl")
+        if value in (None, ""):
+            raise RuntimeError(
+                f"unrealized P&L unavailable for {position.get('product_symbol') or position.get('product_id')}")
+        total += float(value)
+    return round(total, 2)
+
+
+def build_move_entry_plan(contract: dict, configured_lots: int, side: str, slot: str) -> dict:
+    """Validate value, liquidity, affordability, risk sizing and portfolio limits."""
+    _assert_entry_configuration()
+    protection = _protection_snapshot(slot)  # validate before any order is submitted
+    unresolved = [p.name for p in DATA_DIR.glob("pending_*_entry.json")]
+    if unresolved:
+        raise RuntimeError(f"unresolved entry journal blocks new exposure: {', '.join(unresolved)}")
+    open_move = [s for name, s in load_states(DATA_DIR).items()
+                 if name in ("morning", "evening")
+                 and str(s.get("status", "")).upper() == "OPEN"]
+    if len(open_move) >= MAX_CONCURRENT_MOVE_POSITIONS:
+        raise RuntimeError(
+            f"concurrent MOVE cap reached ({len(open_move)}/{MAX_CONCURRENT_MOVE_POSITIONS})")
+    if side == "sell" and not ALLOW_SHORT_MOVE:
+        raise RuntimeError("short MOVE entries are disabled; set ALLOW_SHORT_MOVE only with an explicit SL")
+    symbol = contract["symbol"]
+    if get_mv_position(int(contract["id"])):
+        raise RuntimeError(
+            f"target product {symbol} already has net exposure; automated ownership would be ambiguous")
+    cv = float(contract.get("contract_value") or 0.001)
+    snapshot = get_execution_snapshot(symbol, side)
+    value_signal = move_value_signal(contract, snapshot, side)
+    premium = snapshot["ask"] if side == "buy" else snapshot["bid"]
+    affordable = _effective_lots(configured_lots, premium, cv, slot.upper())
+    if affordable < 1:
+        raise RuntimeError("verified affordable lots is zero")
+    risk_budget, stop_loss = _slot_risk(slot)
+    spot = snapshot.get("spot") or get_btc_price()
+    fee_one_way = min(OPTION_FEE_RATE * spot, OPTION_FEE_CAP_PCT * premium) * cv
+    slippage_per_lot = premium * cv * MAX_SLIPPAGE_PCT / 100
+    lots = risk_based_lots(
+        configured=configured_lots,
+        affordable=affordable,
+        liquidity_cap=int(snapshot["liquidity_cap"]),
+        max_order_lots=MAX_ORDER_LOTS,
+        risk_budget_usd=risk_budget,
+        stop_loss_usd=stop_loss,
+        premium_per_lot=premium * cv,
+        round_trip_fee_per_lot=fee_one_way * 2,
+        slippage_per_lot=slippage_per_lot,
+        short=side == "sell",
+    )
+    if lots < 1:
+        raise RuntimeError(
+            "risk sizing produced zero lots; verify risk budget, SL, liquidity and affordability")
+    catastrophe = lots * (premium * cv + fee_one_way * 2 + slippage_per_lot)
+    # A configured SL is a trigger, not a guarantee of fill.  Long premium at
+    # risk remains the catastrophe bound and must never be understated.
+    proposed_risk = max(stop_loss, catastrophe)
+    unrealized = _account_unrealized_pnl()
+    decision = evaluate_entry(DATA_DIR, proposed_risk, _risk_config(),
+                              unrealized_pnl_usd=unrealized)
+    audit_event(DATA_DIR, "move_entry_evaluated", {
+        "slot": slot, "symbol": symbol, "side": side,
+        "configured_lots": configured_lots, "affordable_lots": affordable,
+        "liquidity_cap_lots": snapshot["liquidity_cap"], "risk_lots": lots,
+        "risk_budget_usd": risk_budget, "stop_loss_usd": stop_loss,
+        "proposed_risk_usd": round(proposed_risk, 2),
+        "unrealized_pnl_usd": unrealized,
+        "snapshot": snapshot, "value_signal": value_signal,
+        "risk_decision": decision_dict(decision),
+    })
+    if not decision.allowed:
+        raise RuntimeError(f"portfolio risk blocked entry: {decision.reason}")
+    return {
+        "lots": lots, "snapshot": snapshot, "value_signal": value_signal,
+        "risk_budget_usd": risk_budget, "stop_loss_usd": stop_loss,
+        "risk_at_entry_usd": round(proposed_risk, 2),
+        "risk_decision": decision_dict(decision),
+        "estimated_entry_fee_usd": round(fee_one_way * lots, 4),
+        "protection_config": protection,
+    }
+
+
+def recover_pending_entries(slots=("morning", "evening")) -> None:
+    """Resolve crash journals using bot-owned order identity.
+
+    A same-product exchange position is never sufficient evidence by itself:
+    it may have been opened manually. At least one terminal fill bearing an
+    order/client ID from our pre-submit journal must account for the remaining
+    exposure before this strategy adopts and protects it.
+    """
+    for slot in slots:
+        path = DATA_DIR / f"pending_{slot}_entry.json"
+        if not path.exists():
+            continue
+        try:
+            journal = json.loads(path.read_text(encoding="utf-8"))
+            pid = int(journal.get("product_id") or 0)
+            if not pid:
+                raise RuntimeError("pending entry journal has no product_id")
+
+            fills = list(journal.get("fills") or [])
+            intents = list(journal.get("orders") or [])
+            # Compatibility with journals written immediately before this
+            # release: their verified-looking fills still get re-queried by
+            # exact order/client ID before being trusted.
+            if not intents and fills:
+                intents = [{
+                    "order_id": fill.get("order_id"),
+                    "client_order_id": fill.get("client_order_id"),
+                    "requested_lots": fill.get("lots"),
+                    "status": "legacy_requires_verification",
+                } for fill in fills]
+                fills = []
+
+            unresolved = []
+            verified_fills: list[dict] = []
+            seen_order_ids: set[str] = set()
+            seen_client_ids: set[str] = set()
+            for intent in intents:
+                order_identity = str(intent.get("order_id") or "")
+                client_identity = str(intent.get("client_order_id") or "")
+                if ((order_identity and order_identity in seen_order_ids)
+                        or (client_identity and client_identity in seen_client_ids)):
+                    intent["status"] = "duplicate_journal_identity_ignored"
+                    continue
+                if order_identity:
+                    seen_order_ids.add(order_identity)
+                if client_identity:
+                    seen_client_ids.add(client_identity)
+                requested = int(float(intent.get("requested_lots") or 0))
+                if requested < 1:
+                    unresolved.append(str(intent.get("client_order_id") or "invalid-intent"))
+                    continue
+                order = _lookup_owned_order(
+                    intent.get("order_id"), intent.get("client_order_id"), pid)
+                if not order:
+                    if (intent.get("status") == "rejected"
+                            and int(intent.get("verified_filled_lots") or 0) == 0):
+                        continue
+                    intent["status"] = "ownership_unresolved"
+                    unresolved.append(str(intent.get("client_order_id") or intent.get("order_id")))
+                    continue
+                returned_client = str(order.get("client_order_id") or "")
+                returned_side = str(order.get("side") or "").lower()
+                if (str(order.get("product_id") or "") != str(pid)
+                        or (client_identity and returned_client != client_identity)
+                        or (returned_side and returned_side != str(journal.get("side") or "").lower())):
+                    intent["status"] = "ownership_mismatch"
+                    unresolved.append(client_identity or order_identity)
+                    continue
+                filled = _verified_terminal_fill(order, requested)
+                if filled is None:
+                    intent["status"] = ("active" if _order_state(order) in _ACTIVE_ORDER_STATES
+                                        else "ambiguous")
+                    intent["order_id"] = order.get("id") or intent.get("order_id")
+                    unresolved.append(str(intent.get("client_order_id") or intent.get("order_id")))
+                    continue
+                intent.update({
+                    "status": "terminal", "order_id": order.get("id") or intent.get("order_id"),
+                    "order_state": _order_state(order), "verified_filled_lots": filled,
+                })
+                if filled:
+                    price = float(order.get("average_fill_price") or 0)
+                    if price <= 0:
+                        intent["status"] = "ambiguous_fill_price"
+                        unresolved.append(str(intent.get("client_order_id") or intent.get("order_id")))
+                        continue
+                    verified_fills.append({
+                        "order_id": order.get("id") or intent.get("order_id"),
+                        "client_order_id": (order.get("client_order_id")
+                                            or intent.get("client_order_id")),
+                        "lots": filled, "average_fill_price": price,
+                        "paid_commission": float(order.get("paid_commission")
+                                                 or order.get("commission") or 0),
+                    })
+
+            journal["orders"] = intents
+            journal["fills"] = verified_fills
+            journal["recovery_unresolved_orders"] = unresolved
+            journal["last_reconciled_at_utc"] = datetime.now(timezone.utc).isoformat()
+            _write_entry_journal(slot, journal)
+
+            position = get_mv_position(pid) if pid else None
+            actual_size = int(float(position.get("size") or 0)) if position else 0
+            if actual_size == 0:
+                if unresolved:
+                    log.error("Pending %s order identity remains unresolved; journal retained.", slot)
+                    audit_event(DATA_DIR, "pending_entry_unresolved", {
+                        "slot": slot, "product_id": pid, "orders": unresolved,
+                        "exchange_size": 0,
+                    })
+                    continue
+                log.warning("Clearing resolved pending %s journal; exchange has no position.", slot)
+                _write_entry_journal(slot, None)
+                audit_event(DATA_DIR, "pending_entry_cleared_no_position", {
+                    "slot": slot, "product_id": pid,
+                    "verified_filled_lots": sum(f["lots"] for f in verified_fills),
+                })
+                continue
+            proven_lots = sum(int(fill.get("lots") or 0) for fill in verified_fills)
+            expected_sign = -1 if str(journal.get("side")) == "sell" else 1
+            ownership_proven = (proven_lots > 0
+                                and actual_size * expected_sign > 0
+                                and abs(actual_size) <= proven_lots)
+            if not ownership_proven:
+                journal["ownership_status"] = "unproven_exchange_position"
+                _write_entry_journal(slot, journal)
+                audit_event(DATA_DIR, "pending_entry_ownership_blocked", {
+                    "slot": slot, "product_id": pid, "exchange_size": actual_size,
+                    "proven_bot_fills": proven_lots, "orders": unresolved,
+                })
+                send_telegram(
+                    f"🚨 <b>UNRESOLVED ENTRY OWNERSHIP — {slot.upper()} ({TAG})</b>\n"
+                    f"Product <code>{pid}</code> has <code>{actual_size}</code> live lots but only "
+                    f"<code>{proven_lots}</code> lots are proven bot fills.\n"
+                    "The journal is retained and all new entries are blocked; inspect immediately."
+                )
+                continue
+
+            try:
+                product_response = _retry(
+                    _get, f"/v2/products/{pid}", retries=2, delay=0.25)
+                product = product_response.get("result") or {}
+            except Exception as exc:
+                # Public metadata enrichment is never a prerequisite to
+                # protecting/flattening proven exchange exposure.
+                log.warning("Product metadata unavailable during recovery: %s", exc)
+                product = {}
+            lots = abs(actual_size)
+            side = "sell" if actual_size < 0 else "buy"
+            fill = float(position.get("entry_price") or 0)
+            if fill <= 0 and verified_fills:
+                total = sum(int(f.get("lots") or 0) for f in verified_fills)
+                fill = (sum(float(f.get("average_fill_price") or 0) * int(f.get("lots") or 0)
+                            for f in verified_fills) / total) if total else 0
+            if fill <= 0:
+                raise RuntimeError("owned live position has no verifiable entry price")
+            cv = float(product.get("contract_value") or 0.001)
+            recovered_protection = journal.get("protection_config")
+            try:
+                protection_is_valid = (
+                    isinstance(recovered_protection, dict)
+                    and math.isfinite(float(recovered_protection.get("tp_target_pnl") or 0))
+                    and float(recovered_protection.get("tp_target_pnl") or 0) > 0
+                )
+            except (TypeError, ValueError):
+                protection_is_valid = False
+            started = str(journal.get("started_at_utc") or datetime.now(timezone.utc).isoformat())
+            try:
+                began = datetime.fromisoformat(started.replace("Z", "+00:00"))
+            except ValueError:
+                began = datetime.now(timezone.utc)
+            existing = (load_morning_state() if slot == "morning" else load_state()) or {}
+            if (existing.get("status") == "OPEN"
+                    and int(existing.get("product_id") or 0) not in (0, pid)):
+                raise RuntimeError(
+                    f"cannot recover product {pid}; {slot} already tracks product "
+                    f"{existing.get('product_id')}")
+            state = {
+                "slot": slot, "status": "OPEN", "side": "short" if side == "sell" else "long",
+                "entry_date": began.strftime("%Y-%m-%d"),
+                "trading_date": trading_date(began, RISK_DAY_TZ_OFFSET_MIN),
+                "entry_time_utc": began.strftime("%H:%M:%S"),
+                "symbol": product.get("symbol") or journal.get("symbol"),
+                "product_id": pid, "strike": float(product.get("strike_price") or 0),
+                "settlement": product.get("settlement_time", ""), "contract_value": cv,
+                "lots": lots, "owned_entry_lots": min(lots, proven_lots),
+                "entry_mark": fill, "btc_at_entry": 0,
+                "total_cost_usd": round(fill * cv * lots, 2),
+                "order_id": (verified_fills[0].get("order_id") if verified_fills else None),
+                "order_ids": [f.get("order_id") for f in verified_fills if f.get("order_id")],
+                "client_order_id": (verified_fills[0].get("client_order_id")
+                                    if verified_fills else None),
+                "client_order_ids": [f.get("client_order_id") for f in verified_fills
+                                     if f.get("client_order_id")],
+                "entry_commission_usd": sum(float(f.get("paid_commission") or 0)
+                                            for f in verified_fills),
+                "entry_trigger": "recovered_pending_journal", "dry_run": False,
+                "ownership": "move_bot", "recovery_unresolved_orders": unresolved,
+                "protection_config": recovered_protection if protection_is_valid else {},
+            }
+            # Preserve monitor bookkeeping when recovery is re-run after the
+            # state was already saved but before every order became terminal.
+            if existing.get("status") == "OPEN" and int(existing.get("product_id") or 0) == pid:
+                state = {**existing, **state}
+            save_fn = save_morning_state if slot == "morning" else save_state
+            try:
+                save_fn(state)
+            except Exception:
+                # Proven bot exposure exists but cannot be made durable. Use
+                # the in-memory state to reduce it before propagating failure.
+                _close_position_job(
+                    state, save_fn, slot.upper(),
+                    exit_trigger_override="recovery_state_persist_failure")
+                raise
+            if not protection_is_valid:
+                _close_position_job(
+                    state, save_fn, slot.upper(),
+                    exit_trigger_override="missing_recovery_protection_snapshot")
+                if not unresolved:
+                    _write_entry_journal(slot, None)
+                continue
+            protected = start_tp_monitor(slot)
+            if not protected:
+                # Reduce risk before any nonessential journal annotation.
+                _emergency_flatten_unprotected(slot)
+                if not unresolved:
+                    _write_entry_journal(slot, None)
+                continue
+            if not unresolved:
+                _write_entry_journal(slot, None)
+            else:
+                journal["position_adopted"] = True
+                journal["protection_confirmed"] = True
+                _write_entry_journal(slot, journal)
+            try:
+                audit_event(DATA_DIR, "pending_entry_recovered", {
+                    "slot": slot, "symbol": state["symbol"], "lots": lots,
+                    "entry_mark": fill, "unresolved_orders": unresolved,
+                })
+            except Exception:
+                log.exception("Recovered-entry audit failed after protection was confirmed")
+            send_telegram(
+                f"⚠️ <b>RECOVERED INTERRUPTED {slot.upper()} ENTRY — {TAG}</b>\n"
+                f"<code>{state['symbol']}</code> · {lots:,} lots @ ${fill:.4f}\n"
+                "Protection monitor is confirmed."
+            )
+        except Exception as exc:
+            log.exception("Pending %s entry recovery failed", slot)
+            send_telegram(f"🚨 <b>PENDING ENTRY RECOVERY FAILED — {slot.upper()} ({TAG})</b>\n"
+                          f"<code>{exc}</code>\nNew entries remain blocked by the journal.")
 
 # ─────────────────────────────────────────────────────────────
 # TP MONITOR SPAWN + STALE-STOP SWEEP
@@ -589,7 +1636,48 @@ def start_tp_monitor(slot: str):
     protection never depends on someone pressing Start in the dashboard.
     Uses the same users/<user>/tp_<slot>.pid file the dashboard tracks."""
     if DRY_RUN:
-        return   # no real position to protect
+        return True   # no real position to protect
+    health_file = DATA_DIR / f"tp_{slot}_health.json"
+    timeout_sec = max(min(int(os.getenv("PROTECTION_START_TIMEOUT_SEC", "30")), 55), 5)
+    heartbeat_max_age = max(
+        int(os.getenv(f"TP_POLL_SECS_{slot.upper()}",
+                      os.getenv("TP_POLL_SECS", "30"))) * 3,
+        60,
+    )
+
+    def ready(expected_pid=None, newer_than=0.0):
+        try:
+            health = json.loads(health_file.read_text(encoding="utf-8"))
+            if expected_pid and int(health.get("pid") or 0) != int(expected_pid):
+                return False
+            if str(health.get("user") or "").lower() != BOT_USER.lower():
+                return False
+            if str(health.get("slot") or "").lower() != slot.lower():
+                return False
+            current_state = (load_morning_state() if slot == "morning" else load_state()) or {}
+            if str(health.get("product_id") or "") != str(current_state.get("product_id") or ""):
+                return False
+            expected_order = current_state.get("order_id") or current_state.get("entry_order_id")
+            if expected_order and str(health.get("entry_order_id") or "") != str(expected_order):
+                return False
+            expected_client = current_state.get("client_order_id")
+            if (expected_client
+                    and str(health.get("entry_client_order_id") or "") != str(expected_client)):
+                return False
+            if health_file.stat().st_mtime < newer_than:
+                return False
+            heartbeat = datetime.fromisoformat(
+                str(health.get("heartbeat_utc") or "").replace("Z", "+00:00"))
+            if heartbeat.tzinfo is None:
+                heartbeat = heartbeat.replace(tzinfo=timezone.utc)
+            age = (datetime.now(timezone.utc) - heartbeat.astimezone(timezone.utc)).total_seconds()
+            if age < -30 or age > heartbeat_max_age:
+                return False
+            return bool(health.get("protection_established")) and health.get("status") in {
+                "healthy", "degraded",
+            }
+        except (OSError, ValueError, TypeError):
+            return False
     try:
         pf = DATA_DIR / f"tp_{slot}.pid"
         if pf.exists():
@@ -597,12 +1685,52 @@ def start_tp_monitor(slot: str):
                 # POSIX liveness probe; the live bot runs on Linux (Windows
                 # dev copy is DRY_RUN and returns above — os.kill(pid, 0)
                 # is NOT safe as a liveness check on Windows).
-                os.kill(int(pf.read_text().strip()), 0)
-                log.info("TP monitor for %s already running — not spawning.", slot)
-                return
+                existing_pid = int(pf.read_text().strip())
+                os.kill(existing_pid, 0)
+                if ready(existing_pid):
+                    log.info("TP monitor for %s already running and healthy.", slot)
+                    return True
+                # A stale pidfile is not authority to signal an arbitrary
+                # reused PID. Require both OS command identity and the monitor
+                # health identity before terminating it.
+                try:
+                    cmdline = Path(f"/proc/{existing_pid}/cmdline").read_bytes().replace(b"\0", b" ").decode()
+                    health_identity = json.loads(health_file.read_text(encoding="utf-8"))
+                    identity_ok = (
+                        "tp_monitor.py" in cmdline
+                        and f"--slot {slot}" in cmdline
+                        and f"--user {BOT_USER}" in cmdline
+                        and int(health_identity.get("pid") or 0) == existing_pid
+                        and str(health_identity.get("slot") or "").lower() == slot.lower()
+                        and str(health_identity.get("user") or "").lower() == BOT_USER.lower()
+                    )
+                except Exception:
+                    identity_ok = False
+                if not identity_ok:
+                    log.critical("Refusing to signal unproven PID %d from %s", existing_pid, pf)
+                    return False
+                log.error("TP monitor for %s is alive but has no healthy protection heartbeat; restarting.",
+                          slot)
+                os.kill(existing_pid, 15)
+                for _ in range(20):
+                    try:
+                        os.kill(existing_pid, 0)
+                    except OSError:
+                        break
+                    time.sleep(0.1)
+                try:
+                    os.kill(existing_pid, 0)
+                except OSError:
+                    pass
+                else:
+                    log.critical("Old %s monitor PID %d did not terminate; duplicate spawn blocked.",
+                                 slot, existing_pid)
+                    return False
+                pf.unlink(missing_ok=True)
             except (OSError, ValueError):
-                pass
+                pf.unlink(missing_ok=True)
         script = Path(__file__).parent / "tp_monitor.py"
+        spawned_at = time.time()
         proc = subprocess.Popen(
             [sys.executable, str(script), "--slot", slot, "--user", BOT_USER],
             cwd=str(Path(__file__).parent),
@@ -610,34 +1738,146 @@ def start_tp_monitor(slot: str):
         )
         pf.write_text(str(proc.pid))
         log.info("TP monitor spawned for %s slot (pid %d).", slot, proc.pid)
+        deadline = time.time() + timeout_sec
+        while time.time() < deadline:
+            if proc.poll() is not None:
+                break
+            if ready(proc.pid, spawned_at):
+                log.info("TP monitor for %s confirmed protection healthy.", slot)
+                audit_event(DATA_DIR, "protection_confirmed", {"slot": slot, "pid": proc.pid})
+                return True
+            time.sleep(0.5)
+        message = f"monitor did not confirm protection within {timeout_sec}s"
+        log.error("%s for %s.", message, slot)
+        audit_event(DATA_DIR, "protection_unconfirmed", {"slot": slot, "pid": proc.pid,
+                                                          "reason": message})
+        state = load_morning_state() if slot == "morning" else load_state()
+        if state and state.get("status") == "OPEN":
+            state["protection_start_failure"] = message
+            state["protection_established"] = False
+            (save_morning_state if slot == "morning" else save_state)(state)
+        send_telegram(f"🚨 <b>PROTECTION NOT CONFIRMED — {slot.upper()} ({TAG})</b>\n"
+                      f"<code>{message}</code>\nNo further slot entry is allowed while this position is open.")
+        return False
     except Exception as exc:
         log.warning("TP monitor spawn failed for %s: %s", slot, exc)
         send_telegram(f"⚠️ <b>TP MONITOR SPAWN FAILED — {slot.upper()} ({TAG})</b>\n"
-                      f"<code>{exc}</code>\nStart it manually from the dashboard.")
+                      f"<code>{exc}</code>\nProtection failed; entry fail-safe will flatten the position.")
+        return False
+
+
+def _emergency_flatten_unprotected(slot: str) -> bool:
+    """Fail-safe for a real fill whose protection could not be confirmed."""
+    state = load_morning_state() if slot == "morning" else load_state()
+    if not state or state.get("status") != "OPEN":
+        return True
+    save_fn = save_morning_state if slot == "morning" else save_state
+    _close_position_job(
+        state, save_fn, slot.upper(), exit_trigger_override="protection_start_failure")
+    try:
+        audit_event(DATA_DIR, "unprotected_position_flatten_verified", {
+            "slot": slot, "symbol": state.get("symbol"), "lots": state.get("lots"),
+        })
+    except Exception:
+        log.exception("Unprotected-position flatten audit failed after verified close")
+    return True
+
+
+def _protect_or_flatten_entry(slot: str) -> bool:
+    """Make protection confirmation part of entry completion.
+
+    Returns True when the filled position remains open and protected. Returns
+    False when the fail-safe flattened it. Raises when neither outcome could
+    be verified, leaving the journal/state in place for periodic recovery.
+    """
+    if start_tp_monitor(slot):
+        _write_entry_journal(slot, None)
+        return True
+    # The original entry journal and OPEN state already exist. Do no further
+    # disk I/O before the risk-reducing order; a full disk must not suppress
+    # the emergency close.
+    _emergency_flatten_unprotected(slot)
+    send_telegram(
+        f"🚨 <b>{slot.upper()} ENTRY PROTECTION FAILED — {TAG}</b>\n"
+        "The position was immediately flattened with a verified reduce-only close."
+    )
+    _write_entry_journal(slot, None)
+    return False
 
 
 def cancel_product_stops(product_id: int):
-    """Cancel any resting stop/TP orders left on this product from an earlier
-    position — a stale reduce-only order must never fire against the brand-new
-    position we are about to open."""
+    """Cancel only protection orders this account's state explicitly owns.
+
+    A product-level sweep used to cancel manual orders as collateral damage.
+    State order IDs and our client-order prefix are the ownership boundary.
+    """
     if DRY_RUN:
         return
-    try:
-        data = _get("/v2/orders",
-                    params={"product_ids": str(product_id), "states": "open"},
-                    auth=True)
-        for o in data.get("result", []):
-            if not o.get("stop_order_type"):
-                continue
-            body = json.dumps({"id": o["id"], "product_id": product_id},
-                              separators=(",", ":"))
-            hdrs = _sign("DELETE", "/v2/orders", "", body)
-            requests.delete(BASE_URL + "/v2/orders", data=body, headers=hdrs,
-                            timeout=15)
-            log.info("Cancelled stale resting order %s on product %d.",
-                     o["id"], product_id)
-    except Exception as exc:
-        log.warning("Stale-stop sweep failed for product %d: %s", product_id, exc)
+    owned_ids = set()
+    for state in (load_state() or {}, load_morning_state() or {}):
+        if int(state.get("product_id") or 0) != int(product_id):
+            continue
+        for key in ("tsl_stop_order_id", "tp_stop_order_id"):
+            if state.get(key):
+                owned_ids.add(str(state[key]))
+        for order_id in state.get("orphan_protection_order_ids") or []:
+            if order_id:
+                owned_ids.add(str(order_id))
+
+    data = _retry(
+        _get, "/v2/orders",
+        params={"product_ids": str(product_id), "states": "open"}, auth=True)
+    if not data.get("success"):
+        raise RuntimeError(f"could not verify open orders for product {product_id}: {data}")
+    orders = data.get("result")
+    if not isinstance(orders, list):
+        raise RuntimeError(f"invalid open-order response for product {product_id}")
+    non_stops = [order for order in orders if not order.get("stop_order_type")]
+    if non_stops:
+        ids = ", ".join(str(order.get("id")) for order in non_stops)
+        raise RuntimeError(
+            f"open non-protection order(s) block automated entry on product {product_id}: {ids}")
+    stops = [order for order in orders if order.get("stop_order_type")]
+    unowned = [order for order in stops if str(order.get("id")) not in owned_ids]
+    if unowned:
+        ids = ", ".join(str(order.get("id")) for order in unowned)
+        # Client-ID prefixes are diagnostic, not cancellation authority. If a
+        # crash lost the state ownership record, an operator must reconcile it
+        # rather than letting a new entry delete an order on a guess.
+        raise RuntimeError(
+            f"unowned resting protection order(s) block entry on product {product_id}: {ids}")
+
+    for order in stops:
+        order_id = order.get("id")
+        body = json.dumps({"id": order_id, "product_id": product_id},
+                          separators=(",", ":"))
+        hdrs = _sign("DELETE", "/v2/orders", "", body)
+        response = requests.delete(BASE_URL + "/v2/orders", data=body, headers=hdrs,
+                                   timeout=15)
+        response.raise_for_status()
+        result = response.json()
+        if not result.get("success"):
+            # Cancellation responses can be lost/racy; only an independently
+            # verified terminal order permits entry to continue.
+            refreshed = _lookup_owned_order(order_id, order.get("client_order_id"), product_id)
+            if not refreshed or _order_state(refreshed) not in _TERMINAL_ORDER_STATES:
+                raise RuntimeError(
+                    f"could not confirm cancellation of owned protection order {order_id}: {result}")
+        log.info("Cancelled owned stale resting order %s on product %d.",
+                 order_id, product_id)
+
+    # DELETE can be accepted asynchronously. Re-read the book and require the
+    # target product to be completely clear before opening new exposure.
+    verified = _retry(
+        _get, "/v2/orders",
+        params={"product_ids": str(product_id), "states": "open"}, auth=True)
+    remaining = verified.get("result")
+    if not verified.get("success") or not isinstance(remaining, list):
+        raise RuntimeError(f"could not verify post-cancel order state for product {product_id}")
+    if remaining:
+        ids = ", ".join(str(order.get("id")) for order in remaining)
+        raise RuntimeError(
+            f"open order(s) remain after protection cleanup on product {product_id}: {ids}")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -705,6 +1945,14 @@ def check_api_access():
 # Buys TODAY's contract (settles 12:00 UTC same day).
 # ─────────────────────────────────────────────────────────────
 def morning_entry_job():
+    with account_entry_lock(DATA_DIR, "scheduled-morning") as acquired:
+        if not acquired:
+            log.warning("Another account entry is in progress — morning entry skipped.")
+            return
+        return _morning_entry_job_locked()
+
+
+def _morning_entry_job_locked():
     log.info("=" * 64)
     log.info("MORNING ENTRY  %s UTC  (%s)",
              datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
@@ -714,6 +1962,10 @@ def morning_entry_job():
 
     # Once-per-day guard for the morning slot
     ms = load_morning_state()
+    if ms and ms.get("history_pending"):
+        if not _flush_pending_move_history():
+            raise RuntimeError("previous morning trade history is not durable; entry blocked")
+        ms = load_morning_state()
     if ms and ms.get("entry_date") == today:
         log.info("Morning trade already recorded today (status=%s). Skipping.",
                  ms.get("status", ""))
@@ -729,8 +1981,10 @@ def morning_entry_job():
     settlement   = contract.get("settlement_time", "")
 
     btc_price  = get_btc_price()
-    entry_mark = get_mv_mark(symbol)
-    lots       = _effective_lots(MORNING_LOTS, entry_mark, contract_val, "MORNING")
+    plan       = build_move_entry_plan(contract, MORNING_LOTS, MORNING_SIDE, "morning")
+    snap       = plan["snapshot"]
+    entry_mark = snap["ask"] if MORNING_SIDE == "buy" else snap["bid"]
+    lots       = plan["lots"]
     total_cost = entry_mark * contract_val * lots
 
     log.info("Symbol      : %s", symbol)
@@ -740,15 +1994,18 @@ def morning_entry_job():
     log.info("Lots        : %d  |  Total premium: $%.2f", lots, total_cost)
 
     cancel_product_stops(product_id)
-    order, lots = place_entry_order(product_id, symbol, MORNING_SIDE, lots)
+    order, lots = place_entry_order(product_id, symbol, MORNING_SIDE, lots,
+                                    slot="morning", snapshot=snap, entry_context=plan)
     fill  = float(order.get("result", {}).get("average_fill_price") or entry_mark)
+    entry_fee, entry_fee_source = _entry_fee_accounting(order, plan)
 
     now = datetime.now(timezone.utc)
-    save_morning_state({
+    _persist_entry_state("morning", {
         "slot":           "morning",
         "status":         "OPEN",
         "side":           "long" if MORNING_SIDE == "buy" else "short",
         "entry_date":     today,
+        "trading_date":   trading_date(now, RISK_DAY_TZ_OFFSET_MIN),
         "entry_time_utc": now.strftime("%H:%M:%S"),
         "symbol":         symbol,
         "product_id":     product_id,
@@ -756,13 +2013,34 @@ def morning_entry_job():
         "settlement":     settlement,
         "contract_value": contract_val,
         "lots":           lots,
+        "owned_entry_lots": lots,
         "entry_mark":     round(fill, 4),
         "btc_at_entry":   round(btc_price, 2),
         "total_cost_usd": round(fill * contract_val * lots, 2),
         "order_id":       order.get("result", {}).get("id"),
+        "order_ids":      order.get("result", {}).get("order_ids", []),
+        "client_order_id": order.get("result", {}).get("client_order_id"),
+        "client_order_ids": order.get("result", {}).get("client_order_ids", []),
+        "entry_commission_usd": entry_fee,
+        "entry_fee_source": entry_fee_source,
         "entry_trigger":  "morning_scheduled",
+        "execution_snapshot": snap,
+        "move_value_signal": plan["value_signal"],
+        "risk_at_entry_usd": plan["risk_at_entry_usd"],
+        "risk_decision": plan["risk_decision"],
+        "protection_config": plan["protection_config"],
         "dry_run":        DRY_RUN,
-    })
+    }, save_morning_state)
+    if not _protect_or_flatten_entry("morning"):
+        log.error("Morning fill was flattened because protection could not be confirmed.")
+        return
+    try:
+        audit_event(DATA_DIR, "move_entry_filled", {
+            "slot": "morning", "symbol": symbol, "lots": lots, "fill": fill,
+            "order_ids": order.get("result", {}).get("order_ids", []),
+        })
+    except Exception:
+        log.exception("Morning entry audit write failed after protection was confirmed")
 
     send_telegram(
         f"🌅 <b>MORNING STRADDLE {'SOLD (short)' if MORNING_SIDE == 'sell' else 'OPENED'} — {TAG}</b>\n"
@@ -778,13 +2056,20 @@ def morning_entry_job():
         f"Mode    » <code>{'DRY-RUN ⚠' if DRY_RUN else 'LIVE ●'}</code>"
     )
     log.info("Morning straddle opened: %d lots %s @ $%.4f", lots, symbol, fill)
-    start_tp_monitor("morning")
 
 
 # ─────────────────────────────────────────────────────────────
 # ENTRY JOB  —  12:05 UTC  (5:35 PM IST)
 # ─────────────────────────────────────────────────────────────
 def entry_job():
+    with account_entry_lock(DATA_DIR, "scheduled-evening") as acquired:
+        if not acquired:
+            log.warning("Another account entry is in progress — evening entry skipped.")
+            return
+        return _entry_job_locked()
+
+
+def _entry_job_locked():
     log.info("=" * 64)
     log.info("ENTRY  %s UTC  (5:35 PM IST)",
              datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"))
@@ -803,8 +2088,10 @@ def entry_job():
 
     # Market snapshot
     btc_price  = get_btc_price()
-    entry_mark = get_mv_mark(symbol)
-    lots       = _effective_lots(LOTS, entry_mark, contract_val, "EVENING")
+    plan       = build_move_entry_plan(contract, LOTS, EVENING_SIDE, "evening")
+    snap       = plan["snapshot"]
+    entry_mark = snap["ask"] if EVENING_SIDE == "buy" else snap["bid"]
+    lots       = plan["lots"]
     total_cost = entry_mark * contract_val * lots
 
     log.info("Symbol      : %s", symbol)
@@ -816,30 +2103,57 @@ def entry_job():
 
     # Place the single entry order (direction per EVENING_SIDE config)
     cancel_product_stops(product_id)
-    order, lots = place_entry_order(product_id, symbol, EVENING_SIDE, lots)
+    order, lots = place_entry_order(product_id, symbol, EVENING_SIDE, lots,
+                                    slot="evening", snapshot=snap, entry_context=plan)
     # Record the REAL fill, not the pre-order snapshot — all downstream P&L
     # (TP/SL triggers included) keys off entry_mark.
     fill  = float(order.get("result", {}).get("average_fill_price") or entry_mark)
+    entry_fee, entry_fee_source = _entry_fee_accounting(order, plan)
 
     # Persist — this is what prevents any second order today
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    save_state({
+    now = datetime.now(timezone.utc)
+    _persist_entry_state("evening", {
+        "slot":           "evening",
         "status":         "OPEN",
         "side":           "long" if EVENING_SIDE == "buy" else "short",
         "entry_date":     today,
-        "entry_time_utc": datetime.now(timezone.utc).strftime("%H:%M:%S"),
+        "trading_date":   trading_date(now, RISK_DAY_TZ_OFFSET_MIN),
+        "entry_time_utc": now.strftime("%H:%M:%S"),
         "symbol":         symbol,
         "product_id":     product_id,
         "strike":         strike,
         "settlement":     settlement,
         "contract_value": contract_val,
         "lots":           lots,
+        "owned_entry_lots": lots,
         "entry_mark":     round(fill, 4),
         "btc_at_entry":   btc_price,
         "total_cost_usd": round(fill * contract_val * lots, 4),
         "order_id":       order.get("result", {}).get("id"),
+        "order_ids":      order.get("result", {}).get("order_ids", []),
+        "client_order_id": order.get("result", {}).get("client_order_id"),
+        "client_order_ids": order.get("result", {}).get("client_order_ids", []),
+        "entry_commission_usd": entry_fee,
+        "entry_fee_source": entry_fee_source,
+        "entry_trigger":  "evening_scheduled",
+        "execution_snapshot": snap,
+        "move_value_signal": plan["value_signal"],
+        "risk_at_entry_usd": plan["risk_at_entry_usd"],
+        "risk_decision": plan["risk_decision"],
+        "protection_config": plan["protection_config"],
         "dry_run":        DRY_RUN,
-    })
+    }, save_state)
+    if not _protect_or_flatten_entry("evening"):
+        log.error("Evening fill was flattened because protection could not be confirmed.")
+        return
+    try:
+        audit_event(DATA_DIR, "move_entry_filled", {
+            "slot": "evening", "symbol": symbol, "lots": lots, "fill": fill,
+            "order_ids": order.get("result", {}).get("order_ids", []),
+        })
+    except Exception:
+        log.exception("Evening entry audit write failed after protection was confirmed")
     log.info("Straddle OPEN. Waiting for exit at %02d:%02d UTC.",
              EXIT_H_UTC, EXIT_M_UTC)
 
@@ -856,7 +2170,6 @@ def entry_job():
         f"Time    » <code>{datetime.now(timezone.utc).strftime('%H:%M UTC')}  (IST +5:30)</code>\n"
         f"Mode    » <code>{'DRY-RUN ⚠' if DRY_RUN else 'LIVE ●'}</code>"
     )
-    start_tp_monitor("evening")
 
 # ─────────────────────────────────────────────────────────────
 # EXIT JOBS — shared close logic for both slots
@@ -871,7 +2184,7 @@ def exit_job():
     if not state or state.get("status") != "OPEN":
         log.info("No open evening position — nothing to close.")
         return
-    _close_position_job(state, save_state, "EVENING")
+    _close_position_job(state, save_state, "EVENING", load_fn=load_state)
 
 
 def morning_exit_job():
@@ -884,71 +2197,399 @@ def morning_exit_job():
     if not state or state.get("status") != "OPEN":
         log.info("No open morning position — nothing to close.")
         return
-    _close_position_job(state, save_morning_state, "MORNING")
+    _close_position_job(
+        state, save_morning_state, "MORNING", load_fn=load_morning_state)
 
 
-def _close_position_job(state: dict, save_fn, label: str):
-    product_id   = state["product_id"]
-    symbol       = state["symbol"]
-    entry_mark   = state.get("entry_mark",    0)
-    contract_val = state.get("contract_value", 0.001)
-    lots         = state["lots"]
+_PENDING_CLOSE_FIELDS = (
+    "pending_close_order_id",
+    "pending_close_client_order_id",
+    "pending_close_requested_lots",
+    "pending_close_start_size",
+    "pending_close_side",
+    "pending_close_submission_state",
+    "pending_close_started_at_utc",
+    "pending_close_last_error",
+    "pending_close_order_state",
+    "pending_close_reason",
+)
 
-    # ALWAYS verify against the real exchange — regardless of DRY_RUN. DRY_RUN
-    # gates opening new exposure, not the honesty of an exit: a scheduled exit
-    # must never assume a position exists (or fake-close one) without checking.
-    position    = get_mv_position(product_id)
-    actual_size = int(float(position["size"])) if position else 0
+
+def _clear_pending_close(state: dict) -> None:
+    for key in _PENDING_CLOSE_FIELDS:
+        state[key] = "" if key in {"pending_close_last_error", "pending_close_reason"} else None
+
+
+def _validate_recovered_close_order(order: dict, *, product_id: int,
+                                    client_order_id: str, side: str,
+                                    order_id=None) -> dict:
+    """Prove a recovered order belongs to this exact reduce-only close intent."""
+    if not isinstance(order, dict) or not order.get("id"):
+        raise RuntimeError("recovered close order has no exchange identity")
+    if order_id and str(order.get("id")) != str(order_id):
+        raise RuntimeError(
+            f"recovered close order id mismatch: {order.get('id')} != {order_id}")
+    returned_client = str(order.get("client_order_id") or "")
+    if returned_client and returned_client != str(client_order_id):
+        raise RuntimeError(
+            f"recovered close client id mismatch: {returned_client} != {client_order_id}")
+    returned_product = order.get("product_id")
+    if returned_product not in (None, "") and str(returned_product) != str(product_id):
+        raise RuntimeError(
+            f"recovered close product mismatch: {returned_product} != {product_id}")
+    returned_side = str(order.get("side") or "").lower()
+    if returned_side and returned_side != side:
+        raise RuntimeError(f"recovered close side mismatch: {returned_side} != {side}")
+    if order.get("reduce_only") is False:
+        raise RuntimeError("recovered close order is not reduce-only")
+    return order
+
+
+def _close_position_job(state: dict, save_fn, label: str,
+                        exit_trigger_override: str | None = None,
+                        load_fn=None):
+    slot = str(state.get("slot") or label).lower()
+    with account_file_lock(
+        DATA_DIR, f"close-{slot}", f"scheduled-close-{os.getpid()}",
+        stale_after_sec=30, wait_sec=2,
+    ) as acquired:
+        if not acquired:
+            raise RuntimeError(f"another {slot} close/reconciliation is in progress")
+        # State may have changed while this caller waited for the account-wide
+        # close lock.  Reload inside the critical section so a durable pending
+        # close identity is never lost to a stale in-memory copy.
+        if load_fn is not None:
+            latest = load_fn()
+            if latest:
+                state = latest
+            if not state or state.get("status") != "OPEN":
+                log.info("%s close already reconciled by another worker.", label)
+                return None
+        return _close_position_job_locked(
+            state, save_fn, label, exit_trigger_override=exit_trigger_override)
+
+
+def _close_position_job_locked(state: dict, save_fn, label: str,
+                               exit_trigger_override: str | None = None):
+    product_id = int(state["product_id"])
+    symbol = state["symbol"]
+    entry_mark = float(state.get("entry_mark") or 0)
+    contract_val = float(state.get("contract_value") or 0.001)
+    recorded_lots = int(state.get("lots") or 0)
+
+    # DRY_RUN gates only new exposure. A close always starts with an
+    # authenticated exchange-size check and finishes with another one.
+    position = get_mv_position(product_id)
+    actual_size = int(float(position.get("size") or 0)) if position else 0
     log.info("Exchange position: %d lots of %s", actual_size, symbol)
-    if actual_size == 0:
-        log.warning("No open position found on exchange for %s — nothing to close "
-                    "(may have been a DRY-RUN-only entry, or already closed manually).", symbol)
-    elif abs(actual_size) != lots:
-        log.warning("Position mismatch: expected %d lots, found %d. Using exchange figure.", lots, actual_size)
+    if actual_size and abs(actual_size) != recorded_lots:
+        log.warning("Position mismatch: expected %d lots, found %d. Using exchange figure.",
+                    recorded_lots, actual_size)
 
-    # Long positions have positive exchange size, shorts negative
-    is_short   = state.get("side") == "short" or actual_size < 0
-    pnl_sign   = -1 if is_short else 1
+    is_short = state.get("side") == "short" or actual_size < 0
+    pnl_sign = -1 if is_short else 1
     close_side = "buy" if is_short else "sell"
     close_size = abs(actual_size)
+    btc_entry = float(state.get("btc_at_entry") or 0)
+    exit_mark = 0.0
+    btc_exit = btc_entry
+    btc_move = 0.0
+    close_order = {}
+    close_fee = None
+    close_fee_source = "none"
+    remaining_size = 0
+    filled_lots = 0
+    verified_fill = None
+    had_close_attempt = False
+    pending_id = state.get("pending_close_order_id")
+    client_id = str(state.get("pending_close_client_order_id") or "")
+    pending_status = str(state.get("pending_close_submission_state") or "").lower()
+    requested_size = int(float(state.get("pending_close_requested_lots") or 0))
+    attempt_start_signed = int(float(state.get("pending_close_start_size") or 0))
+    intent_created = False
+    stored_close_side = str(state.get("pending_close_side") or "").lower()
+    if stored_close_side and stored_close_side != close_side:
+        raise RuntimeError(
+            f"pending close side {stored_close_side} conflicts with required {close_side}")
 
-    # Snapshot exit mark
-    exit_mark  = get_mv_mark(symbol)
-    btc_exit   = get_btc_price()
-    btc_entry  = state.get("btc_at_entry", 0)
-    btc_move   = (btc_exit - btc_entry) / btc_entry * 100 if btc_entry else 0
+    # A persisted client id is the durable identity of the close. It is
+    # reconciled even when the exchange already reports flat, because a lost
+    # POST response may be the order that flattened the position.
+    if pending_id or client_id:
+        if not client_id:
+            raise RuntimeError(
+                f"pending close order {pending_id} has no durable client identity")
+        pending = _lookup_owned_order(pending_id, client_id, product_id)
+        if pending:
+            close_order = _validate_recovered_close_order(
+                pending, product_id=product_id, client_order_id=client_id,
+                side=close_side, order_id=pending_id)
+            pending_id = close_order.get("id")
+            state.update({
+                "pending_close_order_id": pending_id,
+                "pending_close_order_state": _order_state(close_order),
+                "pending_close_submission_state": "acknowledged",
+                "pending_close_last_error": "",
+            })
+            save_fn(state)
+        elif pending_status != "prepared" or pending_id:
+            state["pending_close_last_error"] = (
+                "exact close order identity is not yet visible; duplicate submission blocked")
+            save_fn(state)
+            raise RuntimeError(
+                f"cannot verify pending close identity {client_id}; duplicate close blocked")
 
-    if entry_mark > 0 and exit_mark > 0:
-        pnl_per_btc = (exit_mark - entry_mark) * pnl_sign
-        pnl_usd     = pnl_per_btc * contract_val * close_size
-        ret_pct     = pnl_per_btc / entry_mark * 100
-        log.info("Entry mark  : $%.4f/BTC  |  Exit mark: $%.4f/BTC  (%s)",
-                 entry_mark, exit_mark, "SHORT" if is_short else "LONG")
-        log.info("BTC move    : %.2f%%  ($%.0f -> $%.0f)", btc_move, btc_entry, btc_exit)
-        log.info("P&L         : $%.2f  (%+.1f%%)", pnl_usd, ret_pct)
-    else:
-        pnl_usd   = 0.0
-        exit_mark = 0.0
+    if client_id and not close_order and close_size == 0:
+        state["pending_close_last_error"] = (
+            "exchange is flat but exact close order identity is not yet visible")
+        save_fn(state)
+        raise RuntimeError(
+            f"close identity {client_id} is unresolved; flat-state accounting deferred")
 
-    # Close position — force_real=True: never let DRY_RUN fake the close of a
-    # position that was actually verified open on the exchange above.
-    if close_size > 0:
-        place_market_order(product_id, symbol, close_side, close_size, force_real=True)
-    else:
-        log.warning("Size is 0 — no close order placed.")
+    if not close_order and close_size > 0 and not client_id:
+        client_id = _close_client_id(label.lower())
+        requested_size = close_size
+        attempt_start_signed = actual_size
+        intent_created = True
+        state.update({
+            "pending_close_order_id": None,
+            "pending_close_client_order_id": client_id,
+            "pending_close_requested_lots": requested_size,
+            "pending_close_start_size": attempt_start_signed,
+            "pending_close_side": close_side,
+            "pending_close_submission_state": "prepared",
+            "pending_close_started_at_utc": datetime.now(timezone.utc).isoformat(),
+            "pending_close_last_error": "",
+            "pending_close_order_state": None,
+            "pending_close_reason": f"scheduled_exit_{label.lower()}",
+        })
+        # This write is deliberately before network I/O. A response can never
+        # be lost without leaving an exact exchange identity for recovery.
+        save_fn(state)
 
-    # Update state
+    if not close_order and client_id and close_size > 0:
+        # A prior response-loss state is never blindly retried. A `prepared`
+        # intent may be submitted with the SAME id (including after a crash in
+        # the tiny persist-before-POST window); `submission_unknown` must first
+        # become visible through exact exchange reconciliation.
+        if not intent_created and pending_status not in {"", "prepared"}:
+            raise RuntimeError(
+                f"close submission {client_id} remains unresolved; duplicate close blocked")
+        if requested_size < 1:
+            requested_size = close_size
+        if not attempt_start_signed:
+            attempt_start_signed = actual_size
+        try:
+            close_response = place_market_order(
+                product_id, symbol, close_side, requested_size, force_real=True,
+                client_order_id=client_id, reduce_only=True,
+            )
+            close_order = close_response.get("result") or {}
+        except Exception as submit_exc:
+            recovered = _lookup_owned_order(None, client_id, product_id)
+            if not recovered:
+                state.update({
+                    "pending_close_submission_state": "submission_unknown",
+                    "pending_close_last_error": str(submit_exc),
+                })
+                save_fn(state)
+                raise RuntimeError(
+                    f"close response lost for {client_id}; exact recovery pending") from submit_exc
+            close_order = _validate_recovered_close_order(
+                recovered, product_id=product_id,
+                client_order_id=client_id, side=close_side)
+
+        close_order = _validate_recovered_close_order(
+            close_order, product_id=product_id,
+            client_order_id=client_id, side=close_side)
+        pending_id = close_order.get("id")
+        state.update({
+            "pending_close_order_id": pending_id,
+            "pending_close_submission_state": "acknowledged",
+            "pending_close_order_state": _order_state(close_order),
+            "pending_close_last_error": "",
+        })
+        save_fn(state)
+
+    if close_order:
+        requested_size = (
+            requested_size or abs(attempt_start_signed) or close_size or recorded_lots)
+        attempt_start_signed = attempt_start_signed or (
+            -requested_size if close_side == "buy" else requested_size)
+        # Market orders normally close synchronously; refresh an incomplete
+        # response so fills and commissions are not guessed from submission.
+        verified, verified_fill = _wait_for_terminal_fill(
+            close_order, requested_size, product_id, client_id,
+            timeout_sec=float(os.getenv("CLOSE_ORDER_VERIFY_TIMEOUT_SEC", "8")),
+        )
+        if verified:
+            close_order = _validate_recovered_close_order(
+                verified, product_id=product_id,
+                client_order_id=client_id, side=close_side,
+                order_id=close_order.get("id"))
+        order_state = _order_state(close_order)
+        state.update({
+            "pending_close_order_id": close_order.get("id") or pending_id,
+            "pending_close_order_state": order_state,
+        })
+        if order_state not in _TERMINAL_ORDER_STATES:
+            state["pending_close_submission_state"] = (
+                "active" if order_state in _ACTIVE_ORDER_STATES else "ambiguous")
+            state["pending_close_last_error"] = (
+                f"close order has non-terminal state {order_state or 'unknown'}")
+            save_fn(state)
+            raise RuntimeError(
+                f"close order {close_order.get('id') or client_id} is not terminal; duplicate blocked")
+
+        had_close_attempt = True
+        # Give Delta a brief consistency window, then treat position size as
+        # the final authority. reduce_only prevents this order from reversing.
+        for attempt in range(4):
+            live_after = get_mv_position(product_id)
+            remaining_size = int(float(live_after.get("size") or 0)) if live_after else 0
+            if remaining_size == 0 or attempt == 3:
+                break
+            time.sleep(0.5)
+        if remaining_size and remaining_size * attempt_start_signed < 0:
+            raise RuntimeError(
+                "reduce-only close produced an impossible side reversal: "
+                f"{attempt_start_signed} -> {remaining_size}")
+        if abs(remaining_size) > abs(attempt_start_signed):
+            raise RuntimeError(
+                f"position grew during close: {attempt_start_signed} -> {remaining_size}")
+        filled_lots = max(abs(attempt_start_signed) - abs(remaining_size), 0)
+        if verified_fill is not None and verified_fill != filled_lots:
+            log.warning("Close fill/position delta mismatch (%d vs %d); position delta is authoritative.",
+                        verified_fill, filled_lots)
+        try:
+            real_fill = float(close_order.get("average_fill_price") or 0)
+        except (TypeError, ValueError):
+            real_fill = 0.0
+        if real_fill > 0:
+            exit_mark = real_fill
+        for fee_key in ("paid_commission", "commission", "total_commission"):
+            if close_order.get(fee_key) not in (None, ""):
+                close_fee = abs(float(close_order[fee_key]))
+                close_fee_source = "exchange"
+                break
+    elif close_size == 0:
+        log.warning("Exchange already reports zero size for %s; no close order placed.", symbol)
+
+    # Market data is accounting-only. A ticker outage must never prevent the
+    # authenticated reduce-only order above from reducing exposure.
+    if exit_mark <= 0:
+        try:
+            exit_mark = float(get_mv_mark(symbol) or 0)
+        except Exception:
+            exit_mark = 0.0
+    try:
+        btc_exit = float(get_btc_price() or btc_entry)
+    except Exception as exc:
+        log.warning("BTC accounting snapshot unavailable after close: %s", exc)
+        btc_exit = btc_entry
+    btc_move = (btc_exit - btc_entry) / btc_entry * 100 if btc_entry else 0
+    if had_close_attempt and close_fee is None:
+        # With no spot snapshot, the premium cap is the conservative upper
+        # bound rather than incorrectly estimating a zero fee.
+        fee_basis = (min(OPTION_FEE_RATE * btc_exit,
+                         OPTION_FEE_CAP_PCT * max(exit_mark, 0))
+                     if btc_exit > 0 else OPTION_FEE_CAP_PCT * max(exit_mark, 0))
+        close_fee = fee_basis * contract_val * filled_lots
+        close_fee_source = "configured_estimate"
+    close_fee = float(close_fee or 0)
+
+    previous_gross = float(state.get("partial_exit_gross_pnl_usd") or 0)
+    previous_exit_fees = float(state.get("partial_exit_fees_usd") or 0)
+    current_gross = ((exit_mark - entry_mark) * pnl_sign * contract_val * filled_lots
+                     if entry_mark > 0 and exit_mark > 0 else 0.0)
+    gross_pnl_usd = previous_gross + current_gross
+    total_exit_fees = previous_exit_fees + close_fee
+
+    if remaining_size != 0:
+        # Never announce/record CLOSED while any exchange exposure remains.
+        # The exact order is terminal, so account its fill once and clear the
+        # pending identity before a later retry creates a new close intent.
+        terminal_order_id = close_order.get("id")
+        terminal_client_id = client_id
+        terminal_state = _order_state(close_order)
+        _clear_pending_close(state)
+        state.update({
+            "status": "OPEN", "lots": abs(remaining_size),
+            "partial_exit_gross_pnl_usd": round(gross_pnl_usd, 8),
+            "partial_exit_fees_usd": round(total_exit_fees, 8),
+            "last_close_order_id": terminal_order_id,
+            "last_close_client_order_id": terminal_client_id,
+            "last_close_order_state": terminal_state,
+            "last_close_reason": f"scheduled_exit_{label.lower()}",
+            "last_partial_exit_mark": exit_mark,
+            "last_partial_exit_lots": filled_lots,
+            "protection_last_error": f"scheduled close left {abs(remaining_size)} lots open",
+        })
+        save_fn(state)
+        audit_event(DATA_DIR, "move_close_incomplete", {
+            "slot": label.lower(), "symbol": symbol, "attempted_lots": requested_size,
+            "filled_lots": filled_lots, "remaining_lots": abs(remaining_size),
+            "exit_order_id": terminal_order_id,
+        })
+        send_telegram(
+            f"🚨 <b>{label} EXIT INCOMPLETE — {TAG}</b>\n"
+            f"<code>{symbol}</code> still has <code>{abs(remaining_size)}</code> lots open.\n"
+            "State remains OPEN and exchange protection is retained."
+        )
+        raise RuntimeError(
+            f"scheduled close left {abs(remaining_size)} lots open for {symbol}")
+
+    # Exposure is now independently verified flat. If it was already zero,
+    # mark the accounting as estimated rather than inventing a fill order.
+    if not had_close_attempt and close_size == 0:
+        filled_lots = recorded_lots
+        current_gross = ((exit_mark - entry_mark) * pnl_sign * contract_val * filled_lots
+                         if entry_mark > 0 and exit_mark > 0 else 0.0)
+        gross_pnl_usd = previous_gross + current_gross
+        state["exit_price_source"] = "mark_after_exchange_flat"
+    entry_fee = float(state.get("entry_commission_usd")
+                      or state.get("entry_fees_usd") or 0)
+    fees_usd = entry_fee + total_exit_fees
+    pnl_usd = gross_pnl_usd - fees_usd
+    ret_pct = ((exit_mark - entry_mark) * pnl_sign / entry_mark * 100
+               if entry_mark > 0 and exit_mark > 0 else 0)
+    log.info("Entry/exit  : $%.4f / $%.4f  (%+.1f%%)", entry_mark, exit_mark, ret_pct)
+    log.info("Gross/fees/net: $%.2f / $%.2f / $%.2f", gross_pnl_usd, fees_usd, pnl_usd)
+
+    _clear_pending_close(state)
     state.update({
-        "status":         "CLOSED",
-        "exit_time_utc":  datetime.now(timezone.utc).strftime("%H:%M:%S"),
-        "btc_at_exit":    round(btc_exit,  2),
-        "btc_move_pct":   round(btc_move,  4),
-        "exit_mark":      exit_mark,
-        "pnl_usd":        round(pnl_usd,   4),
-        "exit_trigger":   f"scheduled_exit_{label.lower()}",
+        "status": "CLOSED",
+        "exit_time_utc": datetime.now(timezone.utc).strftime("%H:%M:%S"),
+        "btc_at_exit": round(btc_exit, 2),
+        "btc_move_pct": round(btc_move, 4),
+        "exit_mark": exit_mark,
+        "pnl_usd": round(pnl_usd, 4),
+        "gross_pnl_usd": round(gross_pnl_usd, 4),
+        "fees_usd": round(fees_usd, 4),
+        "exit_commission_usd": round(total_exit_fees, 8),
+        "exit_fee_source": close_fee_source,
+        "pnl_includes_fees": True,
+        "exit_trigger": (exit_trigger_override or
+                         (f"scheduled_exit_{label.lower()}" if had_close_attempt
+                          else "exchange_already_flat")),
+        "exit_order_id": close_order.get("id"),
+        "exit_client_order_id": client_id or None,
+        "closed_lots": int(state.get("owned_entry_lots") or recorded_lots),
+        "history_pending": True,
+        "history_logged": False,
     })
     save_fn(state)
     log_trade(state)
+    state["history_pending"] = False
+    state["history_logged"] = True
+    state["history_logged_at_utc"] = datetime.now(timezone.utc).isoformat()
+    save_fn(state)
+    closed_lots = int(state.get("closed_lots") or filled_lots or recorded_lots)
+    audit_event(DATA_DIR, "move_position_closed", {
+        "slot": label.lower(), "symbol": symbol, "lots": closed_lots,
+        "gross_pnl_usd": round(gross_pnl_usd, 4), "fees_usd": round(fees_usd, 4),
+        "net_pnl_usd": round(pnl_usd, 4), "exit_order_id": close_order.get("id"),
+    })
     log.info("%s straddle CLOSED. P&L: $%.2f", label, pnl_usd)
 
     _win   = pnl_usd >= 0
@@ -966,7 +2607,7 @@ def _close_position_job(state: dict, save_fn, label: str):
         f"BTC Δ   » <code>{_arrow}{abs(btc_move):.2f}%  "
         f"(${btc_entry:,.0f} → ${state.get('btc_at_exit', 0):,.0f})</code>\n"
         f"PnL     » <b>{_sign}${abs(pnl_usd):.2f}</b>\n"
-        f"Lots    » <code>{lots:,}</code>\n"
+        f"Lots    » <code>{closed_lots:,}</code>\n"
         f"Time    » <code>{datetime.now(timezone.utc).strftime('%H:%M UTC')}  (IST +5:30)</code>"
     )
 
@@ -981,9 +2622,32 @@ def _ist_label(h_utc: int, m_utc: int) -> str:
     return f"{h12}:{m:02d} {ampm} IST"
 
 
+def _scheduled_exit_due(state: dict | None, hour_utc: int,
+                        minute_utc: int) -> datetime | None:
+    """Exit instant belonging to this specific trade, including rollover."""
+    if not state or state.get("status") != "OPEN":
+        return None
+    try:
+        entry_date = datetime.strptime(str(state["entry_date"]), "%Y-%m-%d").date()
+        entry_clock = datetime.strptime(
+            str(state.get("entry_time_utc") or "00:00:00")[:8], "%H:%M:%S").time()
+    except (KeyError, TypeError, ValueError):
+        # An OPEN state with no trustworthy entry identity is not safe to
+        # schedule from; surface it rather than silently using today's date.
+        raise RuntimeError("open position has invalid entry date/time for scheduled exit")
+    entered = datetime.combine(entry_date, entry_clock, tzinfo=timezone.utc)
+    due = datetime.combine(entry_date, datetime.min.time(), tzinfo=timezone.utc).replace(
+        hour=hour_utc, minute=minute_utc)
+    if due <= entered:
+        due += timedelta(days=1)
+    return due
+
+
 def main():
     log.info("=" * 64)
     log.info("Delta MV Straddle Bot")
+    recover_pending_entries()
+    _flush_pending_move_history()
     log.info("  Morning: %02d:%02d UTC (%s)  lots=%d  side=%s  enabled=%s",
              MORNING_H_UTC, MORNING_M_UTC,
              _ist_label(MORNING_H_UTC, MORNING_M_UTC), MORNING_LOTS,
@@ -1006,15 +2670,21 @@ def main():
     if state and state.get("status") == "OPEN":
         log.info("Resuming open EVENING position: %s  (entered %s UTC, lots=%d)",
                  state.get("symbol"), state.get("entry_time_utc"), state.get("lots"))
+        if not start_tp_monitor("evening"):
+            _emergency_flatten_unprotected("evening")
     m_state = load_morning_state()
     if m_state and m_state.get("status") == "OPEN":
         log.info("Resuming open MORNING position: %s  (entered %s UTC, lots=%d)",
                  m_state.get("symbol"), m_state.get("entry_time_utc"), m_state.get("lots"))
+        if not start_tp_monitor("morning"):
+            _emergency_flatten_unprotected("morning")
 
     fired_entry        = False
-    fired_exit         = False
     fired_morning      = False
-    fired_morning_exit = False
+    next_morning_exit_retry = 0.0
+    next_evening_exit_retry = 0.0
+    next_pending_recovery = 0.0
+    next_history_flush = 0.0
     last_day           = None
     env_mtime          = ENV_FILE.stat().st_mtime if ENV_FILE.exists() else 0
     cfg_mtime          = CFG_FILE.stat().st_mtime if CFG_FILE.exists() else 0
@@ -1025,12 +2695,20 @@ def main():
             h, m    = now.hour, now.minute
             today   = now.strftime("%Y-%m-%d")
 
+            if (time.time() >= next_pending_recovery
+                    and any(DATA_DIR.glob("pending_*_entry.json"))):
+                next_pending_recovery = time.time() + 60
+                recover_pending_entries()
+            if time.time() >= next_history_flush:
+                next_history_flush = time.time() + 60
+                _flush_pending_move_history()
+
             # Reset daily flags on new UTC day
             if today != last_day:
                 fired_entry        = False
-                fired_exit         = False
                 fired_morning      = False
-                fired_morning_exit = False
+                next_morning_exit_retry = 0.0
+                next_evening_exit_retry = 0.0
                 last_day           = today
                 log.info("New UTC day: %s — daily flags reset.", today)
 
@@ -1050,18 +2728,20 @@ def main():
             # Catch-up semantics: fires any time AFTER the exit time too, so a
             # bot that was down during the exit window still closes the
             # position when it comes back (exit_job no-ops if nothing is open).
-            in_morning_exit = (MORNING_ENABLED
-                               and MORNING_EXIT_ENABLED
-                               and (h > MORNING_EXIT_H_UTC
-                                    or (h == MORNING_EXIT_H_UTC
-                                        and m >= MORNING_EXIT_WIN_START)))
-            if in_morning_exit and not fired_morning_exit:
-                fired_morning_exit = True
+            morning_open = load_morning_state()
+            morning_due = (_scheduled_exit_due(
+                morning_open, MORNING_EXIT_H_UTC, MORNING_EXIT_M_UTC)
+                if MORNING_EXIT_ENABLED and morning_open
+                and morning_open.get("status") == "OPEN" else None)
+            in_morning_exit = bool(morning_due and now >= morning_due)
+            if in_morning_exit and time.time() >= next_morning_exit_retry:
                 try:
                     morning_exit_job()
                 except Exception as exc:
+                    next_morning_exit_retry = time.time() + 60
                     log.exception("Morning exit job failed")
-                    send_telegram(f"⚠️ <b>MORNING EXIT FAILED — {TAG}</b>\n<code>{exc}</code>")
+                    send_telegram(f"⚠️ <b>MORNING EXIT FAILED — {TAG}</b>\n<code>{exc}</code>\n"
+                                  "The bot will retry in 60 seconds while state remains OPEN.")
 
             # ENTRY TRIGGER  12:05–12:14 UTC (skipped when EVENING_ENABLED=false)
             in_entry_window = (EVENING_ENABLED
@@ -1080,16 +2760,19 @@ def main():
             # Catch-up semantics like the morning exit: any time past the exit
             # time still fires, so downtime during the old 10-min window can no
             # longer leave a position riding to settlement.
-            in_exit_window = (EVENING_EXIT_ENABLED
-                              and (h > EXIT_H_UTC
-                                   or (h == EXIT_H_UTC and m >= EXIT_WIN_START)))
-            if in_exit_window and not fired_exit:
-                fired_exit = True
+            evening_open = load_state()
+            evening_due = (_scheduled_exit_due(evening_open, EXIT_H_UTC, EXIT_M_UTC)
+                           if EVENING_EXIT_ENABLED and evening_open
+                           and evening_open.get("status") == "OPEN" else None)
+            in_exit_window = bool(evening_due and now >= evening_due)
+            if in_exit_window and time.time() >= next_evening_exit_retry:
                 try:
                     exit_job()
                 except Exception as exc:
+                    next_evening_exit_retry = time.time() + 60
                     log.exception("Exit job failed")
-                    send_telegram(f"⚠️ <b>EXIT FAILED — {TAG}</b>\n<code>{exc}</code>")
+                    send_telegram(f"⚠️ <b>EXIT FAILED — {TAG}</b>\n<code>{exc}</code>\n"
+                                  "The bot will retry in 60 seconds while state remains OPEN.")
 
             # CONFIG WATCH — when .env changes (dashboard/app save, manual
             # edit), reload the whole process so new settings apply without
