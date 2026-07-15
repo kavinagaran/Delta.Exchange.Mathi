@@ -1,6 +1,6 @@
 """
-tp_monitor.py — Take-profit monitor for MV-BTC positions.
-Usage:  python tp_monitor.py [--slot morning|evening] [--user <username>]
+tp_monitor.py — TP/SL/TSL monitor for MOVE and trend-option positions.
+Usage:  python tp_monitor.py [--slot morning|evening|trend] [--user <username>]
 
 Watches one user's slot state file (users/<username>/) and market price;
 closes the position at the configured profit target using THAT user's own
@@ -8,6 +8,7 @@ Delta API keys (users/<username>/account.json, .env keys as fallback).
 Slot config (.env):
   evening: TP_TARGET_PNL, TP_POLL_SECS
   morning: TP_TARGET_PNL_MORNING, TP_POLL_SECS_MORNING
+  trend:   TP_TARGET_PNL_TREND, TP_POLL_SECS_TREND
 """
 import os, sys, time, hmac, hashlib, json, logging, requests
 from pathlib import Path
@@ -32,7 +33,7 @@ def _arg(flag: str, default: str) -> str:
 
 
 SLOT = _arg("--slot", "evening")
-if SLOT not in ("morning", "evening"):
+if SLOT not in ("morning", "evening", "trend"):
     print(f"Invalid slot: {SLOT}")
     sys.exit(1)
 
@@ -66,16 +67,22 @@ def _f(key, default=0.0):
 
 if SLOT == "morning":
     STATE_FILE = USER_DIR / "morning_state.json"
-    TARGET_PNL = _f("TP_TARGET_PNL_MORNING", 300)
+    TARGET_PNL = max(_f("TP_TARGET_PNL_MORNING", 300), 1)
     SL_PNL     = abs(_f("SL_TARGET_PNL_MORNING", 0))    # 0 = stop-loss disabled
     TSL_PNL    = abs(_f("TSL_TARGET_PNL_MORNING", 0))   # 0 = trailing stop disabled
-    POLL_SECS  = int(_f("TP_POLL_SECS_MORNING", 30))
+    POLL_SECS  = max(int(_f("TP_POLL_SECS_MORNING", 30)), 10)
+elif SLOT == "trend":
+    STATE_FILE = USER_DIR / "trend_state.json"
+    TARGET_PNL = max(_f("TP_TARGET_PNL_TREND", 100), 1)
+    SL_PNL     = abs(_f("SL_TARGET_PNL_TREND", 50))
+    TSL_PNL    = abs(_f("TSL_TARGET_PNL_TREND", 50))
+    POLL_SECS  = max(int(_f("TP_POLL_SECS_TREND", 30)), 10)
 else:
     STATE_FILE = USER_DIR / "straddle_state.json"
-    TARGET_PNL = _f("TP_TARGET_PNL", 105)
+    TARGET_PNL = max(_f("TP_TARGET_PNL", 105), 1)
     SL_PNL     = abs(_f("SL_TARGET_PNL", 0))             # 0 = stop-loss disabled
     TSL_PNL    = abs(_f("TSL_TARGET_PNL", 0))            # 0 = trailing stop disabled
-    POLL_SECS  = int(_f("TP_POLL_SECS", 30))
+    POLL_SECS  = max(int(_f("TP_POLL_SECS", 30)), 10)
 LOG_NAME = f"tp_{USER}_{SLOT}.log"
 
 HISTORY_FILE = USER_DIR / "trade_history.json"
@@ -90,6 +97,11 @@ logging.basicConfig(
     ],
 )
 log = logging.getLogger(f"tp_monitor[{USER}/{SLOT}]")
+
+
+def _slot_label():
+    return {"morning": "🌅 MORNING", "evening": "🌇 EVENING",
+            "trend": "📈 TREND OPTION"}[SLOT]
 
 
 def _sign(method, path, query="", body=""):
@@ -292,7 +304,7 @@ def close_position(state, mark, pnl, reason="take_profit"):
         STATE_FILE.write_text(json.dumps(state, indent=2), encoding="utf-8")
         append_history(state)
 
-        label = "🌅 MORNING" if SLOT == "morning" else "🌇 EVENING"
+        label = _slot_label()
         head  = {
             "take_profit":   f"✅ <b>TAKE PROFIT HIT — {label} ({USER.upper()})</b>",
             "stop_loss":     f"🛑 <b>STOP LOSS HIT — {label} ({USER.upper()})</b>",
@@ -466,7 +478,7 @@ def main():
         })
         STATE_FILE.write_text(json.dumps(st, indent=2), encoding="utf-8")
         append_history(st)
-        label = "🌅 MORNING" if SLOT == "morning" else "🌇 EVENING"
+        label = _slot_label()
         psign = "+" if real >= 0 else "-"
         head_label = {"tp": "TAKE PROFIT", "tsl": "TRAILING STOP"}.get(kind, "STOP LOSS")
         emoji = {"tp": "✅", "tsl": "🔻"}.get(kind, "🛑")

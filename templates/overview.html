@@ -8,18 +8,42 @@
 <div class="greeting">
   <div class="greeting-txt">
     <h2>Welcome Back, {{ display_name }} 👋</h2>
-    <p>Here's how your bot is doing today.</p>
+    <p>MOVE and trend-option strategies, monitored independently.</p>
   </div>
-  <div class="trend-box" id="trend-box"
-       title="1-hour BTC candles — EMA 9/21 crossover confirmed by RSI(14). UP/DOWN only when all three agree; computed on closed candles so it can't flicker mid-hour.">
-    <div class="lbl">BTC Trend · 1H</div>
-    <div class="dir c-muted" id="trend-dir">—</div>
-    <div class="sub" id="trend-sub">loading…</div>
+</div>
+
+<div class="card trend-strategy">
+  <div class="card-hd strategy-hd">
+    <div>
+      <span class="strategy-kicker">TREND OPTION STRATEGY</span>
+      <strong>BTC multi-timeframe confirmation</strong>
+    </div>
+    <span class="pill idle mini" id="trend-alignment-pill"><span class="dot"></span>CHECKING</span>
+  </div>
+  <div class="card-bd trend-workbench">
+    <div class="trend-frames" title="EMA 9/21 crossover confirmed by RSI(14), calculated only on completed candles.">
+      {% for key, label in [('5m', '5 Mins'), ('15m', '15 Mins'), ('1h', '1 Hour')] %}
+      <div class="trend-box" id="trend-box-{{ key }}">
+        <div class="lbl">BTC Trend · {{ label }}</div>
+        <div class="dir c-muted" id="trend-dir-{{ key }}">—</div>
+        <div class="sub" id="trend-sub-{{ key }}">loading…</div>
+      </div>
+      {% endfor %}
+    </div>
+    <div class="trend-action" id="trend-action">
+      <div class="trend-action-copy">
+        <span class="strategy-kicker">ENTRY GATE</span>
+        <strong>Waiting for all three trends</strong>
+        <small>A trade is enabled only when 5M, 15M and 1H point in the same direction.</small>
+      </div>
+      <button class="btn secondary" disabled>Checking signal…</button>
+    </div>
   </div>
 </div>
 
 <div class="stats" id="stats"></div>
 
+<div class="section-title"><span>MOVE contracts</span><small>Scheduled and manual entries</small></div>
 <div class="grid cols-2">
   <div class="card">
     <div class="card-hd slot-hd">🌅 <span>Morning Trade</span><span class="when" id="when-morning">5:45 AM IST</span></div>
@@ -29,6 +53,12 @@
     <div class="card-hd slot-hd">🌇 <span>Evening Trade</span><span class="when" id="when-evening">5:35 PM IST</span></div>
     <div class="card-bd" id="slot-evening"><div class="no-pos">Loading…</div></div>
   </div>
+</div>
+
+<div class="section-title"><span>Trend option position</span><small>Independent CE / PE position with its own protection</small></div>
+<div class="card trend-position-card">
+  <div class="card-hd slot-hd">📈 <span>Trend-Based CE / PE Buy</span><span class="when">2-step ITM · 5M + 15M + 1H</span></div>
+  <div class="card-bd" id="slot-trend"><div class="no-pos">Loading…</div></div>
 </div>
 
 <div class="modal-back" id="payoff-modal" onclick="if(event.target===this)closePayoff()">
@@ -70,7 +100,7 @@ function manualBtns(slot) {
   </div>`;
 }
 
-function tpRow(slot, tp) {
+function tpRow(slot, tp, positionOpen = true) {
   const t = (tp || {})[slot] || {};
   const on = !!t.running;
   return `<div class="tp-box">
@@ -79,10 +109,10 @@ function tpRow(slot, tp) {
       <span class="pill ${on ? 'live' : 'idle'} mini"><span class="dot"></span>${on ? 'RUNNING' : 'STOPPED'}</span>
       <span class="tp-spacer"></span>
       <button class="btn secondary sm" onclick="saveTp('${slot}')">Save</button>
-      <button class="btn ${on ? 'warn' : 'success'} sm" onclick="toggleTp('${slot}', ${on})">${on ? 'Stop' : 'Start'}</button>
+      <button class="btn ${on ? 'warn' : 'success'} sm" onclick="toggleTp('${slot}', ${on})" ${positionOpen ? '' : 'disabled title="Opens automatically with the trend position"'}>${on ? 'Stop' : (positionOpen ? 'Start' : 'Auto-starts on entry')}</button>
     </div>
     <div class="tp-fields">
-      <label class="fld"><span>Take profit $</span><input id="tp-target-${slot}" type="number" step="1" value="${t.target_pnl ?? ''}"></label>
+      <label class="fld"><span>Take profit $</span><input id="tp-target-${slot}" type="number" step="1" min="1" value="${t.target_pnl ?? ''}"></label>
       <label class="fld"><span>Stop loss $</span><input id="tp-sl-${slot}" type="number" step="1" min="0" value="${t.sl_pnl ?? 0}" placeholder="0 = off"></label>
       <label class="fld"><span>Trailing SL $</span><input id="tp-tsl-${slot}" type="number" step="1" min="0" value="${t.tsl_pnl ?? 0}" placeholder="0 = off"></label>
       <label class="fld"><span>Poll secs</span><input id="tp-poll-${slot}" type="number" step="5" min="10" value="${t.poll_secs ?? ''}"></label>
@@ -96,11 +126,12 @@ function tpRow(slot, tp) {
 
 function slotHtml(s, slot, tp) {
   if (!s || !s.status || s.status === 'IDLE') {
-    return `<div class="no-pos"><span class="icon">💤</span>No position</div>${manualBtns(slot)}`;
+    return `<div class="no-pos"><span class="icon">💤</span>No position</div>${manualBtns(slot)}${slot === 'trend' ? tpRow(slot, tp, false) : ''}`;
   }
   if (s.status === 'OPEN' && s.dry_run) {
     return `<div class="sim-note">⚠ SIMULATED entry — no real order was placed<br>
-      <span class="hint">${esc(s.symbol)} · Mode was DRY RUN at entry time</span></div>`;
+      <span class="hint">${esc(s.symbol)} · Mode was DRY RUN at entry time</span></div>
+      <div class="btn-row center"><button class="btn secondary sm" onclick="squareOff('${slot}')">End simulation</button></div>`;
   }
   if (s.status === 'OPEN') {
     const pnl = s.live_pnl;
@@ -125,7 +156,7 @@ function slotHtml(s, slot, tp) {
       ${tpRow(slot, tp)}`;
   }
   if (s.status === 'CLOSED' && s.dry_run) {
-    return `<div class="sim-note">⚠ SIMULATED — no real trade occurred<br><span class="hint">${esc(s.symbol)}</span></div>${manualBtns(slot)}`;
+    return `<div class="sim-note">⚠ SIMULATED — no real trade occurred<br><span class="hint">${esc(s.symbol)}</span></div>${manualBtns(slot)}${slot === 'trend' ? tpRow(slot, tp, false) : ''}`;
   }
   /* CLOSED real */
   const pnl = +s.pnl_usd;
@@ -137,15 +168,16 @@ function slotHtml(s, slot, tp) {
       <dt>Entry → Exit</dt><dd>$${fN(s.entry_mark, 2)} → $${fN(s.exit_mark, 2)}</dd>
       <dt>Trigger</dt><dd>${esc(s.exit_trigger || '—')}</dd>
     </dl>
-    ${manualBtns(slot)}`;
+    ${manualBtns(slot)}${slot === 'trend' ? tpRow(slot, tp, false) : ''}`;
 }
 
 async function loadSlots() {
   const [st, tp] = await Promise.all([jget('/api/status'), jget('/api/tp-monitor').catch(() => ({}))]);
-  const evening = { ...st }; delete evening.morning;
-  window._slots = { morning: st.morning || {}, evening, btc: +st.btc_futures_price || 0 };
+  const evening = { ...st }; delete evening.morning; delete evening.trend;
+  window._slots = { morning: st.morning || {}, evening, trend: st.trend || {}, btc: +st.btc_futures_price || 0 };
   document.getElementById('slot-morning').innerHTML = slotHtml(st.morning, 'morning', tp);
   document.getElementById('slot-evening').innerHTML = slotHtml(evening, 'evening', tp);
+  document.getElementById('slot-trend').innerHTML = slotHtml(st.trend, 'trend', tp);
   if (st.morning_entry_ist) document.getElementById('when-morning').textContent = 'Entry ' + st.morning_entry_ist;
   if (st.entry_ist)         document.getElementById('when-evening').textContent = 'Entry ' + st.entry_ist;
 }
@@ -172,7 +204,7 @@ async function loadToday() {
     return;
   }
   body.innerHTML = rows.map(t => {
-    const icon = t.slot === 'morning' ? '🌅 ' : (t.slot === 'evening' ? '🌇 ' : '');
+    const icon = t.slot === 'morning' ? '🌅 ' : (t.slot === 'evening' ? '🌇 ' : (t.slot === 'trend' ? '📈 ' : ''));
     if (t.dry_run) {
       return `<tr><td>${icon}${esc(t.symbol)}</td><td>$${fN(t.strike)}</td>
         <td>—</td><td>—</td><td>—</td><td>—</td>
@@ -228,7 +260,9 @@ async function toggleTp(slot, running) {
 async function saveTp(slot) {
   const keys = slot === 'morning'
     ? { t: 'TP_TARGET_PNL_MORNING', p: 'TP_POLL_SECS_MORNING', s: 'SL_TARGET_PNL_MORNING', ts: 'TSL_TARGET_PNL_MORNING' }
-    : { t: 'TP_TARGET_PNL',         p: 'TP_POLL_SECS',         s: 'SL_TARGET_PNL',         ts: 'TSL_TARGET_PNL' };
+    : slot === 'trend'
+      ? { t: 'TP_TARGET_PNL_TREND', p: 'TP_POLL_SECS_TREND', s: 'SL_TARGET_PNL_TREND', ts: 'TSL_TARGET_PNL_TREND' }
+      : { t: 'TP_TARGET_PNL',       p: 'TP_POLL_SECS',       s: 'SL_TARGET_PNL',       ts: 'TSL_TARGET_PNL' };
   const body = {};
   body[keys.t]  = document.getElementById(`tp-target-${slot}`).value;
   body[keys.p]  = document.getElementById(`tp-poll-${slot}`).value;
@@ -331,23 +365,75 @@ function closePayoff() {
 }
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closePayoff(); });
 
-/* ── BTC 1H trend badge ─────────────────────────────────── */
+/* ── BTC multi-timeframe trend + gated CE/PE entry ─────── */
 async function loadTrend() {
   let t;
   try { t = await jget('/api/trend'); } catch (e) { return; }
-  const dir = document.getElementById('trend-dir'), sub = document.getElementById('trend-sub');
-  if (!dir || !t) return;
   const map = {
     up:      ['▲ UPTREND',   'c-pos'],
     down:    ['▼ DOWNTREND', 'c-neg'],
     neutral: ['◆ SIDEWAYS',  'c-muted'],
   };
-  const [label, cls] = map[t.trend] || ['— N/A', 'c-muted'];
-  dir.textContent = label;
-  dir.className   = 'dir ' + cls;
-  sub.textContent = t.ema9
-    ? `EMA9 ${fN(t.ema9)} · EMA21 ${fN(t.ema21)} · RSI ${fN(t.rsi, 1)}`
-    : (t.error || '');
+  for (const key of ['5m', '15m', '1h']) {
+    const f = (t.timeframes || {})[key] || (key === '1h' ? t : {});
+    const [label, cls] = map[f.trend] || ['— N/A', 'c-muted'];
+    const dir = document.getElementById('trend-dir-' + key);
+    const sub = document.getElementById('trend-sub-' + key);
+    dir.textContent = label;
+    dir.className = 'dir ' + cls;
+    sub.textContent = f.ema9
+      ? `EMA9 ${fN(f.ema9)} · EMA21 ${fN(f.ema21)} · RSI ${fN(f.rsi, 1)}`
+      : (t.error || 'Unavailable');
+  }
+
+  const pill = document.getElementById('trend-alignment-pill');
+  const aligned = t.combined === 'up' || t.combined === 'down';
+  pill.className = `pill ${aligned ? 'live' : 'idle'} mini`;
+  pill.innerHTML = `<span class="dot"></span>${aligned ? 'ALL ' + t.combined.toUpperCase() : 'NOT ALIGNED'}`;
+
+  let p = null;
+  try { p = await jget('/api/trend-entry/preview'); } catch (e) {}
+  const action = document.getElementById('trend-action');
+  if (!p || !p.can_enter) {
+    const reason = p?.reason || p?.error || 'Trend entry is currently unavailable';
+    action.className = 'trend-action waiting';
+    action.innerHTML = `<div class="trend-action-copy">
+      <span class="strategy-kicker">ENTRY GATE</span><strong>${esc(reason)}</strong>
+      <small>No order can be placed until every timeframe confirms one direction.</small>
+    </div><button class="btn secondary" disabled>Entry locked</button>`;
+    window._trendPreview = null;
+    return;
+  }
+  window._trendPreview = p;
+  const up = p.direction === 'up';
+  action.className = 'trend-action ready ' + (up ? 'up' : 'down');
+  action.innerHTML = `<div class="trend-action-copy">
+    <span class="strategy-kicker">ALL TIMEFRAMES ${up ? 'UP' : 'DOWN'}</span>
+    <strong>Buy 2-step ITM ${esc(p.option_type)} option</strong>
+    <small>${esc(p.symbol)} · Strike $${fN(p.strike)} · ${fN(p.lots)} lots · ~$${fN(p.est_value)}</small>
+  </div>
+  <button class="btn ${up ? 'success' : 'danger'} trend-buy-btn" onclick="trendEntry()">
+    ${up ? '▲' : '▼'} Buy 2-step ITM ${esc(p.option_type)}
+  </button>`;
+}
+
+async function trendEntry() {
+  const p = window._trendPreview;
+  if (!p) { toast('The trend entry is no longer available', 'err'); return; }
+  const expiry = String(p.settlement || '').replace('T', ' ').replace('Z', ' UTC');
+  const msg = `BUY 2-STEP ITM ${p.option_type} — ALL TRENDS ${p.direction.toUpperCase()}\n\n` +
+    `Contract: ${p.symbol}\nBTC spot: $${fN(p.spot)}\nStrike:   $${fN(p.strike)}\n` +
+    `Mark:     $${fN(p.mark, 4)}\nLots:     ${fN(p.lots)}\nValue:    ~$${fN(p.est_value)}\n` +
+    `Expiry:   ${expiry}\n\n` +
+    (p.dry_run ? '⚠ Mode is DRY RUN — no real order will be placed.\n\n' : '') +
+    `Place market BUY order?`;
+  if (!confirm(msg)) return;
+  const d = await jpost('/api/trend-entry');
+  if (d.ok) {
+    toast(`Trend ${d.option_type} bought${d.dry_run ? ' (SIMULATED)' : ''}: ${fN(d.lots)} lots @ $${fN(d.fill, 4)}`, 'ok');
+    window._trendPreview = null;
+    loadAll();
+  } else toast('Trend order failed: ' + JSON.stringify(d.error || d.reason), 'err');
 }
 
 function loadAll() { loadSlots(); loadStats(); loadToday(); loadTrend(); refreshTopbar(); }

@@ -68,6 +68,19 @@
 </div>
 
 <div class="card">
+  <div class="card-hd">📈 Trend Option Strategy</div>
+  <div class="card-bd form-grid">
+    <label class="fld"><span>CE / PE lots</span><input id="c-TREND_LOTS" type="number" min="1" max="5000"></label>
+    <label class="fld" style="grid-column:span 2"><span>Entry rule</span>
+      <div class="hint" style="padding-top:9px">Manual buy unlocks only when completed 5M, 15M and 1H candles all confirm UP (2-step ITM CE) or DOWN (2-step ITM PE).</div>
+    </label>
+    <label class="fld"><span>Protection</span>
+      <div class="hint" style="padding-top:9px">Configure this strategy's TP / SL / TSL on its Overview card.</div>
+    </label>
+  </div>
+</div>
+
+<div class="card">
   <div class="card-hd">Telegram Alerts</div>
   <div class="card-bd form-grid">
     <label class="fld"><span>Alerts</span>
@@ -92,7 +105,7 @@
 const KEYS = ['DRY_RUN','STRADDLE_LOTS','STRIKE_STEP','EVENING_ENABLED','EVENING_EXIT_ENABLED',
   'EVENING_SIDE','MORNING_SIDE',
   'TELEGRAM_BOT_TOKEN','TELEGRAM_CHAT_ID','TELEGRAM_ALERTS',
-  'MORNING_ENABLED','MORNING_LOTS','MORNING_EXIT_ENABLED',
+  'MORNING_ENABLED','MORNING_LOTS','MORNING_EXIT_ENABLED','TREND_LOTS',
   'DYNAMIC_LOTS','MAX_TRADES_PER_DAY'];
 
 /* Times are edited in IST but the bot's .env stores UTC (IST = UTC+5:30). */
@@ -137,6 +150,7 @@ async function loadConfig() {
     const el = document.getElementById('c-' + k);
     if (!el) continue;
     let v = (cfg[k] ?? '').toString().trim();
+    if (!v && k === 'TREND_LOTS') v = '100';
     if (el.tagName === 'SELECT') {
       // Boolean selects (true/false options) coerce env-style values; value
       // selects (e.g. Direction buy/sell) just normalize case + default.

@@ -65,7 +65,14 @@ def _exchange_pnl(product_id: int):
 BASE     = Path(__file__).parent
 ENV_FILE = BASE / ".env"
 
-SLOTS = ("morning", "evening")
+MOVE_SLOTS = ("morning", "evening")
+SLOTS = (*MOVE_SLOTS, "trend")
+
+SLOT_STATE_FILES = {
+    "morning": "morning_state.json",
+    "evening": "straddle_state.json",
+    "trend":   "trend_state.json",
+}
 
 _tp_procs: dict = {}   # "<user>:<slot>" -> subprocess.Popen
 
@@ -150,6 +157,8 @@ CONFIG_KEYS = [
     "DYNAMIC_LOTS",
     "TP_TARGET_PNL_MORNING", "TP_POLL_SECS_MORNING", "SL_TARGET_PNL_MORNING",
     "TSL_TARGET_PNL_MORNING",
+    "TREND_LOTS", "TP_TARGET_PNL_TREND", "TP_POLL_SECS_TREND",
+    "SL_TARGET_PNL_TREND", "TSL_TARGET_PNL_TREND",
     "MAX_TRADES_PER_DAY",
 ]
 
@@ -182,8 +191,9 @@ app.permanent_session_lifetime = timedelta(days=30)
 #   account.json          credentials: display name, password hash, API keys
 #   straddle_state.json   that user's evening slot
 #   morning_state.json    that user's morning slot
+#   trend_state.json      that user's independent CE/PE trend position
 #   trade_history.json    that user's closed trades
-#   tp_evening.pid / tp_morning.pid   their TP monitor PIDs
+#   tp_evening.pid / tp_morning.pid / tp_trend.pid   TP monitor PIDs
 #
 # EVERY account is a full (primary) account: whoever is logged in trades
 # with their own Delta keys against their own state files. The scheduled
@@ -202,7 +212,7 @@ _LEGACY_ACCOUNTS_FILE = BASE / "accounts.json"
 
 _USERNAME_RE = re.compile(r"^[a-z0-9_-]{2,24}$")
 
-_DATA_FILES = ("straddle_state.json", "morning_state.json", "trade_history.json")
+_DATA_FILES = (*SLOT_STATE_FILES.values(), "trade_history.json")
 
 
 def _safe_user(username: str) -> str:
@@ -361,7 +371,7 @@ def _user_dir() -> Path:
 
 
 def _slot_file(slot: str) -> Path:
-    return _user_dir() / ("morning_state.json" if slot == "morning" else "straddle_state.json")
+    return _user_dir() / SLOT_STATE_FILES.get(slot, SLOT_STATE_FILES["evening"])
 
 
 def _hist_file() -> Path:
@@ -709,10 +719,13 @@ def _reconcile_stale_close(slot: str, state: dict, live_pids: set) -> dict:
 
 
 def _sync_states_from_exchange() -> None:
-    """Adopt the ACTIVE user's open MV-BTC straddle AND single-leg call/put
-    positions from the exchange into the correct slot (entries before 11:00
-    UTC -> morning, else evening) so manually placed trades always show.
-    Throttled to one authenticated call per user per 30s."""
+    """Adopt the ACTIVE user's positions without crossing strategy ownership.
+
+    MV-BTC contracts belong only to the morning/evening MOVE channels. A
+    vanilla BTC call/put belongs only to the independent trend channel. This
+    separation is important: each state owns its own exit orders and monitor.
+    Throttled to one authenticated call per user per 30s.
+    """
     key, secret = _active_creds()
     if not key or not secret:
         return
@@ -731,6 +744,23 @@ def _sync_states_from_exchange() -> None:
                 and str(p.get("product_symbol", "")).startswith(("MV-BTC", "C-BTC", "P-BTC"))]
         live_pids = {int(p["product_id"]) for p in live}
         states = {slot: _load_json(_slot_file(slot), {}) for slot in SLOTS}
+
+        # One-time migration for states created by the previous sync logic,
+        # which incorrectly put manually opened C/P options into a MOVE slot.
+        # This changes dashboard ownership only; it does not touch the live
+        # position or start a monitor with protection values the user has not
+        # reviewed. Newly entered trend trades start their monitor normally.
+        if states["trend"].get("status") != "OPEN":
+            for legacy_slot in MOVE_SLOTS:
+                legacy = states[legacy_slot]
+                if legacy.get("status") == "OPEN" and str(legacy.get("symbol", "")).startswith(("C-BTC", "P-BTC")):
+                    migrated = {**legacy, "slot": "trend", "migrated_from_slot": legacy_slot}
+                    idle = {"slot": legacy_slot, "status": "IDLE",
+                            "migrated_to": "trend", "migrated_product_id": legacy.get("product_id")}
+                    _slot_file("trend").write_text(json.dumps(migrated, indent=2), encoding="utf-8")
+                    _slot_file(legacy_slot).write_text(json.dumps(idle, indent=2), encoding="utf-8")
+                    states["trend"], states[legacy_slot] = migrated, idle
+                    break
         states = {slot: _reconcile_stale_close(slot, s, live_pids) for slot, s in states.items()}
         for p in live:
             pid   = int(p["product_id"])
@@ -738,26 +768,32 @@ def _sync_states_from_exchange() -> None:
             entry = float(p.get("entry_price") or 0)
             if any(_state_matches(s, pid, size, entry) for s in states.values()):
                 continue
+            product_symbol = str(p.get("product_symbol", ""))
             created = str(p.get("created_at", ""))
-            try:
-                # Bucket by IST time-of-day, not raw UTC hour — IST is UTC+5:30,
-                # so a trade at e.g. 22:54 UTC is 04:24 IST the *next* day (morning),
-                # not "evening" as a naive UTC-hour check would conclude.
-                h_utc, m_utc = int(created[11:13]), int(created[14:16])
-                ist_hour = ((h_utc * 60 + m_utc + 330) % 1440) // 60
-            except (ValueError, IndexError):
-                ist_hour = 12
-            slot = "morning" if ist_hour < 11 else "evening"
-            # Don't clobber: (1) a different open position in the slot, or
-            # (2) a close that isn't provably older than this position.
-            other = states[slot]
-            if (other.get("status") == "OPEN" and int(other.get("product_id", 0) or 0) != pid) \
-               or _closed_blocks_adoption(other, created):
-                slot = "evening" if slot == "morning" else "morning"
+            if product_symbol.startswith(("C-BTC", "P-BTC")):
+                slot = "trend"
                 other = states[slot]
                 if (other.get("status") == "OPEN" and int(other.get("product_id", 0) or 0) != pid) \
                    or _closed_blocks_adoption(other, created):
                     continue
+            else:
+                try:
+                    # Bucket MOVE positions by IST time-of-day, not raw UTC.
+                    h_utc, m_utc = int(created[11:13]), int(created[14:16])
+                    ist_hour = ((h_utc * 60 + m_utc + 330) % 1440) // 60
+                except (ValueError, IndexError):
+                    ist_hour = 12
+                slot = "morning" if ist_hour < 11 else "evening"
+                # Don't clobber a different open MOVE position; try the other
+                # MOVE channel, but never spill it into the trend channel.
+                other = states[slot]
+                if (other.get("status") == "OPEN" and int(other.get("product_id", 0) or 0) != pid) \
+                   or _closed_blocks_adoption(other, created):
+                    slot = "evening" if slot == "morning" else "morning"
+                    other = states[slot]
+                    if (other.get("status") == "OPEN" and int(other.get("product_id", 0) or 0) != pid) \
+                       or _closed_blocks_adoption(other, created):
+                        continue
             pr = req.get(f"{API_BASE}/v2/products/{pid}", timeout=6).json().get("result", {})
             cv = float(pr.get("contract_value") or 0.001)
             new_state = {
@@ -819,7 +855,9 @@ def api_status():
     _sync_states_from_exchange()
     state   = _enrich_live(_load_json(_slot_file("evening"), {}))
     morning = _enrich_live(_load_json(_slot_file("morning"), {}))
+    trend   = _enrich_live(_load_json(_slot_file("trend"), {}))
     state["morning"] = morning
+    state["trend"]   = trend
     # BTC futures (perpetual) live price
     try:
         r_btc = req.get(
@@ -899,6 +937,23 @@ def api_square_off():
     entry_mark = float(state.get("entry_mark", 0))
     cval       = float(state.get("contract_value", 0.001))
 
+    # Simulated positions have no exchange position to close. Keep the dry-run
+    # workflow usable while making it impossible for this path to place an order.
+    if state.get("dry_run"):
+        try:
+            mark = float(req.get(f"{API_BASE}/v2/tickers/{symbol}", timeout=5)
+                         .json().get("result", {}).get("mark_price") or entry_mark)
+        except Exception:
+            mark = entry_mark
+        sign = -1 if state.get("side") == "short" else 1
+        pnl = round((mark - entry_mark) * cval * lots * sign, 2)
+        state.update({"status": "CLOSED", "exit_time_utc": datetime.now(timezone.utc).strftime("%H:%M:%S"),
+                      "exit_mark": mark, "pnl_usd": pnl,
+                      "exit_trigger": "manual_squareoff_simulated"})
+        state_file.write_text(json.dumps(state, indent=2), encoding="utf-8")
+        return jsonify({"ok": True, "pnl": pnl, "fill": mark,
+                        "order_id": None, "dry_run": True})
+
     key, secret = _active_creds()
     if not key or not secret:
         return jsonify({"ok": False, "error": "API credentials not configured"}), 400
@@ -944,7 +999,8 @@ def api_square_off():
         # Place market close order (sell for long, buy-back for short)
         import json as _json
         payload = {"product_id": product_id, "size": lots,
-                   "side": close_side, "order_type": "market_order"}
+                   "side": close_side, "order_type": "market_order",
+                   "reduce_only": True}
         body    = _json.dumps(payload, separators=(",", ":"))
         hdrs    = _sign("POST", "/v2/orders", "", body)
         r       = req.post(f"{API_BASE}/v2/orders", data=body, headers=hdrs, timeout=15)
@@ -980,11 +1036,12 @@ def api_square_off():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
-def _slot_arg() -> str:
+def _slot_arg(move_only: bool = False) -> str:
     slot = request.args.get("slot", "")
     if not slot:
         slot = (request.get_json(silent=True) or {}).get("slot", "")
-    return slot if slot in SLOTS else "evening"
+    allowed = MOVE_SLOTS if move_only else SLOTS
+    return slot if slot in allowed else "evening"
 
 
 def _send_telegram(text: str) -> None:
@@ -1050,14 +1107,23 @@ def _manual_entry_lots(slot: str, mark: float, cv: float, strike: float = 0.0) -
     Delta charges the options taker fee on the underlying NOTIONAL, not the
     premium, so each lot must be funded for premium + fee or the exchange
     rejects the order with insufficient_commission."""
-    configured = int(_cfg("MORNING_LOTS", "2000") if slot == "morning"
-                     else _cfg("STRADDLE_LOTS", "800"))
+    lot_key, lot_default = {
+        "morning": ("MORNING_LOTS", "2000"),
+        "evening": ("STRADDLE_LOTS", "800"),
+        "trend":   ("TREND_LOTS", "100"),
+    }.get(slot, ("STRADDLE_LOTS", "800"))
+    try:
+        configured = max(int(_cfg(lot_key, lot_default)), 1)
+    except ValueError:
+        configured = int(lot_default)
     max_lots = int(os.getenv("MAX_ORDER_LOTS", 5000))
     if not _cfg_bool("DYNAMIC_LOTS", True):
         return min(configured, max_lots)
     try:
         hdrs = _sign("GET", "/v2/wallet/balances")
         data = req.get(f"{API_BASE}/v2/wallet/balances", headers=hdrs, timeout=8).json()
+        if not data.get("success"):
+            raise RuntimeError("wallet balance unavailable")
         bal = 0.0
         for w in data.get("result", []):
             if w.get("asset_symbol") == "USD":
@@ -1075,7 +1141,7 @@ def _manual_entry_lots(slot: str, mark: float, cv: float, strike: float = 0.0) -
 @app.route("/api/manual-entry/preview")
 def api_manual_entry_preview():
     """What a manual buy/sell would do right now: contract, strike, sizing."""
-    slot = _slot_arg()
+    slot = _slot_arg(move_only=True)
     contract = _current_atm_mv()
     if not contract:
         return jsonify({"ok": False, "error": "No live MV contract found"}), 502
@@ -1105,7 +1171,7 @@ def api_manual_entry():
     """BUY (long) or SELL (short-to-open) the current ATM straddle for a slot.
     Only allowed when the slot has no open position; afterwards the position
     is BAU — TP monitor, square-off, scheduled exits all apply."""
-    slot = _slot_arg()
+    slot = _slot_arg(move_only=True)
     data = request.get_json(silent=True) or {}
     side = (data.get("side") or request.args.get("side") or "").lower()
     if side not in ("buy", "sell"):
@@ -1226,24 +1292,28 @@ def _tp_env(slot: str):
     if slot == "morning":
         keys = ("TP_TARGET_PNL_MORNING", "TP_POLL_SECS_MORNING",
                 "SL_TARGET_PNL_MORNING", "TSL_TARGET_PNL_MORNING")
-        dflt = (300.0, 30)
+        dflt = (300.0, 30, 0.0, 0.0)
+    elif slot == "trend":
+        keys = ("TP_TARGET_PNL_TREND", "TP_POLL_SECS_TREND",
+                "SL_TARGET_PNL_TREND", "TSL_TARGET_PNL_TREND")
+        dflt = (100.0, 30, 50.0, 50.0)
     else:
         keys = ("TP_TARGET_PNL", "TP_POLL_SECS", "SL_TARGET_PNL", "TSL_TARGET_PNL")
-        dflt = (105.0, 30)
+        dflt = (105.0, 30, 0.0, 0.0)
     try:
-        target = float(_cfg(keys[0]) or dflt[0])
+        target = max(float(_cfg(keys[0]) or dflt[0]), 1.0)
     except ValueError:
         target = dflt[0]
     try:
-        poll = int(float(_cfg(keys[1]) or dflt[1]))
+        poll = max(int(float(_cfg(keys[1]) or dflt[1])), 10)
     except ValueError:
         poll = dflt[1]
-    def _loss(key):
+    def _loss(key, default=0.0):
         try:
-            return abs(float(_cfg(key) or 0))
+            return abs(float(_cfg(key) or default))
         except ValueError:
-            return 0.0
-    return target, poll, _loss(keys[2]), _loss(keys[3])
+            return default
+    return target, poll, _loss(keys[2], dflt[2]), _loss(keys[3], dflt[3])
 
 
 @app.route("/api/tp-monitor", methods=["GET"])
@@ -1571,7 +1641,7 @@ def _usd_inr_rate() -> float:
 
 
 # ─────────────────────────────────────────────────────────────
-# BTC 1H TREND — EMA 9/21 crossover + RSI(14) confirmation
+# BTC MULTI-TIMEFRAME TREND — EMA 9/21 + RSI(14) confirmation
 # ─────────────────────────────────────────────────────────────
 def _ema(vals: list, n: int) -> float:
     k = 2 / (n + 1)
@@ -1598,46 +1668,243 @@ def _rsi(vals: list, n: int = 14) -> float:
     return 100.0 if al == 0 else 100.0 - 100.0 / (1.0 + ag / al)
 
 
+TREND_TIMEFRAMES = {
+    "5m":  {"resolution": "5m",  "seconds": 300,  "label": "5M"},
+    "15m": {"resolution": "15m", "seconds": 900,  "label": "15M"},
+    "1h":  {"resolution": "1h",  "seconds": 3600, "label": "1H"},
+}
+
 _trend_cache = {"ts": 0.0, "data": None}
+
+
+def _trend_metrics(closes: list, candle_time=None) -> dict:
+    """Pure trend calculation shared by every timeframe."""
+    if len(closes) < 40:
+        raise ValueError("not enough candle data")
+    ema9, ema21, rsi = _ema(closes, 9), _ema(closes, 21), _rsi(closes, 14)
+    close = closes[-1]
+    if ema9 > ema21 and close > ema21 and rsi > 50:
+        trend = "up"
+    elif ema9 < ema21 and close < ema21 and rsi < 50:
+        trend = "down"
+    else:
+        trend = "neutral"
+    return {"trend": trend, "ema9": round(ema9, 2), "ema21": round(ema21, 2),
+            "rsi": round(rsi, 1), "close": round(close, 2),
+            "candle_time": candle_time}
+
+
+def _trend_snapshot(force: bool = False) -> dict:
+    """Return 5m/15m/1h metrics computed only from completed candles."""
+    if not force and _trend_cache["data"] and time.time() - _trend_cache["ts"] < 60:
+        return _trend_cache["data"]
+    end = int(time.time())
+    frames = {}
+    for key, spec in TREND_TIMEFRAMES.items():
+        seconds = spec["seconds"]
+        r = req.get(f"{API_BASE}/v2/history/candles",
+                    params={"resolution": spec["resolution"], "symbol": "BTCUSD",
+                            "start": end - seconds * 300, "end": end},
+                    timeout=10).json()
+        candles = sorted(r.get("result") or [], key=lambda c: c.get("time", 0))
+        current_bucket = end - end % seconds
+        if candles and candles[-1].get("time", 0) >= current_bucket:
+            candles = candles[:-1]
+        closes = [float(c["close"]) for c in candles]
+        frames[key] = _trend_metrics(closes, candles[-1].get("time") if candles else None)
+
+    directions = [frames[k]["trend"] for k in TREND_TIMEFRAMES]
+    combined = directions[0] if len(set(directions)) == 1 and directions[0] in ("up", "down") else "neutral"
+    # Preserve the original top-level 1H fields for existing Android/API clients.
+    data = {**frames["1h"], "combined": combined, "timeframes": frames,
+            "all_aligned": combined in ("up", "down")}
+    _trend_cache.update(ts=time.time(), data=data)
+    return data
 
 
 @app.route("/api/trend")
 def api_trend():
-    """BTC trend on 1-hour candles: UP only when EMA9 > EMA21 AND price >
-    EMA21 AND RSI(14) > 50 — DOWN when all three are reversed — otherwise
-    NEUTRAL (mixed signals = no trend call). Computed on COMPLETED candles
-    only, so the arrow can't flicker mid-hour; cached for 2 minutes."""
-    if _trend_cache["data"] and time.time() - _trend_cache["ts"] < 120:
-        return jsonify(_trend_cache["data"])
+    """5m, 15m and 1h BTC trends. Entry is eligible only when all align."""
     try:
-        end   = int(time.time())
-        start = end - 3600 * 300   # ~300 hourly candles
-        r = req.get(f"{API_BASE}/v2/history/candles",
-                    params={"resolution": "1h", "symbol": "BTCUSD",
-                            "start": start, "end": end},
-                    timeout=10).json()
-        candles = sorted(r.get("result") or [], key=lambda c: c.get("time", 0))
-        # Drop the in-progress hour — only closed candles count
-        if candles and candles[-1].get("time", 0) >= end - end % 3600:
-            candles = candles[:-1]
-        closes = [float(c["close"]) for c in candles]
-        if len(closes) < 40:
-            return jsonify({"trend": "na", "error": "not enough candle data"}), 502
-        ema9, ema21, rsi = _ema(closes, 9), _ema(closes, 21), _rsi(closes, 14)
-        close = closes[-1]
-        if ema9 > ema21 and close > ema21 and rsi > 50:
-            trend = "up"
-        elif ema9 < ema21 and close < ema21 and rsi < 50:
-            trend = "down"
-        else:
-            trend = "neutral"
-        data = {"trend": trend, "ema9": round(ema9, 2), "ema21": round(ema21, 2),
-                "rsi": round(rsi, 1), "close": round(close, 2),
-                "candle_time": candles[-1].get("time")}
-        _trend_cache.update(ts=time.time(), data=data)
-        return jsonify(data)
+        return jsonify(_trend_snapshot())
     except Exception as e:
-        return jsonify({"trend": "na", "error": str(e)}), 502
+        return jsonify({"trend": "na", "combined": "na", "timeframes": {},
+                        "error": str(e)}), 502
+
+
+def _pick_two_step_itm(products: list, spot: float, option_type: str) -> dict | None:
+    """Pick two strike-ladder steps ITM from ATM in the nearest usable expiry.
+
+    CE: ATM index - 2. PE: ATM index + 2. This matches the strategy's
+    historical ``itm_strike`` definition while still using live products.
+    Products, rather than STRIKE_STEP arithmetic, are authoritative because
+    Delta's strike spacing varies by expiry and market conditions.
+    """
+    prefix = "C-BTC" if option_type == "CE" else "P-BTC"
+    now_plus_buffer = datetime.now(timezone.utc) + timedelta(hours=1)
+    usable = []
+    for p in products:
+        if not str(p.get("symbol", "")).startswith(prefix):
+            continue
+        try:
+            settlement = datetime.fromisoformat(str(p.get("settlement_time", "")).replace("Z", "+00:00"))
+            strike = float(p.get("strike_price") or 0)
+        except (TypeError, ValueError):
+            continue
+        if settlement <= now_plus_buffer:
+            continue
+        usable.append((settlement, strike, p))
+    for settlement in sorted({x[0] for x in usable}):
+        batch = [x for x in usable if x[0] == settlement]
+        batch.sort(key=lambda x: x[1])
+        distinct = []
+        seen = set()
+        for _, strike, product in batch:
+            if strike not in seen:
+                seen.add(strike)
+                distinct.append((strike, product))
+        if len(distinct) < 5:
+            continue
+        atm_idx = min(range(len(distinct)), key=lambda i: abs(distinct[i][0] - spot))
+        target_idx = atm_idx - 2 if option_type == "CE" else atm_idx + 2
+        if 0 <= target_idx < len(distinct):
+            strike, product = distinct[target_idx]
+            if (option_type == "CE" and strike < spot) or (option_type == "PE" and strike > spot):
+                return product
+    return None
+
+
+def _current_trend_option(direction: str) -> tuple[dict | None, float]:
+    option_type = "CE" if direction == "up" else "PE"
+    try:
+        spot = float(req.get(f"{API_BASE}/v2/tickers/BTCUSD", timeout=6)
+                     .json().get("result", {}).get("mark_price") or 0)
+        products = req.get(f"{API_BASE}/v2/products",
+                           params={"contract_types": "call_options,put_options",
+                                   "states": "live", "page_size": 500},
+                           timeout=12).json().get("result", [])
+        return _pick_two_step_itm(products, spot, option_type), spot
+    except Exception:
+        return None, 0.0
+
+
+def _trend_entry_preview_data() -> tuple[dict, int]:
+    try:
+        trend = _trend_snapshot()
+    except Exception as e:
+        return {"ok": False, "can_enter": False, "error": str(e)}, 502
+    direction = trend.get("combined")
+    option_type = "CE" if direction == "up" else "PE" if direction == "down" else None
+    state = _load_json(_slot_file("trend"), {})
+    if state.get("status") == "OPEN":
+        return {"ok": True, "can_enter": False, "reason": "A trend position is already open",
+                "direction": direction, "option_type": option_type}, 200
+    if not option_type:
+        return {"ok": True, "can_enter": False,
+                "reason": "5M, 15M and 1H trends are not aligned",
+                "direction": direction}, 200
+    contract, spot = _current_trend_option(direction)
+    if not contract:
+        return {"ok": False, "can_enter": False,
+                "error": f"No usable 2-step ITM {option_type} contract found"}, 502
+    symbol = contract["symbol"]
+    cv = float(contract.get("contract_value") or 0.001)
+    try:
+        mark = float(req.get(f"{API_BASE}/v2/tickers/{symbol}", timeout=6)
+                     .json().get("result", {}).get("mark_price") or 0)
+    except Exception:
+        mark = 0.0
+    if mark <= 0:
+        return {"ok": False, "can_enter": False,
+                "error": f"Live mark unavailable for {symbol}"}, 502
+    lots = _manual_entry_lots("trend", mark, cv, float(contract.get("strike_price") or 0))
+    return {"ok": True, "can_enter": True, "direction": direction,
+            "option_type": option_type, "symbol": symbol, "product_id": int(contract["id"]),
+            "strike": float(contract.get("strike_price") or 0), "spot": round(spot, 2),
+            "mark": round(mark, 4), "lots": lots,
+            "est_value": round(mark * cv * lots, 2),
+            "settlement": contract.get("settlement_time", ""),
+            "contract_value": cv, "dry_run": _cfg_bool("DRY_RUN", False)}, 200
+
+
+@app.route("/api/trend-entry/preview")
+def api_trend_entry_preview():
+    data, status = _trend_entry_preview_data()
+    return jsonify(data), status
+
+
+@app.route("/api/trend-entry", methods=["POST"])
+def api_trend_entry():
+    """Buy the eligible 2-step ITM CE/PE; direction is always server-derived."""
+    _sync_states_from_exchange()
+    preview, status = _trend_entry_preview_data()
+    if status != 200 or not preview.get("can_enter"):
+        return jsonify(preview), 400 if status == 200 else status
+    key, secret = _active_creds()
+    if not key or not secret:
+        return jsonify({"ok": False, "error": "API credentials not configured"}), 400
+
+    pid, lots = int(preview["product_id"]), int(preview["lots"])
+    mark, cv = float(preview["mark"]), float(preview["contract_value"])
+    is_dry_run = bool(preview["dry_run"])
+    try:
+        if is_dry_run:
+            order = {"id": 0, "average_fill_price": mark}
+        else:
+            order = None
+            result = {}
+            for _ in range(3):
+                payload = {"product_id": pid, "size": lots, "side": "buy",
+                           "order_type": "market_order"}
+                body = json.dumps(payload, separators=(",", ":"))
+                result = req.post(f"{API_BASE}/v2/orders", data=body,
+                                  headers=_sign("POST", "/v2/orders", "", body),
+                                  timeout=15).json()
+                if result.get("success") and (result.get("result") or {}).get("id"):
+                    order = result["result"]
+                    break
+                err = result.get("error") or {}
+                new_lots = (_downsized_lots(lots, err.get("context") or {})
+                            if str(err.get("code")) in BALANCE_REJECTIONS else None)
+                if not new_lots:
+                    return jsonify({"ok": False, "error": result.get("error", result)}), 400
+                lots = new_lots
+            if order is None:
+                return jsonify({"ok": False, "error": result.get("error", result)}), 400
+
+        fill = float(order.get("average_fill_price") or mark)
+        now = datetime.now(timezone.utc)
+        new_state = {
+            "slot": "trend", "status": "OPEN", "side": "long",
+            "option_type": preview["option_type"], "trend_signal": preview["direction"],
+            "entry_date": now.strftime("%Y-%m-%d"),
+            "entry_time_utc": now.strftime("%H:%M:%S"),
+            "symbol": preview["symbol"], "product_id": pid,
+            "strike": preview["strike"], "settlement": preview["settlement"],
+            "contract_value": cv, "lots": lots, "entry_mark": round(fill, 4),
+            "btc_at_entry": preview["spot"],
+            "total_cost_usd": round(fill * cv * lots, 2),
+            "order_id": order.get("id"), "entry_trigger": "trend_alignment",
+            "dry_run": is_dry_run,
+        }
+        _slot_file("trend").write_text(json.dumps(new_state, indent=2), encoding="utf-8")
+        monitor_started = False
+        if not is_dry_run and not _tp_running(_active_user(), "trend"):
+            monitor_started = _spawn_tp(_active_user(), "trend") is not None
+        mode = " — DRY-RUN (simulated)" if is_dry_run else ""
+        _send_telegram(
+            f"📈 <b>TREND ENTRY — {preview['option_type']} ({_active_user().upper()})</b>{mode}\n"
+            f"<code>{'━' * 24}</code>\nSymbol  » <code>{preview['symbol']}</code>\n"
+            f"Signal  » <code>5M + 15M + 1H {preview['direction'].upper()}</code>\n"
+            f"Lots    » <code>{lots:,}</code>\nFill    » <code>${fill:.4f}</code>\n"
+            f"Value   » <code>${fill * cv * lots:,.2f}</code>"
+        )
+        return jsonify({"ok": True, "slot": "trend", "side": "long",
+                        "option_type": preview["option_type"], "symbol": preview["symbol"],
+                        "lots": lots, "fill": fill, "order_id": order.get("id"),
+                        "dry_run": is_dry_run, "monitor_started": monitor_started})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 @app.route("/api/wallet")
@@ -1740,8 +2007,7 @@ def _restart_tp_monitor(user: str, slot: str) -> bool:
         except Exception:
             pass
         pid_file.unlink(missing_ok=True)
-    state = _load_json(USERS_DIR / user / ("morning_state.json" if slot == "morning"
-                                           else "straddle_state.json"), {})
+    state = _load_json(USERS_DIR / user / SLOT_STATE_FILES[slot], {})
     if state.get("status") != "OPEN":
         return False
     return _spawn_tp(user, slot) is not None
@@ -1751,6 +2017,8 @@ _TP_KEYS_BY_SLOT = {
     "evening": {"TP_TARGET_PNL", "TP_POLL_SECS", "SL_TARGET_PNL", "TSL_TARGET_PNL"},
     "morning": {"TP_TARGET_PNL_MORNING", "TP_POLL_SECS_MORNING",
                 "SL_TARGET_PNL_MORNING", "TSL_TARGET_PNL_MORNING"},
+    "trend": {"TP_TARGET_PNL_TREND", "TP_POLL_SECS_TREND",
+              "SL_TARGET_PNL_TREND", "TSL_TARGET_PNL_TREND"},
 }
 
 
@@ -1823,8 +2091,7 @@ def _revive_tp_monitors():
             except (ValueError, OSError):
                 pass
             pid_file.unlink(missing_ok=True)
-            state = _load_json(udir / ("morning_state.json" if slot == "morning"
-                                       else "straddle_state.json"), {})
+            state = _load_json(udir / SLOT_STATE_FILES[slot], {})
             if state.get("status") != "OPEN":
                 continue
             proc = _spawn_tp(user, slot)
