@@ -341,6 +341,14 @@ def main():
         log.error("No open %s position in state — exiting.", SLOT)
         sys.exit(1)
 
+    configured = state.get("protection_config") or {}
+    if SLOT == "trend" and configured:
+        log.info("Trend exit policy at entry: TP +$%.2f / SL -$%.2f / TSL $%.2f / poll %ss",
+                 float(configured.get("tp_target_pnl") or TARGET_PNL),
+                 float(configured.get("sl_target_pnl") or 0),
+                 float(configured.get("tsl_target_pnl") or 0),
+                 configured.get("poll_secs") or POLL_SECS)
+
     symbol     = state["symbol"]
     entry_mark = float(state["entry_mark"])
     lots       = int(state["lots"])

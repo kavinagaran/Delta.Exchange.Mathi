@@ -1893,6 +1893,11 @@ def _execute_trend_entry(auto: bool = False):
 
         fill = float(order.get("average_fill_price") or mark)
         now = datetime.now(timezone.utc)
+        # Record the exact Trend exit policy active at entry. The dedicated
+        # monitor reads the same account config and exits on the first enabled
+        # TP, fixed SL, or trailing-SL condition; this snapshot makes the
+        # protection attached to an automatic fill visible and auditable.
+        tp_target, tp_poll, sl_target, tsl_target = _tp_env("trend")
         new_state = {
             "slot": "trend", "status": "OPEN", "side": "long",
             "option_type": preview["option_type"], "trend_signal": preview["direction"],
@@ -1907,6 +1912,10 @@ def _execute_trend_entry(auto: bool = False):
             "entry_trigger": "trend_auto" if auto else "trend_alignment",
             "auto_signal_key": preview.get("signal_key"),
             "trend_timeframes": preview.get("timeframes", {}),
+            "protection_config": {
+                "tp_target_pnl": tp_target, "sl_target_pnl": sl_target,
+                "tsl_target_pnl": tsl_target, "poll_secs": tp_poll,
+            },
             "dry_run": is_dry_run,
         }
         _slot_file("trend").write_text(json.dumps(new_state, indent=2), encoding="utf-8")
