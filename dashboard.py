@@ -280,6 +280,91 @@ CONFIG_KEYS = [
     "MOVE_VOL_LOOKBACK", "MAX_CONCURRENT_MOVE_POSITIONS",
 ]
 
+# One explicit, fail-safe profile for every editable setting on the Config
+# page. Do not derive this from .env or the strategy module's historical
+# fallbacks: those can enable live entries and differ between installations.
+# Telegram credentials are deliberately excluded because account secrets have
+# no meaningful shared default and a strategy reset must not erase them.
+CONFIG_PAGE_DEFAULTS = {
+    # Trading mode and shared guardrails
+    "DRY_RUN": "true",
+    "STRADDLE_LOTS": "1000",
+    "STRIKE_STEP": "200",
+    "MAX_ORDER_LOTS": "1000",
+    "MAX_TRADES_PER_DAY_GLOBAL": "3",
+    "MAX_DAILY_LOSS_USD": "500",
+    "MAX_OPEN_RISK_USD": "500",
+    "MAX_CONSECUTIVE_LOSSES": "3",
+    "LOSS_COOLDOWN_MINUTES": "30",
+    "MAX_ACCOUNT_PREMIUM_AT_RISK_USD": "500",
+    "RISK_FAIL_CLOSED": "true",
+    "ALLOW_EXTERNAL_POSITIONS_WITH_BOT": "false",
+    # Morning and evening MOVE slots. Times are UTC; the page renders IST.
+    "MORNING_ENABLED": "false",
+    "MORNING_SIDE": "buy",
+    "MORNING_LOTS": "1000",
+    "RISK_PER_TRADE_USD_MORNING": "200",
+    "MORNING_EXIT_ENABLED": "false",
+    "MORNING_H_UTC": "0",
+    "MORNING_M_UTC": "15",
+    "MORNING_EXIT_H_UTC": "11",
+    "MORNING_EXIT_M_UTC": "30",
+    "EVENING_ENABLED": "false",
+    "EVENING_SIDE": "buy",
+    "RISK_PER_TRADE_USD_EVENING": "200",
+    "EVENING_EXIT_ENABLED": "false",
+    "ENTRY_H_UTC": "12",
+    "ENTRY_M_UTC": "5",
+    "EXIT_H_UTC": "19",
+    "EXIT_M_UTC": "30",
+    # MOVE exposure, execution quality and value gates
+    "ALLOW_SHORT_MOVE": "false",
+    "SHORT_MAX_RISK_USD": "0",
+    "SAFE_EXECUTION_ENABLED": "true",
+    "MAX_SPREAD_PCT": "3",
+    "MAX_SLIPPAGE_PCT": "1",
+    "MIN_BOOK_DEPTH_MULTIPLE": "1",
+    "MAX_QUOTE_AGE_SEC": "20",
+    "ORDER_CHUNK_LOTS": "1000",
+    "MOVE_VALUE_FILTER_ENABLED": "true",
+    "MOVE_MIN_EDGE_PCT": "5",
+    "MOVE_MIN_TTE_MINUTES": "90",
+    "MOVE_MAX_TTE_HOURS": "30",
+    "MOVE_VOL_LOOKBACK": "96",
+    "MAX_CONCURRENT_MOVE_POSITIONS": "1",
+    # Trend signal, contract, liquidity and execution controls
+    "TREND_LOTS": "100",
+    "TREND_AUTO_ENTRY_MODE": "shadow",
+    "TREND_RISK_BUDGET_USD": "100",
+    "TREND_REENTRY_COOLDOWN_MIN": "30",
+    "TREND_EMA_GAP_PCT": "0.05",
+    "TREND_RSI_UP": "55",
+    "TREND_RSI_DOWN": "45",
+    "TREND_15M_SLOPE_BARS": "3",
+    "TREND_MIN_15M_SLOPE_PCT": "0",
+    "TREND_ADX_MIN": "18",
+    "TREND_1H_CONFIRM_SAMPLES": "2",
+    "TREND_MIN_TTE_HOURS": "4",
+    "TREND_TARGET_DELTA": "0.65",
+    "TREND_MAX_SPREAD_PCT": "12",
+    "TREND_MIN_BOOK_DEPTH_LOTS": "10",
+    "TREND_BOOK_PARTICIPATION_PCT": "25",
+    "TREND_QUOTE_MAX_AGE_SECS": "20",
+    "TREND_MAX_MARK_IV": "0",
+    "TREND_ALLOW_MISSING_BOOK": "false",
+    "TREND_MAX_SLIPPAGE_PCT": "1",
+    "TREND_ORDER_CHUNK_LOTS": "1000",
+    "TREND_MARKET_FALLBACK_ENABLED": "false",
+    "OPTION_FEE_RATE": "0.00010",
+    "OPTION_FEE_CAP_PCT": "0.035",
+    # Alert behavior resets, but its account-specific credentials do not.
+    "TELEGRAM_ALERTS": "true",
+}
+CONFIG_PAGE_PRESERVED_KEYS = ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID")
+
+assert set(CONFIG_PAGE_DEFAULTS).issubset(CONFIG_KEYS)
+assert set(CONFIG_PAGE_PRESERVED_KEYS).issubset(CONFIG_KEYS)
+
 app = Flask(__name__,
             static_folder=str(BASE / "static"), static_url_path="/static",
             template_folder=str(BASE / "templates"))
@@ -874,6 +959,8 @@ def render_page(page=""):
         page_title=title,
         display_name=(acct or {}).get("display_name",
                        os.getenv("ACCOUNT_NAME", DASH_USER.capitalize())),
+        config_page_defaults=CONFIG_PAGE_DEFAULTS,
+        config_page_preserved_keys=CONFIG_PAGE_PRESERVED_KEYS,
     )
 
 
@@ -4262,6 +4349,10 @@ def set_config():
     error = _validate_config_update(data, _user_cfg())
     if error:
         return jsonify({"ok": False, "error": error}), 400
+    if "MAX_TRADES_PER_DAY_GLOBAL" in data:
+        # The scheduler still reads this legacy alias in one pre-entry check.
+        # Keep both caps identical so the visible setting is the effective one.
+        data["MAX_TRADES_PER_DAY"] = data["MAX_TRADES_PER_DAY_GLOBAL"]
     if "TREND_AUTO_ENTRY_MODE" in data:
         # Keep old Android clients meaningful: only live mode maps to true.
         data["TREND_AUTO_ENTRY_ENABLED"] = str(data["TREND_AUTO_ENTRY_MODE"]).lower() == "live"

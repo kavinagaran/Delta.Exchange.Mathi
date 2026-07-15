@@ -197,8 +197,9 @@
 </div>
 
 <div class="btn-row">
+  <button class="btn secondary" id="config-reset" type="button" onclick="resetToDefaults()" disabled>↺ Reset to Defaults</button>
   <button class="btn" id="config-save" onclick="saveConfig()" style="padding:10px 26px" disabled>💾 Save configuration</button>
-  <span class="hint" style="align-self:center">This account's bot instance picks up saved changes within ~30 s.</span>
+  <span class="hint" style="align-self:center">Reset loads recommended values for review. Save applies changes to this account within ~30 s.</span>
 </div>
 {% endblock %}
 
@@ -227,28 +228,8 @@ const KEYS = ['DRY_RUN','STRADDLE_LOTS','STRIKE_STEP','EVENING_ENABLED','EVENING
   'TREND_ALLOW_MISSING_BOOK','OPTION_FEE_RATE','OPTION_FEE_CAP_PCT'];
 
 let configReady = false;
-const DEFAULTS = {
-  DRY_RUN:'true', MORNING_ENABLED:'false', MORNING_EXIT_ENABLED:'false',
-  EVENING_ENABLED:'false', EVENING_EXIT_ENABLED:'false',
-  TREND_LOTS:'100', TREND_AUTO_ENTRY_MODE:'shadow', MAX_ORDER_LOTS:'1000', MAX_TRADES_PER_DAY_GLOBAL:'3',
-  MAX_DAILY_LOSS_USD:'500', MAX_OPEN_RISK_USD:'500', MAX_CONSECUTIVE_LOSSES:'3',
-  LOSS_COOLDOWN_MINUTES:'30', MAX_ACCOUNT_PREMIUM_AT_RISK_USD:'500', RISK_FAIL_CLOSED:'true',
-  ALLOW_EXTERNAL_POSITIONS_WITH_BOT:'false',
-  RISK_PER_TRADE_USD_MORNING:'200', RISK_PER_TRADE_USD_EVENING:'200',
-  ALLOW_SHORT_MOVE:'false', SHORT_MAX_RISK_USD:'0', SAFE_EXECUTION_ENABLED:'true',
-  MAX_SPREAD_PCT:'3', MAX_SLIPPAGE_PCT:'1',
-  MIN_BOOK_DEPTH_MULTIPLE:'1', MAX_QUOTE_AGE_SEC:'20', ORDER_CHUNK_LOTS:'1000',
-  MOVE_VALUE_FILTER_ENABLED:'true', MOVE_MIN_EDGE_PCT:'5', MOVE_MIN_TTE_MINUTES:'90',
-  MOVE_MAX_TTE_HOURS:'30', MOVE_VOL_LOOKBACK:'96', MAX_CONCURRENT_MOVE_POSITIONS:'1',
-  TREND_EMA_GAP_PCT:'0.05', TREND_RSI_UP:'55', TREND_RSI_DOWN:'45',
-  TREND_15M_SLOPE_BARS:'3', TREND_MIN_15M_SLOPE_PCT:'0', TREND_ADX_MIN:'18',
-  TREND_1H_CONFIRM_SAMPLES:'2', TREND_MIN_TTE_HOURS:'4', TREND_TARGET_DELTA:'0.65',
-  TREND_MAX_SPREAD_PCT:'12', TREND_MIN_BOOK_DEPTH_LOTS:'10',
-  TREND_BOOK_PARTICIPATION_PCT:'25', TREND_QUOTE_MAX_AGE_SECS:'20', TREND_MAX_MARK_IV:'0',
-  TREND_RISK_BUDGET_USD:'100', TREND_MAX_SLIPPAGE_PCT:'1', TREND_ORDER_CHUNK_LOTS:'1000',
-  TREND_MARKET_FALLBACK_ENABLED:'false', TREND_REENTRY_COOLDOWN_MIN:'30',
-  TREND_ALLOW_MISSING_BOOK:'false', OPTION_FEE_RATE:'0.00010', OPTION_FEE_CAP_PCT:'0.035'
-};
+const DEFAULTS = {{ config_page_defaults | tojson }};
+const RESET_PRESERVED_KEYS = new Set({{ config_page_preserved_keys | tojson }});
 
 /* Times are edited in IST but the bot's .env stores UTC (IST = UTC+5:30). */
 const TIME_FIELDS = {
@@ -304,11 +285,23 @@ function utcHints() {
     `UTC: entry ${utcOf('t-evening-entry')} · exit ${utcOf('t-evening-exit')}`;
 }
 
+function rememberSavedPreservedValues(savedBody = null) {
+  if (!window._loadedPreservedValues) window._loadedPreservedValues = {};
+  for (const k of RESET_PRESERVED_KEYS) {
+    // Empty inputs are intentionally omitted by Save, so only advance the
+    // snapshot when that credential was actually accepted by the server.
+    if (savedBody && !Object.prototype.hasOwnProperty.call(savedBody, k)) continue;
+    window._loadedPreservedValues[k] = document.getElementById('c-' + k).value;
+  }
+}
+
 async function loadConfig() {
   const saveButton = document.getElementById('config-save');
+  const resetButton = document.getElementById('config-reset');
   const loadBanner = document.getElementById('config-load-banner');
   configReady = false;
   saveButton.disabled = true;
+  resetButton.disabled = true;
   try {
     const cfg = await jget('/api/config');
     const owns = (key) => Object.prototype.hasOwnProperty.call(cfg || {}, key);
@@ -332,7 +325,8 @@ async function loadConfig() {
       el.value = v;
     }
     for (const [id, [hk, mk]] of Object.entries(TIME_FIELDS)) {
-      const h = parseInt(cfg[hk], 10), m = parseInt(cfg[mk], 10);
+      const h = parseInt(cfg[hk] || DEFAULTS[hk], 10);
+      const m = parseInt(cfg[mk] || DEFAULTS[mk], 10);
       if (!isNaN(h) && !isNaN(m)) document.getElementById(id).value = utcToIstHHMM(h, m);
     }
     dryBanner();
@@ -342,8 +336,10 @@ async function loadConfig() {
     window._loadedMarketFallback = document.getElementById('c-TREND_MARKET_FALLBACK_ENABLED').value;
     window._loadedExternalOverride = document.getElementById('c-ALLOW_EXTERNAL_POSITIONS_WITH_BOT').value;
     window._loadedShortMove = document.getElementById('c-ALLOW_SHORT_MOVE').value;
+    rememberSavedPreservedValues();
     configReady = true;
     saveButton.disabled = false;
+    resetButton.disabled = false;
     loadBanner.style.display = 'none';
   } catch (error) {
     loadBanner.style.display = 'flex';
@@ -351,6 +347,46 @@ async function loadConfig() {
       (error && error.message ? error.message : 'Reload this page or contact the operator.');
     toast('Configuration load failed; no settings can be saved', 'err');
   }
+}
+
+function resetToDefaults() {
+  if (!configReady) {
+    toast('Configuration is not verified; Reset is locked', 'err');
+    return;
+  }
+  const missing = KEYS.filter(k => !RESET_PRESERVED_KEYS.has(k) && DEFAULTS[k] === undefined);
+  const missingTimes = Object.values(TIME_FIELDS).flat().filter(k => DEFAULTS[k] === undefined);
+  if (missing.length || missingTimes.length) {
+    toast('Reset is unavailable because the default profile is incomplete', 'err');
+    return;
+  }
+  if (!confirm(
+      'Load the recommended safe defaults for every setting on this page?\n\n' +
+      'This enables DRY RUN, disables scheduled MOVE entries and exits, changes Trend auto-entry to SHADOW, ' +
+      'and restores standard sizing, timing, risk, signal, liquidity and execution values.\n\n' +
+      'Important: after Save, any open Morning / Evening MOVE position will no longer have a scheduled ' +
+      'exit; its TP / SL / TSL, manual square-off and settlement remain available.\n\n' +
+      'Telegram token and Chat ID stay unchanged. Reset only fills this form; it does not close open ' +
+      'positions or change Overview TP / SL / TSL settings. Review the values, then select Save ' +
+      'configuration to apply them, including the displayed schedules.')) return;
+
+  for (const k of KEYS) {
+    const el = document.getElementById('c-' + k);
+    if (!el) continue;
+    if (RESET_PRESERVED_KEYS.has(k)) {
+      el.value = window._loadedPreservedValues[k];
+    } else {
+      el.value = DEFAULTS[k];
+    }
+  }
+  for (const [id, [hk, mk]] of Object.entries(TIME_FIELDS)) {
+    document.getElementById(id).value = utcToIstHHMM(
+      parseInt(DEFAULTS[hk], 10), parseInt(DEFAULTS[mk], 10));
+  }
+  dryBanner();
+  shortMoveUi();
+  utcHints();
+  toast('Recommended defaults loaded — review them, then Save configuration', 'ok');
 }
 
 async function saveConfig() {
@@ -390,7 +426,9 @@ async function saveConfig() {
     body[mk] = String(m);
   }
   const saveButton = document.getElementById('config-save');
+  const resetButton = document.getElementById('config-reset');
   saveButton.disabled = true;
+  resetButton.disabled = true;
   try {
     const d = await jpost('/api/config', body);
     if (d.ok) {
@@ -398,6 +436,7 @@ async function saveConfig() {
       window._loadedMarketFallback = fallback;
       window._loadedExternalOverride = externalOverride;
       window._loadedShortMove = shortMove;
+      rememberSavedPreservedValues(body);
       toast('Saved for this account — its bot reloads within ~30 s' +
             (d.tp_restarted?.length ? ` (TP restarted: ${d.tp_restarted.join(', ')})` : ''), 'ok');
     }
@@ -406,6 +445,7 @@ async function saveConfig() {
     toast('Save failed: ' + (error && error.message ? error.message : 'network error'), 'err');
   } finally {
     saveButton.disabled = !configReady;
+    resetButton.disabled = !configReady;
   }
 }
 
