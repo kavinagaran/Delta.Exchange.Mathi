@@ -98,6 +98,24 @@ a { color: var(--accent); text-decoration: none; }
   font-variant-numeric: tabular-nums; white-space: nowrap;
 }
 .chip b { color: var(--text); font-weight: 650; }
+.chip.btc-up {
+  color: var(--pos); border-color: #9cddc2; background: var(--pos-soft);
+  animation: btcGlowUp 1.5s ease-in-out infinite alternate;
+}
+.chip.btc-up b { color: var(--pos); }
+.chip.btc-down {
+  color: var(--neg); border-color: #f0aaa5; background: var(--neg-soft);
+  animation: btcGlowDown 1.5s ease-in-out infinite alternate;
+}
+.chip.btc-down b { color: var(--neg); }
+@keyframes btcGlowUp {
+  from { box-shadow: 0 0 0 1px rgba(8,135,93,.08), 0 0 5px rgba(8,135,93,.16); }
+  to   { box-shadow: 0 0 0 2px rgba(8,135,93,.16), 0 0 14px rgba(8,135,93,.34); }
+}
+@keyframes btcGlowDown {
+  from { box-shadow: 0 0 0 1px rgba(217,45,32,.08), 0 0 5px rgba(217,45,32,.16); }
+  to   { box-shadow: 0 0 0 2px rgba(217,45,32,.16), 0 0 14px rgba(217,45,32,.34); }
+}
 
 .pill { display: inline-flex; align-items: center; gap: 7px; padding: 5px 13px;
   border-radius: 999px; font-size: 12px; font-weight: 700; letter-spacing: .03em; }
@@ -106,6 +124,8 @@ a { color: var(--accent); text-decoration: none; }
 .pill.live .dot { animation: pulse 1.6s infinite; }
 .pill.idle   { background: var(--bg); color: var(--muted); border: 1px solid var(--border); }
 .pill.closed { background: var(--accent-soft); color: var(--accent-dark); }
+.pill.closed-profit { background: var(--pos-soft); color: var(--pos); }
+.pill.closed-loss { background: var(--neg-soft); color: var(--neg); }
 .pill.sim    { background: var(--warn-soft); color: var(--warn); }
 @keyframes pulse { 50% { opacity: .35; } }
 

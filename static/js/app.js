@@ -57,7 +57,7 @@ function _setPill(el, cls, text) {
 }
 
 function statusFromSlots(st) {
-  const slots = [st.morning || {}, { ...st, morning: undefined }];
+  const slots = [st.morning || {}, { ...st, morning: undefined, trend: undefined }, st.trend || {}];
   const open = slots.filter(s => s && s.status === 'OPEN');
   const realOpen = open.filter(s => !s.dry_run);
   if (realOpen.length) {
@@ -68,7 +68,8 @@ function statusFromSlots(st) {
   const closed = slots.filter(s => s && s.status === 'CLOSED' && !s.dry_run);
   if (closed.length) {
     const last = closed.reduce((a, b) => ((a.exit_time_utc || '') > (b.exit_time_utc || '') ? a : b));
-    return { cls: 'closed', text: `CLOSED ${f$(+last.pnl_usd)}` };
+    const pnl = +last.pnl_usd || 0;
+    return { cls: pnl >= 0 ? 'closed-profit' : 'closed-loss', text: `CLOSED ${f$(pnl)}`, pnl };
   }
   return { cls: 'idle', text: 'IDLE — waiting' };
 }
@@ -77,7 +78,18 @@ async function refreshTopbar() {
   try {
     const st = await jget('/api/status');
     const btc = document.getElementById('tb-btc');
-    if (btc) btc.innerHTML = `BTC <b>$${fN(st.btc_futures_price)}</b>`;
+    if (btc) {
+      const price = +st.btc_futures_price;
+      const previous = window._lastBtcPrice;
+      const valid = Number.isFinite(price) && price > 0;
+      btc.classList.remove('btc-up', 'btc-down');
+      if (valid && Number.isFinite(previous)) {
+        if (price > previous) btc.classList.add('btc-up');
+        else if (price < previous) btc.classList.add('btc-down');
+      }
+      if (valid) window._lastBtcPrice = price;
+      btc.innerHTML = `BTC <b>$${fN(valid ? price : null)}</b>`;
+    }
     const pill = document.getElementById('tb-pill');
     if (pill) {
       const s = statusFromSlots(st);
