@@ -107,16 +107,18 @@ function tpRow(slot, tp, positionOpen = true) {
     <div class="tp-box-hd">
       <span class="tp-title">TP / SL / TSL Monitor</span>
       <span class="pill ${on ? 'live' : 'idle'} mini"><span class="dot"></span>${on ? 'RUNNING' : 'STOPPED'}</span>
+    </div>
+    <div class="tp-control-row">
+      <div class="tp-fields">
+        <label class="fld"><span>Take profit $</span><input id="tp-target-${slot}" type="number" step="1" min="1" value="${t.target_pnl ?? ''}"></label>
+        <label class="fld"><span>Stop loss $</span><input id="tp-sl-${slot}" type="number" step="1" min="0" value="${t.sl_pnl ?? 0}" placeholder="0 = off"></label>
+        <label class="fld"><span>Trailing SL $</span><input id="tp-tsl-${slot}" type="number" step="1" min="0" value="${t.tsl_pnl ?? 0}" placeholder="0 = off"></label>
+        <label class="fld"><span>Poll secs</span><input id="tp-poll-${slot}" type="number" step="5" min="10" value="${t.poll_secs ?? ''}"></label>
+      </div>
       <span class="tp-actions">
         <button class="btn secondary sm" onclick="saveTp('${slot}')">Save</button>
         <button class="btn ${on ? 'warn' : 'success'} sm" onclick="toggleTp('${slot}', ${on})" ${positionOpen ? '' : 'disabled title="Opens automatically with the trend position"'}>${on ? 'Stop' : (positionOpen ? 'Start' : 'Auto-starts on entry')}</button>
       </span>
-    </div>
-    <div class="tp-fields">
-      <label class="fld"><span>Take profit $</span><input id="tp-target-${slot}" type="number" step="1" min="1" value="${t.target_pnl ?? ''}"></label>
-      <label class="fld"><span>Stop loss $</span><input id="tp-sl-${slot}" type="number" step="1" min="0" value="${t.sl_pnl ?? 0}" placeholder="0 = off"></label>
-      <label class="fld"><span>Trailing SL $</span><input id="tp-tsl-${slot}" type="number" step="1" min="0" value="${t.tsl_pnl ?? 0}" placeholder="0 = off"></label>
-      <label class="fld"><span>Poll secs</span><input id="tp-poll-${slot}" type="number" step="5" min="10" value="${t.poll_secs ?? ''}"></label>
     </div>
     <div class="tp-note">${t.tsl_armed
         ? `<b class="c-pos">TSL armed — floor ${f$(t.tsl_floor)}${t.tsl_on_exchange ? ' · resting stop on exchange' : ''}</b> · `
