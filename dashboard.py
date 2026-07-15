@@ -919,16 +919,23 @@ def _is_trend_client_order_id(value) -> bool:
 
 
 def _is_owned_trend_state(state: dict) -> bool:
-    """Recognise current and legacy bot-created Trend states.
+    """Recognise current, legacy, and explicitly managed Trend states.
 
     Older dashboard releases did not send a client_order_id, so their
     explicit ``trend_alignment`` / ``trend_auto`` trigger remains accepted.
     An ``exchange_sync`` C/P position is deliberately *not* accepted: it may
     have been opened manually or by another strategy on the same account.
+    The sole exception is an operator-authorized protection-only record. That
+    marker is never inferred from exchange data; it exists so an already
+    monitored external position can retain TP/SL supervision across a rollout
+    without falsely relabelling its entry as a bot trade.
     """
     if not isinstance(state, dict):
         return False
     if _is_trend_client_order_id(state.get("client_order_id")):
+        return True
+    if (state.get("operator_authorized_protection_only") is True
+            and str(state.get("ownership") or "").lower() == "external_protection_only"):
         return True
     trigger = str(state.get("entry_trigger") or "").lower()
     return trigger in {"trend_alignment", "trend_auto", "trend_recovered",

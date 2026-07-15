@@ -20,6 +20,21 @@ class MonitorHealthTests(unittest.TestCase):
         self.assertFalse(dashboard._tp_health_fresh(stale))
 
 
+class TrendOwnershipClassificationTests(unittest.TestCase):
+    def test_exchange_sync_is_external_unless_operator_explicitly_manages_protection(self):
+        external = {
+            "status": "OPEN", "entry_trigger": "exchange_sync",
+            "ownership": "external", "product_id": 42,
+        }
+        self.assertFalse(dashboard._is_owned_trend_state(external))
+        managed = {
+            **external,
+            "ownership": "external_protection_only",
+            "operator_authorized_protection_only": True,
+        }
+        self.assertTrue(dashboard._is_owned_trend_state(managed))
+
+
 class TrendFilterTests(unittest.TestCase):
     def setUp(self):
         dashboard._trend_debounce.clear()
