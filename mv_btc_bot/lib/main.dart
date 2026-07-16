@@ -2749,7 +2749,8 @@ class _AccountsPageState extends State<AccountsPage> {
         : <String, dynamic>{};
     final supported = bot['supported'] == true;
     final active = bot['active'] == true;
-    final protected = a['bot'] == true;
+    final primary = a['primary'] == true;
+    final protected = primary || a['bot'] == true;
     return Card(
       margin: const EdgeInsets.only(bottom: 10),
       child: Padding(
@@ -2788,7 +2789,7 @@ class _AccountsPageState extends State<AccountsPage> {
                               ),
                             ),
                           ),
-                          if (protected)
+                          if (primary)
                             const Padding(
                               padding: EdgeInsets.only(left: 7),
                               child: Icon(
@@ -2800,7 +2801,7 @@ class _AccountsPageState extends State<AccountsPage> {
                         ],
                       ),
                       Text(
-                        '@$user · ${a['api_key'] ?? 'No key'}',
+                        '${primary ? 'PRIMARY' : 'COEXISTENT'} · @$user · ${a['api_key'] ?? 'No key'}',
                         style: const TextStyle(color: kMuted, fontSize: 11.5),
                       ),
                     ],

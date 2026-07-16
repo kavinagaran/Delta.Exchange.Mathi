@@ -1,16 +1,16 @@
 {% extends "base.html" %}
 
 {% block content %}
-<div class="banner info">Every account is a full trading account: sign in and the whole dashboard — positions, trades, manual Buy/Sell, square-off, TP monitors — runs on <b>your</b> Delta API keys, with your data kept in your own folder on the server. <b>Auto-trade</b> runs a separate scheduled bot instance for that account (same strategy &amp; timings from Bot Config, that account's keys and money).</div>
+<div class="banner info"><b>Primary</b> identifies the main API account. <b>Coexistent</b> accounts remain full, independent trading accounts: each login uses its own Delta keys, data, positions, protection and optional auto-trade bot.</div>
 
 <div class="card">
   <div class="card-hd">Accounts</div>
   <div class="tbl-wrap">
     <table>
       <thead><tr>
-        <th>Name</th><th>Username</th><th>API Key</th><th>Secret</th><th>Auto-trade</th><th style="width:180px"></th>
+        <th>Name</th><th>Username</th><th>API Key</th><th>Secret</th><th>Role</th><th>Auto-trade</th><th style="width:180px"></th>
       </tr></thead>
-      <tbody id="acct-body"><tr class="empty-row"><td colspan="6">Loading…</td></tr></tbody>
+      <tbody id="acct-body"><tr class="empty-row"><td colspan="7">Loading…</td></tr></tbody>
     </table>
   </div>
 </div>
@@ -92,10 +92,11 @@ async function loadAccounts() {
       <td>${esc(a.username)}</td>
       <td class="mono">${esc(a.api_key || '—')}</td>
       <td>${a.has_secret ? '<span class="badge win">set</span>' : '<span class="badge loss">missing</span>'}</td>
+      <td>${a.primary ? '<span class="badge live">PRIMARY</span>' : '<span class="badge sim">COEXISTENT</span>'}</td>
       <td>${botCell}</td>
       <td>
         <button class="btn secondary sm" onclick="editAccount('${esc(a.username)}', '${esc(a.display_name || '')}')">Edit</button>
-        ${a.bot ? '' : `<button class="btn danger sm" onclick="delAccount('${esc(a.username)}')">Delete</button>`}
+        ${a.primary || a.bot ? '' : `<button class="btn danger sm" onclick="delAccount('${esc(a.username)}')">Delete</button>`}
       </td>
     </tr>`;
   }).join('');

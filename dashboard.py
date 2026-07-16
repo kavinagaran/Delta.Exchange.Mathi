@@ -398,9 +398,11 @@ app.permanent_session_lifetime = timedelta(days=30)
 #   trade_history.json    that user's closed trades
 #   tp_evening.pid / tp_morning.pid / tp_trend.pid   TP monitor PIDs
 #
-# EVERY account is a full (primary) account: whoever is logged in trades
-# with their own Delta keys against their own state files. The scheduled
-# bot engine (Delta_Straddle_Live.py) runs on BOT_USER's folder and keys.
+# Every account is a full trading account: whoever is logged in trades with
+# their own Delta keys against their own state files. PRIMARY_ACCOUNT_USER is
+# an explicit administrative/display role only; coexistent accounts retain
+# the same independent dashboard and bot capabilities.  The scheduled bot
+# engine (Delta_Straddle_Live.py) runs on BOT_USER's folder and keys.
 #
 # The Android app keeps using HTTP Basic (DASH_USER/DASH_PASS from .env) on
 # /api/* — that path must never break; it maps to DASH_USER's account.
@@ -422,6 +424,16 @@ def _safe_user(username: str) -> str:
     """Usernames become directory names — reject anything path-unsafe."""
     u = (username or "").strip().lower()
     return u if _USERNAME_RE.match(u) else ""
+
+
+def _primary_account_user() -> str:
+    """Configured main account, without coupling the role to BOT_USER.
+
+    BOT_USER remains the backward-compatible fallback so existing installs
+    keep their current protected account until PRIMARY_ACCOUNT_USER is set.
+    """
+    configured = _safe_user(os.getenv("PRIMARY_ACCOUNT_USER", ""))
+    return configured or _safe_user(BOT_USER) or _safe_user(DASH_USER) or "mathi"
 
 
 def _udir(username: str) -> Path:
@@ -501,7 +513,7 @@ def _bootstrap_users() -> None:
         legacy = legacy.get("accounts", [])
     if legacy:
         for a in legacy:
-            a.pop("primary", None)          # every account is primary now
+            a.pop("primary", None)          # role is configured centrally now
             if _safe_user(a.get("username", "")) and not _account_file(a["username"]).exists():
                 _save_account(a)
         _LEGACY_ACCOUNTS_FILE.rename(_LEGACY_ACCOUNTS_FILE.with_suffix(".json.migrated"))
@@ -843,12 +855,19 @@ def health():
 def api_me():
     acct = _session_account()
     if acct:
+        primary = acct["username"] == _primary_account_user()
         return jsonify({"username":     acct["username"],
                         "display_name": acct.get("display_name", acct["username"]),
-                        "bot":          acct["username"] == _safe_user(BOT_USER)})
-    return jsonify({"username": DASH_USER,
-                    "display_name": os.getenv("ACCOUNT_NAME", DASH_USER.capitalize()),
-                    "bot": True})
+                        "bot":          acct["username"] == _safe_user(BOT_USER),
+                        "primary":      primary,
+                        "role":         "primary" if primary else "coexistent"})
+    username = _safe_user(DASH_USER) or "mathi"
+    primary = username == _primary_account_user()
+    return jsonify({"username": username,
+                    "display_name": os.getenv("ACCOUNT_NAME", username.capitalize()),
+                    "bot": username == _safe_user(BOT_USER),
+                    "primary": primary,
+                    "role": "primary" if primary else "coexistent"})
 
 
 def _mask(s: str) -> str:
@@ -857,19 +876,31 @@ def _mask(s: str) -> str:
 
 @app.route("/api/accounts", methods=["GET"])
 def api_accounts_list():
-    return jsonify([{
-        "username":     a.get("username", ""),
-        "display_name": a.get("display_name", ""),
-        "api_key":      _mask(a.get("api_key", "")),
-        "has_secret":   bool(a.get("api_secret")),
-        "bot":          a.get("username", "").lower() == _safe_user(BOT_USER),
-    } for a in _load_accounts()])
+    primary_user = _primary_account_user()
+    rows = []
+    for account in _load_accounts():
+        username = _safe_user(account.get("username", ""))
+        primary = username == primary_user
+        rows.append({
+            "username":     username,
+            "display_name": account.get("display_name", ""),
+            "api_key":      _mask(account.get("api_key", "")),
+            "has_secret":   bool(account.get("api_secret")),
+            "bot":          username == _safe_user(BOT_USER),
+            "primary":      primary,
+            "role":         "primary" if primary else "coexistent",
+        })
+    rows.sort(key=lambda row: (
+        not row["primary"],
+        str(row.get("display_name") or row["username"]).casefold(),
+        row["username"],
+    ))
+    return jsonify(rows)
 
 
 @app.route("/api/accounts", methods=["POST"])
 def api_accounts_save():
-    """Create or update an account. Every account is a full (primary)
-    account trading its own keys against its own data folder."""
+    """Create or update a full, independent trading account."""
     data = request.get_json(silent=True) or {}
     username = _safe_user(data.get("username", ""))
     if not username:
@@ -900,6 +931,8 @@ def api_accounts_delete(username):
     acct = _find_account(username)
     if not acct:
         return jsonify({"ok": False, "error": "No such account"}), 404
+    if username == _primary_account_user():
+        return jsonify({"ok": False, "error": "The primary account cannot be deleted"}), 400
     if username == _safe_user(BOT_USER):
         return jsonify({"ok": False, "error": "The bot engine's account cannot be deleted"}), 400
     if _session_account() and _session_account()["username"] == username:
@@ -3105,9 +3138,8 @@ def _reconstruct_trades_from_orders(orders: list, skip_prefixes=("MV-BTC",)) -> 
 
 def _fetch_reconstructed_trades(skip_prefixes=("MV-BTC",)) -> list:
     """Closed round-trip trades reconstructed from the logged-in account's
-    order history. For the primary account MV symbols are skipped (the bot's
-    own log already tracks them precisely); a secondary account has no bot
-    log, so everything it traded gets reconstructed."""
+    order history. MOVE symbols are skipped by default because each account's
+    own bot history tracks them more precisely."""
     key, secret = _active_creds()
     if not key or not secret:
         return []
