@@ -3066,6 +3066,8 @@ def _reconstruct_trades_from_orders(orders: list, skip_prefixes=("MV-BTC",)) -> 
             fills.append({
                 "symbol":     symbol,
                 "product_id": o.get("product_id"),
+                "order_id":   o.get("id"),
+                "client_order_id": o.get("client_order_id"),
                 "side":       o.get("side", ""),
                 "size":       float(o.get("size", 0)),
                 "price":      float(o.get("average_fill_price")),
@@ -3075,6 +3077,28 @@ def _reconstruct_trades_from_orders(orders: list, skip_prefixes=("MV-BTC",)) -> 
             continue
     fills.sort(key=lambda f: f["time"])
 
+    def identity_list(value):
+        return [] if value in (None, "") else [value]
+
+    def new_cycle(fill: dict, net_size: float) -> dict:
+        return {
+            "net_size": net_size,
+            "entry_price": fill["price"],
+            "entry_time": fill["time"],
+            "realized_pnl": 0.0,
+            "exit_notional": 0.0,
+            "exit_qty": 0.0,
+            "product_id": fill["product_id"],
+            "entry_order_ids": identity_list(fill.get("order_id")),
+            "entry_client_order_ids": identity_list(fill.get("client_order_id")),
+            "exit_order_ids": [],
+            "exit_client_order_ids": [],
+        }
+
+    def append_identity(values: list, value) -> None:
+        if value not in (None, "") and value not in values:
+            values.append(value)
+
     state: dict = {}
     trades = []
     for f in fills:
@@ -3083,11 +3107,7 @@ def _reconstruct_trades_from_orders(orders: list, skip_prefixes=("MV-BTC",)) -> 
         st = state.get(symbol)
 
         if st is None or st["net_size"] == 0:
-            state[symbol] = {
-                "net_size": delta, "entry_price": f["price"], "entry_time": f["time"],
-                "realized_pnl": 0.0, "exit_notional": 0.0, "exit_qty": 0.0,
-                "product_id": f["product_id"],
-            }
+            state[symbol] = new_cycle(f, delta)
             continue
 
         cv = _product_info(st["product_id"])["contract_value"] if st["product_id"] else 0.001
@@ -3096,6 +3116,8 @@ def _reconstruct_trades_from_orders(orders: list, skip_prefixes=("MV-BTC",)) -> 
             old_abs, add_abs = abs(st["net_size"]), abs(delta)
             st["entry_price"] = (st["entry_price"] * old_abs + f["price"] * add_abs) / (old_abs + add_abs)
             st["net_size"] += delta
+            append_identity(st["entry_order_ids"], f.get("order_id"))
+            append_identity(st["entry_client_order_ids"], f.get("client_order_id"))
             continue
 
         old_abs, reduce_abs = abs(st["net_size"]), abs(delta)
@@ -3105,6 +3127,8 @@ def _reconstruct_trades_from_orders(orders: list, skip_prefixes=("MV-BTC",)) -> 
         st["exit_notional"] += f["price"] * matched
         st["exit_qty"]      += matched
         st["net_size"]      += delta
+        append_identity(st["exit_order_ids"], f.get("order_id"))
+        append_identity(st["exit_client_order_ids"], f.get("client_order_id"))
 
         if abs(st["net_size"]) < 1e-9:
             exit_avg = st["exit_notional"] / st["exit_qty"] if st["exit_qty"] else f["price"]
@@ -3112,6 +3136,7 @@ def _reconstruct_trades_from_orders(orders: list, skip_prefixes=("MV-BTC",)) -> 
                 "date":       st["entry_time"][:10],
                 "entry_date": st["entry_time"][:10],
                 "symbol":     symbol,
+                "product_id": st["product_id"],
                 "strike":     _parse_strike(symbol),
                 "lots":       old_abs,
                 "side":       "LONG" if sign > 0 else "SHORT",
@@ -3120,19 +3145,29 @@ def _reconstruct_trades_from_orders(orders: list, skip_prefixes=("MV-BTC",)) -> 
                 "pnl_usd":    round(st["realized_pnl"], 2),
                 "entry_time": st["entry_time"][11:],
                 "exit_time":  f["time"][11:],
+                "entry_order_ids": list(st["entry_order_ids"]),
+                "entry_client_order_ids": list(st["entry_client_order_ids"]),
+                "exit_order_ids": list(st["exit_order_ids"]),
+                "exit_client_order_ids": list(st["exit_client_order_ids"]),
+                "order_id": (st["entry_order_ids"][0]
+                             if st["entry_order_ids"] else None),
+                "client_order_id": (st["entry_client_order_ids"][0]
+                                     if st["entry_client_order_ids"] else None),
+                "exit_order_id": (st["exit_order_ids"][-1]
+                                  if st["exit_order_ids"] else None),
             })
             leftover = reduce_abs - old_abs
             if leftover > 1e-9:
                 new_sign = -1 if f["side"] == "sell" else 1
-                state[symbol] = {
-                    "net_size": leftover * new_sign, "entry_price": f["price"], "entry_time": f["time"],
-                    "realized_pnl": 0.0, "exit_notional": 0.0, "exit_qty": 0.0,
-                    "product_id": f["product_id"],
-                }
+                state[symbol] = new_cycle(f, leftover * new_sign)
             else:
-                state[symbol] = {"net_size": 0, "entry_price": 0, "entry_time": "",
-                                  "realized_pnl": 0.0, "exit_notional": 0.0, "exit_qty": 0.0,
-                                  "product_id": st["product_id"]}
+                state[symbol] = {
+                    "net_size": 0, "entry_price": 0, "entry_time": "",
+                    "realized_pnl": 0.0, "exit_notional": 0.0, "exit_qty": 0.0,
+                    "product_id": st["product_id"],
+                    "entry_order_ids": [], "entry_client_order_ids": [],
+                    "exit_order_ids": [], "exit_client_order_ids": [],
+                }
     return trades
 
 
@@ -3155,20 +3190,142 @@ def _fetch_reconstructed_trades(skip_prefixes=("MV-BTC",)) -> list:
         return []
 
 
+def _trade_phase_ids(record: dict, phase: str) -> set[str]:
+    """Stable exchange/client identities attached to one side of a trade."""
+    if phase == "entry":
+        order_keys = ("entry_order_id", "order_id", "entry_order_ids", "order_ids")
+        client_keys = ("entry_client_order_id", "client_order_id",
+                       "entry_client_order_ids", "client_order_ids")
+    else:
+        order_keys = ("exit_order_id", "close_order_id", "exit_order_ids", "close_order_ids")
+        client_keys = ("exit_client_order_id", "close_client_order_id",
+                       "exit_client_order_ids", "close_client_order_ids")
+
+    identities: set[str] = set()
+
+    def add(prefix: str, value) -> None:
+        values = value if isinstance(value, (list, tuple, set)) else [value]
+        for item in values:
+            if item not in (None, ""):
+                identities.add(f"{prefix}:{item}")
+
+    for key in order_keys:
+        add("order", record.get(key))
+    for key in client_keys:
+        add("client", record.get(key))
+    if phase == "entry":
+        for execution in record.get("executions") or []:
+            if isinstance(execution, dict):
+                add("order", execution.get("order_id"))
+                add("client", execution.get("client_order_id"))
+    return identities
+
+
+def _trade_clock_seconds(record: dict, phase: str) -> int | None:
+    value = record.get(f"{phase}_time") or record.get(f"{phase}_time_utc")
+    match = re.search(r"(\d{2}):(\d{2}):(\d{2})", str(value or ""))
+    if not match:
+        return None
+    hour, minute, second = map(int, match.groups())
+    if hour > 23 or minute > 59 or second > 59:
+        return None
+    return hour * 3600 + minute * 60 + second
+
+
+def _trade_clock_distance(left: dict, right: dict, phase: str) -> int | None:
+    a = _trade_clock_seconds(left, phase)
+    b = _trade_clock_seconds(right, phase)
+    if a is None or b is None:
+        return None
+    difference = abs(a - b)
+    return min(difference, 86_400 - difference)
+
+
+def _trade_side(record: dict) -> str:
+    side = str(record.get("side") or "").strip().lower()
+    return {"buy": "long", "sell": "short"}.get(side, side)
+
+
+def _trade_number(record: dict, key: str) -> float | None:
+    value = record.get(key)
+    if value in (None, "") or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _trades_represent_same_round_trip(tracked: dict, reconstructed: dict) -> bool:
+    """Conservatively identify one tracked trade reconstructed from orders.
+
+    Stable entry/exit order identities are authoritative. Legacy records that
+    lack comparable IDs must match every economic field and both timestamps,
+    allowing only the small exchange position-vs-order clock skew observed in
+    production.
+    """
+    if not isinstance(tracked, dict) or not isinstance(reconstructed, dict):
+        return False
+    if not tracked.get("symbol") or tracked.get("symbol") != reconstructed.get("symbol"):
+        return False
+    tracked_product = tracked.get("product_id")
+    reconstructed_product = reconstructed.get("product_id")
+    if (tracked_product not in (None, "") and reconstructed_product not in (None, "")
+            and str(tracked_product) != str(reconstructed_product)):
+        return False
+    tracked_date = tracked.get("date") or tracked.get("entry_date")
+    reconstructed_date = reconstructed.get("date") or reconstructed.get("entry_date")
+    if not tracked_date or tracked_date != reconstructed_date:
+        return False
+
+    tracked_identity = set()
+    reconstructed_identity = set()
+    for phase in ("entry", "exit"):
+        tracked_ids = _trade_phase_ids(tracked, phase)
+        reconstructed_ids = _trade_phase_ids(reconstructed, phase)
+        tracked_identity.update(tracked_ids)
+        reconstructed_identity.update(reconstructed_ids)
+        if tracked_ids & reconstructed_ids:
+            return True
+    # IDs on both records are stronger evidence than similar economics. If no
+    # same-phase identity matched, keep both; never cross-match an exit order
+    # from one trade to an entry order from a later reversal.
+    if tracked_identity and reconstructed_identity:
+        return False
+
+    tracked_entry = _trade_clock_seconds(tracked, "entry")
+    reconstructed_entry = _trade_clock_seconds(reconstructed, "entry")
+    if tracked_entry is not None and tracked_entry == reconstructed_entry:
+        # Preserve the historical exact key for sparse legacy records.
+        return True
+
+    if _trade_side(tracked) != _trade_side(reconstructed):
+        return False
+    precision = {"lots": 6, "entry_mark": 4, "exit_mark": 4, "pnl_usd": 2}
+    for key, digits in precision.items():
+        left = _trade_number(tracked, key)
+        right = _trade_number(reconstructed, key)
+        if left is None or right is None or round(left, digits) != round(right, digits):
+            return False
+    entry_distance = _trade_clock_distance(tracked, reconstructed, "entry")
+    exit_distance = _trade_clock_distance(tracked, reconstructed, "exit")
+    return (entry_distance is not None and entry_distance <= 2
+            and exit_distance is not None and exit_distance <= 2)
+
+
 def _all_trades_merged() -> list:
     """The active user's tracked trades (their trade_history.json — written
     by the bot engine, square-offs, TP monitors and stale-close reconciling)
     plus trades reconstructed from their own Delta order history for anything
-    never tracked, deduped on (symbol, date, entry_time)."""
-    def _key(t: dict) -> tuple:
-        # Bot/reconcile records store entry_time_utc; reconstructed ones
-        # store entry_time — same value, either name must match.
-        return (t.get("symbol"),
-                t.get("date") or t.get("entry_date", ""),
-                t.get("entry_time") or t.get("entry_time_utc", ""))
+    never tracked. The stored ledger is authoritative when both sources refer
+    to the same exchange round trip."""
     mv_trades    = _load_json(_hist_file(), [])
-    tracked_keys = {_key(t) for t in mv_trades}
-    other = [t for t in _fetch_reconstructed_trades() if _key(t) not in tracked_keys]
+    other = [
+        reconstructed for reconstructed in _fetch_reconstructed_trades()
+        if not any(_trades_represent_same_round_trip(tracked, reconstructed)
+                   for tracked in mv_trades)
+    ]
     merged = mv_trades + other
     for t in merged:
         # Older records (square-offs, resumed states) carry only entry_date /
