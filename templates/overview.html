@@ -279,7 +279,10 @@ async function loadToday() {
 /* ── Actions ────────────────────────────────────────────── */
 async function manualEntry(slot, side) {
   let p;
-  try { p = await jget('/api/manual-entry/preview?slot=' + slot); } catch (e) {}
+  try {
+    p = await jget('/api/manual-entry/preview?slot=' + encodeURIComponent(slot) +
+                   '&side=' + encodeURIComponent(side));
+  } catch (e) {}
   if (!p || !p.ok) { toast('Cannot fetch preview: ' + (p && p.error || 'network error'), 'err'); return; }
   const msg = `${side === 'buy' ? 'BUY (long)' : 'SELL (short — collect premium)'} — ${slot.toUpperCase()}\n\n` +
     `Contract: ${p.symbol}\nStrike:   $${fN(p.strike)}\nMark:     $${fN(p.mark, 2)} / BTC\n` +
@@ -287,7 +290,9 @@ async function manualEntry(slot, side) {
     (p.dry_run ? '⚠ Mode is DRY RUN — this will be SIMULATED, no real order placed.\n\n' : '') +
     `Place market ${side.toUpperCase()} order?`;
   if (!confirm(msg)) return;
-  const d = await jpost('/api/manual-entry?slot=' + slot, { side });
+  const d = await jpost('/api/manual-entry?slot=' + encodeURIComponent(slot), {
+    side, product_id: p.product_id, symbol: p.symbol, lots: p.lots, mark: p.mark
+  });
   if (d.ok) {
     toast(`${side.toUpperCase()} filled${d.dry_run ? ' (SIMULATED)' : ''}: ${fN(d.lots)} lots ${d.symbol} @ $${fN(d.fill, 2)}`, 'ok');
     loadAll();

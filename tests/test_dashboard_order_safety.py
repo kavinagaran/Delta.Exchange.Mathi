@@ -61,6 +61,120 @@ def test_legacy_manual_sizing_fails_closed_on_unknown_or_zero_affordability():
         assert dashboard._manual_entry_lots("evening", 10, .001, 64000) == 0
 
 
+def test_move_selector_uses_slot_horizon_and_skips_stale_nonoperational_products():
+    now = datetime(2026, 7, 17, 4, 0, tzinfo=timezone.utc)
+    products = [
+        {"id": 1, "symbol": "MV-BTC-64000-100726", "state": "live",
+         "trading_status": "operational", "settlement_time": "2026-07-10T12:00:00Z",
+         "strike_price": "64000", "underlying_asset": {"symbol": "BTC"}},
+        {"id": 2, "symbol": "MV-BTC-64000-170726", "state": "live",
+         "trading_status": "settled", "settlement_time": "2026-07-17T12:00:00Z",
+         "strike_price": "64000", "underlying_asset": {"symbol": "BTC"}},
+        {"id": 3, "symbol": "MV-BTC-64500-170726", "state": "live",
+         "trading_status": "operational", "settlement_time": "2026-07-17T12:00:00Z",
+         "strike_price": "64500", "underlying_asset": {"symbol": "BTC"}},
+        {"id": 4, "symbol": "MV-BTC-65000-180726", "state": "live",
+         "trading_status": "operational", "settlement_time": "2026-07-18T12:00:00Z",
+         "strike_price": "65000", "underlying_asset": {"symbol": "BTC"}},
+    ]
+
+    def cfg(key, default=""):
+        return {"MOVE_MIN_TTE_MINUTES": "90", "MOVE_MAX_TTE_HOURS": "40"}.get(
+            key, default)
+
+    with patch.object(dashboard, "_cfg", side_effect=cfg):
+        morning = dashboard._select_atm_mv(products, 64600, "morning", now)
+        evening = dashboard._select_atm_mv(products, 64600, "evening", now)
+
+    assert morning["id"] == 3
+    assert evening["id"] == 4
+
+
+def test_move_selector_fails_closed_when_target_cycle_has_no_eligible_product():
+    now = datetime(2026, 7, 17, 11, 0, tzinfo=timezone.utc)
+    products = [
+        {"id": 1, "symbol": "MV-BTC-64000-170726", "state": "live",
+         "trading_status": "operational", "settlement_time": "2026-07-17T12:00:00Z",
+         "strike_price": "64000"},
+        {"id": 2, "symbol": "MV-BTC-64500-170726", "state": "closed",
+         "trading_status": "operational", "settlement_time": "2026-07-17T12:00:00Z",
+         "strike_price": "64500"},
+    ]
+    with patch.object(dashboard, "_cfg", side_effect=lambda key, default="": default):
+        assert dashboard._select_atm_mv(products, 64000, "morning", now) is None
+
+
+def test_manual_preview_uses_requested_sell_side_and_rejects_zero_lot_plan():
+    contract = {
+        "id": 9, "symbol": "MV-BTC-65000-180726", "contract_value": ".001",
+        "strike_price": "65000", "settlement_time": "2026-07-18T12:00:00Z",
+    }
+    quote = {"entry_price": 10, "entry_depth": 100}
+    with dashboard.app.test_request_context(
+            "/api/manual-entry/preview?slot=evening&side=sell"), \
+            patch.object(dashboard, "_current_atm_mv", return_value=contract) as select, \
+            patch.object(dashboard, "_move_execution_quote", return_value=quote) as pricing, \
+            patch.object(dashboard, "_move_lot_plan",
+                         return_value={"lots": 0, "reason": "No affordable lots"}):
+        response, status = _response_tuple(dashboard.api_manual_entry_preview())
+
+    assert status == 409
+    assert response.get_json()["error"] == "No affordable lots"
+    select.assert_called_once_with("evening")
+    pricing.assert_called_once_with(contract["symbol"], "sell")
+
+
+def test_manual_entry_refuses_contract_that_changed_after_preview(isolated_user):
+    selected = {"id": 10, "symbol": "MV-BTC-65500-180726"}
+    with dashboard.app.test_request_context(
+            "/api/manual-entry?slot=evening", method="POST",
+            json={"side": "buy", "product_id": 9,
+                  "symbol": "MV-BTC-65000-180726", "lots": 2, "mark": 10}), \
+            patch.object(dashboard, "_active_creds", return_value=("key", "secret")), \
+            patch.object(dashboard, "_current_atm_mv", return_value=selected), \
+            patch.object(dashboard, "_strict_exchange_positions") as positions, \
+            patch.object(dashboard, "_post_dashboard_order") as submit:
+        response, status = _response_tuple(dashboard.api_manual_entry())
+
+    assert status == 409
+    assert "changed after preview" in response.get_json()["error"]
+    positions.assert_not_called()
+    submit.assert_not_called()
+
+
+def test_manual_entry_binds_preview_price_and_lots(isolated_user):
+    selected = {"id": 9, "symbol": "MV-BTC-65000-180726"}
+    with dashboard.app.test_request_context(
+            "/api/manual-entry?slot=evening", method="POST",
+            json={"side": "buy", "product_id": 9,
+                  "symbol": selected["symbol"], "lots": 2, "mark": 10}), \
+            patch.object(dashboard, "_active_creds", return_value=("key", "secret")), \
+            patch.object(dashboard, "_current_atm_mv", return_value=selected), \
+            patch.object(dashboard, "_strict_exchange_positions", return_value=[]), \
+            patch.object(dashboard, "_validate_move_entry_account", return_value=0), \
+            patch.object(dashboard, "_move_execution_quote",
+                         return_value={"entry_price": 10, "entry_depth": 100}) as pricing, \
+            patch.object(dashboard, "_move_lot_plan",
+                         return_value={"lots": 3, "reason": "sizing checks passed"}), \
+            patch.object(dashboard, "_post_dashboard_order") as submit:
+        response, status = _response_tuple(dashboard.api_manual_entry())
+
+    assert status == 409
+    assert "sizing changed after preview" in response.get_json()["error"]
+    pricing.assert_called_once_with(selected["symbol"], "buy", reference_price=10)
+    submit.assert_not_called()
+
+
+def test_overview_manual_entry_sends_side_and_exact_preview_identity():
+    source = (Path(__file__).resolve().parents[1] / "templates" / "overview.html").read_text(
+        encoding="utf-8")
+    assert "'&side=' + encodeURIComponent(side)" in source
+    assert "product_id: p.product_id" in source
+    assert "symbol: p.symbol" in source
+    assert "lots: p.lots" in source
+    assert "mark: p.mark" in source
+
+
 def test_short_plan_requires_opt_in_positive_sl_and_short_cap():
     cfg = {
         "STRADDLE_LOTS": "100", "MAX_ORDER_LOTS": "100",

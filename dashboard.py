@@ -2451,22 +2451,75 @@ def _send_telegram(text: str) -> None:
         pass
 
 
-def _current_atm_mv() -> dict | None:
-    """The live MV-BTC contract with the nearest settlement whose strike is
-    closest to the current BTC price — i.e. 'the current straddle'."""
+def _move_target_date(slot: str, now: datetime | None = None) -> str:
+    """Scheduled MOVE horizon for a dashboard manual entry.
+
+    Morning owns today's 12:00 UTC contract; Evening owns tomorrow's.  Keeping
+    the same horizon as the scheduled strategy prevents a manual click from
+    silently trading an expired or different MOVE cycle.
+    """
+    if slot not in MOVE_SLOTS:
+        raise ValueError("MOVE slot must be morning or evening")
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    target = now.date() + (timedelta(days=1) if slot == "evening" else timedelta())
+    return target.isoformat()
+
+
+def _select_atm_mv(products: list, spot: float, slot: str,
+                   now: datetime | None = None) -> dict | None:
+    """Select the closest-strike operational contract in the slot's cycle."""
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    target_date = _move_target_date(slot, now)
     try:
+        min_tte = max(float(_cfg("MOVE_MIN_TTE_MINUTES", "90")) * 60, 0)
+        max_tte = max(float(_cfg("MOVE_MAX_TTE_HOURS", "30")) * 3600, min_tte)
+    except (TypeError, ValueError):
+        min_tte, max_tte = 90 * 60, 30 * 3600
+    usable = []
+    for product in products or []:
+        if not isinstance(product, dict):
+            continue
+        if not str(product.get("symbol") or "").startswith("MV-BTC"):
+            continue
+        product_state = str(product.get("state") or "").lower()
+        if product_state and product_state != "live":
+            continue
+        underlying = (product.get("underlying_asset") or {}).get("symbol")
+        if underlying not in (None, "", "BTC"):
+            continue
+        if str(product.get("trading_status") or "").lower() != "operational":
+            continue
+        try:
+            settlement = datetime.fromisoformat(
+                str(product.get("settlement_time") or "").replace("Z", "+00:00")
+            )
+            if settlement.tzinfo is None:
+                settlement = settlement.replace(tzinfo=timezone.utc)
+            settlement = settlement.astimezone(timezone.utc)
+            strike = float(product.get("strike_price") or 0)
+        except (TypeError, ValueError):
+            continue
+        tte = (settlement - now).total_seconds()
+        if (settlement.date().isoformat() != target_date or strike <= 0
+                or tte < min_tte or tte > max_tte):
+            continue
+        usable.append(product)
+    if not usable or spot <= 0:
+        return None
+    return min(usable, key=lambda p: abs(float(p.get("strike_price") or 0) - spot))
+
+
+def _current_atm_mv(slot: str, now: datetime | None = None) -> dict | None:
+    """Fetch and validate the ATM MOVE contract for one strategy slot."""
+    try:
+        target_date = _move_target_date(slot, now)
         spot = float(req.get(f"{API_BASE}/v2/tickers/BTCUSD", timeout=6)
                      .json().get("result", {}).get("mark_price") or 0)
         prods = req.get(f"{API_BASE}/v2/products",
-                        params={"contract_types": "move_options", "states": "live"},
+                        params={"contract_types": "move_options", "states": "live",
+                                "expiry": target_date, "page_size": 50},
                         timeout=8).json().get("result", [])
-        mv = [p for p in prods if str(p.get("symbol", "")).startswith("MV-BTC")
-              and p.get("settlement_time")]
-        if not mv or spot <= 0:
-            return None
-        nearest = min(p.get("settlement_time") for p in mv)
-        batch   = [p for p in mv if p.get("settlement_time") == nearest]
-        return min(batch, key=lambda p: abs(float(p.get("strike_price") or 0) - spot))
+        return _select_atm_mv(prods, spot, slot, now)
     except Exception:
         return None
 
@@ -2734,9 +2787,13 @@ def api_manual_entry_preview():
     side = str(request.args.get("side") or "buy").lower()
     if side not in {"buy", "sell"}:
         return jsonify({"ok": False, "error": "side must be buy or sell"}), 400
-    contract = _current_atm_mv()
+    contract = _current_atm_mv(slot)
     if not contract:
-        return jsonify({"ok": False, "error": "No live MV contract found"}), 502
+        return jsonify({
+            "ok": False,
+            "error": (f"No eligible operational MV contract found for {slot} "
+                      f"target settlement {_move_target_date(slot)}"),
+        }), 502
     symbol = contract["symbol"]
     cv     = float(contract.get("contract_value") or 0.001)
     try:
@@ -2746,11 +2803,15 @@ def api_manual_entry_preview():
         return jsonify({"ok": False, "error": str(exc)}), 409
     mark = float(quote.get("entry_price") or 0)
     lots = int(plan.get("lots") or 0)
+    if lots <= 0:
+        return jsonify({"ok": False, "error": plan.get("reason") or
+                        "No lots pass every safety cap", "sizing": plan}), 409
     return jsonify({
         "ok":         True,
         "slot":       slot,
         "side":       side,
         "symbol":     symbol,
+        "product_id": int(contract.get("id") or 0),
         "strike":     float(contract.get("strike_price") or 0),
         "mark":       round(mark, 4),
         "lots":       lots,
@@ -3108,11 +3169,22 @@ def api_manual_entry():
     key, secret = _active_creds()
     if not key or not secret:
         return jsonify({"ok": False, "error": "API credentials not configured"}), 400
-
     user = _active_user()
     with account_entry_lock(_user_dir(), f"dashboard-entry:{user}:{slot}") as acquired:
         if not acquired:
             return jsonify({"ok": False, "error": "Another account exposure change is in progress"}), 409
+        try:
+            preview_product_id = int(data.get("product_id") or 0)
+            preview_lots = int(data.get("lots") or 0)
+            preview_price = float(data.get("mark") or 0)
+        except (TypeError, ValueError, OverflowError):
+            preview_product_id = preview_lots = 0
+            preview_price = 0.0
+        preview_symbol = str(data.get("symbol") or "")
+        if (preview_product_id <= 0 or preview_lots <= 0 or preview_price <= 0
+                or not math.isfinite(preview_price) or not preview_symbol):
+            return jsonify({"ok": False,
+                            "error": "A fresh MOVE preview is required before entry"}), 409
         state_file = _slot_file(slot)
         state = _load_json(state_file, {})
         try:
@@ -3166,17 +3238,35 @@ def api_manual_entry():
             if state.get("status") == "OPEN":
                 return jsonify({"ok": False, "error": f"{slot} already has an open position"}), 400
 
-            contract = _current_atm_mv()
+            contract = _current_atm_mv(slot)
             if not contract:
-                return jsonify({"ok": False, "error": "No live MV contract found"}), 502
+                return jsonify({
+                    "ok": False,
+                    "error": (f"No eligible operational MV contract found for {slot} "
+                              f"target settlement {_move_target_date(slot)}"),
+                }), 502
             product_id = int(contract.get("id") or 0)
+            if (product_id != preview_product_id
+                    or str(contract.get("symbol") or "") != preview_symbol):
+                return jsonify({
+                    "ok": False,
+                    "error": ("MOVE contract changed after preview; review the refreshed "
+                              "contract before submitting"),
+                }), 409
             positions = _strict_exchange_positions()
             unrealized = _validate_move_entry_account(positions, product_id)
-            quote = _move_execution_quote(contract["symbol"], side)
+            quote = _move_execution_quote(
+                contract["symbol"], side, reference_price=preview_price)
             plan = _move_lot_plan(slot, side, contract, quote)
             if int(plan.get("lots") or 0) <= 0:
                 return jsonify({"ok": False, "error": plan.get("reason"),
                                 "sizing": plan}), 409
+            if int(plan.get("lots") or 0) != preview_lots:
+                return jsonify({
+                    "ok": False,
+                    "error": "MOVE sizing changed after preview; review the refreshed lots",
+                    "sizing": plan,
+                }), 409
             decision = evaluate_entry(
                 _user_dir(), float(plan["proposed_risk_usd"]), _user_cfg(),
                 unrealized_pnl_usd=unrealized)
