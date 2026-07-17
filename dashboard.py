@@ -2451,35 +2451,35 @@ def _send_telegram(text: str) -> None:
         pass
 
 
-def _move_target_date(slot: str, now: datetime | None = None) -> str:
-    """Scheduled MOVE horizon for a dashboard manual entry.
+def _select_atm_mv(products: list, spot: float, slot: str,
+                   now: datetime | None = None) -> dict | None:
+    """Select the current manual-entry MOVE contract.
 
-    Morning owns today's 12:00 UTC contract; Evening owns tomorrow's.  Keeping
-    the same horizon as the scheduled strategy prevents a manual click from
-    silently trading an expired or different MOVE cycle.
+    The dashboard assigns a manual position to the active morning/evening
+    state slot, but the contract itself must be the nearest *currently listed*
+    operational settlement.  Delta may not list the next day's cycle until
+    the current cycle rolls, so forcing an evening click to tomorrow's date
+    makes otherwise valid manual entries impossible before that rollover.
     """
     if slot not in MOVE_SLOTS:
         raise ValueError("MOVE slot must be morning or evening")
     now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
-    target = now.date() + (timedelta(days=1) if slot == "evening" else timedelta())
-    return target.isoformat()
-
-
-def _select_atm_mv(products: list, spot: float, slot: str,
-                   now: datetime | None = None) -> dict | None:
-    """Select the closest-strike operational contract in the slot's cycle."""
-    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
-    target_date = _move_target_date(slot, now)
     try:
-        min_tte = max(float(_cfg("MOVE_MIN_TTE_MINUTES", "90")) * 60, 0)
-        max_tte = max(float(_cfg("MOVE_MAX_TTE_HOURS", "30")) * 3600, min_tte)
+        min_minutes = float(_cfg("MOVE_MIN_TTE_MINUTES", "90"))
+        max_hours = float(_cfg("MOVE_MAX_TTE_HOURS", "30"))
+        if (not math.isfinite(min_minutes) or not math.isfinite(max_hours)
+                or min_minutes < 0 or max_hours <= 0
+                or min_minutes / 60 >= max_hours):
+            raise ValueError("invalid MOVE TTE bounds")
+        min_tte = min_minutes * 60
+        max_tte = max_hours * 3600
     except (TypeError, ValueError):
         min_tte, max_tte = 90 * 60, 30 * 3600
     usable = []
     for product in products or []:
         if not isinstance(product, dict):
             continue
-        if not str(product.get("symbol") or "").startswith("MV-BTC"):
+        if not str(product.get("symbol") or "").startswith("MV-BTC-"):
             continue
         product_state = str(product.get("state") or "").lower()
         if product_state and product_state != "live":
@@ -2500,25 +2500,50 @@ def _select_atm_mv(products: list, spot: float, slot: str,
         except (TypeError, ValueError):
             continue
         tte = (settlement - now).total_seconds()
-        if (settlement.date().isoformat() != target_date or strike <= 0
-                or tte < min_tte or tte > max_tte):
+        if (not math.isfinite(strike) or not math.isfinite(tte)
+                or strike <= 0 or tte < min_tte or tte > max_tte):
             continue
-        usable.append(product)
-    if not usable or spot <= 0:
+        usable.append((settlement, product))
+    if not usable or not math.isfinite(spot) or spot <= 0:
         return None
-    return min(usable, key=lambda p: abs(float(p.get("strike_price") or 0) - spot))
+    nearest_settlement = min(settlement for settlement, _ in usable)
+    cycle = [product for settlement, product in usable
+             if settlement == nearest_settlement]
+    return min(cycle, key=lambda p: abs(float(p.get("strike_price") or 0) - spot))
+
+
+def _fetch_live_mv_products() -> list:
+    """Fetch every page of live MOVE products or fail closed."""
+    products = []
+    after = None
+    seen_cursors = set()
+    for _ in range(20):
+        params = {"contract_types": "move_options", "states": "live",
+                  "page_size": 100}
+        if after:
+            params["after"] = after
+        payload = req.get(f"{API_BASE}/v2/products", params=params, timeout=8).json()
+        page = payload.get("result") if isinstance(payload, dict) else None
+        if not isinstance(page, list):
+            raise RuntimeError("invalid MOVE products response")
+        products.extend(page)
+        meta = payload.get("meta") or {}
+        next_after = meta.get("after") if isinstance(meta, dict) else None
+        if not next_after:
+            return products
+        if not isinstance(next_after, str) or next_after in seen_cursors:
+            raise RuntimeError("MOVE products pagination did not advance")
+        seen_cursors.add(next_after)
+        after = next_after
+    raise RuntimeError("MOVE products pagination did not terminate")
 
 
 def _current_atm_mv(slot: str, now: datetime | None = None) -> dict | None:
-    """Fetch and validate the ATM MOVE contract for one strategy slot."""
+    """Fetch and validate the nearest eligible contract for a manual entry."""
     try:
-        target_date = _move_target_date(slot, now)
         spot = float(req.get(f"{API_BASE}/v2/tickers/BTCUSD", timeout=6)
                      .json().get("result", {}).get("mark_price") or 0)
-        prods = req.get(f"{API_BASE}/v2/products",
-                        params={"contract_types": "move_options", "states": "live",
-                                "expiry": target_date, "page_size": 50},
-                        timeout=8).json().get("result", [])
+        prods = _fetch_live_mv_products()
         return _select_atm_mv(prods, spot, slot, now)
     except Exception:
         return None
@@ -2791,8 +2816,8 @@ def api_manual_entry_preview():
     if not contract:
         return jsonify({
             "ok": False,
-            "error": (f"No eligible operational MV contract found for {slot} "
-                      f"target settlement {_move_target_date(slot)}"),
+            "error": (f"No eligible operational MV contract is currently "
+                      f"listed for manual {slot} entry"),
         }), 502
     symbol = contract["symbol"]
     cv     = float(contract.get("contract_value") or 0.001)
@@ -3242,8 +3267,8 @@ def api_manual_entry():
             if not contract:
                 return jsonify({
                     "ok": False,
-                    "error": (f"No eligible operational MV contract found for {slot} "
-                              f"target settlement {_move_target_date(slot)}"),
+                    "error": (f"No eligible operational MV contract is currently "
+                              f"listed for manual {slot} entry"),
                 }), 502
             product_id = int(contract.get("id") or 0)
             if (product_id != preview_product_id

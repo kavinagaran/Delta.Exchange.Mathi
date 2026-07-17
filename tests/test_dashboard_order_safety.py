@@ -61,7 +61,7 @@ def test_legacy_manual_sizing_fails_closed_on_unknown_or_zero_affordability():
         assert dashboard._manual_entry_lots("evening", 10, .001, 64000) == 0
 
 
-def test_move_selector_uses_slot_horizon_and_skips_stale_nonoperational_products():
+def test_manual_move_selector_uses_nearest_live_cycle_for_both_state_slots():
     now = datetime(2026, 7, 17, 4, 0, tzinfo=timezone.utc)
     products = [
         {"id": 1, "symbol": "MV-BTC-64000-100726", "state": "live",
@@ -73,9 +73,12 @@ def test_move_selector_uses_slot_horizon_and_skips_stale_nonoperational_products
         {"id": 3, "symbol": "MV-BTC-64500-170726", "state": "live",
          "trading_status": "operational", "settlement_time": "2026-07-17T12:00:00Z",
          "strike_price": "64500", "underlying_asset": {"symbol": "BTC"}},
-        {"id": 4, "symbol": "MV-BTC-65000-180726", "state": "live",
+        {"id": 4, "symbol": "MV-BTC-64600-180726", "state": "live",
          "trading_status": "operational", "settlement_time": "2026-07-18T12:00:00Z",
-         "strike_price": "65000", "underlying_asset": {"symbol": "BTC"}},
+         "strike_price": "64600", "underlying_asset": {"symbol": "BTC"}},
+        {"id": 5, "symbol": "MV-BTC-64200-170726", "state": "live",
+         "trading_status": "operational", "settlement_time": "2026-07-17T12:00:00Z",
+         "strike_price": "64200", "underlying_asset": {"symbol": "BTC"}},
     ]
 
     def cfg(key, default=""):
@@ -87,10 +90,24 @@ def test_move_selector_uses_slot_horizon_and_skips_stale_nonoperational_products
         evening = dashboard._select_atm_mv(products, 64600, "evening", now)
 
     assert morning["id"] == 3
-    assert evening["id"] == 4
+    assert evening["id"] == 3
 
 
-def test_move_selector_fails_closed_when_target_cycle_has_no_eligible_product():
+def test_manual_move_selector_rolls_to_next_cycle_when_nearest_is_below_min_tte():
+    now = datetime(2026, 7, 17, 11, 0, tzinfo=timezone.utc)
+    products = [
+        {"id": 1, "symbol": "MV-BTC-64000-170726", "state": "live",
+         "trading_status": "operational", "settlement_time": "2026-07-17T12:00:00Z",
+         "strike_price": "64000"},
+        {"id": 2, "symbol": "MV-BTC-64500-180726", "state": "live",
+         "trading_status": "operational", "settlement_time": "2026-07-18T12:00:00Z",
+         "strike_price": "64500"},
+    ]
+    with patch.object(dashboard, "_cfg", side_effect=lambda key, default="": default):
+        assert dashboard._select_atm_mv(products, 64400, "evening", now)["id"] == 2
+
+
+def test_manual_move_selector_fails_closed_when_no_product_passes_tte_and_status():
     now = datetime(2026, 7, 17, 11, 0, tzinfo=timezone.utc)
     products = [
         {"id": 1, "symbol": "MV-BTC-64000-170726", "state": "live",
@@ -99,9 +116,58 @@ def test_move_selector_fails_closed_when_target_cycle_has_no_eligible_product():
         {"id": 2, "symbol": "MV-BTC-64500-170726", "state": "closed",
          "trading_status": "operational", "settlement_time": "2026-07-17T12:00:00Z",
          "strike_price": "64500"},
+        {"id": 3, "symbol": "MV-BTC-64500-180726", "state": "live",
+         "trading_status": "operational", "settlement_time": "2026-07-18T12:00:00Z",
+         "strike_price": "nan"},
+        {"id": 4, "symbol": "MV-BTCX-64500-180726", "state": "live",
+         "trading_status": "operational", "settlement_time": "2026-07-18T12:00:00Z",
+         "strike_price": "64500"},
     ]
     with patch.object(dashboard, "_cfg", side_effect=lambda key, default="": default):
         assert dashboard._select_atm_mv(products, 64000, "morning", now) is None
+
+
+def test_live_move_products_paginates_without_requiring_future_expiry():
+    page_one = Mock()
+    page_one.json.return_value = {
+        "result": [{"id": 1}], "meta": {"after": "cursor-1"}}
+    page_two = Mock()
+    page_two.json.return_value = {
+        "result": [{"id": 2}], "meta": {"after": None}}
+
+    with patch.object(dashboard.req, "get",
+                      side_effect=[page_one, page_two]) as get:
+        products = dashboard._fetch_live_mv_products()
+
+    assert [product["id"] for product in products] == [1, 2]
+    first_params = get.call_args_list[0].kwargs["params"]
+    second_params = get.call_args_list[1].kwargs["params"]
+    assert "expiry" not in first_params
+    assert first_params["page_size"] == 100
+    assert "after" not in first_params
+    assert second_params["after"] == "cursor-1"
+
+
+def test_live_move_products_rejects_repeated_pagination_cursor():
+    response = Mock()
+    response.json.return_value = {
+        "result": [], "meta": {"after": "same-cursor"}}
+    with patch.object(dashboard.req, "get", return_value=response), \
+            pytest.raises(RuntimeError, match="did not advance"):
+        dashboard._fetch_live_mv_products()
+
+
+def test_manual_move_selector_uses_safe_defaults_for_nonfinite_tte_config():
+    now = datetime(2026, 7, 17, 11, 0, tzinfo=timezone.utc)
+    product = {
+        "id": 1, "symbol": "MV-BTC-64000-170726", "state": "live",
+        "trading_status": "operational",
+        "settlement_time": "2026-07-17T12:00:00Z",
+        "strike_price": "64000",
+    }
+    with patch.object(dashboard, "_cfg", return_value="nan"):
+        assert dashboard._select_atm_mv(
+            [product], 64000, "evening", now) is None
 
 
 def test_manual_preview_uses_requested_sell_side_and_rejects_zero_lot_plan():
