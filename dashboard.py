@@ -16,6 +16,7 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import ExitStack
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
@@ -161,7 +162,22 @@ def _tp_health_fresh(health: dict) -> bool:
         return False
 
 
-def _tp_health_matches(health: dict, state: dict, user: str, slot: str) -> bool:
+def _tp_continuity_health_fresh(health: dict) -> bool:
+    """Tighter freshness bound for hiding an adopted aggregate from External."""
+    if not health:
+        return False
+    try:
+        beat = datetime.fromisoformat(
+            str(health.get("heartbeat_utc", "")).replace("Z", "+00:00"))
+        poll = max(float(health.get("next_poll_secs") or 30), 1)
+        max_age = max(30.0, min(90.0, poll * 2 + 5))
+        return (datetime.now(timezone.utc) - beat).total_seconds() <= max_age
+    except (TypeError, ValueError):
+        return False
+
+
+def _tp_health_matches(health: dict, state: dict, user: str, slot: str, *,
+                       require_protection_identity: bool = True) -> bool:
     if str(health.get("user") or "").lower() != user.lower():
         return False
     if str(health.get("slot") or "").lower() != slot.lower():
@@ -169,11 +185,96 @@ def _tp_health_matches(health: dict, state: dict, user: str, slot: str) -> bool:
     if str(health.get("product_id") or "") != str(state.get("product_id") or ""):
         return False
     order_id = state.get("order_id") or state.get("entry_order_id")
-    if order_id and str(health.get("entry_order_id") or "") != str(order_id):
+    if str(health.get("entry_order_id") or "") != str(order_id or ""):
         return False
     client_id = state.get("client_order_id")
-    if (client_id
-            and str(health.get("entry_client_order_id") or "") != str(client_id)):
+    if (str(health.get("entry_client_order_id") or "")
+            != str(client_id or "")):
+        return False
+    try:
+        health_revision = int(health.get("protection_revision") or 0)
+        state_revision = int(state.get("protection_revision") or 0)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    if health_revision != state_revision:
+        return False
+    cycle_id = state.get("position_cycle_id")
+    if str(health.get("position_cycle_id") or "") != str(cycle_id or ""):
+        return False
+    try:
+        health_continuity_revision = int(health.get("continuity_revision") or 0)
+        state_continuity_revision = int(state.get("continuity_revision") or 0)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    if health_continuity_revision != state_continuity_revision:
+        return False
+    if not require_protection_identity:
+        return True
+
+    def protection_identity_matches(*, health_id_key: str,
+                                    state_id_key: str,
+                                    state_client_key: str,
+                                    proof_key: str,
+                                    required: bool) -> bool:
+        """Bind a protection claim to the exact identities in current state.
+
+        Revisions normally invalidate an old heartbeat, but identity clearing
+        or replacement must fail closed even if a buggy/legacy writer did not
+        bump the revision.  A complete exchange-protection claim therefore
+        requires both the state ID/client ID and the embedded strict order
+        proof.  In a local-fallback snapshot, any exchange identity that is
+        present must still agree with current state.
+        """
+        state_id = str(state.get(state_id_key) or "")
+        state_client = str(state.get(state_client_key) or "")
+        health_id = str(health.get(health_id_key) or "")
+        proof = health.get(proof_key)
+        proof_order = proof.get("order") if isinstance(proof, dict) else None
+        has_claim = bool(
+            required or state_id or health_id or proof_order
+        )
+        if not has_claim:
+            return True
+        if not state_id or health_id != state_id:
+            return False
+        if isinstance(proof_order, dict) and proof_order:
+            if str(proof_order.get("id") or "") != state_id:
+                return False
+            if (not state_client
+                    or str(proof_order.get("client_order_id") or "")
+                    != state_client):
+                return False
+            if (str(proof_order.get("product_id") or "")
+                    != str(state.get("product_id") or "")):
+                return False
+        elif required:
+            return False
+        return not required or (
+            isinstance(proof, dict) and proof.get("ok") is True
+        )
+
+    exchange_complete = health.get("exchange_protection_complete") is True
+    stop_proof = health.get("stop_order_proof")
+    stop_disabled = bool(
+        isinstance(stop_proof, dict)
+        and stop_proof.get("ok") is True
+        and str(stop_proof.get("reason") or "").lower() == "stop is disabled"
+        and not state.get("tsl_stop_order_id")
+        and not health.get("stop_order_id")
+    )
+    if not protection_identity_matches(
+            health_id_key="stop_order_id",
+            state_id_key="tsl_stop_order_id",
+            state_client_key="stop_client_order_id",
+            proof_key="stop_order_proof",
+            required=exchange_complete and not stop_disabled):
+        return False
+    if not protection_identity_matches(
+            health_id_key="tp_order_id",
+            state_id_key="tp_stop_order_id",
+            state_client_key="tp_client_order_id",
+            proof_key="tp_order_proof",
+            required=exchange_complete):
         return False
     return True
 
@@ -192,8 +293,11 @@ def _wait_for_protection(user: str, slot: str, started_at: datetime,
             current_run = heartbeat >= started_at - timedelta(seconds=2)
         except (TypeError, ValueError):
             current_run = False
-        active = (latest.get("protection_established")
-                  or latest.get("local_fallback_active"))
+        active = bool(
+            latest.get("protection_established")
+            and (latest.get("exchange_protection_complete")
+                 or latest.get("local_fallback_active"))
+        )
         if (current_run and active and _tp_health_matches(latest, expected_state, user, slot)
                 and latest.get("status") in {"healthy", "degraded", "running"}):
             return True, latest
@@ -631,6 +735,16 @@ def _history_accounting_complete(record: dict) -> bool:
     append by the dashboard poller.
     """
     if not isinstance(record, dict):
+        return False
+    if (str(record.get("accounting_status") or "").lower()
+            in {"pending", "ambiguous", "partial_reduction_unreconciled"}
+            or str(record.get("partial_exit_accounting_status") or "complete").lower()
+            != "complete"):
+        return False
+    try:
+        if int(record.get("unreconciled_partial_exit_lots") or 0) > 0:
+            return False
+    except (TypeError, ValueError, OverflowError):
         return False
 
     def finite_number(key: str) -> bool:
@@ -1111,6 +1225,40 @@ def _is_trend_client_order_id(value) -> bool:
     return str(value or "").lower().startswith("trend-")
 
 
+def _trend_position_cycle_id(product_id, entry_at, order_ids) -> str:
+    seed = "|".join((
+        str(product_id), str(entry_at),
+        ",".join(str(value) for value in (order_ids or []) if value not in (None, "")),
+    ))
+    return "trend-" + hashlib.sha256(seed.encode("utf-8")).hexdigest()[:20]
+
+
+def _exchange_timestamp_iso(value) -> str:
+    """Normalize Delta's Unix-microsecond or ISO order time to UTC ISO."""
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    try:
+        numeric = int(raw)
+        magnitude = abs(numeric)
+        if magnitude >= 100_000_000_000_000:
+            seconds = numeric / 1_000_000
+        elif magnitude >= 100_000_000_000:
+            seconds = numeric / 1_000
+        else:
+            seconds = numeric
+        return datetime.fromtimestamp(seconds, tz=timezone.utc).isoformat()
+    except (TypeError, ValueError, OSError, OverflowError):
+        pass
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc).isoformat()
+    except (TypeError, ValueError, OverflowError):
+        return ""
+
+
 def _is_owned_trend_state(state: dict) -> bool:
     """Recognise current, legacy, and explicitly managed Trend states.
 
@@ -1133,6 +1281,72 @@ def _is_owned_trend_state(state: dict) -> bool:
     trigger = str(state.get("entry_trigger") or "").lower()
     return trigger in {"trend_alignment", "trend_auto", "trend_recovered",
                        "trend_shadow_promoted"}
+
+
+def _trend_state_covers_exchange_position(state: dict, product_id: int,
+                                           signed_size: int,
+                                           health: dict | None = None,
+                                           user: str | None = None) -> bool:
+    """Whether an adopted aggregate is already covered by this Trend state.
+
+    This narrow predicate prevents the delayed margined-position feed from
+    rendering a verified Trend position a second time as external. Bot-only
+    and adopted aggregates both require a fresh, revision-matched monitor
+    proof; a newly observed excess therefore stays visible until protection
+    succeeds.
+    """
+    health = health if isinstance(health, dict) else {}
+    if (not _is_owned_trend_state(state)
+            or str(state.get("status") or "").upper() != "OPEN"
+            or not _tp_continuity_health_fresh(health)
+            or not _tp_health_matches(
+                health, state, user or _active_user(), "trend")
+            or health.get("continuity_verified") is not True
+            or health.get("protection_established") is not True):
+        return False
+    try:
+        if int(state.get("product_id") or 0) != int(product_id):
+            return False
+        signed_size = int(signed_size)
+        expected_sign = -1 if str(state.get("side") or "").lower() == "short" else 1
+        protected_lots = abs(int(float(
+            state.get("protection_lots") or state.get("lots") or 0
+        )))
+        health_size = int(health.get("continuity_verified_size"))
+        health_protected = abs(int(float(health.get("protected_lots") or 0)))
+    except (TypeError, ValueError, OverflowError):
+        return False
+    expected_size = expected_sign * protected_lots
+    exchange_coverage = health.get("exchange_protection_complete") is True
+    local_coverage = bool(
+        health.get("local_fallback_active")
+        and _tp_running(user or _active_user(), "trend")
+    )
+    has_coverage = exchange_coverage or local_coverage
+    return (
+        signed_size != 0
+        and signed_size == expected_size
+        and health_size == expected_size
+        and health_protected == protected_lots
+        and has_coverage
+    )
+
+
+def _open_owned_trend_same_product(state: dict, product_id: int) -> bool:
+    """Keep an existing Trend ownership record authoritative during sync.
+
+    A size/basis mismatch is work for the real-time protection monitor.  The
+    dashboard's slower margined-position snapshot must never recover over the
+    existing record because doing so would relabel external lots as bot-owned
+    and discard the cycle/protection revisions used by that monitor.
+    """
+    if (not _is_owned_trend_state(state)
+            or str(state.get("status") or "").upper() != "OPEN"):
+        return False
+    try:
+        return int(state.get("product_id") or 0) == int(product_id)
+    except (TypeError, ValueError, OverflowError):
+        return False
 
 
 def _owned_trend_order(orders: list, product_id: int) -> dict | None:
@@ -1222,8 +1436,9 @@ def _sync_states_from_exchange() -> None:
     MOVE positions retain their historical time-slot reconciliation. A BTC
     C/P position is attached to Trend only when its opening order carries our
     ``trend-`` client ID (or an already-open legacy Trend state explicitly
-    says it came from a Trend trigger). All other C/P positions are exposed as
-    external and never receive this strategy's TP/SL orders.
+    says it came from a Trend trigger). An exact same-product/same-direction
+    addition is hidden from the external list only after the protection monitor
+    has durably adopted it; all unrelated C/P positions remain external.
     """
     _flush_pending_history()
     key, secret = _active_creds()
@@ -1244,6 +1459,7 @@ def _sync_states_from_exchange() -> None:
                 and str(p.get("product_symbol", "")).startswith(("MV-BTC", "C-BTC", "P-BTC"))]
         live_pids = {int(p["product_id"]) for p in live}
         states = {slot: _load_json(_slot_file(slot), {}) for slot in SLOTS}
+        trend_health = _tp_health(user, "trend")
 
         # Order history is ownership evidence for recovery after a dashboard
         # restart. Failure to fetch it is fail-closed: unknown C/P positions
@@ -1290,18 +1506,50 @@ def _sync_states_from_exchange() -> None:
             pid   = int(p["product_id"])
             size  = int(float(p["size"]))
             entry = float(p.get("entry_price") or 0)
-            if any(_state_matches(s, pid, size, entry) for s in states.values()):
-                continue
             product_symbol = str(p.get("product_symbol", ""))
-            created = str(p.get("created_at", ""))
+            # Option ownership is hidden only by a fresh strict Trend health
+            # proof below. The generic state matcher has no protection or
+            # continuity generation and could otherwise conceal an aggregate
+            # while resizing, after a dead heartbeat, or after a same-size
+            # cycle replacement.
+            if (not product_symbol.startswith(("C-BTC", "P-BTC"))
+                    and any(_state_matches(s, pid, size, entry)
+                            for s in states.values())):
+                continue
+            created = (_exchange_timestamp_iso(p.get("created_at"))
+                       or str(p.get("created_at", "")))
             if product_symbol.startswith(("C-BTC", "P-BTC")):
                 slot = "trend"
                 other = states[slot]
+                if _trend_state_covers_exchange_position(
+                        other, pid, size, trend_health, user):
+                    continue
+                if (str(other.get("status") or "").upper() == "OWNERSHIP_AMBIGUOUS"
+                        or str(other.get("continuity_status") or "")
+                        == "broken_reopened"):
+                    row = _external_option_view(p)
+                    row["ownership"] = "external_after_trend_cycle_close"
+                    external.append(row)
+                    continue
+                if _open_owned_trend_same_product(other, pid):
+                    # Preserve the complete Trend cycle and expose the
+                    # mismatched aggregate until the real-time monitor has
+                    # proven continuity, adopted/rebased it, and published a
+                    # matching protection revision.  Never run order-history
+                    # recovery over an already-owned OPEN same-product state.
+                    row = _external_option_view(p)
+                    row["ownership"] = "pending_trend_reconciliation"
+                    row["trend_state_lots"] = abs(int(float(
+                        other.get("protection_lots") or other.get("lots") or 0
+                    )))
+                    external.append(row)
+                    continue
                 owned_order = _owned_trend_order(orders, pid) if size > 0 else None
                 if not owned_order:
                     external.append(_external_option_view(p))
                     continue
-                created = str(owned_order.get("created_at") or created)
+                created = (_exchange_timestamp_iso(owned_order.get("created_at"))
+                           or created)
                 if (other.get("status") == "OPEN"
                         and int(other.get("product_id", 0) or 0) != pid) \
                    or _closed_blocks_adoption(other, created):
@@ -1351,6 +1599,28 @@ def _sync_states_from_exchange() -> None:
                     "client_order_id": owned_order.get("client_order_id"),
                     "order_id": owned_order.get("id"),
                     "ownership": "trend_bot",
+                    "owned_entry_lots": abs(size),
+                    "original_owned_entry_lots": abs(size),
+                    "protection_lots": abs(size),
+                    "max_protected_lots": abs(size),
+                    "protection_revision": 0,
+                    "continuity_revision": 0,
+                    "position_cycle_id": _trend_position_cycle_id(
+                        pid, created, [owned_order.get("id")]),
+                    "continuity_anchor_utc": created,
+                    "continuity_verified": False,
+                    "continuity_status": "awaiting_monitor_verification",
+                    "original_bot_entry_mark": entry,
+                    "original_bot_entry_fee_usd": _order_commission_optional_usd(
+                        owned_order),
+                    "original_bot_entry_fee_source": (
+                        "exchange" if _order_commission_optional_usd(owned_order)
+                        is not None else "fee_pending"
+                    ),
+                    "cycle_entry_lots_total": abs(size),
+                    "cycle_exit_lots_total": 0,
+                    "partial_exit_accounting_status": "complete",
+                    "position_composition": "bot_only",
                 })
             _atomic_write_json(_slot_file(slot), new_state)
             states[slot] = new_state
@@ -1532,8 +1802,8 @@ def api_status():
     )
     state["morning"] = morning
     state["trend"]   = trend
-    # C/P positions not opened by this strategy are intentionally separate:
-    # they remain visible without being adopted or protected as Trend trades.
+    # Unrelated C/P positions remain separate. Exact same-product additions
+    # disappear from this list only after the Trend monitor confirms adoption.
     state["external_options"] = _external_options.get(_active_user(), [])
     # BTC futures (perpetual) live price
     try:
@@ -1629,6 +1899,36 @@ def _strict_exchange_positions() -> list[dict]:
     if not data.get("success") or not isinstance(data.get("result"), list):
         raise RuntimeError(f"exchange positions could not be verified: {data.get('error') or data}")
     return [p for p in data["result"] if int(float(p.get("size") or 0)) != 0]
+
+
+def _strict_realtime_position(product_id: int) -> dict:
+    """Fetch one product from Delta's non-lagged position endpoint."""
+    product_id = int(product_id)
+    path = "/v2/positions"
+    params = {"product_id": product_id}
+    query = f"?product_id={product_id}"
+    data = req.get(
+        f"{API_BASE}{path}", params=params, headers=_sign("GET", path, query),
+        timeout=8,
+    ).json()
+    result = data.get("result") if isinstance(data, dict) else None
+    if (not isinstance(data, dict) or not data.get("success")
+            or not isinstance(result, dict)):
+        error = data.get("error") if isinstance(data, dict) else data
+        raise RuntimeError(f"real-time position could not be verified: {error or data}")
+    returned_product = result.get("product_id")
+    if (returned_product not in (None, "")
+            and str(returned_product) != str(product_id)):
+        raise RuntimeError("real-time position returned a different product")
+    position = dict(result)
+    position.setdefault("product_id", product_id)
+    try:
+        size = float(position.get("size", 0))
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise RuntimeError("real-time position size is malformed") from exc
+    if not math.isfinite(size) or not size.is_integer():
+        raise RuntimeError("real-time position size is not an integer")
+    return position
 
 
 def _position_for_product(positions: list[dict], product_id: int) -> dict | None:
@@ -1769,6 +2069,35 @@ def _cancel_flat_position_protection(state: dict) -> tuple[bool, list]:
     return not failures, failures
 
 
+def _require_fresh_trend_close_continuity(state: dict, live_size: int) -> None:
+    """Fail closed unless the monitor proves this exact live Trend generation."""
+    user = _active_user()
+    continuity_health = _tp_health(user, "trend")
+    try:
+        continuity_size = int(
+            continuity_health.get("continuity_verified_size")
+        )
+        health_exchange_size = int(
+            continuity_health.get("exchange_position_size")
+        )
+    except (TypeError, ValueError, OverflowError):
+        continuity_size = health_exchange_size = 0
+    continuity_proven = bool(
+        _tp_continuity_health_fresh(continuity_health)
+        and _tp_health_matches(
+            continuity_health, state, user, "trend",
+            require_protection_identity=False,
+        )
+        and continuity_health.get("continuity_verified") is True
+        and continuity_size == live_size == health_exchange_size
+    )
+    if not continuity_proven:
+        raise RuntimeError(
+            "Trend fill-ledger continuity is not freshly proven for "
+            "this exact position cycle; close blocked"
+        )
+
+
 def _close_move_state_locked(slot: str, state: dict,
                              reason: str = "manual_squareoff") -> dict:
     """Recover or execute one verified reduce-only close; never guess flat."""
@@ -1780,8 +2109,11 @@ def _close_move_state_locked(slot: str, state: dict,
     if not product_id or expected_lots <= 0 or not symbol:
         raise RuntimeError("open state has incomplete owned-position identity")
 
-    positions = _strict_exchange_positions()
-    position = _position_for_product(positions, product_id)
+    if slot == "trend":
+        position = _strict_realtime_position(product_id)
+    else:
+        positions = _strict_exchange_positions()
+        position = _position_for_product(positions, product_id)
     live_size = int(float((position or {}).get("size") or 0))
     expected_size = -expected_lots if expected_short else expected_lots
     pending_client = str(state.get("pending_close_client_order_id") or "")
@@ -1789,6 +2121,8 @@ def _close_move_state_locked(slot: str, state: dict,
     pending_status = str(state.get("pending_close_submission_state") or "")
 
     if not pending_client:
+        if slot == "trend":
+            _require_fresh_trend_close_continuity(state, live_size)
         if live_size == 0:
             raise RuntimeError("exchange is already flat but no owned close identity exists")
         if live_size != expected_size:
@@ -1834,6 +2168,18 @@ def _close_move_state_locked(slot: str, state: dict,
         _atomic_write_json(state_file, state)
         raise RuntimeError("prior close submission remains unresolved")
     else:
+        if slot == "trend":
+            # The intent may have remained prepared while the monitor adopted
+            # lots or replaced the position cycle.  Re-read and bind the
+            # freshest health proof immediately before the only POST path.
+            latest_position = _strict_realtime_position(product_id)
+            latest_size = int(float((latest_position or {}).get("size") or 0))
+            if latest_size != expected_size:
+                raise RuntimeError(
+                    f"owned position mismatch: state {expected_size}, "
+                    f"exchange {latest_size}; close blocked"
+                )
+            _require_fresh_trend_close_continuity(state, latest_size)
         payload = {"product_id": product_id, "size": requested,
                    "side": close_side, "order_type": "market_order",
                    "reduce_only": True, "client_order_id": client_id}
@@ -1871,7 +2217,8 @@ def _close_move_state_locked(slot: str, state: dict,
     remaining = None
     for attempt in range(4):
         try:
-            after = _position_for_product(_strict_exchange_positions(), product_id)
+            after = (_strict_realtime_position(product_id) if slot == "trend" else
+                     _position_for_product(_strict_exchange_positions(), product_id))
             remaining = int(float((after or {}).get("size") or 0))
             if remaining == 0 or attempt == 3:
                 break
@@ -1889,30 +2236,67 @@ def _close_move_state_locked(slot: str, state: dict,
         raise RuntimeError("close did not verifiably reduce the owned position")
 
     fill = float(order.get("average_fill_price") or 0)
+    # The position delta can include a concurrent manual/protection fill.
+    # Attribute it to this dashboard order only when the terminal order proves
+    # the exact same quantity; otherwise leave accounting for the complete
+    # Trend fill ledger instead of pricing somebody else's lots at this fill.
     filled_lots = abs(expected_size) - abs(remaining)
+    fill_attribution_exact = proven_fill == filled_lots and fill > 0
     entry_mark = float(state.get("entry_mark") or 0)
     cval = float(state.get("contract_value") or 0.001)
     pnl_sign = -1 if expected_short else 1
     previous_gross = float(state.get("partial_exit_gross_pnl_usd") or 0)
     previous_exit_fees = float(state.get("partial_exit_fees_usd") or 0)
     current_gross = ((fill - entry_mark) * cval * filled_lots * pnl_sign
-                     if fill > 0 else 0.0)
-    current_exit_fee = _order_commission_usd(order)
+                     if fill_attribution_exact else 0.0)
+    commission = _order_commission_optional_usd(order)
+    segment_complete = fill_attribution_exact and commission is not None
+    current_exit_fee = float(commission or 0.0) if segment_complete else 0.0
     cumulative_gross = previous_gross + current_gross
     cumulative_exit_fees = previous_exit_fees + current_exit_fee
+    previous_unreconciled = int(state.get("unreconciled_partial_exit_lots") or 0)
+    unreconciled_lots = previous_unreconciled + (0 if segment_complete else filled_lots)
+    prior_partial_complete = (
+        str(state.get("partial_exit_accounting_status") or "complete") == "complete"
+        and previous_unreconciled == 0
+    )
+    partial_accounting_complete = prior_partial_complete and segment_complete
+    previous_cycle_exits = int(state.get("cycle_exit_lots_total") or 0)
+    cycle_exit_lots = previous_cycle_exits + filled_lots
     original_owned = int(state.get("original_owned_entry_lots")
                          or state.get("owned_entry_lots") or expected_lots)
     if remaining:
         state.update({
             "status": "OPEN", "lots": abs(remaining),
+            "protection_lots": abs(remaining),
+            "protection_revision": int(state.get("protection_revision") or 0) + 1,
+            "continuity_revision": int(state.get("continuity_revision") or 0) + 1,
+            "continuity_verified": False,
+            "continuity_status": "awaiting_post_close_verification",
             "owned_entry_lots": original_owned,
             "original_owned_entry_lots": original_owned,
             "partial_exit_gross_pnl_usd": round(cumulative_gross, 8),
             "partial_exit_fees_usd": round(cumulative_exit_fees, 8),
+            "partial_exit_accounting_status": (
+                "complete" if partial_accounting_complete else "fill_ledger_pending"
+            ),
+            "unreconciled_partial_exit_lots": unreconciled_lots,
+            "cycle_exit_lots_total": cycle_exit_lots,
+            "position_composition": "fungible_mixed_after_reduction"
+            if state.get("externally_added_lots_adopted") else state.get(
+                "position_composition", "bot_only"),
+            "lot_attribution_status": "fungible_after_reduction",
             "last_close_order_id": order.get("id"),
             "last_close_client_order_id": client_id,
             "last_partial_exit_lots": filled_lots,
+            "last_close_order_filled_lots": proven_fill,
             "last_partial_exit_mark": fill,
+            "tsl_peak": 0.0,
+            "tsl_armed": False,
+            "tsl_floor": None,
+            "stop_kind": "sl",
+            "tsl_rebased_at_utc": datetime.now(timezone.utc).isoformat(),
+            "tsl_rebase_reason": "dashboard_partial_position_reduction",
             "pending_close_client_order_id": None,
             "pending_close_order_id": None,
             "pending_close_submission_state": None,
@@ -1922,25 +2306,66 @@ def _close_move_state_locked(slot: str, state: dict,
         raise RuntimeError(f"close was partial; {abs(remaining)} lots remain OPEN")
 
     gross = cumulative_gross
-    entry_fees = float(state.get("entry_fees_usd") or state.get("fees_usd") or 0)
-    fees = entry_fees + cumulative_exit_fees
-    pnl = round(gross - fees, 2)
+    entry_fee_raw = state.get("entry_fees_usd")
+    if entry_fee_raw in (None, ""):
+        entry_fee_raw = state.get("entry_fee_usd")
+    fee_sources = (
+        str(state.get("entry_fee_source") or "").strip().lower(),
+        str(state.get("original_bot_entry_fee_source") or "").strip().lower(),
+    )
+    explicitly_non_authoritative_entry_fee = any(
+        "estimate" in source or "pending" in source
+        for source in fee_sources
+        if source
+    )
+    try:
+        entry_fees = float(entry_fee_raw)
+        entry_fees_known = (
+            math.isfinite(entry_fees)
+            and entry_fees >= 0
+            and not explicitly_non_authoritative_entry_fee
+        )
+    except (TypeError, ValueError, OverflowError):
+        entry_fees, entry_fees_known = 0.0, False
+    accounting_complete = (
+        partial_accounting_complete and unreconciled_lots == 0
+        and entry_fees_known
+    )
+    fees = entry_fees + cumulative_exit_fees if accounting_complete else None
+    pnl = round(gross - fees, 2) if accounting_complete else None
     state.update({
         "status": "CLOSED", "exit_date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
         "exit_time_utc": datetime.now(timezone.utc).strftime("%H:%M:%S"),
-        "exit_mark": fill, "pnl_usd": pnl, "pnl_includes_fees": True,
+        "exit_mark": fill if accounting_complete else None,
+        "pnl_usd": pnl, "pnl_includes_fees": accounting_complete,
         "fees_usd": fees, "exit_trigger": reason,
-        "gross_pnl_usd": round(gross, 8),
-        "exit_fees_usd": round(cumulative_exit_fees, 8),
+        "fees_complete": accounting_complete,
+        "fees_estimated": not accounting_complete,
+        "accounting_status": "complete" if accounting_complete else "pending",
+        "gross_pnl_usd": round(gross, 8) if accounting_complete else None,
+        "exit_fees_usd": (round(cumulative_exit_fees, 8)
+                           if accounting_complete else None),
+        "partial_exit_gross_pnl_usd": round(cumulative_gross, 8),
+        "partial_exit_fees_usd": round(cumulative_exit_fees, 8),
+        "partial_exit_accounting_status": (
+            "complete" if accounting_complete else "fill_ledger_pending"
+        ),
+        "unreconciled_partial_exit_lots": unreconciled_lots,
+        "exit_reconciliation_status": (
+            "complete" if accounting_complete else "pending_fill_ledger"
+        ),
+        "last_close_order_filled_lots": proven_fill,
         "owned_entry_lots": original_owned,
         "original_owned_entry_lots": original_owned,
+        "cycle_exit_lots_total": cycle_exit_lots,
+        "closed_lots": cycle_exit_lots,
         "exit_order_id": order.get("id"), "exit_client_order_id": client_id,
         "pending_close_client_order_id": None, "pending_close_order_id": None,
         "pending_close_submission_state": None, "pending_close_last_error": "",
     })
     cleanup_ok, cleanup_errors = _cancel_flat_position_protection(state)
     appended = _append_trade_history(state, f"dashboard-squareoff:{slot}")
-    state["history_pending"] = not appended
+    state["history_pending"] = not (appended and accounting_complete)
     _atomic_write_json(state_file, state)
     audit_event(_user_dir(), "dashboard_move_close_verified", {
         "slot": slot, "client_order_id": client_id, "order_id": order.get("id"),
@@ -1948,7 +2373,8 @@ def _close_move_state_locked(slot: str, state: dict,
         "protection_cleanup_ok": cleanup_ok,
     })
     return {"pnl": pnl, "fill": fill, "order_id": order.get("id"),
-            "history_pending": not appended, "protection_cleanup_ok": cleanup_ok,
+            "history_pending": state["history_pending"],
+            "protection_cleanup_ok": cleanup_ok,
             "protection_cleanup_errors": cleanup_errors}
 
 
@@ -2889,29 +3315,111 @@ def _tp_policy(slot: str) -> dict:
 def tp_monitor_status():
     user = _active_user()
     out = {}
+    def lot_count(value) -> int:
+        try:
+            return abs(int(float(value or 0)))
+        except (TypeError, ValueError, OverflowError):
+            return 0
     for slot in SLOTS:
         policy = _tp_policy(slot)
         target, poll, sl, tsl = (policy["tp_target_pnl"], policy["poll_secs"],
                                  policy["sl_target_pnl"], policy["tsl_target_pnl"])
         st = _load_json(_slot_file(slot), {})
         health = _tp_health(user, slot)
-        open_stop = bool(st.get("tsl_stop_order_id")) and st.get("status") == "OPEN"
-        out[slot] = {"running": _tp_running(user, slot), "target_pnl": target,
+        running = _tp_running(user, slot)
+        health_fresh = _tp_health_fresh(health)
+        health_matches = _tp_health_matches(health, st, user, slot)
+        verified_health = health_fresh and health_matches
+        protected_lots = lot_count(
+            health.get("protected_lots") if verified_health else
+            st.get("protection_lots") or st.get("lots")
+        )
+        bot_entry_lots = lot_count(
+            st.get("original_owned_entry_lots")
+            or st.get("owned_entry_lots") or st.get("lots")
+        )
+        exchange_lots = lot_count(health.get("exchange_position_size")) \
+            if verified_health else 0
+        exchange_protected_lots = lot_count(
+            health.get("exchange_protected_lots")
+        ) if verified_health else 0
+        external_protected_lots = max(protected_lots - bot_entry_lots, 0)
+        continuity_required = slot == "trend" and st.get("status") == "OPEN"
+        continuity_ok = bool(
+            not continuity_required
+            or (verified_health and health.get("continuity_verified") is True
+                and lot_count(health.get("continuity_verified_size")) == protected_lots)
+        )
+        exchange_complete = bool(
+            verified_health and health.get("exchange_protection_complete")
+            and exchange_protected_lots >= protected_lots > 0
+        )
+        local_fallback = bool(
+            verified_health and health.get("local_fallback_active")
+        )
+        if not continuity_ok:
+            coverage_status = "attention"
+        elif running and exchange_lots > exchange_protected_lots:
+            coverage_status = "resizing"
+        elif exchange_complete:
+            coverage_status = "exchange_protected"
+        elif local_fallback and health.get("protection_established"):
+            coverage_status = "local_fallback"
+        elif running and not verified_health:
+            coverage_status = "verifying"
+        else:
+            coverage_status = "attention"
+        monitor_error = health.get("last_error") if verified_health else (
+            "Protection heartbeat is stale or does not match this position revision"
+            if running and st.get("status") == "OPEN" else None
+        )
+        def strict_order_flag(proof_key: str, state_order_key: str) -> bool:
+            proof = health.get(proof_key) if verified_health else None
+            if not isinstance(proof, dict) or proof.get("ok") is not True:
+                return False
+            order = proof.get("order")
+            return bool(
+                isinstance(order, dict)
+                and str(order.get("id") or "") == str(st.get(state_order_key) or "")
+                and lot_count(proof.get("covered_lots")) == protected_lots > 0
+                and st.get("status") == "OPEN"
+            )
+        stop_proven = strict_order_flag(
+            "stop_order_proof", "tsl_stop_order_id",
+        )
+        tp_proven = strict_order_flag("tp_order_proof", "tp_stop_order_id")
+        out[slot] = {"running": running, "target_pnl": target,
                      "poll_secs": poll, "sl_pnl": sl, "tsl_pnl": tsl,
                      "tsl_arm_pnl": policy["tsl_arm_pnl"],
                      "tsl_trail_pnl": policy["tsl_trail_pnl"],
                      "tsl_lock_min_pnl": policy["tsl_lock_min_pnl"],
-                     "healthy": _tp_health_fresh(health), "health": health,
-                     "protection_established": bool(health.get("protection_established")),
-                     "local_fallback_active": bool(health.get("local_fallback_active")),
-                     "monitor_error": health.get("last_error"),
+                     "healthy": bool(verified_health and health.get("status") == "healthy"),
+                     "health_matches": health_matches, "health": health,
+                     "protection_established": bool(
+                         verified_health and health.get("protection_established")),
+                     "local_fallback_active": local_fallback,
+                     "continuity_verified": continuity_ok,
+                     "continuity_status": health.get("continuity_status")
+                                          if verified_health else st.get("continuity_status"),
+                     "monitor_error": monitor_error,
+                     "coverage_status": coverage_status,
+                     "protected_lots": protected_lots,
+                     "exchange_position_lots": exchange_lots,
+                     "exchange_protected_lots": exchange_protected_lots,
+                     "bot_entry_lots": bot_entry_lots,
+                     "external_protected_lots": external_protected_lots,
+                     "externally_added_lots_adopted": lot_count(
+                         st.get("externally_added_lots_adopted")),
+                     "last_external_adoption_utc": st.get(
+                         "last_external_adoption_utc"),
+                     "lot_attribution_status": st.get("lot_attribution_status"),
                      # live trail bookkeeping persisted by the monitor — SL and TSL
                      # share one resting exchange stop, distinguished by stop_kind
                      "tsl_armed":       bool(st.get("tsl_armed")) and st.get("status") == "OPEN",
                      "tsl_floor":       st.get("tsl_floor"),
-                     "tsl_on_exchange": open_stop and st.get("stop_kind") == "tsl",
-                     "sl_on_exchange":  open_stop and st.get("stop_kind", "sl") == "sl",
-                     "tp_on_exchange":  bool(st.get("tp_stop_order_id")) and st.get("status") == "OPEN"}
+                     "tsl_on_exchange": stop_proven and st.get("stop_kind") == "tsl",
+                     "sl_on_exchange":  stop_proven and st.get("stop_kind", "sl") == "sl",
+                     "tp_on_exchange":  tp_proven}
     # Back-compat top-level fields = evening
     out.update(out["evening"])
     return jsonify(out)
@@ -3843,6 +4351,67 @@ def _state_exit_at(state: dict) -> datetime | None:
         return None
 
 
+def _state_has_pending_protection_cleanup(state: dict) -> bool:
+    """Whether replacing this slot could lose a live exchange-order identity."""
+    if not isinstance(state, dict):
+        return False
+    return bool(
+        state.get("tsl_stop_order_id")
+        or state.get("tp_stop_order_id")
+        or state.get("pending_stop_protection")
+        or state.get("pending_tp_protection")
+        or state.get("orphan_protection_order_ids")
+        or state.get("pending_close_order_id")
+        or state.get("pending_close_client_order_id")
+        or state.get("protection_cleanup_pending")
+        or state.get("protection_cleanup_errors")
+        or state.get("remove_protection_requested")
+    )
+
+
+def _state_has_pending_accounting(state: dict) -> bool:
+    """Whether a CLOSED slot still needs authoritative realised accounting."""
+    if not isinstance(state, dict):
+        return False
+    if state.get("history_pending"):
+        return True
+    if str(state.get("accounting_status") or "").lower() in {
+            "pending", "ambiguous", "partial_reduction_unreconciled"}:
+        return True
+    partial_status = str(
+        state.get("partial_exit_accounting_status") or ""
+    ).lower()
+    if partial_status and partial_status != "complete":
+        return True
+    if str(state.get("exit_reconciliation_status") or "").lower().startswith(
+            "pending"):
+        return True
+    try:
+        return int(state.get("unreconciled_partial_exit_lots") or 0) > 0
+    except (TypeError, ValueError, OverflowError):
+        return True
+
+
+def _trend_previous_state_blocker(state: dict) -> str | None:
+    """Explain why a non-OPEN Trend record may not be overwritten yet."""
+    if not isinstance(state, dict):
+        return "Previous Trend state is unreadable; entry fails closed"
+    status = str(state.get("status") or "").upper()
+    if status == "OPEN":
+        return "A trend position is already open"
+    if _state_has_pending_protection_cleanup(state):
+        return (
+            "Previous Trend protection or close cleanup is unresolved; "
+            "entry remains blocked until every exchange-order identity is reconciled"
+        )
+    if _state_has_pending_accounting(state):
+        return (
+            "Previous Trend realised accounting is still being reconciled; "
+            "entry remains blocked until it is complete"
+        )
+    return None
+
+
 def _trend_reentry_reason(state: dict, trend: dict, persist: bool = True) -> str | None:
     """One trade per closed 15M candle, then require neutral/opposite rearm."""
     current_direction = str(trend.get("combined") or "neutral")
@@ -3968,8 +4537,9 @@ def _trend_entry_preview_data() -> tuple[dict, int]:
         for k in ("5m", "15m", "1h")
     ])
     state = _load_json(_slot_file("trend"), {})
-    if state.get("status") == "OPEN":
-        return {"ok": True, "can_enter": False, "reason": "A trend position is already open",
+    previous_state_blocker = _trend_previous_state_blocker(state)
+    if previous_state_blocker:
+        return {"ok": True, "can_enter": False, "reason": previous_state_blocker,
                 "direction": direction, "option_type": option_type,
                 "signal_key": signal_key}, 200
     external = _external_options.get(_active_user(), [])
@@ -4082,12 +4652,20 @@ def _filled_order_size(order: dict, requested: int) -> int:
     return 0
 
 
-def _order_commission_usd(order: dict) -> float:
+def _order_commission_optional_usd(order: dict) -> float | None:
     for key in ("paid_commission", "commission", "commission_usd", "total_commission"):
         if order.get(key) not in (None, ""):
             return max(_as_float(order.get(key), 0), 0)
     meta = order.get("meta_data") or {}
-    return max(_as_float(meta.get("paid_commission"), 0), 0)
+    if meta.get("paid_commission") not in (None, ""):
+        return max(_as_float(meta.get("paid_commission"), 0), 0)
+    return None
+
+
+def _order_commission_usd(order: dict) -> float:
+    """Compatibility helper for entry execution; missing remains zero there."""
+    value = _order_commission_optional_usd(order)
+    return float(value or 0.0)
 
 
 def _refresh_order(order: dict, product_id: int, requested: int) -> dict:
@@ -4219,7 +4797,7 @@ def _execute_trend_chunks(preview: dict, requested_lots: int) -> dict:
                            "order_id": order.get("id"), "requested": chunk,
                            "filled": limit_filled, "limit_price": limit_price,
                            "average_fill_price": fill_price,
-                           "paid_commission_usd": _order_commission_usd(order)})
+                           "paid_commission_usd": _order_commission_optional_usd(order)})
 
         if not quantity_proven:
             error = (f"Order {order.get('id')} quantity could not be verified; "
@@ -4260,7 +4838,7 @@ def _execute_trend_chunks(preview: dict, requested_lots: int) -> dict:
                                    "order_id": fallback.get("id"), "requested": unfilled,
                                    "filled": fallback_filled,
                                    "average_fill_price": fallback_price,
-                                   "paid_commission_usd": _order_commission_usd(fallback)})
+                                   "paid_commission_usd": _order_commission_optional_usd(fallback)})
                 weighted += fallback_price * fallback_filled
                 filled += fallback_filled
                 if not fallback_proven:
@@ -4281,11 +4859,22 @@ def _execute_trend_chunks(preview: dict, requested_lots: int) -> dict:
             error = (f"Filled protected IOC slice {filled_total}/{requested_lots}; "
                      "remaining lots were not submitted")
             break
+    filled_executions = [
+        item for item in executions if int(item.get("filled") or 0) > 0
+    ]
+    fee_complete = all(
+        item.get("paid_commission_usd") is not None
+        for item in filled_executions
+    )
+    paid_commission = round(sum(
+        _as_float(item.get("paid_commission_usd"), 0)
+        for item in filled_executions
+    ), 8)
     return {"filled_lots": filled_total,
             "fill_price": weighted / filled_total if filled_total else 0.0,
             "executions": executions, "unfilled_lots": requested_lots - filled_total,
-            "paid_commission_usd": round(sum(_as_float(x.get("paid_commission_usd"), 0)
-                                              for x in executions), 8),
+            "paid_commission_usd": paid_commission if fee_complete else None,
+            "entry_fees_complete": fee_complete,
             "error": error, "market_fallback_enabled": market_fallback}
 
 
@@ -4295,13 +4884,43 @@ def _execute_trend_entry(auto: bool = False):
     with account_entry_lock(_user_dir(), f"trend:{user}") as acquired:
         if not acquired:
             return jsonify({"ok": False, "error": "Another strategy entry is in progress"}), 409
+        state_guard = ExitStack()
+        close_state_acquired = state_guard.enter_context(account_file_lock(
+            _user_dir(), "close-trend", f"dashboard-trend-entry-{os.getpid()}",
+            stale_after_sec=30, wait_sec=5,
+        ))
+        if not close_state_acquired:
+            state_guard.close()
+            return jsonify({
+                "ok": False,
+                "error": "Trend protection/cleanup state is busy; entry was not submitted",
+            }), 409
         _sync_states_from_exchange()
         preview, status = _trend_entry_preview_data()
         if status != 200 or not preview.get("can_enter"):
+            state_guard.close()
             _trend_audit("trend_entry_blocked", {"auto": auto, **preview})
             return jsonify(preview), 400 if status == 200 else status
+        # Preview and execution are separate safety boundaries. A CLOSED
+        # reconciliation worker can publish a pending order/accounting identity
+        # after the preview was built; reload immediately before any exchange
+        # submission so the new OPEN state can never overwrite that identity.
+        latest_previous_state = _load_json(_slot_file("trend"), {})
+        previous_state_blocker = _trend_previous_state_blocker(
+            latest_previous_state
+        )
+        if previous_state_blocker:
+            blocked = {
+                "ok": False, "can_enter": False,
+                "reason": previous_state_blocker,
+                "error": previous_state_blocker,
+            }
+            state_guard.close()
+            _trend_audit("trend_entry_blocked", {"auto": auto, **blocked})
+            return jsonify(blocked), 409
         key, secret = _active_creds()
         if not key or not secret:
+            state_guard.close()
             return jsonify({"ok": False, "error": "API credentials not configured"}), 400
 
         pid, requested = int(preview["product_id"]), int(preview["lots"])
@@ -4313,6 +4932,7 @@ def _execute_trend_entry(auto: bool = False):
                 execution = {"filled_lots": requested, "fill_price": fill,
                              "unfilled_lots": 0, "error": None,
                              "paid_commission_usd": 0.0,
+                             "entry_fees_complete": True,
                              "market_fallback_enabled": False,
                              "executions": [{"kind": "dry_run", "requested": requested,
                                              "filled": requested,
@@ -4332,6 +4952,7 @@ def _execute_trend_entry(auto: bool = False):
                             f"<code>{preview['symbol']}</code> order intent was accepted but fill quantity "
                             f"could not be verified. Client IDs are durably journaled; inspect the exchange now."
                         )
+                    state_guard.close()
                     return jsonify({"ok": False,
                                     "error": execution.get("error") or "IOC order did not fill"}), 400
                 fill = float(execution["fill_price"])
@@ -4350,11 +4971,31 @@ def _execute_trend_entry(auto: bool = False):
                 "symbol": preview["symbol"], "product_id": pid,
                 "strike": preview["strike"], "settlement": preview["settlement"],
                 "contract_value": cv, "lots": lots, "entry_mark": round(fill, 4),
-                "owned_entry_lots": lots,
+                "owned_entry_lots": lots, "original_owned_entry_lots": lots,
+                "protection_lots": lots, "max_protected_lots": lots,
+                "protection_revision": 0, "continuity_revision": 0,
+                "position_cycle_id": _trend_position_cycle_id(
+                    pid, now.isoformat(), order_ids),
+                "continuity_anchor_utc": now.isoformat(),
+                "continuity_verified": False,
+                "continuity_status": "awaiting_monitor_verification",
+                "original_bot_entry_mark": round(fill, 4),
+                "original_bot_entry_fee_usd": execution.get("paid_commission_usd"),
+                "original_bot_entry_fee_source": (
+                    "exchange" if execution.get("entry_fees_complete")
+                    else "fee_pending"
+                ),
+                "cycle_entry_lots_total": lots, "cycle_exit_lots_total": 0,
+                "partial_exit_accounting_status": "complete",
+                "position_composition": "bot_only",
                 "btc_at_entry": preview["spot"],
                 "total_cost_usd": round(fill * cv * lots, 2),
-                "entry_fees_usd": execution.get("paid_commission_usd", 0.0),
-                "fees_usd": execution.get("paid_commission_usd", 0.0),
+                "entry_fees_usd": execution.get("paid_commission_usd"),
+                "fees_usd": execution.get("paid_commission_usd"),
+                "entry_fee_source": (
+                    "exchange" if execution.get("entry_fees_complete")
+                    else "fee_pending"
+                ),
                 "order_id": order_ids[0] if order_ids else 0,
                 "order_ids": order_ids,
                 "client_order_id": client_ids[0] if client_ids else None,
@@ -4377,17 +5018,31 @@ def _execute_trend_entry(auto: bool = False):
                 "dry_run": is_dry_run,
             }
             _atomic_write_json(_slot_file("trend"), new_state)
+            # The new generation is durable. Release close-trend before the
+            # monitor starts, because its first protection cycle takes this
+            # same lock.
+            state_guard.close()
             monitor_started = False
             if not is_dry_run and not _tp_running(_active_user(), "trend"):
                 monitor_started = _spawn_tp(_active_user(), "trend") is not None
             protection_verified, protection_health = (True, {}) if is_dry_run else \
                 _wait_for_protection(user, "trend", now, timeout_secs=10)
-            latest_state = _load_json(_slot_file("trend"), new_state)
-            latest_state.update({
-                "protection_verified_at_entry": protection_verified,
-                "protection_health_at_entry": protection_health,
-            })
-            _atomic_write_json(_slot_file("trend"), latest_state)
+            with account_file_lock(
+                    _user_dir(), "close-trend",
+                    f"dashboard-trend-entry-health-{os.getpid()}",
+                    stale_after_sec=30, wait_sec=2) as health_state_lock:
+                if health_state_lock:
+                    latest_state = _load_json(_slot_file("trend"), {})
+                    if (
+                        latest_state.get("status") == "OPEN"
+                        and str(latest_state.get("position_cycle_id") or "")
+                        == str(new_state.get("position_cycle_id") or "")
+                    ):
+                        latest_state.update({
+                            "protection_verified_at_entry": protection_verified,
+                            "protection_health_at_entry": protection_health,
+                        })
+                        _atomic_write_json(_slot_file("trend"), latest_state)
             if not is_dry_run and not protection_verified:
                 _send_telegram(
                     f"🚨 <b>TREND PROTECTION ALERT ({user.upper()})</b>\n"
@@ -4421,6 +5076,7 @@ def _execute_trend_entry(auto: bool = False):
                             "partial_fill": lots < requested,
                             "execution_warning": execution.get("error"), "auto": auto})
         except Exception as e:
+            state_guard.close()
             _trend_audit("trend_entry_exception", {"auto": auto, "error": str(e),
                                                    "preview": preview})
             if not is_dry_run:
@@ -4762,19 +5418,47 @@ def set_config():
     user = _active_user()
     _trend_cache.pop(user, None)
     tp_restarted = []
+    snapshot_slots = []
+    snapshot_errors = []
     for slot, keys in _TP_KEYS_BY_SLOT.items():
         if not (keys & set(data)):
             continue
         # The monitor treats protection_config as the trade-attached policy.
-        # An explicit Save therefore updates that OPEN trade atomically before
-        # restart; unrelated config saves never mutate its exit contract.
+        # Serialize the snapshot update with close/adoption/protection writes,
+        # and reload only after acquiring that lock. Mutating just this one
+        # field preserves any close/protection journal published concurrently.
         state_path = USERS_DIR / user / SLOT_STATE_FILES[slot]
-        state = _load_json(state_path, {})
-        if state.get("status") == "OPEN":
-            state["protection_config"] = _tp_policy(slot)
-            _atomic_write_json(state_path, state)
+        with account_file_lock(
+                USERS_DIR / user, f"close-{slot}",
+                f"dashboard-config-{os.getpid()}-{slot}",
+                stale_after_sec=30, wait_sec=5) as acquired:
+            if not acquired:
+                snapshot_errors.append(slot)
+                continue
+            state = _load_json(state_path, {})
+            if state.get("status") == "OPEN":
+                state["protection_config"] = _tp_policy(slot)
+                _atomic_write_json(state_path, state)
+                snapshot_slots.append(slot)
+
+    # Process termination/spawn must happen after every state lock is released.
+    # A new monitor takes the same close-{slot} lock on its first protection
+    # cycle, so restarting inside the context can deadlock or time out.
+    for slot in snapshot_slots:
         if _tp_running(user, slot) and _restart_tp_monitor(user, slot):
             tp_restarted.append(slot)
+    if snapshot_errors:
+        return jsonify({
+            "ok": False,
+            "config_saved": True,
+            "error": (
+                "Configuration was saved, but active protection state is busy "
+                "for: " + ", ".join(snapshot_errors)
+                + ". Retry Save before relying on the new protection values."
+            ),
+            "tp_restarted": tp_restarted,
+            "protection_snapshot_pending": snapshot_errors,
+        }), 409
     return jsonify({"ok": True, "tp_restarted": tp_restarted})
 
 
@@ -4818,18 +5502,17 @@ def _ensure_open_monitors(force: bool = False) -> int:
             state = _load_json(udir / SLOT_STATE_FILES[slot], {})
             status = str(state.get("status") or "").upper()
             open_protection = status == "OPEN" and not state.get("dry_run")
-            pending_external_accounting = (
+            pending_closed_accounting = (
                 status == "CLOSED"
-                and bool(state.get("history_pending"))
-                and str(state.get("exit_trigger") or "").lower() == "closed_externally"
+                and _state_has_pending_accounting(state)
                 and not state.get("dry_run")
             )
-            pending_closed_cleanup = status == "CLOSED" and bool(
-                state.get("tsl_stop_order_id")
-                or state.get("tp_stop_order_id")
-                or state.get("orphan_protection_order_ids")
+            pending_closed_cleanup = (
+                status == "CLOSED"
+                and _state_has_pending_protection_cleanup(state)
+                and not state.get("dry_run")
             )
-            if not (open_protection or pending_external_accounting
+            if not (open_protection or pending_closed_accounting
                     or pending_closed_cleanup):
                 continue
             if slot == "trend" and not _is_owned_trend_state(state):

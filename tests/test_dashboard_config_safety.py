@@ -1,7 +1,8 @@
 import json
 import re
+from contextlib import contextmanager
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -190,6 +191,79 @@ def test_saving_reset_profile_preserves_credentials_and_off_page_protection(
     assert saved["DYNAMIC_LOTS"] == "true"
     assert saved["MAX_TRADES_PER_DAY"] == "3"
     assert saved["TREND_AUTO_ENTRY_ENABLED"] == "False"
+
+
+def test_tp_save_snapshots_open_state_under_close_lock_and_restarts_after_release(
+        isolated_account):
+    state_path = isolated_account / "trend_state.json"
+    pending_intent = {
+        "client_order_id": "pending-tp-1",
+        "product_id": 42,
+        "lots": 6,
+    }
+    _write_json(state_path, {
+        "slot": "trend",
+        "status": "OPEN",
+        "product_id": 42,
+        "lots": 6,
+        "pending_tp_protection": pending_intent,
+        "pending_close_client_order_id": "close-journal-1",
+        "orphan_protection_order_ids": [77],
+        "protection_config": {"tp_target_pnl": 25},
+    })
+    lock_active = {"value": False}
+
+    @contextmanager
+    def close_lock(user_dir, name, owner, **kwargs):
+        assert user_dir == isolated_account
+        assert name == "close-trend"
+        assert "dashboard-config" in owner
+        lock_active["value"] = True
+        try:
+            yield True
+        finally:
+            lock_active["value"] = False
+
+    real_load = dashboard._load_json
+
+    def guarded_load(path, default):
+        if Path(path) == state_path:
+            assert lock_active["value"], "OPEN state must be reloaded inside its close lock"
+        return real_load(path, default)
+
+    restart = Mock()
+
+    def restart_after_release(user, slot):
+        assert lock_active["value"] is False
+        restart(user, slot)
+        return True
+
+    policy = {
+        "tp_target_pnl": 125.0,
+        "sl_target_pnl": 50.0,
+        "tsl_arm_pnl": 50.0,
+        "tsl_trail_pnl": 25.0,
+        "tsl_lock_min_pnl": 5.0,
+        "poll_secs": 15,
+    }
+    with patch.object(dashboard, "account_file_lock", side_effect=close_lock), \
+            patch.object(dashboard, "_load_json", side_effect=guarded_load), \
+            patch.object(dashboard, "_tp_policy", return_value=policy), \
+            patch.object(dashboard, "_tp_running", return_value=True), \
+            patch.object(dashboard, "_restart_tp_monitor",
+                         side_effect=restart_after_release):
+        with dashboard.app.test_request_context(
+                "/api/config", method="POST",
+                json={"TP_TARGET_PNL_TREND": "125"}):
+            response = dashboard.set_config()
+
+    assert response.get_json() == {"ok": True, "tp_restarted": ["trend"]}
+    restart.assert_called_once_with("alice", "trend")
+    saved_state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert saved_state["protection_config"] == policy
+    assert saved_state["pending_tp_protection"] == pending_intent
+    assert saved_state["pending_close_client_order_id"] == "close-journal-1"
+    assert saved_state["orphan_protection_order_ids"] == [77]
 
 
 def test_short_move_requires_explicit_positive_risk_cap():

@@ -285,3 +285,44 @@ def test_closed_external_pending_accounting_is_periodically_supervised(
 
     assert started == 1
     spawned.assert_called_once_with("alice", "evening")
+
+
+@pytest.mark.parametrize("pending_fields", [
+    {
+        "pending_tp_protection": {
+            "client_order_id": "tp-journal-1",
+            "product_id": 101,
+        },
+    },
+    {"tsl_stop_order_id": 7001},
+    {"orphan_protection_order_ids": [7002]},
+    {"protection_cleanup_pending": True},
+    {
+        "history_pending": True,
+        "accounting_status": "pending",
+        "exit_trigger": "manual_squareoff",
+        "exit_reconciliation_status": "pending_fill_ledger",
+    },
+])
+def test_closed_trend_pending_cleanup_or_accounting_is_supervised(
+        isolated_status_account, monkeypatch, pending_fields):
+    _write(isolated_status_account / "account.json", {"username": "alice"})
+    _write(isolated_status_account / "trend_state.json", {
+        "slot": "trend",
+        "status": "CLOSED",
+        "product_id": 101,
+        "symbol": "C-BTC-TEST",
+        "entry_trigger": "trend_alignment",
+        "ownership": "trend_bot",
+        **pending_fields,
+    })
+    dashboard._monitor_last_restart.clear()
+    spawned = Mock(return_value=Mock(pid=4322))
+    monkeypatch.setattr(dashboard, "_tp_running", lambda user, slot: False)
+    monkeypatch.setattr(dashboard, "_tp_health", lambda user, slot: {})
+    monkeypatch.setattr(dashboard, "_spawn_tp", spawned)
+
+    started = dashboard._ensure_open_monitors(force=True)
+
+    assert started == 1
+    spawned.assert_called_once_with("alice", "trend")

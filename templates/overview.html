@@ -65,7 +65,7 @@
 </div>
 
 <div class="card external-options-card" id="external-options-card" style="display:none">
-  <div class="card-hd slot-hd">🔗 <span>External / manual BTC options</span><span class="when">Visible only · never adopted by Trend</span></div>
+  <div class="card-hd slot-hd">🔗 <span>External / manual BTC options</span><span class="when">Unrelated exposure · not managed by Trend</span></div>
   <div class="card-bd" id="external-options"></div>
 </div>
 
@@ -111,10 +111,28 @@ function manualBtns(slot) {
 function tpRow(slot, tp, positionOpen = true) {
   const t = (tp || {})[slot] || {};
   const on = !!t.running;
+  const protectedLots = +t.protected_lots || 0;
+  const botLots = +t.bot_entry_lots || protectedLots;
+  const externalLots = +t.external_protected_lots || 0;
+  const coverageLabel = !on ? 'STOPPED'
+    : t.coverage_status === 'exchange_protected' ? 'PROTECTED'
+    : t.coverage_status === 'local_fallback' ? 'LOCAL FALLBACK'
+    : t.coverage_status === 'resizing' ? 'RESIZING'
+    : 'VERIFYING';
+  const coverageNote = t.lot_attribution_status === 'fungible_after_reduction'
+    ? `<b class="c-pos">${fN(protectedLots)} aggregate lots targeted</b> · original bot entry ${fN(botLots)} lots · remaining-lot attribution is fungible · `
+    : externalLots > 0
+      ? `<b class="c-pos">${fN(protectedLots)} aggregate lots targeted = ${fN(botLots)} bot entry + ${fN(externalLots)} externally added matching lots</b> · `
+      : '';
+  const coverageState = t.coverage_status === 'exchange_protected'
+    ? '<b class="c-pos">Full-size exchange coverage confirmed</b> · '
+    : t.coverage_status === 'local_fallback'
+      ? '<b class="c-muted">Executable full-position local fallback active</b> · '
+      : (on && positionOpen ? '<b class="c-neg">Full-size protection is being verified</b> · ' : '');
   return `<div class="tp-box">
     <div class="tp-box-hd">
       <span class="tp-title">TP / SL / TSL Monitor</span>
-      <span class="pill ${on ? 'live' : 'idle'} mini"><span class="dot"></span>${on ? 'RUNNING' : 'STOPPED'}</span>
+      <span class="pill ${on && t.protection_established ? 'live' : 'idle'} mini"><span class="dot"></span>${coverageLabel}</span>
     </div>
     <div class="tp-control-row">
       <div class="tp-fields">
@@ -130,7 +148,7 @@ function tpRow(slot, tp, positionOpen = true) {
         <button class="btn ${on ? 'warn' : 'success'} sm" onclick="toggleTp('${slot}', ${on})" ${positionOpen ? '' : 'disabled title="Opens automatically with the trend position"'}>${on ? 'Stop' : (positionOpen ? 'Start' : 'Auto-starts on entry')}</button>
       </span>
     </div>
-    <div class="tp-note">${t.tsl_armed
+    <div class="tp-note">${coverageNote}${coverageState}${t.tsl_armed
         ? `<b class="c-pos">TSL armed — floor ${f$(t.tsl_floor)}${t.tsl_on_exchange ? ' · resting stop on exchange' : ''}</b> · `
         : (t.sl_on_exchange ? `<b class="c-neg">SL resting on exchange</b> · ` : '')
       }${t.tp_on_exchange ? '<b class="c-pos">TP resting on exchange</b> · ' : ''}${t.monitor_error ? `<b class="c-neg">Monitor: ${esc(t.monitor_error)}</b> · ` : ''}0 disables that protection · TSL activation, allowed giveback and minimum locked profit are configured independently.</div>
@@ -167,6 +185,11 @@ function slotHtml(s, slot, tp) {
         </button>
       </div>
       ${tpRow(slot, tp)}`;
+  }
+  if (s.status === 'OWNERSHIP_AMBIGUOUS') {
+    return `<div class="sim-note">⚠ Original Trend cycle closed before this same-product position appeared<br>
+      <span class="hint">Automation was detached and its old protection orders are being removed. The current exposure is shown under External / manual BTC options.</span></div>
+      ${slot === 'trend' ? tpRow(slot, tp, false) : ''}`;
   }
   if (s.status === 'CLOSED' && s.dry_run) {
     return `<div class="sim-note">⚠ SIMULATED — no real trade occurred<br><span class="hint">${esc(s.symbol)}</span></div>${manualBtns(slot)}${slot === 'trend' ? tpRow(slot, tp, false) : ''}`;
@@ -272,7 +295,12 @@ async function manualEntry(slot, side) {
 }
 
 async function squareOff(slot) {
-  if (!confirm(`Square off the ${slot.toUpperCase()} position now at market price?`)) return;
+  const s = (window._slots || {})[slot] || {};
+  const adopted = +s.externally_added_lots_adopted || 0;
+  const scope = adopted > 0
+    ? `\n\nThis closes the complete ${fN(s.lots)}-lot aggregate, including externally added matching lots.`
+    : '';
+  if (!confirm(`Square off the ${slot.toUpperCase()} position now at market price?${scope}`)) return;
   const d = await jpost('/api/square-off?slot=' + slot);
   if (d.ok) { toast(`Closed — P&L ${f$(d.pnl)}`, 'ok'); loadAll(); }
   else toast('Square off failed: ' + JSON.stringify(d.error), 'err');

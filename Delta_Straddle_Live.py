@@ -1841,9 +1841,12 @@ def start_tp_monitor(slot: str):
             age = (datetime.now(timezone.utc) - heartbeat.astimezone(timezone.utc)).total_seconds()
             if age < -30 or age > heartbeat_max_age:
                 return False
-            return bool(health.get("protection_established")) and health.get("status") in {
-                "healthy", "degraded",
-            }
+            proven_mode = bool(
+                health.get("exchange_protection_complete")
+                or health.get("local_fallback_active")
+            )
+            return (bool(health.get("protection_established")) and proven_mode
+                    and health.get("status") in {"healthy", "degraded"})
         except (OSError, ValueError, TypeError):
             return False
     try:

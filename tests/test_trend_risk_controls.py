@@ -19,6 +19,99 @@ class MonitorHealthTests(unittest.TestCase):
         self.assertTrue(dashboard._tp_health_fresh(recent))
         self.assertFalse(dashboard._tp_health_fresh(stale))
 
+    def test_health_must_match_the_current_protection_revision(self):
+        state = {
+            "product_id": 42, "order_id": "entry-1",
+            "client_order_id": "trend-entry-1", "protection_revision": 2,
+        }
+        health = {
+            "user": "alice", "slot": "trend", "product_id": 42,
+            "entry_order_id": "entry-1",
+            "entry_client_order_id": "trend-entry-1",
+            "protection_revision": 1,
+        }
+        self.assertFalse(dashboard._tp_health_matches(
+            health, state, "alice", "trend"))
+        health["protection_revision"] = 2
+        self.assertTrue(dashboard._tp_health_matches(
+            health, state, "alice", "trend"))
+
+    def test_complete_exchange_proof_must_match_current_order_identities(self):
+        state = {
+            "product_id": 42, "order_id": "entry-1",
+            "client_order_id": "trend-entry-1", "protection_revision": 2,
+            "continuity_revision": 3, "position_cycle_id": "cycle-1",
+            "tsl_stop_order_id": "stop-1",
+            "stop_client_order_id": "trend-stop-1",
+            "tp_stop_order_id": "tp-1",
+            "tp_client_order_id": "trend-tp-1",
+        }
+        health = {
+            "user": "alice", "slot": "trend", "product_id": 42,
+            "entry_order_id": "entry-1",
+            "entry_client_order_id": "trend-entry-1",
+            "protection_revision": 2, "continuity_revision": 3,
+            "position_cycle_id": "cycle-1",
+            "exchange_protection_complete": True,
+            "stop_order_id": "stop-1", "tp_order_id": "tp-1",
+            "stop_order_proof": {
+                "ok": True,
+                "order": {
+                    "id": "stop-1", "client_order_id": "trend-stop-1",
+                    "product_id": 42,
+                },
+            },
+            "tp_order_proof": {
+                "ok": True,
+                "order": {
+                    "id": "tp-1", "client_order_id": "trend-tp-1",
+                    "product_id": 42,
+                },
+            },
+        }
+        self.assertTrue(dashboard._tp_health_matches(
+            health, state, "alice", "trend"))
+        self.assertFalse(dashboard._tp_health_matches(
+            health, {**state, "tsl_stop_order_id": "stop-2"},
+            "alice", "trend"))
+        self.assertFalse(dashboard._tp_health_matches(
+            health, {**state, "tp_stop_order_id": None},
+            "alice", "trend"))
+        self.assertFalse(dashboard._tp_health_matches(
+            health, {**state, "tp_client_order_id": "trend-tp-replaced"},
+            "alice", "trend"))
+
+    def test_complete_exchange_proof_allows_explicitly_disabled_stop(self):
+        state = {
+            "product_id": 42, "order_id": "entry-1",
+            "client_order_id": "trend-entry-1", "protection_revision": 2,
+            "continuity_revision": 3, "position_cycle_id": "cycle-1",
+            "tp_stop_order_id": "tp-1", "tp_client_order_id": "trend-tp-1",
+        }
+        health = {
+            "user": "alice", "slot": "trend", "product_id": 42,
+            "entry_order_id": "entry-1",
+            "entry_client_order_id": "trend-entry-1",
+            "protection_revision": 2, "continuity_revision": 3,
+            "position_cycle_id": "cycle-1",
+            "exchange_protection_complete": True,
+            "stop_order_id": None,
+            "stop_order_proof": {
+                "ok": True, "covered_lots": 6,
+                "reason": "stop is disabled", "order": {},
+            },
+            "tp_order_id": "tp-1",
+            "tp_order_proof": {
+                "ok": True,
+                "order": {
+                    "id": "tp-1", "client_order_id": "trend-tp-1",
+                    "product_id": 42,
+                },
+            },
+        }
+        self.assertTrue(dashboard._tp_health_matches(
+            health, state, "alice", "trend"))
+
 
 class TrendOwnershipClassificationTests(unittest.TestCase):
     def test_exchange_sync_is_external_unless_operator_explicitly_manages_protection(self):
@@ -33,6 +126,95 @@ class TrendOwnershipClassificationTests(unittest.TestCase):
             "operator_authorized_protection_only": True,
         }
         self.assertTrue(dashboard._is_owned_trend_state(managed))
+
+    def test_only_strictly_protected_same_side_aggregate_is_hidden_from_external(self):
+        state = {
+            "status": "OPEN", "product_id": 42, "side": "long",
+            "entry_trigger": "trend_alignment", "owned_entry_lots": 3,
+            "lots": 6, "protection_lots": 6,
+            "protection_scope": "trend_plus_same_product_external",
+            "protection_revision": 1, "continuity_revision": 1,
+            "position_cycle_id": "cycle-1",
+            "tsl_stop_order_id": "stop-1",
+            "stop_client_order_id": "trend-stop-1",
+            "tp_stop_order_id": "tp-1",
+            "tp_client_order_id": "trend-tp-1",
+        }
+        health = {
+            "user": "alice", "slot": "trend", "product_id": 42,
+            "protection_revision": 1, "continuity_revision": 1,
+            "position_cycle_id": "cycle-1",
+            "heartbeat_utc": datetime.now(timezone.utc).isoformat(),
+            "next_poll_secs": 30, "continuity_verified": True,
+            "continuity_verified_size": 6, "protected_lots": 6,
+            "protection_established": True,
+            "exchange_protection_complete": True,
+            "stop_order_id": "stop-1", "tp_order_id": "tp-1",
+            "stop_order_proof": {
+                "ok": True, "covered_lots": 6,
+                "order": {
+                    "id": "stop-1", "client_order_id": "trend-stop-1",
+                    "product_id": 42,
+                },
+            },
+            "tp_order_proof": {
+                "ok": True, "covered_lots": 6,
+                "order": {
+                    "id": "tp-1", "client_order_id": "trend-tp-1",
+                    "product_id": 42,
+                },
+            },
+        }
+        self.assertTrue(dashboard._trend_state_covers_exchange_position(
+            state, 42, 6, health, "alice"))
+        self.assertFalse(dashboard._trend_state_covers_exchange_position(
+            state, 42, 3, health, "alice"))  # stale/shrunk exposure stays visible
+        self.assertFalse(dashboard._trend_state_covers_exchange_position(
+            state, 42, 7, health, "alice"))  # a new excess remains visible until adopted
+        self.assertFalse(dashboard._trend_state_covers_exchange_position(
+            state, 42, -6, health, "alice"))
+        self.assertTrue(dashboard._trend_state_covers_exchange_position(
+            {**state, "protection_scope": ""}, 42, 6, health, "alice"))
+        self.assertFalse(dashboard._trend_state_covers_exchange_position(
+            state, 42, 6, {}, "alice"))
+
+    def test_local_fallback_only_hides_position_while_monitor_is_running(self):
+        state = {
+            "status": "OPEN", "product_id": 42, "side": "long",
+            "entry_trigger": "trend_alignment", "lots": 6,
+            "protection_lots": 6, "protection_revision": 1,
+            "continuity_revision": 1, "position_cycle_id": "cycle-1",
+        }
+        health = {
+            "user": "alice", "slot": "trend", "product_id": 42,
+            "protection_revision": 1, "continuity_revision": 1,
+            "position_cycle_id": "cycle-1",
+            "heartbeat_utc": datetime.now(timezone.utc).isoformat(),
+            "next_poll_secs": 30, "continuity_verified": True,
+            "continuity_verified_size": 6, "protected_lots": 6,
+            "protection_established": True,
+            "exchange_protection_complete": False,
+            "local_fallback_active": True,
+        }
+        with patch.object(dashboard, "_tp_running", return_value=False):
+            self.assertFalse(dashboard._trend_state_covers_exchange_position(
+                state, 42, 6, health, "alice"))
+        with patch.object(dashboard, "_tp_running", return_value=True):
+            self.assertTrue(dashboard._trend_state_covers_exchange_position(
+                state, 42, 6, health, "alice"))
+
+    def test_open_owned_same_product_is_reserved_for_monitor_reconciliation(self):
+        state = {
+            "status": "OPEN", "product_id": 42,
+            "entry_trigger": "trend_alignment", "side": "long",
+        }
+        self.assertTrue(dashboard._open_owned_trend_same_product(state, 42))
+        self.assertFalse(dashboard._open_owned_trend_same_product(state, 43))
+        self.assertFalse(dashboard._open_owned_trend_same_product(
+            {**state, "status": "CLOSED"}, 42))
+        self.assertFalse(dashboard._open_owned_trend_same_product({
+            **state, "entry_trigger": "exchange_sync", "ownership": "external",
+        }, 42))
 
 
 class TrendFilterTests(unittest.TestCase):
