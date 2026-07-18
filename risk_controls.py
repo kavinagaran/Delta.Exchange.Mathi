@@ -274,12 +274,14 @@ def evaluate_entry(
         return RiskDecision(False, f"daily loss lock reached (${daily_pnl:.2f})", **base)
 
     max_losses = max(cfg_int(config, "MAX_CONSECUTIVE_LOSSES", 3), 0)
-    if max_losses and consecutive >= max_losses:
-        return RiskDecision(False, f"consecutive-loss lock reached ({consecutive})", **base)
-
     cooldown_min = max(cfg_int(config, "LOSS_COOLDOWN_MINUTES", 30), 0)
     closed_ordered = [row for row in ordered if _pnl(row) is not None]
-    if consecutive and cooldown_min and closed_ordered:
+    # The loss threshold and cooldown are one guardrail: isolated losses below
+    # MAX_CONSECUTIVE_LOSSES must not pause otherwise-valid entries.  Once the
+    # configured streak is reached, LOSS_COOLDOWN_MINUTES defines the lock
+    # duration from the latest loss.  A zero cooldown retains the fail-closed,
+    # manual-reset style consecutive-loss lock.
+    if max_losses and consecutive >= max_losses and cooldown_min and closed_ordered:
         last = closed_ordered[-1]
         stamp = str(last.get("exit_at_utc") or "")
         if not stamp:
@@ -292,7 +294,15 @@ def evaluate_entry(
         except (TypeError, ValueError):
             remaining = 0
         if remaining > 0:
-            return RiskDecision(False, "post-loss cooldown active", cooldown_remaining_sec=remaining, **base)
+            return RiskDecision(
+                False,
+                f"consecutive-loss cooldown active ({consecutive}/{max_losses})",
+                cooldown_remaining_sec=remaining,
+                **base,
+            )
+    elif max_losses and consecutive >= max_losses:
+        return RiskDecision(
+            False, f"consecutive-loss lock reached ({consecutive})", **base)
 
     max_open = max(cfg_float(config, "MAX_OPEN_RISK_USD", 500.0), 0.0)
     if proposed_risk_usd <= 0:

@@ -82,15 +82,85 @@ def test_unknown_open_risk_fails_closed(tmp_path):
     assert "no verifiable risk" in d.reason
 
 
-def test_post_loss_cooldown(tmp_path):
+def test_one_loss_does_not_activate_consecutive_loss_cooldown(tmp_path):
     now = datetime(2026, 7, 15, 4, tzinfo=timezone.utc)
     _write(tmp_path / "trade_history.json", [{
         "order_id": 1, "trading_date": "2026-07-15", "pnl_usd": -10,
         "exit_at_utc": (now - timedelta(minutes=5)).isoformat(),
     }])
-    d = evaluate_entry(tmp_path, 10, {"LOSS_COOLDOWN_MINUTES": 30}, now)
+    d = evaluate_entry(tmp_path, 10, {
+        "MAX_TRADES_PER_DAY_GLOBAL": 10,
+        "MAX_CONSECUTIVE_LOSSES": 3,
+        "LOSS_COOLDOWN_MINUTES": 30,
+    }, now)
+    assert d.allowed
+    assert d.consecutive_losses == 1
+    assert d.cooldown_remaining_sec == 0
+
+
+def test_cooldown_starts_at_configured_consecutive_loss_threshold(tmp_path):
+    now = datetime(2026, 7, 15, 4, tzinfo=timezone.utc)
+    _write(tmp_path / "trade_history.json", [
+        {
+            "order_id": index,
+            "trading_date": "2026-07-15",
+            "pnl_usd": -10,
+            "exit_at_utc": (
+                now - timedelta(minutes=7 - index)).isoformat(),
+        }
+        for index in range(1, 4)
+    ])
+    d = evaluate_entry(tmp_path, 10, {
+        "MAX_TRADES_PER_DAY_GLOBAL": 10,
+        "MAX_CONSECUTIVE_LOSSES": 3,
+        "LOSS_COOLDOWN_MINUTES": 30,
+    }, now)
     assert not d.allowed
+    assert "consecutive-loss cooldown" in d.reason
+    assert d.consecutive_losses == 3
     assert d.cooldown_remaining_sec > 0
+
+
+def test_entry_is_allowed_after_consecutive_loss_cooldown_expires(tmp_path):
+    now = datetime(2026, 7, 15, 4, tzinfo=timezone.utc)
+    _write(tmp_path / "trade_history.json", [
+        {
+            "order_id": index,
+            "trading_date": "2026-07-15",
+            "pnl_usd": -10,
+            "exit_at_utc": (
+                now - timedelta(minutes=42 - index)).isoformat(),
+        }
+        for index in range(1, 4)
+    ])
+    d = evaluate_entry(tmp_path, 10, {
+        "MAX_TRADES_PER_DAY_GLOBAL": 10,
+        "MAX_CONSECUTIVE_LOSSES": 3,
+        "LOSS_COOLDOWN_MINUTES": 30,
+    }, now)
+    assert d.allowed
+    assert d.consecutive_losses == 3
+    assert d.cooldown_remaining_sec == 0
+
+
+def test_zero_cooldown_keeps_consecutive_loss_lock_fail_closed(tmp_path):
+    now = datetime(2026, 7, 15, 4, tzinfo=timezone.utc)
+    _write(tmp_path / "trade_history.json", [
+        {
+            "order_id": index,
+            "trading_date": "2026-07-15",
+            "pnl_usd": -10,
+            "exit_at_utc": now.isoformat(),
+        }
+        for index in range(1, 4)
+    ])
+    d = evaluate_entry(tmp_path, 10, {
+        "MAX_TRADES_PER_DAY_GLOBAL": 10,
+        "MAX_CONSECUTIVE_LOSSES": 3,
+        "LOSS_COOLDOWN_MINUTES": 0,
+    }, now)
+    assert not d.allowed
+    assert "consecutive-loss lock" in d.reason
 
 
 def test_risk_lots_is_minimum_of_every_cap():

@@ -39,8 +39,8 @@
         <label class="fld"><span>Maximum daily loss $</span><input id="c-MAX_DAILY_LOSS_USD" type="number" min="0" step="1"><em class="fld-hint">Realized + unrealized</em></label>
         <label class="fld"><span>Maximum open risk $</span><input id="c-MAX_OPEN_RISK_USD" type="number" min="0" step="1"></label>
         <label class="fld"><span>Maximum premium at risk $</span><input id="c-MAX_ACCOUNT_PREMIUM_AT_RISK_USD" type="number" min="0" step="1"></label>
-        <label class="fld"><span>Consecutive-loss lock</span><input id="c-MAX_CONSECUTIVE_LOSSES" type="number" min="0" max="100"></label>
-        <label class="fld"><span>Loss cooldown mins</span><input id="c-LOSS_COOLDOWN_MINUTES" type="number" min="0" max="1440"></label>
+        <label class="fld"><span>Consecutive-loss threshold</span><input id="c-MAX_CONSECUTIVE_LOSSES" type="number" min="0" max="100"><em class="fld-hint">Cooldown starts only when this streak is reached</em></label>
+        <label class="fld"><span>Loss-streak cooldown mins</span><input id="c-LOSS_COOLDOWN_MINUTES" type="number" min="0" max="1440"><em class="fld-hint">0 keeps the threshold locked until reset</em></label>
       </div>
     </div>
   </div>
