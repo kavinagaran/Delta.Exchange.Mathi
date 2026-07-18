@@ -5352,15 +5352,11 @@ def _trend_lot_plan(
     notional_reference = _as_float(quote.get("spot"), 0) or strike
     # Simulations are backed by virtual capital, not the authenticated
     # account's USD wallet.  Configured lots become the paper affordability
-    # ceiling while liquidity, premium, risk and order caps remain mandatory.
+    # ceiling while premium, risk and order caps remain mandatory.
     affordable = (configured if dry_run
                   else _affordable_option_lots(ask, cv, notional_reference))
     affordability_source = "paper_configured_cap" if dry_run else "exchange_wallet"
-    participation = min(max(_as_float(config.get("TREND_BOOK_PARTICIPATION_PCT") or 25, 25), 0), 100)
-    liquidity_cap = int(max(_as_float(quote.get("ask_size"), 0), 0) * participation / 100)
-    if str(config.get("TREND_ALLOW_MISSING_BOOK") or "false").lower() in {"1", "true", "yes", "on"} \
-            and liquidity_cap <= 0:
-        liquidity_cap = max_order
+    observed_ask_depth = max(int(_as_float(quote.get("ask_size"), 0)), 0)
     risk_budget = max(_as_float(config.get("TREND_RISK_BUDGET_USD") or 100, 100), 0)
     max_slippage_pct = max(_as_float(config.get("TREND_MAX_SLIPPAGE_PCT") or 1, 1), 0)
     premium_per_lot = ask * cv
@@ -5374,11 +5370,12 @@ def _trend_lot_plan(
     ) if premium_limit else math.inf
     premium_cap = (int(premium_remaining / premium_per_lot)
                    if premium_per_lot > 0 and math.isfinite(premium_remaining) else max_order)
-    effective_liquidity_cap = min(liquidity_cap, premium_cap)
     lots = risk_based_lots(
         configured=configured,
         affordable=affordable or 0,
-        liquidity_cap=effective_liquidity_cap,
+        # Trend depth still controls contract eligibility and each LIVE IOC
+        # execution chunk, but never reduces the planned strategy lots.
+        liquidity_cap=premium_cap,
         max_order_lots=max_order,
         risk_budget_usd=risk_budget,
         stop_loss_usd=sl_target,
@@ -5392,7 +5389,8 @@ def _trend_lot_plan(
         "lots": lots, "configured": configured,
         "affordable": affordable,
         "affordability_source": affordability_source,
-        "liquidity_cap": liquidity_cap,
+        "observed_ask_depth_lots": observed_ask_depth,
+        "book_depth_applied_to_sizing": False,
         "premium_cap": premium_cap, "max_order_cap": max_order,
         "risk_budget_usd": round(risk_budget, 2),
         "stop_loss_usd": round(sl_target, 2),
@@ -5470,7 +5468,7 @@ def _trend_entry_preview_data(
     lots = int(sizing["lots"])
     if lots < 1:
         return {"ok": True, "can_enter": False,
-                "reason": "Configured, affordable, risk, premium, or book-depth cap permits zero lots",
+                "reason": "Configured, affordable, risk, premium, or order cap permits zero lots",
                 "sizing": sizing}, 200
 
     unrealized = 0.0 if is_dry_run else _account_unrealized_pnl()
@@ -5661,7 +5659,7 @@ def _submit_trend_order(payload: dict) -> tuple[dict | None, dict]:
 
 
 def _execute_trend_chunks(preview: dict, requested_lots: int) -> dict:
-    """Buy using bounded IOC limits; stop safely on any partial/failed chunk."""
+    """Buy using bounded IOC limits; depth sizes chunks, not planned lots."""
     symbol, pid = preview["symbol"], int(preview["product_id"])
     max_slippage = max(_as_float(_cfg("TREND_MAX_SLIPPAGE_PCT", "1"), 1), 0)
     chunk_size = max(int(_as_float(_cfg("TREND_ORDER_CHUNK_LOTS", "1000"), 1000)), 1)
@@ -5682,11 +5680,12 @@ def _execute_trend_chunks(preview: dict, requested_lots: int) -> dict:
             error = "Fresh execution quote failed: " + "; ".join(reasons)
             break
         ask, tick = _as_float(quote.get("ask"), 0), _as_float(quote.get("tick_size"), 0.1)
-        depth_cap = int(_as_float(quote.get("ask_size"), 0) * participation / 100)
-        if depth_cap <= 0:
+        execution_depth_cap = int(
+            _as_float(quote.get("ask_size"), 0) * participation / 100)
+        if execution_depth_cap <= 0:
             error = "Fresh ask depth permits zero lots at configured participation"
             break
-        chunk = min(chunk, depth_cap)
+        chunk = min(chunk, execution_depth_cap)
         limit_price = _ceil_to_tick((reference_ask or ask) * (1 + max_slippage / 100), tick)
         if ask > limit_price:
             error = f"Fresh ask {ask} exceeds entry slippage cap {limit_price}"

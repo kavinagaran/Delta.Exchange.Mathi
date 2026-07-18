@@ -166,7 +166,7 @@
         <label class="fld"><span>Target absolute delta</span><input id="c-TREND_TARGET_DELTA" type="number" min="0.05" max="0.99" step="0.05"></label>
         <label class="fld"><span>Maximum spread %</span><input id="c-TREND_MAX_SPREAD_PCT" type="number" min="0.1" max="100" step="0.1"></label>
         <label class="fld"><span>Minimum ask depth lots</span><input id="c-TREND_MIN_BOOK_DEPTH_LOTS" type="number" min="0" step="1"></label>
-        <label class="fld"><span>Book participation %</span><input id="c-TREND_BOOK_PARTICIPATION_PCT" type="number" min="0.1" max="100" step="1"></label>
+        <label class="fld"><span>IOC book participation %</span><input id="c-TREND_BOOK_PARTICIPATION_PCT" type="number" min="0.1" max="100" step="1"><em class="fld-hint">Controls each LIVE execution chunk, not planned lots</em></label>
         <label class="fld"><span>Maximum quote age secs</span><input id="c-TREND_QUOTE_MAX_AGE_SECS" type="number" min="1" max="300"></label>
         <label class="fld"><span>Maximum mark IV</span><input id="c-TREND_MAX_MARK_IV" type="number" min="0" max="10" step="0.05"><em class="fld-hint">0 disables the IV ceiling</em></label>
         <label class="fld"><span>Missing book data</span><select id="c-TREND_ALLOW_MISSING_BOOK"><option value="false">Block entry (recommended)</option><option value="true">Allow unverified book</option></select></label>

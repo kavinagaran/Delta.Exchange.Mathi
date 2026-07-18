@@ -290,9 +290,9 @@ class TrendOptionQualityTests(unittest.TestCase):
 
 
 class TrendSizingAndReentryTests(unittest.TestCase):
-    def test_lots_are_minimum_of_risk_affordability_and_depth(self):
+    def test_live_lots_ignore_depth_but_retain_affordability_and_risk_caps(self):
         contract = {"contract_value": "0.001", "strike_price": "64000"}
-        quote = {"ask": 100.0, "mark": 99.0, "ask_size": 200}
+        quote = {"ask": 100.0, "mark": 99.0, "ask_size": 1}
         config = {
             "TREND_LOTS": "1000", "TREND_BOOK_PARTICIPATION_PCT": "25",
             "TREND_RISK_BUDGET_USD": "100", "TREND_MAX_SLIPPAGE_PCT": "1",
@@ -304,10 +304,11 @@ class TrendSizingAndReentryTests(unittest.TestCase):
              patch.object(dashboard, "_tp_env", return_value=(100, 30, 50, 50)), \
              patch.object(dashboard, "_option_fee_per_lot", return_value=.001):
             plan = dashboard._trend_lot_plan(contract, quote)
-        self.assertEqual(plan["liquidity_cap"], 50)
-        self.assertEqual(plan["lots"], 50)
+        self.assertEqual(plan["observed_ask_depth_lots"], 1)
+        self.assertFalse(plan["book_depth_applied_to_sizing"])
+        self.assertEqual(plan["lots"], 700)
 
-    def test_dry_sizing_uses_virtual_cap_and_retains_depth_limit(self):
+    def test_dry_sizing_uses_virtual_cap_without_depth_limit(self):
         contract = {"contract_value": "0.001", "strike_price": "64000"}
         quote = {"ask": 100.0, "mark": 99.0, "ask_size": 200}
         config = {
@@ -327,9 +328,11 @@ class TrendSizingAndReentryTests(unittest.TestCase):
                 contract, quote, dry_run=True)
 
         wallet.assert_not_called()
-        self.assertEqual(plan["lots"], 50)
+        self.assertEqual(plan["lots"], 970)
         self.assertEqual(plan["affordable"], 1000)
         self.assertEqual(plan["affordability_source"], "paper_configured_cap")
+        self.assertEqual(plan["observed_ask_depth_lots"], 200)
+        self.assertFalse(plan["book_depth_applied_to_sizing"])
 
     def test_live_sizing_still_uses_exchange_wallet_cap(self):
         contract = {"contract_value": "0.001", "strike_price": "64000"}
@@ -407,6 +410,48 @@ class TrendOwnershipAndExecutionTests(unittest.TestCase):
         self.assertAlmostEqual(result["paid_commission_usd"], .3)
         self.assertEqual(result["executions"][0]["kind"], "ioc_limit")
         self.assertEqual(result["executions"][1]["kind"], "configured_market_fallback")
+
+    def test_book_depth_limits_each_live_ioc_chunk_not_planned_lots(self):
+        ticker = {
+            "symbol": "C-BTC-X", "mark_price": "10",
+            "timestamp": int(time.time() * 1_000_000),
+            "tick_size": ".1", "product_trading_status": "operational",
+            "quotes": {
+                "best_bid": "9.8", "best_ask": "10",
+                "ask_size": "8", "bid_size": "100",
+            },
+            "greeks": {"delta": ".65"},
+        }
+        response = type("R", (), {"json": lambda self: {"result": ticker}})()
+        submitted = []
+
+        def submit(payload):
+            submitted.append(dict(payload))
+            size = int(payload["size"])
+            return {
+                "id": len(submitted), "average_fill_price": "10",
+                "filled_size": size, "unfilled_size": 0,
+            }, {"success": True}
+
+        preview = {"symbol": "C-BTC-X", "product_id": 9, "ask": 10}
+        with patch.object(dashboard.req, "get", return_value=response), \
+             patch.object(dashboard, "_trend_quote_reasons", return_value=[]), \
+             patch.object(dashboard, "_journal_order_intent", return_value=True), \
+             patch.object(dashboard, "_submit_trend_order", side_effect=submit), \
+             patch.object(dashboard, "_refresh_order",
+                          side_effect=lambda order, *_: order), \
+             patch.object(dashboard, "_cfg", side_effect=lambda k, d="": {
+                 "TREND_MAX_SLIPPAGE_PCT": "1",
+                 "TREND_ORDER_CHUNK_LOTS": "1000",
+                 "TREND_BOOK_PARTICIPATION_PCT": "25",
+             }.get(k, d)), \
+             patch.object(dashboard, "_cfg_bool", return_value=False), \
+             patch.object(dashboard, "_active_user", return_value="alice"):
+            result = dashboard._execute_trend_chunks(preview, 5)
+
+        self.assertEqual([order["size"] for order in submitted], [2])
+        self.assertEqual(result["filled_lots"], 2)
+        self.assertEqual(result["unfilled_lots"], 3)
 
 
 if __name__ == "__main__":
