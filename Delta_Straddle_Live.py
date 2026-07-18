@@ -1459,12 +1459,21 @@ def get_available_usd() -> float:
     return 0.0
 
 def _effective_lots(configured: int, mark: float, contract_val: float, label: str) -> int:
-    """Dynamic lot sizing: how many lots the available balance can buy at the
-    current mark. Per spec we buy whichever is LOWER — configured or
-    affordable — so the order never exceeds either the configured size or the
-    balance (capped at MAX_ORDER_LOTS, floor 1). Falls back to the configured
-    size only after a verified balance read. A failed/zero affordability check
-    returns zero and blocks the entry (fail closed)."""
+    """Return the configured lots after applying the applicable funding cap.
+
+    LIVE sizing requires a verified wallet and fails closed when affordability
+    cannot be established.  DRY RUN uses virtual capital, so its paper funding
+    ceiling is the configured size.  The caller still applies liquidity,
+    strategy-risk, SL, fee, slippage and order-size caps.
+    """
+    if DRY_RUN:
+        lots = max(min(configured, MAX_ORDER_LOTS), 0)
+        log.info(
+            "%s paper lot sizing: configured=%d  virtual_cap=%d  -> using %d",
+            label, configured, configured, lots,
+        )
+        return lots
+
     # Affordability is a mandatory safety cap for scheduled automation.  The
     # legacy DYNAMIC_LOTS toggle remains readable for old clients but can no
     # longer authorise an order larger than the verified wallet can fund.

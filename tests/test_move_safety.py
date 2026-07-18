@@ -173,9 +173,21 @@ def test_entry_identity_is_journalled_before_transport_failure(tmp_path):
 
 
 def test_affordability_failure_blocks_instead_of_using_configured():
-    with patch.object(bot, "DYNAMIC_LOTS", True), \
+    with patch.object(bot, "DRY_RUN", False), \
+         patch.object(bot, "DYNAMIC_LOTS", True), \
          patch.object(bot, "get_available_usd", side_effect=RuntimeError("wallet down")):
         assert bot._effective_lots(1000, 100, .001, "TEST") == 0
+
+
+def test_dry_run_sizing_uses_virtual_cap_without_wallet_access():
+    with patch.object(bot, "DRY_RUN", True), \
+         patch.object(bot, "MAX_ORDER_LOTS", 600), \
+         patch.object(bot, "get_available_usd") as wallet, \
+         patch.object(bot, "get_btc_price") as spot:
+        assert bot._effective_lots(1000, 100, .001, "TEST") == 600
+
+    wallet.assert_not_called()
+    spot.assert_not_called()
 
 
 def test_move_value_gate_uses_only_completed_candles():

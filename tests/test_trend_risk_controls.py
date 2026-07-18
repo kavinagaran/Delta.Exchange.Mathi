@@ -307,6 +307,50 @@ class TrendSizingAndReentryTests(unittest.TestCase):
         self.assertEqual(plan["liquidity_cap"], 50)
         self.assertEqual(plan["lots"], 50)
 
+    def test_dry_sizing_uses_virtual_cap_and_retains_depth_limit(self):
+        contract = {"contract_value": "0.001", "strike_price": "64000"}
+        quote = {"ask": 100.0, "mark": 99.0, "ask_size": 200}
+        config = {
+            "TREND_LOTS": "1000", "MAX_ORDER_LOTS": "1000",
+            "TREND_ORDER_CHUNK_LOTS": "1000",
+            "TREND_BOOK_PARTICIPATION_PCT": "25",
+            "TREND_RISK_BUDGET_USD": "100",
+            "TREND_MAX_SLIPPAGE_PCT": "1",
+            "MAX_ACCOUNT_PREMIUM_AT_RISK_USD": "500",
+        }
+        with patch.object(dashboard, "_user_cfg", return_value=config), \
+             patch.object(dashboard, "_affordable_option_lots") as wallet, \
+             patch.object(dashboard, "_open_long_premium_usd", return_value=0), \
+             patch.object(dashboard, "_tp_env", return_value=(100, 30, 0, 50)), \
+             patch.object(dashboard, "_option_fee_per_lot", return_value=.001):
+            plan = dashboard._trend_lot_plan(
+                contract, quote, dry_run=True)
+
+        wallet.assert_not_called()
+        self.assertEqual(plan["lots"], 50)
+        self.assertEqual(plan["affordable"], 1000)
+        self.assertEqual(plan["affordability_source"], "paper_configured_cap")
+
+    def test_live_sizing_still_uses_exchange_wallet_cap(self):
+        contract = {"contract_value": "0.001", "strike_price": "64000"}
+        quote = {"ask": 100.0, "mark": 99.0, "ask_size": 200}
+        config = {
+            "TREND_LOTS": "1000", "MAX_ORDER_LOTS": "1000",
+            "TREND_ORDER_CHUNK_LOTS": "1000",
+            "TREND_BOOK_PARTICIPATION_PCT": "25",
+            "TREND_RISK_BUDGET_USD": "100",
+            "MAX_ACCOUNT_PREMIUM_AT_RISK_USD": "500",
+        }
+        with patch.object(dashboard, "_user_cfg", return_value=config), \
+             patch.object(dashboard, "_affordable_option_lots", return_value=0), \
+             patch.object(dashboard, "_open_long_premium_usd", return_value=0), \
+             patch.object(dashboard, "_tp_env", return_value=(100, 30, 0, 50)):
+            plan = dashboard._trend_lot_plan(
+                contract, quote, dry_run=False)
+
+        self.assertEqual(plan["lots"], 0)
+        self.assertEqual(plan["affordability_source"], "exchange_wallet")
+
     def test_same_15m_candle_cannot_reenter_and_neutral_rearms(self):
         state = {"status": "CLOSED", "last_entry_15m_candle": "100",
                  "last_entry_direction": "up", "trend_rearmed": False,

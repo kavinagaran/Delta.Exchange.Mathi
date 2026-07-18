@@ -258,6 +258,50 @@ def test_short_plan_requires_opt_in_positive_sl_and_short_cap():
     assert "disabled" in plan["reason"]
 
 
+def test_dry_move_sizing_uses_virtual_cap_without_weakening_other_caps():
+    cfg = {
+        "STRADDLE_LOTS": "1000", "MAX_ORDER_LOTS": "1000",
+        "ORDER_CHUNK_LOTS": "1000", "MIN_BOOK_DEPTH_MULTIPLE": "1",
+        "RISK_PER_TRADE_USD_EVENING": "500",
+        "MAX_ACCOUNT_PREMIUM_AT_RISK_USD": "500",
+    }
+    contract = {"contract_value": ".001", "strike_price": "64000"}
+    quote = {"entry_price": 149, "entry_depth": 569}
+    with patch.object(dashboard, "_user_cfg", return_value=cfg), \
+            patch.object(dashboard, "_affordable_option_lots") as wallet, \
+            patch.object(dashboard, "_tp_env", return_value=(100, 30, 0, 0)), \
+            patch.object(dashboard, "_open_long_premium_usd", return_value=0), \
+            patch.object(dashboard, "_option_fee_per_lot", return_value=.005):
+        plan = dashboard._move_lot_plan(
+            "evening", "buy", contract, quote, dry_run=True)
+
+    wallet.assert_not_called()
+    assert plan["lots"] == 569
+    assert plan["affordable"] == 1000
+    assert plan["affordability_source"] == "paper_configured_cap"
+    assert plan["liquidity_cap"] == 569
+
+
+def test_live_move_sizing_still_fails_closed_on_empty_wallet():
+    cfg = {
+        "STRADDLE_LOTS": "1000", "MAX_ORDER_LOTS": "1000",
+        "ORDER_CHUNK_LOTS": "1000", "MIN_BOOK_DEPTH_MULTIPLE": "1",
+        "RISK_PER_TRADE_USD_EVENING": "500",
+        "MAX_ACCOUNT_PREMIUM_AT_RISK_USD": "500",
+    }
+    contract = {"contract_value": ".001", "strike_price": "64000"}
+    quote = {"entry_price": 149, "entry_depth": 569}
+    with patch.object(dashboard, "_user_cfg", return_value=cfg), \
+            patch.object(dashboard, "_affordable_option_lots", return_value=0), \
+            patch.object(dashboard, "_tp_env", return_value=(100, 30, 0, 0)), \
+            patch.object(dashboard, "_open_long_premium_usd", return_value=0):
+        plan = dashboard._move_lot_plan(
+            "evening", "buy", contract, quote, dry_run=False)
+
+    assert plan["lots"] == 0
+    assert plan["affordability_source"] == "exchange_wallet"
+
+
 def test_manual_entry_honors_concurrent_move_cap(isolated_user):
     _write(isolated_user / "morning_state.json", _open_state(
         slot="morning", product_id=7, symbol="MV-BTC-OLD", lots=4,

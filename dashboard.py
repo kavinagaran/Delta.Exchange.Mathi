@@ -3206,7 +3206,13 @@ def _move_lot_plan(
     *,
     dry_run: bool = False,
 ) -> dict:
-    """Fail-closed minimum of configured, affordable, cap, risk and depth."""
+    """Fail-closed minimum of configured, funding, cap, risk and depth.
+
+    A paper trade has no real-wallet funding requirement.  In DRY RUN its
+    configured size is therefore the virtual affordability ceiling; every
+    other safety cap below still applies.  LIVE entries continue to require a
+    verified exchange-wallet balance.
+    """
     cfg = _user_cfg()
     lot_key, lot_default = (("MORNING_LOTS", 2000) if slot == "morning"
                             else ("STRADDLE_LOTS", 800))
@@ -3219,7 +3225,9 @@ def _move_lot_plan(
     cv = float(contract.get("contract_value") or 0)
     strike = float(contract.get("strike_price") or 0)
     price = float(quote.get("entry_price") or 0)
-    affordable = _affordable_option_lots(price, cv, strike)
+    affordable = (max(configured, 0) if dry_run
+                  else _affordable_option_lots(price, cv, strike))
+    affordability_source = "paper_configured_cap" if dry_run else "exchange_wallet"
     depth_multiple = max(_as_float(cfg.get("MIN_BOOK_DEPTH_MULTIPLE") or 1, 1), 0.01)
     liquidity_cap = int(float(quote.get("entry_depth") or 0) / depth_multiple)
     risk_key = "RISK_PER_TRADE_USD_MORNING" if slot == "morning" \
@@ -3262,6 +3270,7 @@ def _move_lot_plan(
         in {"1", "true", "yes", "on"}
     return {
         "lots": lots, "configured": configured, "affordable": affordable,
+        "affordability_source": affordability_source,
         "max_order_lots": max_order, "chunk_cap": chunk_cap,
         "liquidity_cap": liquidity_cap, "risk_budget_usd": risk_budget,
         "sl_target_pnl": sl_target, "proposed_risk_usd": proposed,
@@ -5320,7 +5329,12 @@ def _trend_lot_plan(
     cv = _as_float(contract.get("contract_value"), 0.001)
     strike = _as_float(contract.get("strike_price"), 0)
     notional_reference = _as_float(quote.get("spot"), 0) or strike
-    affordable = _affordable_option_lots(ask, cv, notional_reference)
+    # Simulations are backed by virtual capital, not the authenticated
+    # account's USD wallet.  Configured lots become the paper affordability
+    # ceiling while liquidity, premium, risk and order caps remain mandatory.
+    affordable = (configured if dry_run
+                  else _affordable_option_lots(ask, cv, notional_reference))
+    affordability_source = "paper_configured_cap" if dry_run else "exchange_wallet"
     participation = min(max(_as_float(config.get("TREND_BOOK_PARTICIPATION_PCT") or 25, 25), 0), 100)
     liquidity_cap = int(max(_as_float(quote.get("ask_size"), 0), 0) * participation / 100)
     if str(config.get("TREND_ALLOW_MISSING_BOOK") or "false").lower() in {"1", "true", "yes", "on"} \
@@ -5355,7 +5369,9 @@ def _trend_lot_plan(
                         lots * (premium_per_lot + round_trip_fee + slippage_per_lot)) if lots else 0
     return {
         "lots": lots, "configured": configured,
-        "affordable": affordable, "liquidity_cap": liquidity_cap,
+        "affordable": affordable,
+        "affordability_source": affordability_source,
+        "liquidity_cap": liquidity_cap,
         "premium_cap": premium_cap, "max_order_cap": max_order,
         "risk_budget_usd": round(risk_budget, 2),
         "stop_loss_usd": round(sl_target, 2),
