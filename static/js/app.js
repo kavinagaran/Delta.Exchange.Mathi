@@ -50,6 +50,22 @@ function initThemeToggle() {
   });
 }
 
+function setTradingModeIndicator(mode, dryRunMode) {
+  const el = document.getElementById('tb-mode');
+  if (!el) return;
+  const raw = String(mode || '').trim().toUpperCase().replace(/[_-]+/g, ' ');
+  const known = dryRunMode === true || dryRunMode === false ||
+    raw === 'LIVE' || raw === 'DRY RUN';
+  const isDry = dryRunMode === true || raw === 'DRY RUN';
+  const label = known ? (isDry ? 'DRY RUN' : 'LIVE') : '—';
+  el.className = `trading-mode-pill ${known ? (isDry ? 'dry' : 'live') : 'loading'}`;
+  el.setAttribute('aria-label', known
+    ? `Trading mode is ${label}`
+    : 'Trading mode is unavailable');
+  el.innerHTML = `<span class="dot" aria-hidden="true"></span>` +
+    `<span class="mode-label">Trading Mode</span><strong>${label}</strong>`;
+}
+
 /* formatting */
 const fN = (v, d = 0) => (v == null || isNaN(+v)) ? '—' : (+v).toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
 const f$ = v => (v == null || isNaN(+v)) ? '—' : (v < 0 ? '-$' : '+$') + Math.abs(+v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -117,13 +133,11 @@ function _closedAtMs(trade) {
 
 function statusFromSlots(st) {
   const slots = [st.morning || {}, { ...st, morning: undefined, trend: undefined }, st.trend || {}];
-  const open = slots.filter(s => s && s.status === 'OPEN');
-  const realOpen = open.filter(s => !s.dry_run);
+  const realOpen = slots.filter(s => s && s.status === 'OPEN' && !s.dry_run);
   if (realOpen.length) {
     const pnl = realOpen.reduce((a, s) => a + (+s.live_pnl || 0), 0);
     return { cls: 'live', text: `LIVE ${f$(pnl)}`, pnl };
   }
-  if (open.length) return { cls: 'sim', text: 'SIMULATED ONLY' };
   if (st.latest_closed_trade) return _closedPill(st.latest_closed_trade);
   const closed = slots.filter(s => s && s.status === 'CLOSED' && !s.dry_run);
   if (closed.length) {
@@ -136,6 +150,7 @@ function statusFromSlots(st) {
 async function refreshTopbar() {
   try {
     const st = await jget('/api/status');
+    setTradingModeIndicator(st.trading_mode, st.dry_run_mode);
     const btc = document.getElementById('tb-btc');
     if (btc) {
       const price = +st.btc_futures_price;
@@ -157,14 +172,16 @@ async function refreshTopbar() {
     window._lastStatus = st;
     document.dispatchEvent(new CustomEvent('status', { detail: st }));
   } catch (e) { /* transient */ }
-  try {
-    const w = await jget('/api/wallet');
-    const el = document.getElementById('tb-bal');
-    if (el && w.usd_balance != null) {
-      const inr = w.inr_balance != null ? ` · ₹${fN(w.inr_balance)}` : '';
-      el.innerHTML = `Balance <b>$${fN(w.usd_balance, 2)}</b>${inr}`;
-    }
-  } catch (e) { /* transient */ }
+  const el = document.getElementById('tb-bal');
+  if (el) {
+    try {
+      const w = await jget('/api/wallet');
+      if (w.usd_balance != null) {
+        const inr = w.inr_balance != null ? ` · ₹${fN(w.inr_balance)}` : '';
+        el.innerHTML = `Balance <b>$${fN(w.usd_balance, 2)}</b>${inr}`;
+      }
+    } catch (e) { /* transient */ }
+  }
 }
 
 function tickClock() {

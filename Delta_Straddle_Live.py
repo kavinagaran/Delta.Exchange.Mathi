@@ -23,6 +23,7 @@ import sys
 import time
 import math
 import statistics
+from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
@@ -58,31 +59,48 @@ API_KEY          = os.getenv("API_KEY",          "")
 API_SECRET       = os.getenv("API_SECRET",       "")
 PERPETUAL_SYMBOL = os.getenv("PERPETUAL_SYMBOL", "BTCUSD")
 
+def _strict_config_bool(value, *, key: str = "boolean setting") -> bool:
+    """Parse a persisted safety toggle without silently treating junk as false."""
+    if isinstance(value, bool):
+        return value
+    raw = str(value if value is not None else "").strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{key} must be true or false")
+
+
+_ENV_DRY_RUN_DEFAULT = _strict_config_bool(
+    os.getenv("DRY_RUN", "false"), key="DRY_RUN")
+
 # ── Account identity & per-user data (must come before strategy config:
 #    every os.getenv below may be overridden by this user's config.json) ──
 BOT_USER = os.getenv("BOT_USER", os.getenv("DASH_USER", "mathi"))
-DATA_DIR = Path(__file__).parent / "users" / BOT_USER
-DATA_DIR.mkdir(parents=True, exist_ok=True)
+ACCOUNT_DIR = Path(__file__).parent / "users" / BOT_USER
+LIVE_DATA_DIR = ACCOUNT_DIR
+DRY_DATA_DIR = ACCOUNT_DIR / "dry_run"
+ACCOUNT_DIR.mkdir(parents=True, exist_ok=True)
+DRY_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-STATE_FILE         = DATA_DIR / "straddle_state.json"
-MORNING_STATE_FILE = DATA_DIR / "morning_state.json"
-HISTORY_FILE       = DATA_DIR / "trade_history.json"
 ENV_FILE           = Path(__file__).parent / ".env"
-CFG_FILE           = DATA_DIR / "config.json"
+CFG_FILE           = ACCOUNT_DIR / "config.json"
 ENTRY_CONFIGURATION_ERRORS: list[str] = []
 
 # One-time migration: these files used to live in the repo root — move them
-# into the bot account's folder if they're still there.
+# into the bot account's LIVE folder if they're still there.  DRY-RUN data is
+# deliberately stored under users/<user>/dry_run and is migrated by the
+# dashboard's account-storage migration under its cross-process lock.
 import shutil as _shutil
 for _f in ("straddle_state.json", "morning_state.json", "trade_history.json"):
     _src = Path(__file__).parent / _f
-    _dst = DATA_DIR / _f
+    _dst = LIVE_DATA_DIR / _f
     if _src.exists() and not _dst.exists():
         _shutil.move(str(_src), str(_dst))
 
 # Each bot instance trades ITS user's own credentials (account.json),
 # falling back to the .env keys — one `mathi-bot@<user>` service per account.
-_account_path = DATA_DIR / "account.json"
+_account_path = ACCOUNT_DIR / "account.json"
 if _account_path.exists():
     try:
         _acct = json.loads(_account_path.read_text(encoding="utf-8"))
@@ -111,7 +129,46 @@ if CFG_FILE.exists():
     except (OSError, ValueError, TypeError) as exc:
         ENTRY_CONFIGURATION_ERRORS.append(f"invalid config.json: {exc}")
 
+try:
+    PROCESS_DRY_RUN = _strict_config_bool(
+        os.getenv("DRY_RUN", str(_ENV_DRY_RUN_DEFAULT)),
+        key="DRY_RUN",
+    )
+except ValueError as exc:
+    PROCESS_DRY_RUN = True
+    ENTRY_CONFIGURATION_ERRORS.append(str(exc))
+
+# New entries use exactly one mode namespace.  The LIVE namespace remains the
+# legacy account root for backward compatibility; paper state can therefore
+# never overwrite or block a real slot.
+DRY_RUN = PROCESS_DRY_RUN
+DATA_DIR = DRY_DATA_DIR if PROCESS_DRY_RUN else LIVE_DATA_DIR
+STATE_FILE         = DATA_DIR / "straddle_state.json"
+MORNING_STATE_FILE = DATA_DIR / "morning_state.json"
+HISTORY_FILE       = DATA_DIR / "trade_history.json"
+
 TAG = BOT_USER.upper()   # identifies this instance in alerts and logs
+
+
+@contextmanager
+def _storage_namespace(dry_run: bool):
+    """Temporarily address one mode's files in this single-threaded engine.
+
+    The process mode still governs NEW exposure.  This scoped path switch is
+    only for supervising, reconciling, and closing positions that were opened
+    before a later config-mode change.
+    """
+    global DATA_DIR, STATE_FILE, MORNING_STATE_FILE, HISTORY_FILE
+    previous = (DATA_DIR, STATE_FILE, MORNING_STATE_FILE, HISTORY_FILE)
+    data_dir = DRY_DATA_DIR if dry_run else LIVE_DATA_DIR
+    DATA_DIR = data_dir
+    STATE_FILE = data_dir / "straddle_state.json"
+    MORNING_STATE_FILE = data_dir / "morning_state.json"
+    HISTORY_FILE = data_dir / "trade_history.json"
+    try:
+        yield
+    finally:
+        DATA_DIR, STATE_FILE, MORNING_STATE_FILE, HISTORY_FILE = previous
 
 # One per-order ceiling for every strategy; risk/affordability/liquidity caps
 # normally bind first.  Do not maintain a different hidden Evening ceiling.
@@ -154,7 +211,6 @@ ENTRY_WIN_START = ENTRY_M_UTC
 ENTRY_WIN_END   = min(ENTRY_M_UTC + 10, 60)  # 10-min window, capped at hour end
 EXIT_WIN_START  = EXIT_M_UTC
 
-DRY_RUN  = os.getenv("DRY_RUN", "false").lower() in ("1", "true", "yes")
 POLL_SEC = 30
 
 # Morning trade — buys TODAY's contract (settles 12:00 UTC same day)
@@ -318,7 +374,50 @@ def _atomic_json(path: Path, value) -> None:
     os.replace(tmp, path)
 
 
+def _state_flag(value) -> bool:
+    return value is True or str(value or "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
+class StateNamespaceMismatch(RuntimeError):
+    """A paper state is in REAL storage, or vice versa."""
+
+
+def _dry_namespace(path: Path) -> bool:
+    """Storage identity, independent of the process's current config mode."""
+    return Path(path).parent.name.lower() == "dry_run"
+
+
+def _validate_state_namespace(state: dict, path: Path) -> dict:
+    """Reject a state whose recorded mode disagrees with its directory.
+
+    Missing ``dry_run`` remains a backward-compatible REAL record.  A legacy
+    paper record left in the real account root must fail closed so it can
+    never be monitored, reconciled, or closed as exchange exposure.
+    """
+    if not isinstance(state, dict):
+        raise ValueError("state is not an object")
+    expected_dry = _dry_namespace(path)
+    actual_dry = _state_flag(state.get("dry_run", False))
+    raw_mode = str(state.get("execution_mode") or "").strip().lower()
+    if raw_mode:
+        if raw_mode not in {"real", "live", "dry_run", "dry-run", "paper"}:
+            raise RuntimeError(f"state has invalid execution_mode: {raw_mode}")
+        mode_dry = raw_mode in {"dry_run", "dry-run", "paper"}
+        if mode_dry != actual_dry:
+            raise StateNamespaceMismatch(
+                "state dry_run and execution_mode markers disagree")
+    if actual_dry != expected_dry:
+        location = "DRY-RUN" if expected_dry else "REAL"
+        recorded = "DRY-RUN" if actual_dry else "REAL"
+        raise StateNamespaceMismatch(
+            f"{recorded} state is stored in the {location} namespace: {path}")
+    return state
+
+
 def save_state(state: dict):
+    _validate_state_namespace(state, STATE_FILE)
     _atomic_json(STATE_FILE, state)
     log.info("State saved → %s", STATE_FILE.name)
 
@@ -326,15 +425,15 @@ def load_state() -> dict | None:
     if STATE_FILE.exists():
         try:
             state = json.loads(STATE_FILE.read_text(encoding="utf-8"))
-            if not isinstance(state, dict):
-                raise ValueError("state is not an object")
-            return state
+            return _validate_state_namespace(state, STATE_FILE)
+        except StateNamespaceMismatch as exc:
+            log.critical("%s; treating it as non-current until migration", exc)
+            return None
         except (OSError, ValueError, TypeError) as exc:
             backup = STATE_FILE.with_suffix(STATE_FILE.suffix + ".bak")
             try:
                 state = json.loads(backup.read_text(encoding="utf-8"))
-                if not isinstance(state, dict):
-                    raise ValueError("backup state is not an object")
+                _validate_state_namespace(state, STATE_FILE)
                 log.critical("Primary state corrupt (%s); using validated backup %s", exc, backup)
                 return state
             except (OSError, ValueError, TypeError):
@@ -345,6 +444,7 @@ def clear_state():
     STATE_FILE.unlink(missing_ok=True)
 
 def save_morning_state(state: dict):
+    _validate_state_namespace(state, MORNING_STATE_FILE)
     _atomic_json(MORNING_STATE_FILE, state)
     log.info("State saved → %s", MORNING_STATE_FILE.name)
 
@@ -352,15 +452,15 @@ def load_morning_state() -> dict | None:
     if MORNING_STATE_FILE.exists():
         try:
             state = json.loads(MORNING_STATE_FILE.read_text(encoding="utf-8"))
-            if not isinstance(state, dict):
-                raise ValueError("state is not an object")
-            return state
+            return _validate_state_namespace(state, MORNING_STATE_FILE)
+        except StateNamespaceMismatch as exc:
+            log.critical("%s; treating it as non-current until migration", exc)
+            return None
         except (OSError, ValueError, TypeError) as exc:
             backup = MORNING_STATE_FILE.with_suffix(MORNING_STATE_FILE.suffix + ".bak")
             try:
                 state = json.loads(backup.read_text(encoding="utf-8"))
-                if not isinstance(state, dict):
-                    raise ValueError("backup state is not an object")
+                _validate_state_namespace(state, MORNING_STATE_FILE)
                 log.critical("Primary morning state corrupt (%s); using validated backup %s", exc, backup)
                 return state
             except (OSError, ValueError, TypeError):
@@ -459,6 +559,10 @@ def _move_first_present(state: dict, *keys):
 
 def log_trade(state: dict) -> bool:
     """Safely upsert a MOVE trade; return true only for final accounting."""
+    # HISTORY_FILE shares the active mode directory with both slot states.
+    # Key validation to that directory so isolated history writers/tests do
+    # not depend on an unrelated module-level slot path.
+    _validate_state_namespace(state, HISTORY_FILE)
     entry_fee = _move_first_present(
         state, "entry_fee_usd", "entry_commission_usd", "entry_fees_usd",
     )
@@ -504,6 +608,8 @@ def log_trade(state: dict) -> bool:
         "entry_time":   state.get("entry_time_utc", ""),
         "exit_time":    state.get("exit_time_utc", ""),
         "dry_run":      state.get("dry_run", False),
+        "execution_mode": ("dry_run" if _move_bool(state.get("dry_run"))
+                           else "real"),
         "side":         state.get("side", "long"),
         "order_id":     state.get("order_id"),
         "order_ids":    state.get("order_ids", []),
@@ -675,13 +781,23 @@ def already_traded_today() -> bool:
         if not settled:
             log.info("Position still OPEN — cannot enter another trade.")
             return True
-        log.info("Stale OPEN state — position settled/closed externally. Marking CLOSED.")
-        state["status"]       = "CLOSED"
-        state["exit_trigger"] = "settlement_or_external"
-        state["history_pending"] = True
-        save_state(state)
-        if not _flush_pending_move_history():
-            return True
+        if _move_bool(state.get("dry_run")):
+            log.info("Stale DRY-RUN evening state reached settlement; valuing it from public ticker.")
+            _close_dry_run_position_job(
+                state, save_state, load_state, "EVENING",
+                "settlement_simulated",
+            )
+            state = load_state() or {}
+            if state.get("history_pending"):
+                return True
+        else:
+            log.info("Stale OPEN state — position settled/closed externally. Marking CLOSED.")
+            state["status"]       = "CLOSED"
+            state["exit_trigger"] = "settlement_or_external"
+            state["history_pending"] = True
+            save_state(state)
+            if not _flush_pending_move_history():
+                return True
 
     # Count today's completed trades (history uses 'date' from the bot,
     # 'entry_date' from dashboard square-offs)
@@ -694,7 +810,8 @@ def already_traded_today() -> bool:
         if not isinstance(trades, list) or any(not isinstance(row, dict) for row in trades):
             raise RuntimeError("trade history schema is invalid; entry blocked")
     count = sum(1 for t in trades
-                if (t.get("entry_date") or t.get("date", "")) == today)
+                if (t.get("entry_date") or t.get("date", "")) == today
+                and _move_bool(t.get("dry_run")) == bool(DRY_RUN))
 
     # Include state's trade if it closed today but never reached history
     # (e.g. a manual position that settled on the exchange)
@@ -702,6 +819,7 @@ def already_traded_today() -> bool:
         in_history = any(
             (t.get("entry_date") or t.get("date", "")) == today
             and t.get("symbol") == state.get("symbol")
+            and _move_bool(t.get("dry_run")) == bool(DRY_RUN)
             for t in trades)
         if not in_history:
             count += 1
@@ -1389,6 +1507,39 @@ def _assert_entry_configuration() -> None:
         raise RuntimeError("new entries disabled: " + "; ".join(errors))
 
 
+def _configured_dry_run_now() -> bool:
+    """Re-read the authoritative entry mode immediately before a new entry."""
+    if not CFG_FILE.exists():
+        return _ENV_DRY_RUN_DEFAULT
+    try:
+        document = json.loads(CFG_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError) as exc:
+        raise RuntimeError(
+            "new entries disabled: config.json is unreadable during mode check"
+        ) from exc
+    if not isinstance(document, dict):
+        raise RuntimeError(
+            "new entries disabled: config.json is not an object during mode check")
+    raw = document.get("DRY_RUN")
+    if raw in (None, ""):
+        return _ENV_DRY_RUN_DEFAULT
+    try:
+        return _strict_config_bool(raw, key="DRY_RUN")
+    except ValueError as exc:
+        raise RuntimeError(f"new entries disabled: {exc}") from exc
+
+
+def _assert_entry_mode_current() -> None:
+    """Close the config-save/reload race at the irreversible entry boundary."""
+    persisted = _configured_dry_run_now()
+    if persisted != PROCESS_DRY_RUN:
+        running = "DRY-RUN" if PROCESS_DRY_RUN else "REAL"
+        selected = "DRY-RUN" if persisted else "REAL"
+        raise RuntimeError(
+            f"trading mode changed from {running} to {selected}; "
+            "bot reload is required before any new entry")
+
+
 def _slot_risk(slot: str) -> tuple[float, float]:
     if slot == "morning":
         return RISK_PER_TRADE_MORNING, abs(float(os.getenv("SL_TARGET_PNL_MORNING", "0") or 0))
@@ -1481,14 +1632,15 @@ def build_move_entry_plan(contract: dict, configured_lots: int, side: str, slot:
         raise RuntimeError(f"unresolved entry journal blocks new exposure: {', '.join(unresolved)}")
     open_move = [s for name, s in load_states(DATA_DIR).items()
                  if name in ("morning", "evening")
-                 and str(s.get("status", "")).upper() == "OPEN"]
+                 and str(s.get("status", "")).upper() == "OPEN"
+                 and _move_bool(s.get("dry_run")) == bool(DRY_RUN)]
     if len(open_move) >= MAX_CONCURRENT_MOVE_POSITIONS:
         raise RuntimeError(
             f"concurrent MOVE cap reached ({len(open_move)}/{MAX_CONCURRENT_MOVE_POSITIONS})")
     if side == "sell" and not ALLOW_SHORT_MOVE:
         raise RuntimeError("short MOVE entries are disabled; set ALLOW_SHORT_MOVE only with an explicit SL")
     symbol = contract["symbol"]
-    if get_mv_position(int(contract["id"])):
+    if not DRY_RUN and get_mv_position(int(contract["id"])):
         raise RuntimeError(
             f"target product {symbol} already has net exposure; automated ownership would be ambiguous")
     cv = float(contract.get("contract_value") or 0.001)
@@ -1521,9 +1673,13 @@ def build_move_entry_plan(contract: dict, configured_lots: int, side: str, slot:
     # A configured SL is a trigger, not a guarantee of fill.  Long premium at
     # risk remains the catastrophe bound and must never be understated.
     proposed_risk = max(stop_loss, catastrophe)
-    unrealized = _account_unrealized_pnl()
+    # Paper results have their own state/history risk ledger.  Pulling the
+    # exchange account's live P&L into a simulation would mix the two modes
+    # and could make a harmless paper entry depend on unrelated real exposure.
+    unrealized = 0.0 if DRY_RUN else _account_unrealized_pnl()
     decision = evaluate_entry(DATA_DIR, proposed_risk, _risk_config(),
-                              unrealized_pnl_usd=unrealized)
+                              unrealized_pnl_usd=unrealized,
+                              dry_run=DRY_RUN)
     audit_event(DATA_DIR, "move_entry_evaluated", {
         "slot": slot, "symbol": symbol, "side": side,
         "configured_lots": configured_lots, "affordable_lots": affordable,
@@ -1742,6 +1898,7 @@ def recover_pending_entries(slots=("morning", "evening")) -> None:
                 "entry_commission_usd": sum(float(f.get("paid_commission") or 0)
                                             for f in verified_fills),
                 "entry_trigger": "recovered_pending_journal", "dry_run": False,
+                "execution_mode": "real",
                 "ownership": "move_bot", "recovery_unresolved_orders": unresolved,
                 "protection_config": recovered_protection if protection_is_valid else {},
             }
@@ -1803,8 +1960,13 @@ def start_tp_monitor(slot: str):
     """Spawn tp_monitor.py for this slot right after an entry, so TP/SL/TSL
     protection never depends on someone pressing Start in the dashboard.
     Uses the same users/<user>/tp_<slot>.pid file the dashboard tracks."""
-    if DRY_RUN:
-        return True   # no real position to protect
+    current_state = (
+        load_morning_state() if slot == "morning" else load_state()
+    ) or {}
+    if _move_bool(current_state.get("dry_run")):
+        log.info("DRY-RUN %s state uses local simulated exits; no exchange monitor spawned.",
+                 slot)
+        return True
     health_file = DATA_DIR / f"tp_{slot}_health.json"
     timeout_sec = max(min(int(os.getenv("PROTECTION_START_TIMEOUT_SEC", "30")), 55), 5)
     heartbeat_max_age = max(
@@ -2116,10 +2278,13 @@ def check_api_access():
 # Buys TODAY's contract (settles 12:00 UTC same day).
 # ─────────────────────────────────────────────────────────────
 def morning_entry_job():
-    with account_entry_lock(DATA_DIR, "scheduled-morning") as acquired:
+    # The mutex stays at the account root so a config transition can never
+    # allow simultaneous REAL and DRY-RUN entry workers.
+    with account_entry_lock(ACCOUNT_DIR, "scheduled-morning") as acquired:
         if not acquired:
             log.warning("Another account entry is in progress — morning entry skipped.")
             return
+        _assert_entry_mode_current()
         return _morning_entry_job_locked()
 
 
@@ -2201,6 +2366,7 @@ def _morning_entry_job_locked():
         "risk_decision": plan["risk_decision"],
         "protection_config": plan["protection_config"],
         "dry_run":        DRY_RUN,
+        "execution_mode": "dry_run" if DRY_RUN else "real",
     }, save_morning_state)
     if not _protect_or_flatten_entry("morning"):
         log.error("Morning fill was flattened because protection could not be confirmed.")
@@ -2233,10 +2399,11 @@ def _morning_entry_job_locked():
 # ENTRY JOB  —  12:05 UTC  (5:35 PM IST)
 # ─────────────────────────────────────────────────────────────
 def entry_job():
-    with account_entry_lock(DATA_DIR, "scheduled-evening") as acquired:
+    with account_entry_lock(ACCOUNT_DIR, "scheduled-evening") as acquired:
         if not acquired:
             log.warning("Another account entry is in progress — evening entry skipped.")
             return
+        _assert_entry_mode_current()
         return _entry_job_locked()
 
 
@@ -2314,6 +2481,7 @@ def _entry_job_locked():
         "risk_decision": plan["risk_decision"],
         "protection_config": plan["protection_config"],
         "dry_run":        DRY_RUN,
+        "execution_mode": "dry_run" if DRY_RUN else "real",
     }, save_state)
     if not _protect_or_flatten_entry("evening"):
         log.error("Evening fill was flattened because protection could not be confirmed.")
@@ -2345,6 +2513,102 @@ def _entry_job_locked():
 # ─────────────────────────────────────────────────────────────
 # EXIT JOBS — shared close logic for both slots
 # ─────────────────────────────────────────────────────────────
+def _close_dry_run_position_job(state: dict, save_fn, load_fn, label: str,
+                                exit_trigger: str) -> dict | None:
+    """Close one paper position from public marks and persist its own ledger.
+
+    This path contains no authenticated position lookup, order lookup, order
+    submission, or protection-order cleanup.  Its state marker and namespace
+    are both verified before a simulated result can be published.
+    """
+    slot = str(state.get("slot") or label).strip().lower()
+    with account_file_lock(
+        DATA_DIR, f"close-{slot}", f"scheduled-dry-close-{os.getpid()}",
+        stale_after_sec=30, wait_sec=2,
+    ) as acquired:
+        if not acquired:
+            raise RuntimeError(f"another {slot} close/reconciliation is in progress")
+        latest = load_fn()
+        if latest:
+            state = latest
+        if not state or state.get("status") != "OPEN":
+            log.info("%s paper close already reconciled by another worker.", label)
+            return None
+        if not _move_bool(state.get("dry_run")):
+            raise RuntimeError(
+                f"refusing simulated close for non-DRY-RUN {slot} state")
+
+        symbol = str(state.get("symbol") or "")
+        lots = int(float(state.get("lots") or 0))
+        entry_mark = float(state.get("entry_mark") or 0)
+        contract_val = float(state.get("contract_value") or 0.001)
+        if not symbol or lots < 1 or entry_mark <= 0 or contract_val <= 0:
+            raise RuntimeError("paper state has incomplete entry identity")
+        exit_mark = float(get_mv_mark(symbol) or 0)
+        if not math.isfinite(exit_mark) or exit_mark <= 0:
+            raise RuntimeError(
+                f"public ticker has no valid paper exit mark for {symbol}")
+        try:
+            btc_exit = float(get_btc_price() or state.get("btc_at_entry") or 0)
+        except Exception:
+            btc_exit = float(state.get("btc_at_entry") or 0)
+        btc_entry = float(state.get("btc_at_entry") or 0)
+        btc_move = ((btc_exit - btc_entry) / btc_entry * 100
+                    if btc_entry and btc_exit else 0.0)
+        pnl_sign = -1 if str(state.get("side") or "").lower() == "short" else 1
+        gross = (exit_mark - entry_mark) * contract_val * lots * pnl_sign
+        # No exchange order exists in DRY-RUN, therefore no actual commission
+        # is charged.  Keep the zero explicit so paper accounting is complete
+        # rather than masquerading as missing real fill data.
+        fees = 0.0
+        pnl = gross - fees
+        closed_at = datetime.now(timezone.utc)
+        state.update({
+            "status": "CLOSED",
+            "dry_run": True,
+            "execution_mode": "dry_run",
+            "exit_date": closed_at.strftime("%Y-%m-%d"),
+            "exit_time_utc": closed_at.strftime("%H:%M:%S"),
+            "exit_at_utc": closed_at.isoformat().replace("+00:00", "Z"),
+            "exit_mark": round(exit_mark, 8),
+            "btc_at_exit": round(btc_exit, 2),
+            "btc_move_pct": round(btc_move, 4),
+            "gross_pnl_usd": round(gross, 8),
+            "fees_usd": fees,
+            "entry_fee_usd": 0.0,
+            "exit_fee_usd": 0.0,
+            "entry_commission_usd": 0.0,
+            "exit_commission_usd": 0.0,
+            "entry_fee_source": "dry_run",
+            "exit_fee_source": "dry_run",
+            "fees_available": True,
+            "fees_complete": True,
+            "fees_estimated": False,
+            "pnl_includes_fees": True,
+            "pnl_usd": round(pnl, 4),
+            "exit_trigger": exit_trigger,
+            "exit_price_source": "public_ticker_simulation",
+            "closed_lots": lots,
+            "history_pending": True,
+            "history_logged": False,
+        })
+        save_fn(state)
+        history_complete = log_trade(state)
+        state["history_pending"] = not history_complete
+        state["history_logged"] = bool(history_complete)
+        if history_complete:
+            state["history_logged_at_utc"] = closed_at.isoformat()
+        save_fn(state)
+        audit_event(DATA_DIR, "dry_run_move_closed", {
+            "slot": slot, "symbol": symbol, "lots": lots,
+            "entry_mark": entry_mark, "exit_mark": exit_mark,
+            "pnl_usd": round(pnl, 4), "exit_trigger": exit_trigger,
+        })
+        log.info("%s DRY-RUN straddle CLOSED. Simulated P&L: $%.2f",
+                 label, pnl)
+        return {"pnl": round(pnl, 4), "fill": exit_mark, "dry_run": True}
+
+
 def exit_job():
     """Evening exit — configured via EXIT_H_UTC / EXIT_M_UTC."""
     log.info("=" * 64)
@@ -2355,6 +2619,11 @@ def exit_job():
     if not state or state.get("status") != "OPEN":
         log.info("No open evening position — nothing to close.")
         return
+    if _move_bool(state.get("dry_run")):
+        return _close_dry_run_position_job(
+            state, save_state, load_state, "EVENING",
+            "scheduled_exit_evening_simulated",
+        )
     _close_position_job(state, save_state, "EVENING", load_fn=load_state)
 
 
@@ -2368,6 +2637,11 @@ def morning_exit_job():
     if not state or state.get("status") != "OPEN":
         log.info("No open morning position — nothing to close.")
         return
+    if _move_bool(state.get("dry_run")):
+        return _close_dry_run_position_job(
+            state, save_morning_state, load_morning_state, "MORNING",
+            "scheduled_exit_morning_simulated",
+        )
     _close_position_job(
         state, save_morning_state, "MORNING", load_fn=load_morning_state)
 
@@ -2815,11 +3089,49 @@ def _scheduled_exit_due(state: dict | None, hour_utc: int,
     return due
 
 
+def _resume_mode_namespace(dry_run: bool) -> None:
+    """Recover one namespace without letting the selected entry mode hide it."""
+    label = "DRY-RUN" if dry_run else "REAL"
+    with _storage_namespace(dry_run):
+        if not dry_run:
+            recover_pending_entries()
+        _flush_pending_move_history()
+        for slot, load_fn in (
+            ("evening", load_state),
+            ("morning", load_morning_state),
+        ):
+            state = load_fn()
+            if not state or state.get("status") != "OPEN":
+                continue
+            log.info("Resuming %s %s position: %s (entered %s UTC, lots=%s)",
+                     label, slot.upper(), state.get("symbol"),
+                     state.get("entry_time_utc"), state.get("lots"))
+            if dry_run:
+                # Scheduled paper exits are handled by this engine.  A
+                # dedicated paper TP/SL worker may also attach independently,
+                # but no exchange-protection monitor belongs to this state.
+                continue
+            if not start_tp_monitor(slot):
+                _emergency_flatten_unprotected(slot)
+
+
+def _flush_all_mode_histories() -> None:
+    for dry_run in (False, True):
+        try:
+            with _storage_namespace(dry_run):
+                _flush_pending_move_history()
+        except Exception:
+            log.exception("%s history flush failed",
+                          "DRY-RUN" if dry_run else "REAL")
+
+
 def main():
     log.info("=" * 64)
     log.info("Delta MV Straddle Bot")
-    recover_pending_entries()
-    _flush_pending_move_history()
+    # A mode switch governs new entries only. Existing real exposure and paper
+    # simulations remain independently recoverable/closable.
+    _resume_mode_namespace(False)
+    _resume_mode_namespace(True)
     log.info("  Morning: %02d:%02d UTC (%s)  lots=%d  side=%s  enabled=%s",
              MORNING_H_UTC, MORNING_M_UTC,
              _ist_label(MORNING_H_UTC, MORNING_M_UTC), MORNING_LOTS,
@@ -2837,24 +3149,12 @@ def main():
     log.info("  Lots   : %d  |  DRY-RUN: %s", LOTS, DRY_RUN)
     log.info("=" * 64)
 
-    # On restart, show any open positions
-    state = load_state()
-    if state and state.get("status") == "OPEN":
-        log.info("Resuming open EVENING position: %s  (entered %s UTC, lots=%d)",
-                 state.get("symbol"), state.get("entry_time_utc"), state.get("lots"))
-        if not start_tp_monitor("evening"):
-            _emergency_flatten_unprotected("evening")
-    m_state = load_morning_state()
-    if m_state and m_state.get("status") == "OPEN":
-        log.info("Resuming open MORNING position: %s  (entered %s UTC, lots=%d)",
-                 m_state.get("symbol"), m_state.get("entry_time_utc"), m_state.get("lots"))
-        if not start_tp_monitor("morning"):
-            _emergency_flatten_unprotected("morning")
-
     fired_entry        = False
     fired_morning      = False
-    next_morning_exit_retry = 0.0
-    next_evening_exit_retry = 0.0
+    next_exit_retry = {
+        (False, "morning"): 0.0, (False, "evening"): 0.0,
+        (True, "morning"): 0.0, (True, "evening"): 0.0,
+    }
     next_pending_recovery = 0.0
     next_history_flush = 0.0
     last_day           = None
@@ -2867,20 +3167,34 @@ def main():
             h, m    = now.hour, now.minute
             today   = now.strftime("%Y-%m-%d")
 
+            # CONFIG WATCH runs before every entry trigger.  The mode is also
+            # re-read under the account entry lock, closing the remaining
+            # sub-second save/reload race.
+            env_mt = ENV_FILE.stat().st_mtime if ENV_FILE.exists() else 0
+            cfg_mt = CFG_FILE.stat().st_mtime if CFG_FILE.exists() else 0
+            if (env_mt != env_mtime or cfg_mt != cfg_mtime) \
+               and time.time() - max(env_mt, cfg_mt) > 2:
+                src = "config.json" if cfg_mt != cfg_mtime else ".env"
+                log.info("Config change detected in %s — reloading bot with new settings.", src)
+                send_telegram(f"🔄 <b>CONFIG CHANGED — BOT RELOADED ({TAG})</b>\n"
+                              "New settings are now in effect.")
+                os.execv(sys.executable, [sys.executable] + sys.argv)
+
             if (time.time() >= next_pending_recovery
-                    and any(DATA_DIR.glob("pending_*_entry.json"))):
+                    and any(LIVE_DATA_DIR.glob("pending_*_entry.json"))):
                 next_pending_recovery = time.time() + 60
-                recover_pending_entries()
+                with _storage_namespace(False):
+                    recover_pending_entries()
             if time.time() >= next_history_flush:
                 next_history_flush = time.time() + 60
-                _flush_pending_move_history()
+                _flush_all_mode_histories()
 
             # Reset daily flags on new UTC day
             if today != last_day:
                 fired_entry        = False
                 fired_morning      = False
-                next_morning_exit_retry = 0.0
-                next_evening_exit_retry = 0.0
+                for retry_key in next_exit_retry:
+                    next_exit_retry[retry_key] = 0.0
                 last_day           = today
                 log.info("New UTC day: %s — daily flags reset.", today)
 
@@ -2896,24 +3210,29 @@ def main():
                     log.exception("Morning entry job failed")
                     send_telegram(f"⚠️ <b>MORNING ENTRY FAILED — {TAG}</b>\n<code>{exc}</code>")
 
-            # MORNING EXIT TRIGGER (skipped when MORNING_EXIT_ENABLED=false).
-            # Catch-up semantics: fires any time AFTER the exit time too, so a
-            # bot that was down during the exit window still closes the
-            # position when it comes back (exit_job no-ops if nothing is open).
-            morning_open = load_morning_state()
-            morning_due = (_scheduled_exit_due(
-                morning_open, MORNING_EXIT_H_UTC, MORNING_EXIT_M_UTC)
-                if MORNING_EXIT_ENABLED and morning_open
-                and morning_open.get("status") == "OPEN" else None)
-            in_morning_exit = bool(morning_due and now >= morning_due)
-            if in_morning_exit and time.time() >= next_morning_exit_retry:
+            # Existing REAL and DRY-RUN positions retain independent scheduled
+            # exits after a mode switch.  A paper close is local-only; a real
+            # close still uses the authenticated reduce-only path.
+            for dry_run in (False, True):
+                retry_key = (dry_run, "morning")
                 try:
-                    morning_exit_job()
+                    with _storage_namespace(dry_run):
+                        morning_open = load_morning_state()
+                        morning_due = (_scheduled_exit_due(
+                            morning_open, MORNING_EXIT_H_UTC, MORNING_EXIT_M_UTC)
+                            if MORNING_EXIT_ENABLED and morning_open
+                            and morning_open.get("status") == "OPEN" else None)
+                        if (morning_due and now >= morning_due
+                                and time.time() >= next_exit_retry[retry_key]):
+                            morning_exit_job()
                 except Exception as exc:
-                    next_morning_exit_retry = time.time() + 60
-                    log.exception("Morning exit job failed")
-                    send_telegram(f"⚠️ <b>MORNING EXIT FAILED — {TAG}</b>\n<code>{exc}</code>\n"
-                                  "The bot will retry in 60 seconds while state remains OPEN.")
+                    next_exit_retry[retry_key] = time.time() + 60
+                    mode_label = "DRY-RUN" if dry_run else "REAL"
+                    log.exception("%s morning exit job failed", mode_label)
+                    send_telegram(
+                        f"⚠️ <b>{mode_label} MORNING EXIT FAILED — {TAG}</b>\n"
+                        f"<code>{exc}</code>\n"
+                        "The bot will retry in 60 seconds while state remains OPEN.")
 
             # ENTRY TRIGGER  12:05–12:14 UTC (skipped when EVENING_ENABLED=false)
             in_entry_window = (EVENING_ENABLED
@@ -2927,39 +3246,26 @@ def main():
                     log.exception("Entry job failed")
                     send_telegram(f"⚠️ <b>ENTRY FAILED — {TAG}</b>\n<code>{exc}</code>")
 
-            # EXIT TRIGGER  19:30 UTC onward (skipped when EVENING_EXIT_ENABLED=false;
-            # intentionally NOT gated on EVENING_ENABLED — see toggle comments up top).
-            # Catch-up semantics like the morning exit: any time past the exit
-            # time still fires, so downtime during the old 10-min window can no
-            # longer leave a position riding to settlement.
-            evening_open = load_state()
-            evening_due = (_scheduled_exit_due(evening_open, EXIT_H_UTC, EXIT_M_UTC)
-                           if EVENING_EXIT_ENABLED and evening_open
-                           and evening_open.get("status") == "OPEN" else None)
-            in_exit_window = bool(evening_due and now >= evening_due)
-            if in_exit_window and time.time() >= next_evening_exit_retry:
+            for dry_run in (False, True):
+                retry_key = (dry_run, "evening")
                 try:
-                    exit_job()
+                    with _storage_namespace(dry_run):
+                        evening_open = load_state()
+                        evening_due = (_scheduled_exit_due(
+                            evening_open, EXIT_H_UTC, EXIT_M_UTC)
+                            if EVENING_EXIT_ENABLED and evening_open
+                            and evening_open.get("status") == "OPEN" else None)
+                        if (evening_due and now >= evening_due
+                                and time.time() >= next_exit_retry[retry_key]):
+                            exit_job()
                 except Exception as exc:
-                    next_evening_exit_retry = time.time() + 60
-                    log.exception("Exit job failed")
-                    send_telegram(f"⚠️ <b>EXIT FAILED — {TAG}</b>\n<code>{exc}</code>\n"
-                                  "The bot will retry in 60 seconds while state remains OPEN.")
-
-            # CONFIG WATCH — when .env changes (dashboard/app save, manual
-            # edit), reload the whole process so new settings apply without
-            # anyone having to restart the service by hand. os.execv replaces
-            # this process in place; daily-fire guards are state-file backed,
-            # so a reload inside a trigger window can't double-fire orders.
-            env_mt = ENV_FILE.stat().st_mtime if ENV_FILE.exists() else 0
-            cfg_mt = CFG_FILE.stat().st_mtime if CFG_FILE.exists() else 0
-            if (env_mt != env_mtime or cfg_mt != cfg_mtime) \
-               and time.time() - max(env_mt, cfg_mt) > 2:
-                src = "config.json" if cfg_mt != cfg_mtime else ".env"
-                log.info("Config change detected in %s — reloading bot with new settings.", src)
-                send_telegram(f"🔄 <b>CONFIG CHANGED — BOT RELOADED ({TAG})</b>\n"
-                              "New settings are now in effect.")
-                os.execv(sys.executable, [sys.executable] + sys.argv)
+                    next_exit_retry[retry_key] = time.time() + 60
+                    mode_label = "DRY-RUN" if dry_run else "REAL"
+                    log.exception("%s evening exit job failed", mode_label)
+                    send_telegram(
+                        f"⚠️ <b>{mode_label} EVENING EXIT FAILED — {TAG}</b>\n"
+                        f"<code>{exc}</code>\n"
+                        "The bot will retry in 60 seconds while state remains OPEN.")
 
             # Heartbeat every 10 min — reports both slots
             if m % 10 == 0 and now.second < POLL_SEC:
@@ -2967,9 +3273,21 @@ def main():
                     if not s or not s.get("status") or s.get("status") == "IDLE":
                         return "idle"
                     return f"{s.get('status', '?')} {s.get('symbol', '?')} x{s.get('lots', '?')}"
-                log.info("Heartbeat %s UTC  morning[%s]  evening[%s]",
-                         now.strftime("%H:%M"),
-                         _slot_desc(load_morning_state()), _slot_desc(load_state()))
+                snapshots = {}
+                for dry_run in (False, True):
+                    with _storage_namespace(dry_run):
+                        key = "dry" if dry_run else "real"
+                        snapshots[key] = (
+                            _slot_desc(load_morning_state()),
+                            _slot_desc(load_state()),
+                        )
+                log.info(
+                    "Heartbeat %s UTC  real[morning=%s evening=%s]  "
+                    "dry[morning=%s evening=%s]",
+                    now.strftime("%H:%M"),
+                    snapshots["real"][0], snapshots["real"][1],
+                    snapshots["dry"][0], snapshots["dry"][1],
+                )
                 check_api_access()
 
         except Exception:

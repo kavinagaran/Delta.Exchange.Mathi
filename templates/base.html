@@ -33,6 +33,7 @@
       {% set items = [
         ('overview',  '/',          'Overview',     'M3 12l9-8 9 8M5 10v10h4v-6h6v6h4V10'),
         ('trades',    '/trades',    'Trades & P&L', 'M3 17l5-6 4 3 6-8M14 6h4v4'),
+        ('dry-run',   '/dry-run',   'Dry Run',      'M9 3v5l-4.5 8A3 3 0 007 20h10a3 3 0 002.5-4L15 8V3M8 13h8'),
         ('positions', '/positions', 'Positions',    'M4 6h16M4 12h16M4 18h10'),
         ('config',    '/config',    'Bot Config',   'M12 8a4 4 0 100 8 4 4 0 000-8zm8 4a8 8 0 01-.2 1.8l2 1.5-2 3.4-2.3-.9a8 8 0 01-3.1 1.8L14 22h-4l-.4-2.4a8 8 0 01-3.1-1.8l-2.3.9-2-3.4 2-1.5A8 8 0 014 12'),
         ('accounts',  '/accounts',  'API Accounts', 'M16 7a4 4 0 11-8 0 4 4 0 018 0zM4 21v-1a6 6 0 016-6h4a6 6 0 016 6v1'),
@@ -61,10 +62,22 @@
         <span class="theme-knob" aria-hidden="true"></span>
         <span class="theme-icon theme-moon" aria-hidden="true">☾</span>
       </button>
+      <span class="trading-mode-pill loading" id="tb-mode" role="status"
+            aria-live="polite" aria-label="Trading mode is loading">
+        <span class="dot" aria-hidden="true"></span>
+        <span class="mode-label">Trading Mode</span>
+        <strong>—</strong>
+      </span>
       <span class="topbar-spacer" aria-hidden="true"></span>
       <span class="chip" id="tb-btc">BTC <b>—</b></span>
+      {% if page == 'dry-run' %}
+      <span class="pill sim topbar-paper-context" title="This page contains simulated results only">
+        <span class="dot"></span>PAPER RESULTS
+      </span>
+      {% else %}
       <span class="chip" id="tb-bal">Balance <b>—</b></span>
       <span class="pill idle" id="tb-pill"><span class="dot"></span>Loading…</span>
+      {% endif %}
       <span class="chip" id="tb-clock">—</span>
     </header>
 

@@ -717,12 +717,36 @@ def _user_dir() -> Path:
     return d
 
 
-def _slot_file(slot: str) -> Path:
-    return _user_dir() / SLOT_STATE_FILES.get(slot, SLOT_STATE_FILES["evening"])
+def _mode_data_dir(dry_run: bool = False) -> Path:
+    """Return the isolated persistence namespace for one execution mode.
+
+    Existing account-root files remain the authoritative LIVE namespace for
+    rollback compatibility.  Simulations are never written beside them.
+    """
+    directory = _user_dir() / "dry_run" if dry_run else _user_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory
 
 
-def _hist_file() -> Path:
-    return _user_dir() / "trade_history.json"
+def _slot_file(slot: str, *, dry_run: bool = False) -> Path:
+    return _mode_data_dir(dry_run) / SLOT_STATE_FILES.get(
+        slot, SLOT_STATE_FILES["evening"])
+
+
+def _hist_file(*, dry_run: bool = False) -> Path:
+    return _mode_data_dir(dry_run) / "trade_history.json"
+
+
+def _is_dry_record(record: dict | None) -> bool:
+    if not isinstance(record, dict):
+        return False
+    mode = str(record.get("execution_mode") or "").strip().lower()
+    if mode:
+        return mode in {"dry", "dry_run", "simulation", "simulated"}
+    value = record.get("dry_run")
+    return value is True or str(value or "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
 
 
 def _history_accounting_complete(record: dict) -> bool:
@@ -778,7 +802,12 @@ def _history_accounting_complete(record: dict) -> bool:
     ))
 
 
-def _append_trade_history(record: dict, owner: str) -> bool:
+def _append_trade_history(
+    record: dict,
+    owner: str,
+    *,
+    dry_run: bool | None = None,
+) -> bool:
     """Cross-process-safe history upsert; true means accounting is final.
 
     A pending external-close row is intentionally persisted but returns false,
@@ -786,10 +815,12 @@ def _append_trade_history(record: dict, owner: str) -> bool:
     accounting arrives, the same trade is repaired in place rather than being
     stranded as a duplicate with null or synthetic P&L.
     """
-    with account_file_lock(_user_dir(), "history", owner, wait_sec=2.0) as acquired:
+    is_dry_run = _is_dry_record(record) if dry_run is None else bool(dry_run)
+    data_dir = _mode_data_dir(is_dry_run)
+    with account_file_lock(data_dir, "history", owner, wait_sec=2.0) as acquired:
         if not acquired:
             return False
-        path = _hist_file()
+        path = _hist_file(dry_run=is_dry_run)
         if path.exists():
             try:
                 history = json.loads(path.read_text(encoding="utf-8"))
@@ -804,22 +835,39 @@ def _append_trade_history(record: dict, owner: str) -> bool:
         incoming["accounting_status"] = (
             "complete" if _history_accounting_complete(incoming) else "pending"
         )
-        key = (incoming.get("client_order_id") or incoming.get("order_id"),
+        key = (incoming.get("simulation_id")
+               or incoming.get("client_order_id") or incoming.get("order_id"),
                incoming.get("symbol"), incoming.get("entry_date") or incoming.get("date"),
                incoming.get("entry_time_utc") or incoming.get("entry_time"))
 
         def row_key(row):
-            return (row.get("client_order_id") or row.get("order_id"),
+            return (row.get("simulation_id")
+                    or row.get("client_order_id") or row.get("order_id"),
                     row.get("symbol"), row.get("entry_date") or row.get("date"),
                     row.get("entry_time_utc") or row.get("entry_time"))
 
+        def same_record(row: dict) -> bool:
+            if row_key(row) == key:
+                return True
+            if not (is_dry_run and _is_dry_record(row)):
+                return False
+            # First isolated import may meet a legacy paper row that predates
+            # simulation_id. Match its immutable entry identity once, then the
+            # merged row gains the stable ID for all subsequent upserts.
+            return all(str(row.get(field) or "") == str(incoming.get(field) or "")
+                       for field in ("slot", "symbol", "lots", "entry_mark")) \
+                and str(row.get("entry_date") or row.get("date") or "") == str(
+                    incoming.get("entry_date") or incoming.get("date") or "") \
+                and str(row.get("entry_time_utc") or row.get("entry_time") or "") == str(
+                    incoming.get("entry_time_utc") or incoming.get("entry_time") or "")
+
         duplicate_index = next((
             index for index, row in enumerate(history)
-            if isinstance(row, dict) and row_key(row) == key
+            if isinstance(row, dict) and same_record(row)
         ), None)
         if duplicate_index is None:
             history.append(incoming)
-            _atomic_write_json(_hist_file(), history)
+            _atomic_write_json(path, history)
             stored = incoming
         else:
             existing = history[duplicate_index]
@@ -832,7 +880,7 @@ def _append_trade_history(record: dict, owner: str) -> bool:
                 )
                 if stored != existing:
                     history[duplicate_index] = stored
-                    _atomic_write_json(_hist_file(), history)
+                    _atomic_write_json(path, history)
         return _history_accounting_complete(stored)
 
 
@@ -912,6 +960,66 @@ def _cfg(key: str, default: str = "") -> str:
 def _cfg_bool(key: str, default: bool = False) -> bool:
     v = _cfg(key)
     return v.lower() in ("1", "true", "yes") if v else default
+
+
+def _trading_mode() -> tuple[bool, str]:
+    """Return the server-authoritative account mode and a stable revision.
+
+    The revision binds a confirmation to the configuration that produced its
+    preview.  A save between preview and submit therefore fails closed rather
+    than changing a simulated click into a real order (or vice versa).
+    """
+    cfg = _user_cfg()
+    raw = str(cfg.get("DRY_RUN") or "").strip().lower()
+    dry_run = raw in {"1", "true", "yes", "on"}
+    canonical = json.dumps(cfg, sort_keys=True, separators=(",", ":"))
+    revision = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+    return dry_run, revision
+
+
+def _trading_mode_payload() -> dict:
+    dry_run, revision = _trading_mode()
+    return {
+        "dry_run_mode": dry_run,
+        "trading_mode": "DRY RUN" if dry_run else "LIVE",
+        "execution_mode": "dry_run" if dry_run else "live",
+        "mode_revision": revision,
+    }
+
+
+def _mode_expectation_error(data: dict | None) -> str | None:
+    """Validate an optional preview/confirmation mode binding."""
+    data = data if isinstance(data, dict) else {}
+    current = _trading_mode_payload()
+    expected_mode = str(
+        data.get("expected_mode") or data.get("execution_mode") or ""
+    ).strip().lower().replace(" ", "_")
+    if expected_mode in {"dry", "simulation", "simulated"}:
+        expected_mode = "dry_run"
+    if expected_mode and expected_mode not in {"dry_run", "live"}:
+        return "Invalid expected trading mode"
+    if expected_mode and expected_mode != current["execution_mode"]:
+        return (
+            "Trading Mode changed after preview. Refresh and review the "
+            f"{current['trading_mode']} action before submitting."
+        )
+    if "dry_run" in data:
+        raw = data.get("dry_run")
+        expected_dry = raw is True or str(raw or "").strip().lower() in {
+            "1", "true", "yes", "on",
+        }
+        if expected_dry != current["dry_run_mode"]:
+            return (
+                "Trading Mode changed after preview. Refresh and confirm the "
+                "action again."
+            )
+    revision = str(data.get("mode_revision") or "").strip()
+    if revision and revision != current["mode_revision"]:
+        return (
+            "Configuration changed after preview. Refresh the contract, "
+            "sizing and Trading Mode before submitting."
+        )
+    return None
 
 
 @app.before_request
@@ -1118,12 +1226,77 @@ def _atomic_write_json(path: Path, value) -> None:
     os.replace(tmp, path)
 
 
-def _pnl_stats(trades: list) -> dict:
-    # DRY-RUN trades produced no real money outcome — never let a simulated
-    # result contribute to real performance stats (same principle as
-    # excluding imported backtest rows).
+def _simulation_identity(record: dict, slot: str = "") -> str:
+    existing = str(record.get("simulation_id") or "").strip()
+    if existing:
+        return existing
+    basis = "|".join(str(value or "") for value in (
+        _active_user(), slot or record.get("slot"), record.get("symbol"),
+        record.get("entry_date") or record.get("date"),
+        record.get("entry_time_utc") or record.get("entry_time"),
+        record.get("lots"), record.get("entry_mark"),
+    ))
+    return "sim-" + hashlib.sha256(basis.encode("utf-8")).hexdigest()[:20]
+
+
+def _as_dry_record(record: dict, slot: str = "") -> dict:
+    result = dict(record)
+    result["dry_run"] = True
+    result["execution_mode"] = "dry_run"
+    result["simulation_id"] = _simulation_identity(result, slot)
+    if slot:
+        result.setdefault("slot", slot)
+    return result
+
+
+def _import_legacy_dry_records() -> None:
+    """Copy explicit legacy simulations into the isolated namespace.
+
+    This migration is deliberately non-destructive: source files are retained
+    for rollback, while every real-facing reader filters them out.  The copy
+    is idempotent and refuses to replace a different active simulation.
+    """
+    root = _user_dir()
+    dry_dir = _mode_data_dir(True)
+    with account_file_lock(
+        root, "dry-run-import", f"dashboard-dry-import:{os.getpid()}",
+        stale_after_sec=30, wait_sec=0,
+    ) as acquired:
+        if not acquired:
+            return
+        legacy_history = _load_json(root / "trade_history.json", [])
+        if isinstance(legacy_history, list):
+            for row in legacy_history:
+                if isinstance(row, dict) and _is_dry_record(row):
+                    _append_trade_history(
+                        _as_dry_record(row, str(row.get("slot") or "")),
+                        "legacy-dry-history-import",
+                        dry_run=True,
+                    )
+        for slot in SLOTS:
+            source = _load_json(root / SLOT_STATE_FILES[slot], {})
+            if not _is_dry_record(source):
+                continue
+            imported = _as_dry_record(source, slot)
+            destination_path = dry_dir / SLOT_STATE_FILES[slot]
+            destination = _load_json(destination_path, {})
+            same_cycle = (
+                destination.get("simulation_id") == imported["simulation_id"])
+            destination_idle = str(destination.get("status") or "").upper() in {
+                "", "IDLE",
+            }
+            if not destination or destination_idle or same_cycle:
+                _atomic_write_json(destination_path, imported)
+            if str(imported.get("status") or "").upper() == "CLOSED":
+                _append_trade_history(
+                    imported, f"legacy-dry-state-import:{slot}", dry_run=True)
+
+
+def _pnl_stats(trades: list, *, dry_run: bool = False) -> dict:
+    """Performance statistics for exactly one execution mode."""
     pnls   = [float(t.get("pnl_usd", 0)) for t in trades
-              if t.get("pnl_usd") is not None and not t.get("dry_run")]
+              if t.get("pnl_usd") is not None
+              and _is_dry_record(t) is bool(dry_run)]
     if not pnls:
         return {}
     wins   = [p for p in pnls if p >= 0]
@@ -1157,6 +1330,7 @@ def _pnl_stats(trades: list) -> dict:
 # ─────────────────────────────────────────────────────────────
 _PAGES = {
     "":          ("overview.html",  "Overview"),
+    "dry-run":   ("dry_run.html",   "Dry Run Dashboard"),
     "trades":    ("trades.html",    "Trades & P&L"),
     "positions": ("positions.html", "Positions"),
     "config":    ("config.html",    "Bot Config"),
@@ -1828,10 +2002,19 @@ def api_status():
             _revive_tp_monitors()
         except Exception:
             pass
+    try:
+        _import_legacy_dry_records()
+    except Exception as exc:
+        print(f"Legacy dry-run import warning for {_active_user()}: {exc}")
     _sync_states_from_exchange()
-    raw_state   = _enrich_live(_load_json(_slot_file("evening"), {}))
-    raw_morning = _enrich_live(_load_json(_slot_file("morning"), {}))
-    raw_trend   = _enrich_live(_load_json(_slot_file("trend"), {}))
+    raw_state   = _load_json(_slot_file("evening"), {})
+    raw_morning = _load_json(_slot_file("morning"), {})
+    raw_trend   = _load_json(_slot_file("trend"), {})
+    # Explicit legacy simulation rows may remain in the rollback-compatible
+    # LIVE files.  They are never presented as real positions.
+    raw_state = {} if _is_dry_record(raw_state) else _enrich_live(raw_state)
+    raw_morning = {} if _is_dry_record(raw_morning) else _enrich_live(raw_morning)
+    raw_trend = {} if _is_dry_record(raw_trend) else _enrich_live(raw_trend)
     latest_closed = _latest_closed_trade(
         _load_json(_hist_file(), []),
         {"evening": raw_state, "morning": raw_morning, "trend": raw_trend},
@@ -1843,6 +2026,7 @@ def api_status():
     state["latest_closed_trade"] = latest_closed
     state["morning"] = morning
     state["trend"]   = trend
+    state.update(_trading_mode_payload())
     # Unrelated C/P positions remain separate. Exact same-product additions
     # disappear from this list only after the Trend monitor confirms adoption.
     state["external_options"] = _external_options.get(_active_user(), [])
@@ -1903,13 +2087,21 @@ def _ist_calendar_date(date_str: str, time_str: str) -> str:
 def api_today_trades():
     today_ist = (datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)).strftime("%Y-%m-%d")
     trades  = _load_json(_hist_file(), [])
-    today_t = [t for t in trades
-               if _ist_calendar_date(t.get("entry_date") or t.get("date", ""),
-                                      t.get("entry_time") or t.get("entry_time_utc", "")) == today_ist]
+    today_t = [
+        t for t in trades
+        if isinstance(t, dict) and not _is_dry_record(t)
+        and _ist_calendar_date(
+            t.get("entry_date") or t.get("date", ""),
+            t.get("entry_time") or t.get("entry_time_utc", ""),
+        ) == today_ist
+    ]
     # Include any open slot position as a live row with real-time mark & P&L
     for slot in SLOTS:
         s = _load_json(_slot_file(slot), {})
-        if s.get("status") == "OPEN" and _ist_calendar_date(s.get("entry_date", ""), s.get("entry_time_utc", "")) == today_ist:
+        if (s.get("status") == "OPEN" and not _is_dry_record(s)
+                and _ist_calendar_date(
+                    s.get("entry_date", ""), s.get("entry_time_utc", ""),
+                ) == today_ist):
             s["_live"] = True
             s["slot"]  = slot
             s = _enrich_live(s)
@@ -2419,44 +2611,134 @@ def _close_move_state_locked(slot: str, state: dict,
             "protection_cleanup_errors": cleanup_errors}
 
 
+def _dry_run_mark_and_pnl(state: dict) -> tuple[float, float, float, float]:
+    """Public-market-only executable exit estimate for a simulation."""
+    entry_mark = float(state.get("entry_mark") or 0)
+    symbol = str(state.get("symbol") or "")
+    try:
+        ticker = req.get(
+            f"{API_BASE}/v2/tickers/{symbol}", timeout=5
+        ).json().get("result", {})
+        quotes = ticker.get("quotes") or {}
+        if state.get("side") == "short":
+            raw_exit = (
+                quotes.get("best_ask") or ticker.get("best_ask")
+                or ticker.get("ask") or ticker.get("mark_price")
+            )
+        else:
+            raw_exit = (
+                quotes.get("best_bid") or ticker.get("best_bid")
+                or ticker.get("bid") or ticker.get("mark_price")
+            )
+        mark = float(raw_exit or entry_mark)
+    except Exception:
+        mark = entry_mark
+    cv = float(state.get("contract_value") or 0.001)
+    lots = int(state.get("lots") or 0)
+    sign = -1 if state.get("side") == "short" else 1
+    gross = (mark - entry_mark) * cv * lots * sign
+    entry_fee = float(
+        state.get("entry_fee_usd") or state.get("entry_fees_usd") or 0)
+    exit_fee = _option_fee_per_lot(
+        mark, cv, float(state.get("strike") or 0)
+    ) * lots
+    return mark, gross - entry_fee - exit_fee, gross, exit_fee
+
+
+def _close_dry_simulation_locked(
+    slot: str,
+    state: dict,
+    *,
+    trigger: str,
+) -> dict:
+    """Close one dry state without touching a private exchange endpoint."""
+    if not _is_dry_record(state):
+        raise RuntimeError("refusing to simulate-close a non-DRY state")
+    mark, pnl, gross, exit_fee = _dry_run_mark_and_pnl(state)
+    entry_fee = float(
+        state.get("entry_fee_usd") or state.get("entry_fees_usd") or 0)
+    exited = datetime.now(timezone.utc)
+    state = _as_dry_record(state, slot)
+    state.update({
+        "status": "CLOSED",
+        "exit_mark": round(mark, 8),
+        "pnl_usd": round(pnl, 2),
+        "gross_pnl_usd": round(gross, 8),
+        "entry_fee_usd": round(entry_fee, 8),
+        "exit_fee_usd": round(exit_fee, 8),
+        "fees_usd": round(entry_fee + exit_fee, 8),
+        "exit_fee_source": "configured_simulation",
+        "pnl_includes_fees": True,
+        "accounting_status": "complete",
+        "exit_date": exited.strftime("%Y-%m-%d"),
+        "exit_time_utc": exited.strftime("%H:%M:%S"),
+        "exit_at_utc": exited.isoformat().replace("+00:00", "Z"),
+        "exit_trigger": trigger,
+        "history_pending": True,
+        "history_logged": False,
+    })
+    state_file = _slot_file(slot, dry_run=True)
+    _atomic_write_json(state_file, state)
+    appended = _append_trade_history(
+        state, f"dry-close:{slot}:{trigger}", dry_run=True)
+    state["history_pending"] = not appended
+    state["history_logged"] = appended
+    if appended:
+        state["history_logged_at_utc"] = datetime.now(timezone.utc).isoformat()
+    _atomic_write_json(state_file, state)
+    return state
+
+
 @app.route("/api/square-off", methods=["POST"])
 def api_square_off():
     slot = _strict_slot_arg(move_only=False)
     if slot is None:
         return jsonify({"ok": False, "error": "slot must be morning, evening, or trend"}), 400
+    data = request.get_json(silent=True) or {}
+    requested_mode = str(
+        data.get("target_mode") or data.get("expected_mode") or ""
+    ).strip().lower().replace(" ", "_")
+    if requested_mode in {"dry", "simulation", "simulated"}:
+        requested_mode = "dry_run"
+    if requested_mode and requested_mode not in {"live", "dry_run"}:
+        return jsonify({"ok": False, "error": "Invalid square-off target mode"}), 400
+    # Exits follow the position's immutable origin, not the mode currently
+    # selected for NEW entries. Explicit modern clients choose the namespace;
+    # legacy clients fall back to the current account mode.
+    dry_run = (
+        requested_mode == "dry_run" if requested_mode
+        else _trading_mode_payload()["dry_run_mode"]
+    )
     user = _active_user()
     with account_entry_lock(_user_dir(), f"dashboard-close:{user}:{slot}") as exposure_lock:
         if not exposure_lock:
             return jsonify({"ok": False, "error": "Another account exposure change is in progress"}), 409
-        with account_file_lock(_user_dir(), f"close-{slot}",
+        lock_dir = _mode_data_dir(dry_run)
+        with account_file_lock(lock_dir, f"close-{slot}",
                                f"dashboard-close:{os.getpid()}", wait_sec=0) as close_lock:
             if not close_lock:
                 return jsonify({"ok": False, "error": f"Another {slot} close is in progress"}), 409
-            state_file = _slot_file(slot)
+            state_file = _slot_file(slot, dry_run=dry_run)
             state = _load_json(state_file, {})
             if state.get("status") != "OPEN":
                 return jsonify({"ok": False, "error": f"No open {slot} position"}), 400
-            if state.get("dry_run"):
-                entry_mark = float(state.get("entry_mark") or 0)
-                try:
-                    mark = float(req.get(f"{API_BASE}/v2/tickers/{state.get('symbol', '')}", timeout=5)
-                                 .json().get("result", {}).get("mark_price") or entry_mark)
-                except Exception:
-                    mark = entry_mark
-                sign = -1 if state.get("side") == "short" else 1
-                pnl = round((mark - entry_mark) * float(state.get("contract_value") or 0.001)
-                            * int(state.get("lots") or 0) * sign, 2)
-                exited = datetime.now(timezone.utc)
-                state.update(
-                    status="CLOSED", exit_mark=mark, pnl_usd=pnl,
-                    exit_date=exited.strftime("%Y-%m-%d"),
-                    exit_time_utc=exited.strftime("%H:%M:%S"),
-                    exit_at_utc=exited.isoformat().replace("+00:00", "Z"),
-                    exit_trigger="manual_squareoff_simulated",
-                )
-                _atomic_write_json(state_file, state)
-                return jsonify({"ok": True, "pnl": pnl, "fill": mark,
-                                "order_id": None, "dry_run": True})
+            if _is_dry_record(state) and not dry_run:
+                return jsonify({
+                    "ok": False,
+                    "error": "Legacy simulation is isolated from the LIVE dashboard",
+                }), 409
+            if _is_dry_record(state):
+                closed = _close_dry_simulation_locked(
+                    slot, state, trigger="manual_squareoff_simulated")
+                return jsonify({"ok": True, "pnl": closed["pnl_usd"],
+                                "fill": closed["exit_mark"],
+                                "order_id": None, "dry_run": True,
+                                "history_pending": closed["history_pending"]})
+            if dry_run:
+                return jsonify({
+                    "ok": False,
+                    "error": "Simulation namespace contains a non-DRY state; close blocked",
+                }), 409
             key, secret = _active_creds()
             if not key or not secret:
                 return jsonify({"ok": False, "error": "API credentials not configured"}), 400
@@ -2701,7 +2983,14 @@ def _move_execution_quote(symbol: str, side: str, reference_price: float = 0.0) 
             "reference_price": reference, "limit_price": round(limit_price, 10)}
 
 
-def _move_lot_plan(slot: str, side: str, contract: dict, quote: dict) -> dict:
+def _move_lot_plan(
+    slot: str,
+    side: str,
+    contract: dict,
+    quote: dict,
+    *,
+    dry_run: bool = False,
+) -> dict:
     """Fail-closed minimum of configured, affordable, cap, risk and depth."""
     cfg = _user_cfg()
     lot_key, lot_default = (("MORNING_LOTS", 2000) if slot == "morning"
@@ -2739,7 +3028,9 @@ def _move_lot_plan(slot: str, side: str, contract: dict, quote: dict) -> dict:
     if not is_short:
         account_cap = max(_as_float(
             cfg.get("MAX_ACCOUNT_PREMIUM_AT_RISK_USD") or 500, 500), 0)
-        remaining = max(account_cap - _open_long_premium_usd(), 0) if account_cap else 0
+        remaining = max(
+            account_cap - _open_long_premium_usd(dry_run=dry_run), 0
+        ) if account_cap else 0
         premium_cap = int(remaining / premium_per_lot) if premium_per_lot > 0 else 0
     lots = risk_based_lots(
         configured=max(configured, 0), affordable=max(int(affordable or 0), 0),
@@ -2867,9 +3158,11 @@ def api_manual_entry_preview():
         }), 502
     symbol = contract["symbol"]
     cv     = float(contract.get("contract_value") or 0.001)
+    mode = _trading_mode_payload()
     try:
         quote = _move_execution_quote(symbol, side)
-        plan = _move_lot_plan(slot, side, contract, quote)
+        plan = _move_lot_plan(
+            slot, side, contract, quote, dry_run=mode["dry_run_mode"])
     except Exception as exc:
         return jsonify({"ok": False, "error": str(exc)}), 409
     mark = float(quote.get("entry_price") or 0)
@@ -2888,7 +3181,9 @@ def api_manual_entry_preview():
         "lots":       lots,
         "est_value":  round(mark * cv * lots, 2),
         "settlement": contract.get("settlement_time", ""),
-        "dry_run":    _cfg_bool("DRY_RUN", False),
+        "dry_run":    mode["dry_run_mode"],
+        "execution_mode": mode["execution_mode"],
+        "mode_revision": mode["mode_revision"],
         "sizing":     plan,
         "quote":      quote,
         "entry_classification": "discretionary_manual",
@@ -3116,7 +3411,7 @@ def _protect_or_flatten_move(slot: str, state: dict, started_at: datetime) -> tu
 
 def _submit_manual_move_entry(slot: str, side: str, contract: dict,
                               quote: dict, plan: dict, dry_run: bool) -> tuple[dict, dict]:
-    state_file = _slot_file(slot)
+    state_file = _slot_file(slot, dry_run=dry_run)
     requested = int(plan.get("lots") or 0)
     product_id = int(contract.get("id") or 0)
     now = datetime.now(timezone.utc)
@@ -3141,6 +3436,7 @@ def _submit_manual_move_entry(slot: str, side: str, contract: dict,
         "lots": requested, "btc_at_entry": 0,
         "entry_trigger": f"manual_{side}_bounded_ioc",
         "ownership": "manual_move_bot", "dry_run": dry_run,
+        "execution_mode": "dry_run" if dry_run else "live",
         "entry_classification": "discretionary_manual",
         "move_value_gate_evaluated": False,
         "move_value_filter_enabled": plan.get("move_value_filter_enabled", True),
@@ -3156,8 +3452,21 @@ def _submit_manual_move_entry(slot: str, side: str, contract: dict,
         "pending_entry_started_at_utc": now.isoformat(),
     }
     if dry_run:
+        pending["simulation_id"] = _simulation_identity(pending, slot)
         opened = _open_state_from_pending(pending, order, requested)
         opened["dry_run"] = True
+        opened["execution_mode"] = "dry_run"
+        entry_fee = _option_fee_per_lot(
+            float(opened.get("entry_mark") or 0),
+            float(opened.get("contract_value") or 0.001),
+            float(opened.get("strike") or 0),
+        ) * requested
+        opened.update({
+            "entry_fees_usd": round(entry_fee, 8),
+            "fees_usd": round(entry_fee, 8),
+            "entry_fee_source": "configured_simulation",
+            "pnl_includes_fees": False,
+        })
         _atomic_write_json(state_file, opened)
         return opened, order
 
@@ -3237,13 +3546,18 @@ def api_manual_entry():
     side = (data.get("side") or request.args.get("side") or "").lower()
     if side not in ("buy", "sell"):
         return jsonify({"ok": False, "error": "side must be buy or sell"}), 400
-    key, secret = _active_creds()
-    if not key or not secret:
-        return jsonify({"ok": False, "error": "API credentials not configured"}), 400
     user = _active_user()
     with account_entry_lock(_user_dir(), f"dashboard-entry:{user}:{slot}") as acquired:
         if not acquired:
             return jsonify({"ok": False, "error": "Another account exposure change is in progress"}), 409
+        expectation_error = _mode_expectation_error(data)
+        if expectation_error:
+            return jsonify({"ok": False, "error": expectation_error}), 409
+        mode = _trading_mode_payload()
+        dry_run = mode["dry_run_mode"]
+        key, secret = _active_creds()
+        if not dry_run and (not key or not secret):
+            return jsonify({"ok": False, "error": "API credentials not configured"}), 400
         try:
             preview_product_id = int(data.get("product_id") or 0)
             preview_lots = int(data.get("lots") or 0)
@@ -3256,10 +3570,10 @@ def api_manual_entry():
                 or not math.isfinite(preview_price) or not preview_symbol):
             return jsonify({"ok": False,
                             "error": "A fresh MOVE preview is required before entry"}), 409
-        state_file = _slot_file(slot)
+        state_file = _slot_file(slot, dry_run=dry_run)
         state = _load_json(state_file, {})
         try:
-            if state.get("status") == "ENTRY_PENDING":
+            if not dry_run and state.get("status") == "ENTRY_PENDING":
                 state, recovered = _recover_pending_move_entry(slot, state)
                 if state.get("status") == "OPEN":
                     product_id = int(state.get("product_id") or 0)
@@ -3324,11 +3638,15 @@ def api_manual_entry():
                     "error": ("MOVE contract changed after preview; review the refreshed "
                               "contract before submitting"),
                 }), 409
-            positions = _strict_exchange_positions()
-            unrealized = _validate_move_entry_account(positions, product_id)
+            if dry_run:
+                unrealized = 0.0
+            else:
+                positions = _strict_exchange_positions()
+                unrealized = _validate_move_entry_account(positions, product_id)
             quote = _move_execution_quote(
                 contract["symbol"], side, reference_price=preview_price)
-            plan = _move_lot_plan(slot, side, contract, quote)
+            plan = _move_lot_plan(
+                slot, side, contract, quote, dry_run=dry_run)
             if int(plan.get("lots") or 0) <= 0:
                 return jsonify({"ok": False, "error": plan.get("reason"),
                                 "sizing": plan}), 409
@@ -3339,13 +3657,13 @@ def api_manual_entry():
                     "sizing": plan,
                 }), 409
             decision = evaluate_entry(
-                _user_dir(), float(plan["proposed_risk_usd"]), _user_cfg(),
-                unrealized_pnl_usd=unrealized)
+                _mode_data_dir(dry_run), float(plan["proposed_risk_usd"]),
+                _user_cfg(), unrealized_pnl_usd=unrealized,
+                dry_run=dry_run)
             if not decision.allowed:
                 return jsonify({"ok": False, "error": decision.reason,
                                 "risk": decision_dict(decision), "sizing": plan}), 409
 
-            dry_run = _cfg_bool("DRY_RUN", False)
             opened, order = _submit_manual_move_entry(
                 slot, side, contract, quote, plan, dry_run)
             expected_size = -int(opened["lots"]) if opened["side"] == "short" \
@@ -3989,7 +4307,10 @@ def _all_trades_merged() -> list:
     plus trades reconstructed from their own Delta order history for anything
     never tracked. The stored ledger is authoritative when both sources refer
     to the same exchange round trip."""
-    mv_trades    = _load_json(_hist_file(), [])
+    mv_trades = [
+        row for row in _load_json(_hist_file(), [])
+        if isinstance(row, dict) and not _is_dry_record(row)
+    ]
     other = [
         reconstructed for reconstructed in _fetch_reconstructed_trades()
         if not any(_trades_represent_same_round_trip(tracked, reconstructed)
@@ -4011,6 +4332,137 @@ def _all_trades_merged() -> list:
 @app.route("/api/trades")
 def api_trades():
     return jsonify(_all_trades_merged())
+
+
+def _dry_run_trades() -> list[dict]:
+    try:
+        _import_legacy_dry_records()
+    except Exception as exc:
+        print(f"Legacy dry-run import warning for {_active_user()}: {exc}")
+    rows = [
+        dict(row) for row in _load_json(_hist_file(dry_run=True), [])
+        if isinstance(row, dict) and _is_dry_record(row)
+    ]
+    # A CLOSED state is an outbox as well as a card.  Include/repair it even
+    # when an earlier process died between its state write and history append.
+    for slot in SLOTS:
+        state = _load_json(_slot_file(slot, dry_run=True), {})
+        if (_is_dry_record(state)
+                and str(state.get("status") or "").upper() == "CLOSED"):
+            state = _as_dry_record(state, slot)
+            _append_trade_history(
+                state, f"dry-results-repair:{slot}", dry_run=True)
+    rows = [
+        dict(row) for row in _load_json(_hist_file(dry_run=True), [])
+        if isinstance(row, dict) and _is_dry_record(row)
+    ]
+    for row in rows:
+        row.setdefault("date", row.get("entry_date", ""))
+        row.setdefault("entry_time", row.get("entry_time_utc", ""))
+        row.setdefault("exit_time", row.get("exit_time_utc", ""))
+    rows.sort(key=lambda row: (
+        row.get("entry_date") or row.get("date", ""),
+        row.get("entry_time") or row.get("entry_time_utc", ""),
+    ))
+    return rows
+
+
+def _schedule_ist_label(
+    cfg: dict,
+    hour_key: str,
+    minute_key: str,
+    default_hour: int,
+    default_minute: int,
+) -> str:
+    try:
+        hour = int(cfg.get(hour_key) or default_hour)
+        minute = int(cfg.get(minute_key) or default_minute)
+    except (TypeError, ValueError):
+        hour, minute = default_hour, default_minute
+    total = (hour * 60 + minute + 330) % 1440
+    hour_ist, minute_ist = divmod(total, 60)
+    return (
+        f"{(hour_ist + 11) % 12 + 1}:{minute_ist:02d} "
+        f"{'PM' if hour_ist >= 12 else 'AM'} IST"
+    )
+
+
+def _enrich_dry_state(state: dict) -> dict:
+    view = dict(state) if isinstance(state, dict) else {}
+    if str(view.get("status") or "").upper() == "OPEN":
+        try:
+            mark, pnl, _, _ = _dry_run_mark_and_pnl(view)
+            view["current_mark"] = round(mark, 8)
+            view["live_pnl"] = round(pnl, 2)
+        except Exception:
+            view["current_mark"] = None
+            view["live_pnl"] = None
+    return view
+
+
+@app.route("/api/dry-run/status")
+def api_dry_run_status():
+    try:
+        _import_legacy_dry_records()
+    except Exception as exc:
+        print(f"Legacy dry-run import warning for {_active_user()}: {exc}")
+    now = datetime.now(timezone.utc)
+    slots = {}
+    for slot in SLOTS:
+        state = _load_json(_slot_file(slot, dry_run=True), {})
+        if state and not _is_dry_record(state):
+            # A mode mismatch inside the simulation namespace is invalid and
+            # must never be rendered as a paper position.
+            state = {"slot": slot, "status": "MODE_MISMATCH"}
+        slots[slot] = _dashboard_slot_view(_enrich_dry_state(state), now)
+    cfg = _user_cfg()
+    mode = _trading_mode_payload()
+    return jsonify({
+        **mode,
+        "mode_active": mode["dry_run_mode"],
+        "morning": slots["morning"],
+        "evening": slots["evening"],
+        "trend": slots["trend"],
+        "morning_entry_ist": _schedule_ist_label(
+            cfg, "MORNING_H_UTC", "MORNING_M_UTC", 0, 15),
+        "evening_entry_ist": _schedule_ist_label(
+            cfg, "ENTRY_H_UTC", "ENTRY_M_UTC", 12, 5),
+        "auto_mode": _trend_auto_mode(),
+    })
+
+
+@app.route("/api/dry-run/trades")
+def api_dry_run_trades():
+    return jsonify(_dry_run_trades())
+
+
+@app.route("/api/dry-run/today-trades")
+def api_dry_run_today_trades():
+    today_ist = datetime.now(_IST_TIMEZONE).strftime("%Y-%m-%d")
+    rows = [
+        row for row in _dry_run_trades()
+        if _ist_calendar_date(
+            row.get("entry_date") or row.get("date", ""),
+            row.get("entry_time") or row.get("entry_time_utc", ""),
+        ) == today_ist
+    ]
+    for slot in SLOTS:
+        state = _load_json(_slot_file(slot, dry_run=True), {})
+        if (str(state.get("status") or "").upper() == "OPEN"
+                and _is_dry_record(state)
+                and _ist_calendar_date(
+                    state.get("entry_date", ""),
+                    state.get("entry_time_utc", ""),
+                ) == today_ist):
+            live = _enrich_dry_state(state)
+            live.update({"_live": True, "slot": slot})
+            rows.insert(0, live)
+    return jsonify(rows)
+
+
+@app.route("/api/dry-run/summary")
+def api_dry_run_summary():
+    return jsonify(_pnl_stats(_dry_run_trades(), dry_run=True))
 
 
 _product_cache: dict = {}   # product_id -> {"contract_value": float, "symbol": str}
@@ -4573,7 +5025,13 @@ def _trend_previous_state_blocker(state: dict) -> str | None:
     return None
 
 
-def _trend_reentry_reason(state: dict, trend: dict, persist: bool = True) -> str | None:
+def _trend_reentry_reason(
+    state: dict,
+    trend: dict,
+    persist: bool = True,
+    *,
+    dry_run: bool = False,
+) -> str | None:
     """One trade per closed 15M candle, then require neutral/opposite rearm."""
     current_direction = str(trend.get("combined") or "neutral")
     current_15m = str((trend.get("timeframes", {}).get("15m") or {}).get("candle_time") or "")
@@ -4586,7 +5044,8 @@ def _trend_reentry_reason(state: dict, trend: dict, persist: bool = True) -> str
                 state["trend_rearmed"] = True
                 rearmed = True
                 if persist:
-                    _atomic_write_json(_slot_file("trend"), state)
+                    _atomic_write_json(
+                        _slot_file("trend", dry_run=dry_run), state)
 
     if not current_15m:
         return "Completed 15M candle identity is unavailable"
@@ -4622,16 +5081,21 @@ def _account_unrealized_pnl() -> float | None:
         return None
 
 
-def _open_long_premium_usd() -> float:
+def _open_long_premium_usd(*, dry_run: bool = False) -> float:
     total = 0.0
     for slot in SLOTS:
-        state = _load_json(_slot_file(slot), {})
+        state = _load_json(_slot_file(slot, dry_run=dry_run), {})
         if state.get("status") == "OPEN" and state.get("side", "long") != "short":
             total += max(_as_float(state.get("total_cost_usd"), 0), 0)
     return total
 
 
-def _trend_lot_plan(contract: dict, quote: dict) -> dict:
+def _trend_lot_plan(
+    contract: dict,
+    quote: dict,
+    *,
+    dry_run: bool = False,
+) -> dict:
     config = _user_cfg()
     configured = max(int(_as_float(config.get("TREND_LOTS") or 100, 100)), 1)
     max_order = max(int(_as_float(config.get("MAX_ORDER_LOTS") or 1000, 1000)), 1)
@@ -4655,7 +5119,9 @@ def _trend_lot_plan(contract: dict, quote: dict) -> dict:
     _, _, sl_target, _ = _tp_env("trend")
 
     premium_limit = max(_as_float(config.get("MAX_ACCOUNT_PREMIUM_AT_RISK_USD") or 500, 500), 0)
-    premium_remaining = max(premium_limit - _open_long_premium_usd(), 0) if premium_limit else math.inf
+    premium_remaining = max(
+        premium_limit - _open_long_premium_usd(dry_run=dry_run), 0
+    ) if premium_limit else math.inf
     premium_cap = (int(premium_remaining / premium_per_lot)
                    if premium_per_lot > 0 and math.isfinite(premium_remaining) else max_order)
     effective_liquidity_cap = min(liquidity_cap, premium_cap)
@@ -4685,8 +5151,21 @@ def _trend_lot_plan(contract: dict, quote: dict) -> dict:
     }
 
 
-def _trend_entry_preview_data() -> tuple[dict, int]:
-    _sync_states_from_exchange()
+def _trend_entry_preview_data(
+    *,
+    dry_run: bool | None = None,
+) -> tuple[dict, int]:
+    mode = _trading_mode_payload()
+    # Direct helper callers retain the historical LIVE default. HTTP routes
+    # and the auto worker always pass the server-authoritative current mode.
+    is_dry_run = False if dry_run is None else bool(dry_run)
+    if is_dry_run:
+        try:
+            _import_legacy_dry_records()
+        except Exception:
+            pass
+    else:
+        _sync_states_from_exchange()
     try:
         trend = _trend_snapshot()
     except Exception as e:
@@ -4697,19 +5176,20 @@ def _trend_entry_preview_data() -> tuple[dict, int]:
         str((trend.get("timeframes", {}).get(k) or {}).get("candle_time", ""))
         for k in ("5m", "15m", "1h")
     ])
-    state = _load_json(_slot_file("trend"), {})
+    state = _load_json(_slot_file("trend", dry_run=is_dry_run), {})
     previous_state_blocker = _trend_previous_state_blocker(state)
     if previous_state_blocker:
         return {"ok": True, "can_enter": False, "reason": previous_state_blocker,
                 "direction": direction, "option_type": option_type,
                 "signal_key": signal_key}, 200
-    external = _external_options.get(_active_user(), [])
+    external = _external_options.get(_active_user(), []) if not is_dry_run else []
     if external and not _cfg_bool("ALLOW_EXTERNAL_POSITIONS_WITH_BOT", False):
         return {"ok": True, "can_enter": False,
                 "reason": f"{len(external)} external/manual option position(s) are open; "
                           "portfolio risk is unowned and entries fail closed",
                 "external_positions": external, "signal_key": signal_key}, 200
-    reentry_reason = _trend_reentry_reason(state, trend)
+    reentry_reason = _trend_reentry_reason(
+        state, trend, dry_run=is_dry_run)
     if not option_type:
         pending = bool((trend.get("timeframes", {}).get("1h") or {}).get("debounce_pending"))
         return {"ok": True, "can_enter": False,
@@ -4734,20 +5214,22 @@ def _trend_entry_preview_data() -> tuple[dict, int]:
     if entry_price <= 0:
         return {"ok": True, "can_enter": False,
                 "reason": f"Executable ask unavailable for {symbol}"}, 200
-    sizing = _trend_lot_plan(contract, quote)
+    sizing = _trend_lot_plan(contract, quote, dry_run=is_dry_run)
     lots = int(sizing["lots"])
     if lots < 1:
         return {"ok": True, "can_enter": False,
                 "reason": "Configured, affordable, risk, premium, or book-depth cap permits zero lots",
                 "sizing": sizing}, 200
 
-    unrealized = _account_unrealized_pnl()
-    if unrealized is None and _cfg_bool("RISK_FAIL_CLOSED", True):
+    unrealized = 0.0 if is_dry_run else _account_unrealized_pnl()
+    if (not is_dry_run and unrealized is None
+            and _cfg_bool("RISK_FAIL_CLOSED", True)):
         return {"ok": True, "can_enter": False,
                 "reason": "Account unrealized P&L could not be verified (risk checks fail closed)",
                 "sizing": sizing}, 200
-    decision = evaluate_entry(_user_dir(), sizing["proposed_risk_usd"], _user_cfg(),
-                              unrealized_pnl_usd=unrealized or 0.0)
+    decision = evaluate_entry(
+        _mode_data_dir(is_dry_run), sizing["proposed_risk_usd"], _user_cfg(),
+        unrealized_pnl_usd=unrealized or 0.0, dry_run=is_dry_run)
     if not decision.allowed:
         return {"ok": True, "can_enter": False,
                 "reason": decision.reason, "risk": decision_dict(decision),
@@ -4764,7 +5246,9 @@ def _trend_entry_preview_data() -> tuple[dict, int]:
             "quote": quote, "lots": lots,
             "est_value": round(entry_price * cv * lots, 2),
             "settlement": contract.get("settlement_time", ""),
-            "contract_value": cv, "dry_run": _cfg_bool("DRY_RUN", False),
+            "contract_value": cv, "dry_run": is_dry_run,
+            "execution_mode": "dry_run" if is_dry_run else "live",
+            "mode_revision": mode["mode_revision"],
             "signal_key": signal_key, "timeframes": trend.get("timeframes", {}),
             "signal_snapshot": trend, "sizing": sizing,
             "risk": decision_dict(decision),
@@ -4773,7 +5257,12 @@ def _trend_entry_preview_data() -> tuple[dict, int]:
 
 @app.route("/api/trend-entry/preview")
 def api_trend_entry_preview():
-    data, status = _trend_entry_preview_data()
+    current_mode = _trading_mode_payload()
+    data, status = _trend_entry_preview_data(
+        dry_run=current_mode["dry_run_mode"])
+    for key, value in _trading_mode_payload().items():
+        data.setdefault(key, value)
+    data.setdefault("dry_run", data.get("dry_run_mode", False))
     return jsonify(data), status
 
 
@@ -5039,15 +5528,28 @@ def _execute_trend_chunks(preview: dict, requested_lots: int) -> dict:
             "error": error, "market_fallback_enabled": market_fallback}
 
 
-def _execute_trend_entry(auto: bool = False):
+def _execute_trend_entry(
+    auto: bool = False,
+    *,
+    expected: dict | None = None,
+):
     """Buy the server-derived contract under the cross-process risk lock."""
     user = _active_user()
     with account_entry_lock(_user_dir(), f"trend:{user}") as acquired:
         if not acquired:
             return jsonify({"ok": False, "error": "Another strategy entry is in progress"}), 409
+        expectation_error = _mode_expectation_error(expected)
+        if expectation_error:
+            return jsonify({"ok": False, "error": expectation_error}), 409
+        mode = _trading_mode_payload()
+        # HTTP and auto callers are mode-bound. Direct internal invocations
+        # retain the legacy LIVE default used by low-level safety tests/tools.
+        mode_bound = auto or expected is not None
+        is_dry_run = mode["dry_run_mode"] if mode_bound else False
+        state_dir = _mode_data_dir(is_dry_run)
         state_guard = ExitStack()
         close_state_acquired = state_guard.enter_context(account_file_lock(
-            _user_dir(), "close-trend", f"dashboard-trend-entry-{os.getpid()}",
+            state_dir, "close-trend", f"dashboard-trend-entry-{os.getpid()}",
             stale_after_sec=30, wait_sec=5,
         ))
         if not close_state_acquired:
@@ -5056,8 +5558,12 @@ def _execute_trend_entry(auto: bool = False):
                 "ok": False,
                 "error": "Trend protection/cleanup state is busy; entry was not submitted",
             }), 409
-        _sync_states_from_exchange()
-        preview, status = _trend_entry_preview_data()
+        if not is_dry_run:
+            _sync_states_from_exchange()
+        preview, status = (
+            _trend_entry_preview_data(dry_run=is_dry_run)
+            if mode_bound else _trend_entry_preview_data()
+        )
         if status != 200 or not preview.get("can_enter"):
             state_guard.close()
             _trend_audit("trend_entry_blocked", {"auto": auto, **preview})
@@ -5066,7 +5572,14 @@ def _execute_trend_entry(auto: bool = False):
         # reconciliation worker can publish a pending order/accounting identity
         # after the preview was built; reload immediately before any exchange
         # submission so the new OPEN state can never overwrite that identity.
-        latest_previous_state = _load_json(_slot_file("trend"), {})
+        if mode_bound and bool(preview.get("dry_run")) != is_dry_run:
+            state_guard.close()
+            return jsonify({
+                "ok": False,
+                "error": "Trading Mode changed while building the Trend preview",
+            }), 409
+        latest_previous_state = _load_json(
+            _slot_file("trend", dry_run=is_dry_run), {})
         previous_state_blocker = _trend_previous_state_blocker(
             latest_previous_state
         )
@@ -5080,13 +5593,12 @@ def _execute_trend_entry(auto: bool = False):
             _trend_audit("trend_entry_blocked", {"auto": auto, **blocked})
             return jsonify(blocked), 409
         key, secret = _active_creds()
-        if not key or not secret:
+        if not is_dry_run and (not key or not secret):
             state_guard.close()
             return jsonify({"ok": False, "error": "API credentials not configured"}), 400
 
         pid, requested = int(preview["product_id"]), int(preview["lots"])
         cv = float(preview["contract_value"])
-        is_dry_run = bool(preview["dry_run"])
         try:
             if is_dry_run:
                 fill = float(preview.get("ask") or preview["mark"])
@@ -5177,8 +5689,24 @@ def _execute_trend_entry(auto: bool = False):
                 "trend_rearmed": False,
                 "protection_config": protection_policy,
                 "dry_run": is_dry_run,
+                "execution_mode": "dry_run" if is_dry_run else "live",
             }
-            _atomic_write_json(_slot_file("trend"), new_state)
+            if is_dry_run:
+                new_state["simulation_id"] = _simulation_identity(
+                    new_state, "trend")
+                simulated_entry_fee = _option_fee_per_lot(
+                    fill, cv, float(preview.get("strike") or 0)
+                ) * lots
+                new_state.update({
+                    "entry_fees_usd": round(simulated_entry_fee, 8),
+                    "fees_usd": round(simulated_entry_fee, 8),
+                    "entry_fee_source": "configured_simulation",
+                    "original_bot_entry_fee_usd": round(
+                        simulated_entry_fee, 8),
+                    "original_bot_entry_fee_source": "configured_simulation",
+                })
+            _atomic_write_json(
+                _slot_file("trend", dry_run=is_dry_run), new_state)
             # The new generation is durable. Release close-trend before the
             # monitor starts, because its first protection cycle takes this
             # same lock.
@@ -5189,11 +5717,12 @@ def _execute_trend_entry(auto: bool = False):
             protection_verified, protection_health = (True, {}) if is_dry_run else \
                 _wait_for_protection(user, "trend", now, timeout_secs=10)
             with account_file_lock(
-                    _user_dir(), "close-trend",
+                    state_dir, "close-trend",
                     f"dashboard-trend-entry-health-{os.getpid()}",
                     stale_after_sec=30, wait_sec=2) as health_state_lock:
                 if health_state_lock:
-                    latest_state = _load_json(_slot_file("trend"), {})
+                    latest_state = _load_json(
+                        _slot_file("trend", dry_run=is_dry_run), {})
                     if (
                         latest_state.get("status") == "OPEN"
                         and str(latest_state.get("position_cycle_id") or "")
@@ -5203,7 +5732,9 @@ def _execute_trend_entry(auto: bool = False):
                             "protection_verified_at_entry": protection_verified,
                             "protection_health_at_entry": protection_health,
                         })
-                        _atomic_write_json(_slot_file("trend"), latest_state)
+                        _atomic_write_json(
+                            _slot_file("trend", dry_run=is_dry_run),
+                            latest_state)
             if not is_dry_run and not protection_verified:
                 _send_telegram(
                     f"🚨 <b>TREND PROTECTION ALERT ({user.upper()})</b>\n"
@@ -5255,7 +5786,8 @@ def api_trend_entry():
     if not _trend_entry_lock.acquire(blocking=False):
         return jsonify({"ok": False, "error": "Another Trend entry is being processed"}), 409
     try:
-        return _execute_trend_entry(auto=False)
+        return _execute_trend_entry(
+            auto=False, expected=request.get_json(silent=True) or {})
     finally:
         _trend_entry_lock.release()
 
@@ -5280,12 +5812,14 @@ def _maybe_auto_trend_entry() -> bool:
         return False
     try:
         _trend_auto_last_attempt[user] = now
-        _sync_states_from_exchange()
-        state = _load_json(_slot_file("trend"), {})
+        dry_run = _trading_mode_payload()["dry_run_mode"]
+        if not dry_run:
+            _sync_states_from_exchange()
+        state = _load_json(_slot_file("trend", dry_run=dry_run), {})
         if state.get("status") == "OPEN":
             health.update(status="position_open", last_action="waiting for open Trend position")
             return False
-        preview, status = _trend_entry_preview_data()
+        preview, status = _trend_entry_preview_data(dry_run=dry_run)
         if status != 200 or not preview.get("can_enter"):
             health.update(status="blocked", last_action=preview.get("reason") or preview.get("error"),
                           last_signal_key=preview.get("signal_key"))
@@ -5311,7 +5845,13 @@ def _maybe_auto_trend_entry() -> bool:
                            else getattr(raw_response, "status_code", 500))
         ok = int(response_status) < 300
         health.update(status="filled" if ok else "entry_failed",
-                      last_action="live auto entry submitted" if ok else "live auto entry failed",
+                      last_action=(
+                          ("dry-run auto simulation opened" if dry_run
+                           else "live auto entry submitted")
+                          if ok else
+                          ("dry-run auto simulation failed" if dry_run
+                           else "live auto entry failed")
+                      ),
                       last_entry_utc=datetime.now(timezone.utc).isoformat() if ok else health.get("last_entry_utc"))
         return ok
     except Exception as exc:
@@ -5515,6 +6055,10 @@ _CONFIG_NUMERIC_BOUNDS = {
 
 
 def _validate_config_update(data: dict, current: dict) -> str | None:
+    if "DRY_RUN" in data:
+        raw_dry_run = str(data.get("DRY_RUN") or "").strip().lower()
+        if raw_dry_run not in {"true", "false", "1", "0", "yes", "no", "on", "off"}:
+            return "DRY_RUN must be enabled or disabled"
     mode = str(data.get("TREND_AUTO_ENTRY_MODE", current.get("TREND_AUTO_ENTRY_MODE", ""))).lower()
     if mode and mode not in {"disabled", "shadow", "live"}:
         return "TREND_AUTO_ENTRY_MODE must be disabled, shadow, or live"
@@ -5549,13 +6093,11 @@ def _validate_config_update(data: dict, current: dict) -> str | None:
     return None
 
 
-@app.route("/api/config", methods=["POST"])
-def set_config():
+def _save_config_data(data: dict):
     """Save strategy settings for the ACTIVE account only — written to
     users/<name>/config.json, never to the shared .env (which now serves
     purely as the global default for keys an account hasn't set). The
     account's bot instance watches its config.json and self-reloads."""
-    data = dict(request.json or {})
     saved = _load_json(_cfg_file(), {})
     if not isinstance(saved, dict):
         saved = {}
@@ -5584,23 +6126,29 @@ def set_config():
     for slot, keys in _TP_KEYS_BY_SLOT.items():
         if not (keys & set(data)):
             continue
-        # The monitor treats protection_config as the trade-attached policy.
-        # Serialize the snapshot update with close/adoption/protection writes,
-        # and reload only after acquiring that lock. Mutating just this one
-        # field preserves any close/protection journal published concurrently.
-        state_path = USERS_DIR / user / SLOT_STATE_FILES[slot]
-        with account_file_lock(
-                USERS_DIR / user, f"close-{slot}",
-                f"dashboard-config-{os.getpid()}-{slot}",
-                stale_after_sec=30, wait_sec=5) as acquired:
-            if not acquired:
-                snapshot_errors.append(slot)
+        for dry_run in (False, True):
+            # Protection is attached to each position in its own namespace.
+            # Updating a paper policy never restarts or touches a LIVE monitor.
+            data_dir = _mode_data_dir(dry_run)
+            state_path = data_dir / SLOT_STATE_FILES[slot]
+            if dry_run and not state_path.exists():
                 continue
-            state = _load_json(state_path, {})
-            if state.get("status") == "OPEN":
-                state["protection_config"] = _tp_policy(slot)
-                _atomic_write_json(state_path, state)
-                snapshot_slots.append(slot)
+            with account_file_lock(
+                    data_dir, f"close-{slot}",
+                    f"dashboard-config-{os.getpid()}-{slot}-"
+                    f"{'dry' if dry_run else 'live'}",
+                    stale_after_sec=30, wait_sec=5) as acquired:
+                if not acquired:
+                    snapshot_errors.append(
+                        f"{slot} ({'DRY RUN' if dry_run else 'LIVE'})")
+                    continue
+                state = _load_json(state_path, {})
+                if (state.get("status") == "OPEN"
+                        and _is_dry_record(state) is dry_run):
+                    state["protection_config"] = _tp_policy(slot)
+                    _atomic_write_json(state_path, state)
+                    if not dry_run:
+                        snapshot_slots.append(slot)
 
     # Process termination/spawn must happen after every state lock is released.
     # A new monitor takes the same close-{slot} lock on its first protection
@@ -5621,6 +6169,27 @@ def set_config():
             "protection_snapshot_pending": snapshot_errors,
         }), 409
     return jsonify({"ok": True, "tp_restarted": tp_restarted})
+
+
+@app.route("/api/config", methods=["POST"])
+def set_config():
+    data = dict(request.json or {})
+    if "DRY_RUN" not in data:
+        return _save_config_data(data)
+    # Mode changes serialize with every manual/scheduled MOVE and Trend entry.
+    # If an entry already owns the mutex, Save fails without changing mode.
+    with account_entry_lock(
+        _user_dir(), f"config-mode:{_active_user()}"
+    ) as acquired:
+        if not acquired:
+            return jsonify({
+                "ok": False,
+                "error": (
+                    "Trading Mode cannot change while an entry is being "
+                    "processed. Retry Save after the entry finishes."
+                ),
+            }), 409
+        return _save_config_data(data)
 
 
 @app.route("/api/test-telegram", methods=["POST"])
@@ -5711,6 +6280,101 @@ def _revive_tp_monitors():
     return _ensure_open_monitors(force=True)
 
 
+def _dry_run_protection_cycle() -> int:
+    """Evaluate TP/SL/TSL for all isolated simulations of the active user."""
+    closed = 0
+    try:
+        _import_legacy_dry_records()
+    except Exception:
+        pass
+    for slot in SLOTS:
+        state_path = _slot_file(slot, dry_run=True)
+        state = _load_json(state_path, {})
+        if (str(state.get("status") or "").upper() != "OPEN"
+                or not _is_dry_record(state)):
+            continue
+        policy = state.get("protection_config")
+        if not isinstance(policy, dict):
+            policy = _tp_policy(slot)
+        try:
+            _, pnl, _, _ = _dry_run_mark_and_pnl(state)
+        except Exception:
+            continue
+        previous_peak = _as_float(
+            state.get("dry_peak_pnl_usd"), max(pnl, 0))
+        peak = max(previous_peak, pnl)
+        tp = max(_as_float(policy.get("tp_target_pnl"), 0), 0)
+        sl = max(_as_float(policy.get("sl_target_pnl"), 0), 0)
+        arm = max(_as_float(
+            policy.get("tsl_arm_pnl") or policy.get("tsl_target_pnl"), 0), 0)
+        trail = max(_as_float(
+            policy.get("tsl_trail_pnl") or policy.get("tsl_target_pnl"), 0), 0)
+        locked = max(_as_float(policy.get("tsl_lock_min_pnl"), 0), 0)
+        trigger = None
+        if tp and pnl >= tp:
+            trigger = "take_profit_simulated"
+        elif sl and pnl <= -sl:
+            trigger = "stop_loss_simulated"
+        elif arm and trail and peak >= arm and pnl <= max(peak - trail, locked):
+            trigger = "trailing_stop_simulated"
+        if not trigger:
+            settlement = str(state.get("settlement") or "")
+            try:
+                settles_at = datetime.fromisoformat(
+                    settlement.replace("Z", "+00:00"))
+                if settles_at.tzinfo is None:
+                    settles_at = settles_at.replace(tzinfo=timezone.utc)
+                if datetime.now(timezone.utc) >= settles_at.astimezone(timezone.utc):
+                    trigger = "settlement_simulated"
+            except (TypeError, ValueError):
+                pass
+
+        with account_file_lock(
+            _mode_data_dir(True), f"close-{slot}",
+            f"dry-protection:{os.getpid()}", stale_after_sec=30, wait_sec=0,
+        ) as acquired:
+            if not acquired:
+                continue
+            latest = _load_json(state_path, {})
+            if (str(latest.get("status") or "").upper() != "OPEN"
+                    or not _is_dry_record(latest)
+                    or _simulation_identity(latest, slot)
+                    != _simulation_identity(state, slot)):
+                continue
+            if trigger:
+                _close_dry_simulation_locked(slot, latest, trigger=trigger)
+                closed += 1
+            elif (peak != previous_peak
+                  or bool(latest.get("dry_tsl_armed")) != bool(arm and peak >= arm)):
+                latest.update({
+                    "dry_peak_pnl_usd": round(peak, 8),
+                    "dry_tsl_armed": bool(arm and peak >= arm),
+                    "dry_last_protection_check_utc": (
+                        datetime.now(timezone.utc).isoformat()),
+                })
+                _atomic_write_json(state_path, latest)
+    return closed
+
+
+def _dry_run_protection_loop() -> None:
+    """Public-data-only simulator worker; never calls an order endpoint."""
+    while True:
+        try:
+            for account in _load_accounts():
+                user = _safe_user(account.get("username", ""))
+                if not user:
+                    continue
+                try:
+                    with app.test_request_context("/api/dry-run/status"):
+                        g.basic_user = user
+                        _dry_run_protection_cycle()
+                except Exception as exc:
+                    print(f"Dry-run protection error for {user}: {exc}")
+        except Exception as exc:
+            print(f"Dry-run protection supervisor error: {exc}")
+        time.sleep(10)
+
+
 # ─────────────────────────────────────────────────────────────
 # MAIN
 # ─────────────────────────────────────────────────────────────
@@ -5721,4 +6385,9 @@ if __name__ == "__main__":
     print("=" * 50)
     _revive_tp_monitors()
     threading.Thread(target=_trend_auto_loop, name="trend-auto-entry", daemon=True).start()
+    threading.Thread(
+        target=_dry_run_protection_loop,
+        name="dry-run-protection",
+        daemon=True,
+    ).start()
     app.run(host="0.0.0.0", port=5001, debug=False)

@@ -191,17 +191,28 @@ def evaluate_entry(
     config: dict[str, Any],
     now: datetime | None = None,
     unrealized_pnl_usd: float = 0.0,
+    dry_run: bool = False,
 ) -> RiskDecision:
-    """Evaluate all account-level limits.  Missing/invalid limits are safe defaults."""
+    """Evaluate account limits against exactly one execution-mode ledger.
+
+    REAL remains the backward-compatible default and still excludes every
+    record explicitly marked ``dry_run``.  A DRY-RUN caller opts in and sees
+    only paper history/state, allowing the simulator to exercise the same
+    daily-trade, loss, cooldown and open-risk rules without contaminating or
+    weakening live controls.
+    """
     now = now or datetime.now(timezone.utc)
     offset = cfg_int(config, "RISK_DAY_TZ_OFFSET_MIN", 330)
     day = trading_date(now, offset)
-    history = [row for row in load_history(data_dir) if not cfg_bool(row, "dry_run", False)]
+    history = [
+        row for row in load_history(data_dir)
+        if cfg_bool(row, "dry_run", False) == bool(dry_run)
+    ]
     today = [t for t in history if _row_date(t, offset) == day]
     pnls = [p for t in today if (p := _pnl(t)) is not None]
 
     states = {slot: state for slot, state in load_states(data_dir).items()
-              if not cfg_bool(state, "dry_run", False)}
+              if cfg_bool(state, "dry_run", False) == bool(dry_run)}
     history_keys = {_trade_key(t) for t in today}
     unlogged_today = [
         state for state in states.values()

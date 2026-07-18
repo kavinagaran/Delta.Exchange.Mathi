@@ -1,0 +1,591 @@
+{% extends "base.html" %}
+
+{% block head %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+{% endblock %}
+
+{% block content %}
+<section class="dry-run-hero" aria-labelledby="dry-run-title">
+  <div class="dry-run-hero-copy">
+    <span class="strategy-kicker">ISOLATED SIMULATION WORKSPACE</span>
+    <h2 id="dry-run-title">Dry Run Dashboard</h2>
+    <p>MOVE and Trend simulations are collected here, completely separate from real positions and real P&amp;L.</p>
+  </div>
+  <div class="dry-run-hero-actions">
+    <span class="pill idle" id="dry-page-mode" role="status" aria-live="polite">
+      <span class="dot"></span>Checking mode…
+    </span>
+    <a class="btn secondary sm" href="/config">Trading mode settings</a>
+  </div>
+</section>
+
+<div class="dry-separation-notice" id="dry-mode-notice">
+  <span class="dry-separation-icon" aria-hidden="true">◇</span>
+  <div>
+    <strong>Simulation only — no exchange orders are placed</strong>
+    <p>Values are paper outcomes calculated from market prices. They never affect real balances, positions, risk totals, or Trades &amp; P&amp;L.</p>
+  </div>
+</div>
+
+<div class="section-title">
+  <span>Simulated strategies</span>
+  <small>Independent paper state for Morning MOVE, Evening MOVE and Trend options</small>
+</div>
+
+<div class="dry-slot-grid">
+  <article class="card dry-slot-card">
+    <div class="card-hd slot-hd">
+      <span aria-hidden="true">🌅</span>
+      <span>Morning MOVE</span>
+      <span class="when" id="dry-when-morning">Entry —</span>
+    </div>
+    <div class="card-bd dry-slot-body" id="dry-slot-morning" aria-live="polite">
+      <div class="no-pos">Loading simulation…</div>
+    </div>
+  </article>
+
+  <article class="card dry-slot-card">
+    <div class="card-hd slot-hd">
+      <span aria-hidden="true">🌇</span>
+      <span>Evening MOVE</span>
+      <span class="when" id="dry-when-evening">Entry —</span>
+    </div>
+    <div class="card-bd dry-slot-body" id="dry-slot-evening" aria-live="polite">
+      <div class="no-pos">Loading simulation…</div>
+    </div>
+  </article>
+
+  <article class="card dry-slot-card">
+    <div class="card-hd slot-hd">
+      <span aria-hidden="true">📈</span>
+      <span>Trend CE / PE</span>
+      <span class="when" id="dry-trend-auto">Auto —</span>
+    </div>
+    <div class="card-bd dry-slot-body" id="dry-slot-trend" aria-live="polite">
+      <div class="no-pos">Loading simulation…</div>
+    </div>
+  </article>
+</div>
+
+<div class="section-title">
+  <span>Paper performance</span>
+  <small>Simulated values only</small>
+</div>
+<div class="stats" id="dry-stats" aria-live="polite">
+  <div class="stat"><div class="lbl">Loading</div><div class="val">—</div></div>
+</div>
+
+<div class="card">
+  <div class="card-hd">
+    Simulated P&amp;L — day-wise
+    <span class="spacer"></span>
+    <span class="badge sim">PAPER ONLY</span>
+  </div>
+  <div class="card-bd">
+    <div class="chart-box dry-chart-box">
+      <canvas id="dry-pnl-chart" aria-label="Day-wise simulated profit and loss chart"></canvas>
+      <div class="dry-chart-empty" id="dry-chart-empty">No completed simulations yet</div>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-hd">
+    Today's Simulations
+    <span class="spacer"></span>
+    <span class="hint" id="dry-today-count"></span>
+  </div>
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Strategy</th><th>Contract</th><th>Side</th><th>Lots</th>
+          <th>Entry</th><th>Exit / Mark</th><th>Sim P&amp;L</th><th>Status</th>
+        </tr>
+      </thead>
+      <tbody id="dry-today-body">
+        <tr class="empty-row"><td colspan="8">Loading simulations…</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-hd">
+    Dry Run History
+    <span class="spacer"></span>
+    <span class="hint" id="dry-trade-count"></span>
+  </div>
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Date</th><th>Strategy</th><th>Contract</th><th>Side</th><th>Lots</th>
+          <th>Entry</th><th>Exit</th><th>Sim P&amp;L</th><th>Cumulative</th><th>Result</th>
+        </tr>
+      </thead>
+      <tbody id="dry-history-body">
+        <tr class="empty-row"><td colspan="10">Loading dry-run history…</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let dryModeActive = false;
+let dryStatus = {};
+let dryTrendPreview = null;
+let dryRunChart = null;
+let dryHistory = [];
+
+function drySlotLabel(slot, symbol = '') {
+  if (slot === 'morning') return 'Morning MOVE';
+  if (slot === 'evening') return 'Evening MOVE';
+  if (slot === 'trend') return 'Trend option';
+  return String(symbol).startsWith('C-BTC') || String(symbol).startsWith('P-BTC')
+    ? 'Trend option' : 'MOVE';
+}
+
+function dryKnownNumber(value) {
+  return value !== null && value !== undefined && value !== '' &&
+    Number.isFinite(Number(value));
+}
+
+function dryManualSlotNow() {
+  return istNowMinutes() < 660 ? 'morning' : 'evening';
+}
+
+function dryMoveButtons(slot) {
+  if (!dryModeActive || slot !== dryManualSlotNow()) return '';
+  return `<div class="btn-row center">
+    <button class="btn success sm" type="button" onclick="dryMoveEntry('${slot}','buy')">▲ Simulate Buy</button>
+    <button class="btn danger sm" type="button" onclick="dryMoveEntry('${slot}','sell')">▼ Simulate Sell</button>
+  </div>`;
+}
+
+function dryStateIsVisible(state) {
+  return state && state.status && state.status !== 'IDLE' &&
+    !(state.status === 'CLOSED' && state.dashboard_visible === false);
+}
+
+function dryPositionDetails(state, slot) {
+  if (!dryStateIsVisible(state)) {
+    const copy = dryModeActive ? 'No active simulation' : 'No saved simulation';
+    return `<div class="no-pos"><span class="icon">◇</span>${copy}</div>` +
+      (slot === 'trend' ? '' : dryMoveButtons(slot));
+  }
+
+  if (state.status === 'OPEN') {
+    const pnl = dryKnownNumber(state.live_pnl) ? Number(state.live_pnl) : null;
+    const mark = state.current_mark ?? state.mark_price;
+    return `<div class="dry-state-line">
+        <span class="badge sim">SIMULATED OPEN</span>
+        <span>Paper position · no exchange exposure</span>
+      </div>
+      <div class="big-pnl ${pnlCls(pnl)}">${f$(pnl)}<small>Simulated live P&amp;L</small></div>
+      <dl class="kv">
+        <dt>Contract</dt><dd>${esc(state.symbol || '—')}</dd>
+        <dt>Side</dt><dd><span class="badge ${state.side === 'short' ? 'short' : 'long'}">${esc(String(state.side || 'long').toUpperCase())}</span></dd>
+        <dt>Lots</dt><dd>${fN(state.lots)}</dd>
+        <dt>Entry</dt><dd>$${fN(state.entry_mark, 4)}</dd>
+        <dt>Current mark</dt><dd>$${fN(mark, 4)}</dd>
+        <dt>Started</dt><dd>${esc(utcToIst(state.entry_time_utc) || '—')}</dd>
+      </dl>
+      <div class="btn-row center">
+        <button class="btn warn sm" type="button" onclick="endDrySimulation('${slot}')">
+          End simulation
+        </button>
+      </div>`;
+  }
+
+  if (state.status === 'CLOSED') {
+    const pnl = dryKnownNumber(state.pnl_usd) ? Number(state.pnl_usd) : null;
+    return `<div class="dry-state-line">
+        <span class="badge sim">SIMULATED CLOSED</span>
+        <span>Recorded in Dry Run History</span>
+      </div>
+      <div class="big-pnl ${pnlCls(pnl)}">${f$(pnl)}<small>Simulated close ${esc(utcToIst(state.exit_time_utc) || '')}</small></div>
+      <dl class="kv">
+        <dt>Contract</dt><dd>${esc(state.symbol || '—')}</dd>
+        <dt>Lots</dt><dd>${fN(state.lots)}</dd>
+        <dt>Entry → Exit</dt><dd>$${fN(state.entry_mark, 4)} → $${fN(state.exit_mark, 4)}</dd>
+        <dt>Trigger</dt><dd>${esc(state.exit_trigger || 'simulation ended')}</dd>
+      </dl>` + (slot === 'trend' ? '' : dryMoveButtons(slot));
+  }
+
+  return `<div class="no-pos"><span class="icon">◇</span>${esc(state.status)}</div>`;
+}
+
+function dryTrendActionHtml(preview) {
+  if (!dryModeActive) {
+    return `<div class="dry-entry-gate muted">
+      <strong>Dry Run is not active</strong>
+      <span>Historical results remain available. Enable DRY RUN in Bot Config to start simulations.</span>
+    </div>`;
+  }
+  if (dryStatus.trend && dryStatus.trend.status === 'OPEN') return '';
+  if (!preview || !preview.can_enter || preview.dry_run !== true) {
+    const reason = preview?.reason || preview?.error ||
+      (preview && preview.dry_run !== true
+        ? 'Trading Mode is no longer DRY RUN'
+        : 'Trend entry is currently unavailable');
+    return `<div class="dry-entry-gate">
+      <strong>Trend entry waiting</strong>
+      <span>${esc(reason)}</span>
+    </div>`;
+  }
+  const up = preview.direction === 'up';
+  return `<div class="dry-entry-gate ready ${up ? 'up' : 'down'}">
+      <div>
+        <strong>All trends ${up ? 'UP' : 'DOWN'} · Simulate ${esc(preview.option_type)}</strong>
+        <span>${esc(preview.symbol)} · ${fN(preview.lots)} lots · paper value ~$${fN(preview.est_value)}</span>
+      </div>
+      <button class="btn ${up ? 'success' : 'danger'} sm" type="button" onclick="dryTrendEntry()">
+        ${up ? '▲' : '▼'} Simulate ${esc(preview.option_type)}
+      </button>
+    </div>`;
+}
+
+function renderDryMode(status) {
+  dryModeActive = status.mode_active === true;
+  const current = String(status.trading_mode || (dryModeActive ? 'DRY RUN' : 'LIVE')).toUpperCase();
+  setTradingModeIndicator(status.trading_mode, status.dry_run_mode);
+  const pill = document.getElementById('dry-page-mode');
+  pill.className = `pill ${dryModeActive ? 'sim' : 'idle'}`;
+  pill.innerHTML = `<span class="dot"></span>${dryModeActive ? 'DRY RUN ACTIVE' : esc(current) + ' · READ ONLY'}`;
+
+  const notice = document.getElementById('dry-mode-notice');
+  notice.classList.toggle('inactive', !dryModeActive);
+  notice.querySelector('strong').textContent = dryModeActive
+    ? 'Simulation only — no exchange orders are placed'
+    : 'Dry Run is currently off — no new simulations';
+  notice.querySelector('p').textContent = dryModeActive
+    ? 'Values are paper outcomes calculated from market prices. They never affect real balances, positions, risk totals, or Trades & P&L.'
+    : 'Historical results remain available, and an already-open simulation may still be ended here. Switch Trading Mode to DRY RUN to start new simulations.';
+}
+
+function dryAutoLabel(mode) {
+  const value = String(mode || 'disabled').toLowerCase();
+  if (value === 'live') return dryModeActive ? 'Auto simulating' : 'Auto enabled';
+  if (value === 'shadow') return 'Auto shadow';
+  return 'Auto disabled';
+}
+
+async function loadDryStatus() {
+  let status;
+  try {
+    status = await jget('/api/dry-run/status');
+  } catch (error) {
+    for (const slot of ['morning', 'evening', 'trend']) {
+      document.getElementById(`dry-slot-${slot}`).innerHTML =
+        '<div class="no-pos c-neg">Dry-run status is unavailable</div>';
+    }
+    return;
+  }
+  dryStatus = status || {};
+  renderDryMode(dryStatus);
+  document.getElementById('dry-when-morning').textContent =
+    'Entry ' + (dryStatus.morning_entry_ist || '—');
+  document.getElementById('dry-when-evening').textContent =
+    'Entry ' + (dryStatus.evening_entry_ist || dryStatus.entry_ist || '—');
+  document.getElementById('dry-trend-auto').textContent = dryAutoLabel(dryStatus.auto_mode);
+
+  dryTrendPreview = null;
+  if (dryModeActive && !(dryStatus.trend && dryStatus.trend.status === 'OPEN')) {
+    try { dryTrendPreview = await jget('/api/trend-entry/preview'); } catch (_) {}
+  }
+
+  document.getElementById('dry-slot-morning').innerHTML =
+    dryPositionDetails(dryStatus.morning || {}, 'morning');
+  document.getElementById('dry-slot-evening').innerHTML =
+    dryPositionDetails(dryStatus.evening || {}, 'evening');
+  document.getElementById('dry-slot-trend').innerHTML =
+    dryPositionDetails(dryStatus.trend || {}, 'trend') +
+    dryTrendActionHtml(dryTrendPreview);
+}
+
+async function dryMoveEntry(slot, side) {
+  if (!dryModeActive) {
+    toast('Enable DRY RUN before starting a simulation', 'err');
+    return;
+  }
+  let preview;
+  try {
+    preview = await jget('/api/manual-entry/preview?slot=' + encodeURIComponent(slot) +
+      '&side=' + encodeURIComponent(side));
+  } catch (_) {}
+  if (!preview || !preview.ok || preview.dry_run !== true) {
+    const reason = preview?.error || (preview && preview.dry_run !== true
+      ? 'Trading Mode is no longer DRY RUN' : 'network error');
+    toast('Cannot prepare simulation: ' + reason, 'err');
+    return;
+  }
+  const message = `SIMULATE ${side.toUpperCase()} — ${slot.toUpperCase()} MOVE\n\n` +
+    `Contract: ${preview.symbol}\nStrike:   $${fN(preview.strike)}\n` +
+    `Mark:     $${fN(preview.mark, 4)}\nLots:     ${fN(preview.lots)}\n` +
+    `Paper value: ~$${fN(preview.est_value, 2)}\n\n` +
+    'No exchange order will be placed. Start this simulation?';
+  if (!confirm(message)) return;
+  const result = await jpost('/api/manual-entry?slot=' + encodeURIComponent(slot), {
+    side,
+    product_id: preview.product_id,
+    symbol: preview.symbol,
+    lots: preview.lots,
+    mark: preview.mark,
+    expected_mode: 'dry_run',
+    mode_revision: preview.mode_revision ?? dryStatus.mode_revision,
+  });
+  if (result.ok && result.dry_run) {
+    toast(`${side.toUpperCase()} simulation started: ${fN(result.lots)} lots ${result.symbol}`, 'ok');
+    await loadDryStatus();
+    await loadDryToday();
+  } else {
+    toast('Simulation failed: ' + (result.error || 'Trading Mode is no longer DRY RUN'), 'err');
+  }
+}
+
+async function dryTrendEntry() {
+  const preview = dryTrendPreview;
+  if (!dryModeActive || !preview?.can_enter || preview.dry_run !== true) {
+    toast('Trend simulation is no longer available', 'err');
+    return;
+  }
+  const message = `SIMULATE TREND ${preview.option_type} — ALL TRENDS ${String(preview.direction).toUpperCase()}\n\n` +
+    `Contract: ${preview.symbol}\nStrike:   $${fN(preview.strike)}\n` +
+    `Ask:      $${fN(preview.ask, 4)}\nLots:     ${fN(preview.lots)}\n` +
+    `Paper value: ~$${fN(preview.est_value, 2)}\n\n` +
+    'No exchange order will be placed. Start this simulation?';
+  if (!confirm(message)) return;
+  const result = await jpost('/api/trend-entry', {
+    expected_mode: 'dry_run',
+    mode_revision: preview.mode_revision ?? dryStatus.mode_revision,
+  });
+  if (result.ok && result.dry_run) {
+    toast(`Trend ${result.option_type} simulation started: ${fN(result.lots)} lots`, 'ok');
+    dryTrendPreview = null;
+    await loadDryStatus();
+    await loadDryToday();
+  } else {
+    toast('Trend simulation failed: ' + (result.error || result.reason ||
+      'Trading Mode is no longer DRY RUN'), 'err');
+  }
+}
+
+async function endDrySimulation(slot) {
+  if (!confirm(`End the ${drySlotLabel(slot).toUpperCase()} simulation at the current mark?\n\nNo exchange order will be placed.`)) return;
+  const result = await jpost('/api/square-off?slot=' + encodeURIComponent(slot), {
+    target_mode: 'dry_run',
+  });
+  if (result.ok && result.dry_run) {
+    toast(`Simulation closed — paper P&L ${f$(result.pnl)}`, 'ok');
+    await Promise.all([loadDryStatus(), loadDryResults(), loadDryToday()]);
+  } else {
+    toast('Could not end simulation: ' + (result.error || 'Trading Mode is no longer DRY RUN'), 'err');
+  }
+}
+
+function renderDryStats(summary) {
+  const el = document.getElementById('dry-stats');
+  if (!summary || !summary.total_days) {
+    el.innerHTML = `<div class="stat dry-empty-stat">
+      <div class="lbl">Paper performance</div>
+      <div class="val">—</div>
+      <div class="sub">No completed simulations yet</div>
+    </div>`;
+    return;
+  }
+  el.innerHTML = `
+    <div class="stat"><div class="lbl">Simulated P&amp;L</div><div class="val ${pnlCls(summary.total_pnl)}">${f$(summary.total_pnl)}</div><div class="sub">${summary.total_days} paper trades</div></div>
+    <div class="stat"><div class="lbl">Simulated win rate</div><div class="val">${fN(summary.win_rate, 1)}%</div><div class="sub">${summary.wins} W / ${summary.losses} L</div></div>
+    <div class="stat"><div class="lbl">Average win</div><div class="val c-pos">${f$(summary.avg_win)}</div><div class="sub">Average loss ${f$(summary.avg_loss)}</div></div>
+    <div class="stat"><div class="lbl">Paper risk / reward</div><div class="val">${fN(summary.rr, 2)}</div><div class="sub">Reward per $1 simulated risk</div></div>
+    <div class="stat"><div class="lbl">Simulated drawdown</div><div class="val c-neg">${f$(summary.max_dd)}</div><div class="sub">Paper peak to trough</div></div>`;
+}
+
+function dryTradeTimestamp(trade) {
+  const date = trade.entry_date || trade.date || '';
+  const clock = trade.entry_time_utc || trade.entry_time || '00:00:00';
+  const parsed = Date.parse(`${date}T${clock}Z`);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function renderDryHistory(trades) {
+  const body = document.getElementById('dry-history-body');
+  document.getElementById('dry-trade-count').textContent =
+    `${trades.length} simulation${trades.length === 1 ? '' : 's'}`;
+  if (!trades.length) {
+    body.innerHTML = '<tr class="empty-row"><td colspan="10">No completed dry-run trades yet</td></tr>';
+    return;
+  }
+  const ordered = [...trades].sort((a, b) => dryTradeTimestamp(a) - dryTradeTimestamp(b));
+  let cumulative = 0;
+  const rows = ordered.map(trade => {
+    const known = dryKnownNumber(trade.pnl_usd);
+    const pnl = known ? Number(trade.pnl_usd) : null;
+    if (known) cumulative += pnl;
+    return { ...trade, _pnl: pnl, _cumulative: cumulative };
+  }).reverse();
+  body.innerHTML = rows.map(trade => {
+    const known = trade._pnl !== null;
+    const result = !known ? '<span class="badge sim">PENDING</span>'
+      : trade._pnl > 0 ? '<span class="badge win">WIN</span>'
+      : trade._pnl < 0 ? '<span class="badge loss">LOSS</span>'
+      : '<span class="badge sim">FLAT</span>';
+    return `<tr>
+      <td>${esc(trade.date || trade.entry_date || '—')}</td>
+      <td>${esc(drySlotLabel(trade.slot, trade.symbol))}</td>
+      <td>${esc(trade.symbol || '—')}</td>
+      <td>${trade.side ? `<span class="badge ${String(trade.side).toLowerCase() === 'short' ? 'short' : 'long'}">${esc(String(trade.side).toUpperCase())}</span>` : '—'}</td>
+      <td>${fN(trade.lots)}</td>
+      <td>$${fN(trade.entry_mark, 4)}</td>
+      <td>${trade.exit_mark == null ? '—' : '$' + fN(trade.exit_mark, 4)}</td>
+      <td class="${pnlCls(trade._pnl)}">${f$(trade._pnl)}</td>
+      <td class="${pnlCls(trade._cumulative)}">${f$(trade._cumulative)}</td>
+      <td>${result}</td>
+    </tr>`;
+  }).join('');
+}
+
+function drawDryChart(trades) {
+  const empty = document.getElementById('dry-chart-empty');
+  const byDay = new Map();
+  for (const trade of trades) {
+    if (!dryKnownNumber(trade.pnl_usd)) continue;
+    const day = trade.date || trade.entry_date;
+    if (!day) continue;
+    byDay.set(day, (byDay.get(day) || 0) + Number(trade.pnl_usd));
+  }
+  if (dryRunChart) {
+    dryRunChart.destroy();
+    dryRunChart = null;
+  }
+  if (!byDay.size) {
+    empty.style.display = 'grid';
+    return;
+  }
+  empty.style.display = 'none';
+  const labels = [...byDay.keys()].sort();
+  const daily = labels.map(day => Number(byDay.get(day).toFixed(2)));
+  let running = 0;
+  const cumulative = daily.map(value => Number((running += value).toFixed(2)));
+  const css = getComputedStyle(document.documentElement);
+  const POS = css.getPropertyValue('--pos').trim();
+  const NEG = css.getPropertyValue('--neg').trim();
+  const MUTED = css.getPropertyValue('--muted').trim();
+  const WARN = css.getPropertyValue('--warn').trim();
+  const GRID = css.getPropertyValue('--chart-grid').trim();
+  dryRunChart = new Chart(document.getElementById('dry-pnl-chart').getContext('2d'), {
+    data: {
+      labels,
+      datasets: [
+        {
+          type: 'bar', label: 'Daily simulated P&L', data: daily, yAxisID: 'daily',
+          backgroundColor: daily.map(value => value >= 0 ? 'rgba(8,135,93,.5)' : 'rgba(217,45,32,.45)'),
+          borderColor: daily.map(value => value >= 0 ? POS : NEG),
+          borderWidth: 1, borderRadius: 4, maxBarThickness: 44,
+        },
+        {
+          type: 'line', label: 'Cumulative simulated P&L', data: cumulative, yAxisID: 'cumulative',
+          borderColor: WARN, backgroundColor: 'rgba(180,83,9,.07)',
+          borderWidth: 2.5, pointRadius: 3, pointBackgroundColor: WARN, tension: .3, fill: true,
+        },
+      ],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { labels: { color: MUTED, font: { size: 12 } } },
+        tooltip: { callbacks: { label: context => ` ${context.dataset.label}: ${f$(context.raw)}` } },
+      },
+      scales: {
+        x: { ticks: { color: MUTED, font: { size: 11 } }, grid: { color: GRID } },
+        daily: {
+          position: 'left', ticks: { color: MUTED, callback: value => f$(value) },
+          grid: { color: GRID },
+        },
+        cumulative: {
+          position: 'right', ticks: { color: WARN, callback: value => f$(value) },
+          grid: { drawOnChartArea: false },
+        },
+      },
+    },
+  });
+}
+
+async function loadDryResults() {
+  let trades = [], summary = {};
+  try {
+    [trades, summary] = await Promise.all([
+      jget('/api/dry-run/trades'),
+      jget('/api/dry-run/summary'),
+    ]);
+  } catch (_) {
+    document.getElementById('dry-history-body').innerHTML =
+      '<tr class="empty-row"><td colspan="10">Dry-run history is unavailable</td></tr>';
+    return;
+  }
+  dryHistory = Array.isArray(trades) ? trades : [];
+  renderDryStats(summary);
+  renderDryHistory(dryHistory);
+  drawDryChart(dryHistory);
+}
+
+function renderDryToday(rows) {
+  const body = document.getElementById('dry-today-body');
+  document.getElementById('dry-today-count').textContent =
+    `${rows.length} simulation${rows.length === 1 ? '' : 's'}`;
+  if (!rows.length) {
+    body.innerHTML = '<tr class="empty-row"><td colspan="8">No dry-run trades today</td></tr>';
+    return;
+  }
+  body.innerHTML = rows.map(trade => {
+    const live = trade._live || trade.status === 'OPEN';
+    const pnl = live ? trade.live_pnl : trade.pnl_usd;
+    const mark = live ? (trade.current_mark ?? trade.mark_price) : trade.exit_mark;
+    const known = dryKnownNumber(pnl);
+    const status = live ? '<span class="badge sim">SIMULATED OPEN</span>'
+      : !known ? '<span class="badge sim">PENDING</span>'
+      : Number(pnl) > 0 ? '<span class="badge win">WIN</span>'
+      : Number(pnl) < 0 ? '<span class="badge loss">LOSS</span>'
+      : '<span class="badge sim">FLAT</span>';
+    return `<tr>
+      <td>${esc(drySlotLabel(trade.slot, trade.symbol))}</td>
+      <td>${esc(trade.symbol || '—')}</td>
+      <td>${trade.side ? `<span class="badge ${String(trade.side).toLowerCase() === 'short' ? 'short' : 'long'}">${esc(String(trade.side).toUpperCase())}</span>` : '—'}</td>
+      <td>${fN(trade.lots)}</td>
+      <td>$${fN(trade.entry_mark, 4)}</td>
+      <td>${mark == null ? '—' : '$' + fN(mark, 4)}</td>
+      <td class="${pnlCls(known ? Number(pnl) : null)}">${f$(known ? Number(pnl) : null)}</td>
+      <td>${status}</td>
+    </tr>`;
+  }).join('');
+}
+
+async function loadDryToday() {
+  try {
+    const rows = await jget('/api/dry-run/today-trades');
+    renderDryToday(Array.isArray(rows) ? rows : []);
+  } catch (_) {
+    document.getElementById('dry-today-body').innerHTML =
+      '<tr class="empty-row"><td colspan="8">Today’s dry-run results are unavailable</td></tr>';
+  }
+}
+
+function loadDryDashboard() {
+  loadDryStatus();
+  loadDryResults();
+  loadDryToday();
+}
+
+window.addEventListener('themechange', () => {
+  if (dryHistory.length) drawDryChart(dryHistory);
+});
+loadDryDashboard();
+setInterval(loadDryStatus, 12_000);
+setInterval(loadDryToday, 12_000);
+setInterval(loadDryResults, 60_000);
+</script>
+{% endblock %}

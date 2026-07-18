@@ -3,7 +3,7 @@
 {% block content %}
 <div class="banner info">These settings apply to <b>{{ display_name }}'s account only</b> — its bot instance, TP monitors and manual trading. Every account has its own configuration.</div>
 <div class="banner warn" id="config-load-banner">Loading verified account configuration — Save is locked.</div>
-<div class="banner warn" id="dry-banner">⚠ DRY RUN is ON — entries are simulated, no real orders are placed.</div>
+<div class="banner warn" id="dry-banner">⚠ DRY RUN is ON account-wide — scheduled and manual MOVE entries plus Trend entries are simulated, and no real orders are placed.</div>
 
 <div class="card">
   <div class="card-hd">Trading Mode</div>
@@ -16,6 +16,7 @@
             <option value="true">DRY RUN — simulate</option>
             <option value="false">LIVE — real orders</option>
           </select>
+          <em class="fld-hint">Account-wide execution mode for every MOVE and Trend entry.</em>
         </label>
         <label class="fld"><span>MOVE lot sizing</span>
           <div class="hint" style="padding-top:9px">Mandatory min(configured, affordable, risk and liquidity caps)</div>
@@ -138,7 +139,7 @@
           <select id="c-TREND_AUTO_ENTRY_MODE">
             <option value="shadow">SHADOW — record signals, no orders</option>
             <option value="disabled">DISABLED — manual confirmation only</option>
-            <option value="live">LIVE — automatically place orders</option>
+            <option value="live">AUTO — execute in the selected Trading Mode</option>
           </select>
         </label>
         <label class="fld"><span>Risk budget / Trend trade $</span><input id="c-TREND_RISK_BUDGET_USD" type="number" min="1" step="1"></label>
@@ -396,7 +397,7 @@ async function saveConfig() {
   }
   const mode = document.getElementById('c-TREND_AUTO_ENTRY_MODE').value;
   if (mode === 'live' && window._loadedTrendAutoMode !== 'live' &&
-      !confirm('Enable LIVE automatic Trend orders? Eligible signals will place real IOC orders when Trading Mode is LIVE.')) return;
+      !confirm('Enable automatic Trend entries? Eligible signals are simulated when Trading Mode is DRY RUN and place real IOC orders only when Trading Mode is LIVE.')) return;
   const fallback = document.getElementById('c-TREND_MARKET_FALLBACK_ENABLED').value;
   if (fallback === 'true' && window._loadedMarketFallback !== 'true' &&
       !confirm('Market fallback removes the IOC price guarantee for an unfilled remainder. Save this higher-risk setting?')) return;
@@ -439,6 +440,7 @@ async function saveConfig() {
       rememberSavedPreservedValues(body);
       toast('Saved for this account — its bot reloads within ~30 s' +
             (d.tp_restarted?.length ? ` (TP restarted: ${d.tp_restarted.join(', ')})` : ''), 'ok');
+      refreshTopbar();
     }
     else toast('Save failed: ' + (d.error || 'unknown error'), 'err');
   } catch (error) {

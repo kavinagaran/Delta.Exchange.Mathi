@@ -102,6 +102,11 @@ function manualSlotNow() {
 
 function manualBtns(slot) {
   if (slot !== manualSlotNow()) return '';
+  if (window._dryRunMode) {
+    return `<div class="btn-row center">
+      <a class="btn secondary sm" href="/dry-run">Open Dry Run dashboard</a>
+    </div>`;
+  }
   return `<div class="btn-row center">
     <button class="btn success sm" onclick="manualEntry('${slot}','buy')">▲ Buy straddle</button>
     <button class="btn danger sm"  onclick="manualEntry('${slot}','sell')">▼ Sell straddle</button>
@@ -228,6 +233,8 @@ function renderExternalOptions(rows) {
 
 async function loadSlots() {
   const [st, tp] = await Promise.all([jget('/api/status'), jget('/api/tp-monitor').catch(() => ({}))]);
+  window._dryRunMode = st.dry_run_mode === true;
+  window._modeRevision = st.mode_revision || '';
   const evening = { ...st }; delete evening.morning; delete evening.trend;
   window._slots = { morning: st.morning || {}, evening, trend: st.trend || {}, btc: +st.btc_futures_price || 0 };
   document.getElementById('slot-morning').innerHTML = slotHtml(st.morning, 'morning', tp);
@@ -297,7 +304,9 @@ async function manualEntry(slot, side) {
     `Place market ${side.toUpperCase()} order?`;
   if (!confirm(msg)) return;
   const d = await jpost('/api/manual-entry?slot=' + encodeURIComponent(slot), {
-    side, product_id: p.product_id, symbol: p.symbol, lots: p.lots, mark: p.mark
+    side, product_id: p.product_id, symbol: p.symbol, lots: p.lots, mark: p.mark,
+    expected_mode: p.execution_mode || 'live', mode_revision: p.mode_revision,
+    dry_run: p.dry_run
   });
   if (d.ok) {
     toast(`${side.toUpperCase()} filled${d.dry_run ? ' (SIMULATED)' : ''}: ${fN(d.lots)} lots ${d.symbol} @ $${fN(d.fill, 2)}`, 'ok');
@@ -312,7 +321,9 @@ async function squareOff(slot) {
     ? `\n\nThis closes the complete ${fN(s.lots)}-lot aggregate, including externally added matching lots.`
     : '';
   if (!confirm(`Square off the ${slot.toUpperCase()} position now at market price?${scope}`)) return;
-  const d = await jpost('/api/square-off?slot=' + slot);
+  const d = await jpost('/api/square-off?slot=' + slot, {
+    target_mode: 'live'
+  });
   if (d.ok) { toast(`Closed — P&L ${f$(d.pnl)}`, 'ok'); loadAll(); }
   else toast('Square off failed: ' + JSON.stringify(d.error), 'err');
 }
@@ -477,11 +488,21 @@ async function loadTrend() {
   const autoHealthy = !auto.last_error && auto.status !== 'error';
   autoPill.className = `pill ${autoMode === 'LIVE' && autoHealthy ? 'live' : 'idle'} mini`;
   autoPill.title = auto.last_error || auto.last_action || '';
-  autoPill.innerHTML = `<span class="dot"></span>AUTO ${esc(autoMode)}${auto.last_error ? ' · ERROR' : ''}`;
+  autoPill.innerHTML = `<span class="dot"></span>${window._dryRunMode && autoMode === 'LIVE' ? 'AUTO SIMULATING' : 'AUTO ' + esc(autoMode)}${auto.last_error ? ' · ERROR' : ''}`;
 
   let p = null;
   try { p = await jget('/api/trend-entry/preview'); } catch (e) {}
   const action = document.getElementById('trend-action');
+  if (p?.dry_run === true) {
+    action.className = 'trend-action waiting';
+    action.innerHTML = `<div class="trend-action-copy">
+      <span class="strategy-kicker">DRY RUN ACTIVE</span>
+      <strong>Trend simulations are isolated from this LIVE dashboard</strong>
+      <small>Open the Dry Run dashboard to view or start paper MOVE and Trend positions.</small>
+    </div><a class="btn secondary" href="/dry-run">Open Dry Run</a>`;
+    window._trendPreview = null;
+    return;
+  }
   if (!p || !p.can_enter) {
     const reason = p?.reason || p?.error || 'Trend entry is currently unavailable';
     action.className = 'trend-action waiting';
@@ -517,7 +538,11 @@ async function trendEntry() {
     (p.dry_run ? '⚠ Mode is DRY RUN — no real order will be placed.\n\n' : '') +
     `Place slippage-capped IOC limit BUY order?`;
   if (!confirm(msg)) return;
-  const d = await jpost('/api/trend-entry');
+  const d = await jpost('/api/trend-entry', {
+    expected_mode: p.execution_mode || 'live',
+    mode_revision: p.mode_revision,
+    dry_run: p.dry_run
+  });
   if (d.ok) {
     toast(`Trend ${d.option_type} bought${d.dry_run ? ' (SIMULATED)' : ''}: ${fN(d.lots)} lots @ $${fN(d.fill, 4)}${d.partial_fill ? ' (partial)' : ''}`, 'ok');
     window._trendPreview = null;
