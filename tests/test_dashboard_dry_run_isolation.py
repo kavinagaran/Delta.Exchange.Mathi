@@ -303,11 +303,19 @@ def test_manual_move_dry_entry_is_disabled_and_never_writes_or_posts(
     raw_post.assert_not_called()
 
 
-def test_dry_square_off_appends_exactly_once_without_private_post(
-        isolated_dashboard, monkeypatch):
+@pytest.mark.parametrize(
+    ("slot", "state_name"),
+    (
+        ("morning", "morning_state.json"),
+        ("evening", "straddle_state.json"),
+        ("trend", "trend_state.json"),
+    ),
+)
+def test_dry_manual_exit_supports_every_strategy_and_appends_exactly_once(
+        isolated_dashboard, monkeypatch, slot, state_name):
     account = isolated_dashboard
-    state_path = account / "dry_run" / "straddle_state.json"
-    _write(state_path, _dry_state())
+    state_path = account / "dry_run" / state_name
+    _write(state_path, _dry_state(slot))
     monkeypatch.setattr(
         dashboard, "_dry_run_mark_and_pnl",
         lambda state: (125.0, 0.25, 0.25, 0.0),
@@ -322,10 +330,10 @@ def test_dry_square_off_appends_exactly_once_without_private_post(
     }
 
     with dashboard.app.test_request_context(
-            "/api/square-off?slot=evening", method="POST", json=body):
+            f"/api/square-off?slot={slot}", method="POST", json=body):
         first, first_status = _result(dashboard.api_square_off())
     with dashboard.app.test_request_context(
-            "/api/square-off?slot=evening", method="POST", json=body):
+            f"/api/square-off?slot={slot}", method="POST", json=body):
         second, second_status = _result(dashboard.api_square_off())
 
     history = json.loads(
@@ -340,7 +348,7 @@ def test_dry_square_off_appends_exactly_once_without_private_post(
     assert closed["status"] == "CLOSED"
     assert closed["exit_trigger"] == "manual_squareoff_simulated"
     assert len(history) == 1
-    assert history[0]["simulation_id"] == "sim-evening-test"
+    assert history[0]["simulation_id"] == f"sim-{slot}-test"
     assert not (account / "trade_history.json").exists()
     raw_post.assert_not_called()
 
@@ -529,3 +537,27 @@ def test_dry_run_live_status_refresh_is_fast_uncached_and_non_overlapping():
     assert "if (dryStatusRefreshPending)" in template
     assert "setInterval(() => loadDryStatus(false), 4_000);" in template
     assert "setInterval(() => loadDryStatus(true), 20_000);" in template
+
+
+def test_dry_run_cards_are_equal_sized_and_every_open_slot_has_manual_exit():
+    root = Path(dashboard.__file__).resolve().parent
+    template = (root / "templates" / "dry_run.html").read_text(
+        encoding="utf-8")
+    overview = (root / "templates" / "overview.html").read_text(
+        encoding="utf-8")
+    styles = (root / "static" / "css" / "app.css").read_text(
+        encoding="utf-8")
+
+    assert "grid-auto-rows: 1fr" in styles
+    assert ".dry-slot-card {" in styles
+    assert "min-height: 420px; flex: 1 1 auto" in styles
+    assert "dry-slot-footer-panel" in template
+    assert "min-height: 86px" in styles
+    assert "Manual Exit" in template
+    assert "endDrySimulation('${slot}')" in template
+    for slot in ("morning", "evening", "trend"):
+        assert f"dryPositionDetails(dryStatus.{slot} || {{}}, '{slot}'" in template
+
+    assert "squareOff('${slot}', 'dry_run')" in overview
+    assert "squareOff('${slot}', 'live')" in overview
+    assert "target_mode: targetMode" in overview

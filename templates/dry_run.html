@@ -157,7 +157,7 @@ function dryKnownNumber(value) {
 
 function dryMoveDecisionHtml(view) {
   if (!view || !view.action) {
-    return `<div class="move-decision muted">
+    return `<div class="move-decision dry-slot-footer-panel muted">
       <div class="move-decision-hd">
         <div class="move-decision-title">
           <span>MOVE strategy</span>
@@ -183,7 +183,7 @@ function dryMoveDecisionHtml(view) {
     ...(view.failed_gates?.long || []).map(v => `LONG ${v}`),
     ...(view.failed_gates?.short || []).map(v => `SHORT ${v}`),
   ].slice(0, 6);
-  return `<div class="move-decision ${cls}">
+  return `<div class="move-decision dry-slot-footer-panel ${cls}">
     <div class="move-decision-hd">
       <div class="move-decision-title">
         <span>Automatic MOVE Forecast</span>
@@ -230,8 +230,10 @@ function dryPositionDetails(state, slot, decision = null) {
         <dt>Started</dt><dd>${esc(utcToIst(state.entry_time_utc) || '—')}</dd>
       </dl>
       <div class="btn-row center">
-        <button class="btn warn sm" type="button" onclick="endDrySimulation('${slot}')">
-          End simulation
+        <button class="btn danger sm" type="button"
+                aria-label="Manual exit ${esc(drySlotLabel(slot))}"
+                onclick="endDrySimulation('${slot}')">
+          Manual Exit
         </button>
       </div>${decisionHtml}`;
   }
@@ -256,7 +258,7 @@ function dryPositionDetails(state, slot, decision = null) {
 
 function dryTrendActionHtml(preview) {
   if (!dryModeActive) {
-    return `<div class="dry-entry-gate muted">
+    return `<div class="dry-entry-gate dry-slot-footer-panel muted">
       <strong>Dry Run is not active</strong>
       <span>Historical results remain available. Enable DRY RUN in Bot Config to start simulations.</span>
     </div>`;
@@ -267,13 +269,13 @@ function dryTrendActionHtml(preview) {
       (preview && preview.dry_run !== true
         ? 'Trading Mode is no longer DRY RUN'
         : 'Trend entry is currently unavailable');
-    return `<div class="dry-entry-gate">
+    return `<div class="dry-entry-gate dry-slot-footer-panel">
       <strong>Trend entry waiting</strong>
       <span>${esc(reason)}</span>
     </div>`;
   }
   const up = preview.direction === 'up';
-  return `<div class="dry-entry-gate ready ${up ? 'up' : 'down'}">
+  return `<div class="dry-entry-gate dry-slot-footer-panel ready ${up ? 'up' : 'down'}">
       <div>
         <strong>All trends ${up ? 'UP' : 'DOWN'} · Simulate ${esc(preview.option_type)}</strong>
         <span>${esc(preview.symbol)} · ${fN(preview.lots)} lots · paper value ~$${fN(preview.est_value)}</span>
@@ -386,15 +388,15 @@ async function dryTrendEntry() {
 }
 
 async function endDrySimulation(slot) {
-  if (!confirm(`End the ${drySlotLabel(slot).toUpperCase()} simulation at the current mark?\n\nNo exchange order will be placed.`)) return;
+  if (!confirm(`Manually exit the ${drySlotLabel(slot).toUpperCase()} simulation at the current mark?\n\nNo exchange order will be placed.`)) return;
   const result = await jpost('/api/square-off?slot=' + encodeURIComponent(slot), {
     target_mode: 'dry_run',
   });
   if (result.ok && result.dry_run) {
-    toast(`Simulation closed — paper P&L ${f$(result.pnl)}`, 'ok');
+    toast(`Manual exit completed — paper P&L ${f$(result.pnl)}`, 'ok');
     await Promise.all([loadDryStatus(), loadDryResults(), loadDryToday()]);
   } else {
-    toast('Could not end simulation: ' + (result.error || 'Trading Mode is no longer DRY RUN'), 'err');
+    toast('Manual exit failed: ' + (result.error || 'Trading Mode is no longer DRY RUN'), 'err');
   }
 }
 
