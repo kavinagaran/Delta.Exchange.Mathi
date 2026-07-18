@@ -5,6 +5,7 @@ from unittest.mock import Mock, patch
 import pytest
 
 import Delta_Straddle_Live as bot
+from risk_controls import RiskDecision
 
 
 def _move_history_paths(tmp_path):
@@ -212,6 +213,64 @@ def test_short_move_requires_explicit_enable():
     with patch.object(bot, "ALLOW_SHORT_MOVE", False):
         with pytest.raises(RuntimeError, match="short MOVE entries are disabled"):
             bot.build_move_entry_plan({"symbol": "MV-X"}, 10, "sell", "evening")
+
+
+def test_scheduled_dry_short_uses_short_cap_as_paper_risk_assumption(tmp_path):
+    snapshot = {
+        "ask": 145, "bid": 144, "spot": 64000,
+        "liquidity_cap": 1000,
+    }
+    decision = RiskDecision(
+        True, "risk checks passed", "2026-07-18", 0, 0, 0, 0)
+    with patch.object(bot, "DATA_DIR", tmp_path), \
+         patch.object(bot, "DRY_RUN", True), \
+         patch.object(bot, "ALLOW_SHORT_MOVE", True), \
+         patch.object(bot, "SHORT_MAX_RISK_USD", 250), \
+         patch.object(bot, "MAX_ORDER_LOTS", 1000), \
+         patch.object(bot, "_assert_entry_configuration"), \
+         patch.object(bot, "_protection_snapshot",
+                      return_value={"tp_target_pnl": 200, "sl_target_pnl": 0}), \
+         patch.object(bot, "load_states", return_value={}), \
+         patch.object(bot, "get_execution_snapshot", return_value=snapshot), \
+         patch.object(bot, "move_value_signal", return_value={"eligible": True}), \
+         patch.object(bot, "_effective_lots", return_value=1000), \
+         patch.object(bot, "_slot_risk", return_value=(500, 0)), \
+         patch.object(bot, "evaluate_entry", return_value=decision), \
+         patch.object(bot, "audit_event"):
+        plan = bot.build_move_entry_plan(
+            {"id": 7, "symbol": "MV-X", "contract_value": ".001"},
+            1000, "sell", "evening")
+
+    assert plan["lots"] == 1000
+    assert plan["risk_budget_usd"] == 250
+    assert plan["configured_stop_loss_usd"] == 0
+    assert plan["stop_loss_usd"] == 250
+    assert plan["paper_short_risk_assumption_usd"] == 250
+    assert plan["risk_at_entry_usd"] == 250
+
+
+def test_scheduled_live_short_still_requires_positive_sl(tmp_path):
+    snapshot = {
+        "ask": 145, "bid": 144, "spot": 64000,
+        "liquidity_cap": 100,
+    }
+    with patch.object(bot, "DATA_DIR", tmp_path), \
+         patch.object(bot, "DRY_RUN", False), \
+         patch.object(bot, "ALLOW_SHORT_MOVE", True), \
+         patch.object(bot, "SHORT_MAX_RISK_USD", 250), \
+         patch.object(bot, "_assert_entry_configuration"), \
+         patch.object(bot, "_protection_snapshot",
+                      return_value={"tp_target_pnl": 200, "sl_target_pnl": 0}), \
+         patch.object(bot, "load_states", return_value={}), \
+         patch.object(bot, "get_mv_position", return_value=None), \
+         patch.object(bot, "get_execution_snapshot", return_value=snapshot), \
+         patch.object(bot, "move_value_signal", return_value={"eligible": True}), \
+         patch.object(bot, "_effective_lots", return_value=100), \
+         patch.object(bot, "_slot_risk", return_value=(500, 0)):
+        with pytest.raises(RuntimeError, match="positive SL"):
+            bot.build_move_entry_plan(
+                {"id": 7, "symbol": "MV-X", "contract_value": ".001"},
+                100, "sell", "evening")
 
 
 def test_external_position_blocks_new_automated_risk():

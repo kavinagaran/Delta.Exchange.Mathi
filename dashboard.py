@@ -3234,14 +3234,27 @@ def _move_lot_plan(
         else "RISK_PER_TRADE_USD_EVENING"
     risk_budget = max(_as_float(cfg.get(risk_key) or 200, 200), 0)
     _, _, sl_target, _ = _tp_env(slot)
+    configured_sl_target = sl_target
+    paper_short_risk_assumption = 0.0
     is_short = side == "sell"
     short_cap = max(_as_float(cfg.get("SHORT_MAX_RISK_USD") or 0, 0), 0)
     if is_short:
         if not _cfg_bool("ALLOW_SHORT_MOVE", False):
             return {"lots": 0, "reason": "Short MOVE entries are disabled"}
-        if sl_target <= 0 or short_cap <= 0:
+        if short_cap <= 0:
             return {"lots": 0,
-                    "reason": "Short MOVE requires a positive SL and short-risk cap"}
+                    "reason": ("Short MOVE simulation requires a positive short-risk cap"
+                               if dry_run else
+                               "Short MOVE requires a positive SL and short-risk cap")}
+        if sl_target <= 0:
+            if not dry_run:
+                return {"lots": 0,
+                        "reason": "Short MOVE requires a positive SL and short-risk cap"}
+            # A paper short has no exchange exposure and no exchange stop
+            # order. Use its mandatory short-risk cap as the simulated loss
+            # assumption for sizing and the paper portfolio-risk ledger.
+            sl_target = short_cap
+            paper_short_risk_assumption = short_cap
         risk_budget = min(risk_budget, short_cap)
     premium_per_lot = price * cv
     fee_per_lot = 2 * _option_fee_per_lot(price, cv, strike)
@@ -3273,7 +3286,10 @@ def _move_lot_plan(
         "affordability_source": affordability_source,
         "max_order_lots": max_order, "chunk_cap": chunk_cap,
         "liquidity_cap": liquidity_cap, "risk_budget_usd": risk_budget,
-        "sl_target_pnl": sl_target, "proposed_risk_usd": proposed,
+        "sl_target_pnl": configured_sl_target,
+        "risk_stop_loss_usd": sl_target,
+        "paper_short_risk_assumption_usd": paper_short_risk_assumption,
+        "proposed_risk_usd": proposed,
         "premium_per_lot": premium_per_lot,
         "round_trip_fee_per_lot": fee_per_lot,
         "slippage_per_lot": slippage_per_lot,

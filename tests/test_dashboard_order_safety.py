@@ -302,6 +302,51 @@ def test_live_move_sizing_still_fails_closed_on_empty_wallet():
     assert plan["affordability_source"] == "exchange_wallet"
 
 
+def test_dry_short_uses_short_cap_when_configured_sl_is_disabled():
+    cfg = {
+        "STRADDLE_LOTS": "1000", "MAX_ORDER_LOTS": "1000",
+        "ORDER_CHUNK_LOTS": "1000", "MIN_BOOK_DEPTH_MULTIPLE": "1",
+        "RISK_PER_TRADE_USD_EVENING": "500",
+        "SHORT_MAX_RISK_USD": "250",
+    }
+    contract = {"contract_value": ".001", "strike_price": "64000"}
+    quote = {"entry_price": 144, "entry_depth": 1098}
+    with patch.object(dashboard, "_user_cfg", return_value=cfg), \
+            patch.object(dashboard, "_cfg_bool", return_value=True), \
+            patch.object(dashboard, "_affordable_option_lots") as wallet, \
+            patch.object(dashboard, "_tp_env", return_value=(200, 20, 0, 0)):
+        plan = dashboard._move_lot_plan(
+            "evening", "sell", contract, quote, dry_run=True)
+
+    wallet.assert_not_called()
+    assert plan["lots"] == 1000
+    assert plan["risk_budget_usd"] == 250
+    assert plan["sl_target_pnl"] == 0
+    assert plan["risk_stop_loss_usd"] == 250
+    assert plan["paper_short_risk_assumption_usd"] == 250
+    assert plan["proposed_risk_usd"] == 250
+
+
+def test_live_short_still_requires_configured_positive_sl():
+    cfg = {
+        "STRADDLE_LOTS": "100", "MAX_ORDER_LOTS": "100",
+        "ORDER_CHUNK_LOTS": "100", "MIN_BOOK_DEPTH_MULTIPLE": "1",
+        "RISK_PER_TRADE_USD_EVENING": "500",
+        "SHORT_MAX_RISK_USD": "250",
+    }
+    contract = {"contract_value": ".001", "strike_price": "64000"}
+    quote = {"entry_price": 144, "entry_depth": 100}
+    with patch.object(dashboard, "_user_cfg", return_value=cfg), \
+            patch.object(dashboard, "_cfg_bool", return_value=True), \
+            patch.object(dashboard, "_affordable_option_lots", return_value=100), \
+            patch.object(dashboard, "_tp_env", return_value=(200, 20, 0, 0)):
+        plan = dashboard._move_lot_plan(
+            "evening", "sell", contract, quote, dry_run=False)
+
+    assert plan["lots"] == 0
+    assert plan["reason"] == "Short MOVE requires a positive SL and short-risk cap"
+
+
 def test_manual_entry_honors_concurrent_move_cap(isolated_user):
     _write(isolated_user / "morning_state.json", _open_state(
         slot="morning", product_id=7, symbol="MV-BTC-OLD", lots=4,

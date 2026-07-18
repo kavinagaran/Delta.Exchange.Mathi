@@ -1660,6 +1660,23 @@ def build_move_entry_plan(contract: dict, configured_lots: int, side: str, slot:
     if affordable < 1:
         raise RuntimeError("verified affordable lots is zero")
     risk_budget, stop_loss = _slot_risk(slot)
+    configured_stop_loss = stop_loss
+    paper_short_risk_assumption = 0.0
+    if side == "sell":
+        if SHORT_MAX_RISK_USD <= 0:
+            raise RuntimeError(
+                "short MOVE simulation requires a positive short-risk cap"
+                if DRY_RUN else
+                "short MOVE requires a positive SL and short-risk cap")
+        if stop_loss <= 0:
+            if not DRY_RUN:
+                raise RuntimeError(
+                    "short MOVE requires a positive SL and short-risk cap")
+            # Paper entries have no exchange exposure or exchange stop order.
+            # Size and account for their risk using the mandatory short cap.
+            stop_loss = SHORT_MAX_RISK_USD
+            paper_short_risk_assumption = SHORT_MAX_RISK_USD
+        risk_budget = min(risk_budget, SHORT_MAX_RISK_USD)
     spot = snapshot.get("spot") or get_btc_price()
     fee_one_way = min(OPTION_FEE_RATE * spot, OPTION_FEE_CAP_PCT * premium) * cv
     slippage_per_lot = premium * cv * MAX_SLIPPAGE_PCT / 100
@@ -1694,6 +1711,8 @@ def build_move_entry_plan(contract: dict, configured_lots: int, side: str, slot:
         "configured_lots": configured_lots, "affordable_lots": affordable,
         "liquidity_cap_lots": snapshot["liquidity_cap"], "risk_lots": lots,
         "risk_budget_usd": risk_budget, "stop_loss_usd": stop_loss,
+        "configured_stop_loss_usd": configured_stop_loss,
+        "paper_short_risk_assumption_usd": paper_short_risk_assumption,
         "proposed_risk_usd": round(proposed_risk, 2),
         "unrealized_pnl_usd": unrealized,
         "snapshot": snapshot, "value_signal": value_signal,
@@ -1704,6 +1723,8 @@ def build_move_entry_plan(contract: dict, configured_lots: int, side: str, slot:
     return {
         "lots": lots, "snapshot": snapshot, "value_signal": value_signal,
         "risk_budget_usd": risk_budget, "stop_loss_usd": stop_loss,
+        "configured_stop_loss_usd": configured_stop_loss,
+        "paper_short_risk_assumption_usd": paper_short_risk_assumption,
         "risk_at_entry_usd": round(proposed_risk, 2),
         "risk_decision": decision_dict(decision),
         "estimated_entry_fee_usd": round(fee_one_way * lots, 4),
