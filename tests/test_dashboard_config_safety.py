@@ -57,21 +57,88 @@ def test_environment_or_legacy_flag_cannot_default_account_to_live(
         isolated_account, monkeypatch):
     monkeypatch.setenv("TREND_AUTO_ENTRY_MODE", "live")
     monkeypatch.setenv("TREND_AUTO_ENTRY_ENABLED", "true")
+    monkeypatch.setenv("MOVE_AUTO_ENTRY_MODE", "live")
     assert dashboard._trend_auto_mode() == "shadow"
+    assert dashboard._user_cfg()["MOVE_AUTO_ENTRY_MODE"] == "shadow"
 
     _write_json(isolated_account / "config.json", {
         "TREND_AUTO_ENTRY_ENABLED": "true",
     })
     assert dashboard._trend_auto_mode() == "shadow"
     assert dashboard._user_cfg()["TREND_AUTO_ENTRY_ENABLED"] == "false"
+    assert dashboard._user_cfg()["MOVE_AUTO_ENTRY_MODE"] == "shadow"
 
 
 def test_only_explicit_valid_per_account_mode_enables_live(isolated_account):
     _write_json(isolated_account / "config.json", {
         "TREND_AUTO_ENTRY_MODE": "live",
+        "MOVE_AUTO_ENTRY_MODE": "live",
     })
     assert dashboard._trend_auto_mode() == "live"
     assert dashboard._user_cfg()["TREND_AUTO_ENTRY_ENABLED"] == "true"
+    assert dashboard._user_cfg()["MOVE_AUTO_ENTRY_MODE"] == "live"
+
+
+def test_move_decision_dashboard_view_is_mode_isolated_and_compact(
+        isolated_account):
+    def decision(action, dry_run):
+        return {
+            "schema_version": 1,
+            "slot": "morning",
+            "decision_id": f"{action}-1",
+            "recorded_at_utc": "2026-07-18T00:15:00Z",
+            "auto_mode": "shadow",
+            "dry_run": dry_run,
+            "normalized_input": {
+                "contract": {"symbol": "MV-BTC-64000-180726"},
+                "market": {"ask": 100},
+            },
+            "forecast": {
+                "expected_payoff_low": 120,
+                "expected_payoff_mid": 140,
+                "expected_payoff_high": 160,
+                "payoff_p99": 400,
+                "jump_event_score": 1,
+                "event_score_available": False,
+                "event_risk_source": "unknown_high_risk",
+                "model_features": {"completed_bars": 8640},
+            },
+            "decision": {
+                "action": action,
+                "side": "buy" if action == "LONG_MOVE" else None,
+                "conflict": False,
+                "metrics": {
+                    "long_edge_per_contract": .01,
+                    "short_edge_per_contract": -.1,
+                },
+                "failed_gates": {
+                    "common": [],
+                    "long": [],
+                    "short": ["jump_event_risk"],
+                },
+            },
+        }
+
+    _write_json(
+        isolated_account / "move_decision_morning.json",
+        decision("LONG_MOVE", False),
+    )
+    _write_json(
+        isolated_account / "dry_run" / "move_decision_morning.json",
+        decision("NO_TRADE", True),
+    )
+
+    live = dashboard._move_decision_dashboard_view("morning")
+    paper = dashboard._move_decision_dashboard_view(
+        "morning", dry_run=True)
+
+    assert live["action"] == "LONG_MOVE"
+    assert paper["action"] == "NO_TRADE"
+    assert paper["dry_run"] is True
+    assert paper["forecast"]["event_score_available"] is False
+    assert paper["failed_gates"]["short"] == ["jump_event_risk"]
+    assert "normalized_input" not in paper
+    assert "model_features" not in paper["forecast"]
 
 
 def test_corrupt_account_config_blocks_auto_entry_and_config_api(isolated_account):
@@ -140,7 +207,7 @@ def test_config_reset_profile_covers_every_page_field_and_is_fail_safe():
         "ENTRY_H_UTC", "ENTRY_M_UTC", "EXIT_H_UTC", "EXIT_M_UTC",
     }
 
-    assert len(page_keys) == 62
+    assert len(page_keys) == 77
     assert preserved == {"TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"}
     assert page_keys - preserved == set(dashboard.CONFIG_PAGE_DEFAULTS) - time_keys
     assert time_keys <= set(dashboard.CONFIG_PAGE_DEFAULTS)
@@ -152,7 +219,10 @@ def test_config_reset_profile_covers_every_page_field_and_is_fail_safe():
     assert defaults["EVENING_ENABLED"] == "false"
     assert defaults["MORNING_EXIT_ENABLED"] == "false"
     assert defaults["EVENING_EXIT_ENABLED"] == "false"
-    assert defaults["MORNING_SIDE"] == defaults["EVENING_SIDE"] == "buy"
+    assert "MORNING_SIDE" not in page_keys
+    assert "EVENING_SIDE" not in page_keys
+    assert defaults["MOVE_AUTO_ENTRY_MODE"] == "shadow"
+    assert defaults["MOVE_DRY_RUN_CAPITAL_USD"] == "1000"
     assert defaults["TREND_AUTO_ENTRY_MODE"] == "shadow"
     assert defaults["ALLOW_SHORT_MOVE"] == "false"
     assert defaults["SHORT_MAX_RISK_USD"] == "0"

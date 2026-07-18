@@ -214,14 +214,6 @@ const kSlots = [
   SlotMeta('evening', 'Evening', '🌇', '5:35 PM IST'),
 ];
 
-/// Same IST boundary the exchange-sync classifier uses: before 11:00 IST
-/// belongs to the morning slot's trading window, after to the evening's.
-String manualSlotNow() {
-  final now = DateTime.now().toUtc();
-  final istMin = (now.hour * 60 + now.minute + 330) % 1440;
-  return istMin < 660 ? 'morning' : 'evening';
-}
-
 // ─────────────────────────────────────────────────────────────
 // Shell with bottom navigation
 // ─────────────────────────────────────────────────────────────
@@ -746,8 +738,16 @@ class _DashboardPageState extends State<DashboardPage> {
       if (btc != null) _lastBtc = btc;
       if (!mounted) return;
       setState(() {
-        _evening = st;
-        _morning = (st['morning'] as Map<String, dynamic>?) ?? {};
+        final decisions =
+            (st['move_decisions'] as Map<String, dynamic>?) ?? {};
+        _evening = {
+          ...st,
+          '_move_decision': decisions['evening'],
+        };
+        _morning = {
+          ...((st['morning'] as Map<String, dynamic>?) ?? {}),
+          '_move_decision': decisions['morning'],
+        };
         _todayTrades = results[1] as List<dynamic>;
         _tp = results[2] as Map<String, dynamic>;
         _wallet = (results[3] as Map<String, dynamic>?) ?? {};
@@ -892,168 +892,6 @@ class _DashboardPageState extends State<DashboardPage> {
       ).showSnackBar(SnackBar(content: Text('Error: $e')));
     }
   }
-
-  Future<void> _manualEntry(SlotMeta slot, String side) async {
-    final isBuy = side == 'buy';
-    Map<String, dynamic> p;
-    try {
-      p =
-          await Api.getJson('/api/manual-entry/preview?slot=${slot.key}')
-              as Map<String, dynamic>;
-      if (p['ok'] != true) throw Exception(p['error'] ?? 'preview failed');
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Cannot fetch straddle preview: $e')),
-      );
-      return;
-    }
-    if (!mounted) return;
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: kSurf,
-        title: Text(isBuy ? '▲ Buy Straddle?' : '▼ Sell Straddle?'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              isBuy
-                  ? 'BUY (long) at market — ${slot.name} slot'
-                  : 'SELL-TO-OPEN (short, collect premium) at market — ${slot.name} slot',
-            ),
-            const SizedBox(height: 12),
-            _previewRow('Contract', '${p['symbol']}'),
-            _previewRow(
-              'Strike',
-              '\$${(p['strike'] as num).toStringAsFixed(0)}',
-            ),
-            _previewRow(
-              'Mark',
-              '\$${(p['mark'] as num).toStringAsFixed(2)} / BTC',
-            ),
-            _previewRow('Lots', '${p['lots']}'),
-            _previewRow(
-              'Value',
-              '~\$${(p['est_value'] as num).toStringAsFixed(0)}',
-            ),
-            if (p['dry_run'] == true) ...[
-              const SizedBox(height: 10),
-              const Text(
-                '⚠ Mode is DRY RUN — this will be SIMULATED, no real order will be placed.',
-                style: TextStyle(
-                  color: kGold,
-                  fontSize: 12,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ],
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            child: Text(
-              isBuy ? 'BUY' : 'SELL',
-              style: TextStyle(
-                color: isBuy ? kGreen : kRed,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-    if (ok != true) return;
-    try {
-      final d = await Api.postJson('/api/manual-entry?slot=${slot.key}', {
-        'side': side,
-      });
-      if (!mounted) return;
-      final simTag = d['dry_run'] == true ? ' (SIMULATED)' : '';
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            d['ok'] == true
-                ? '${side.toUpperCase()} filled$simTag: ${d['lots']} lots ${d['symbol']} @ \$${(d['fill'] as num).toStringAsFixed(2)}'
-                : 'Order failed: ${d['error']}',
-          ),
-          backgroundColor: d['ok'] == true ? kGreen : kRed,
-        ),
-      );
-      _refresh();
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Error: $e')));
-    }
-  }
-
-  Widget _previewRow(String k, String v) => Padding(
-    padding: const EdgeInsets.symmetric(vertical: 2),
-    child: Row(
-      children: [
-        SizedBox(
-          width: 80,
-          child: Text(k, style: const TextStyle(color: kMuted, fontSize: 12.5)),
-        ),
-        Expanded(
-          child: Text(
-            v,
-            style: const TextStyle(
-              color: kText,
-              fontSize: 13,
-              fontWeight: FontWeight.w600,
-              fontFeatures: [FontFeature.tabularFigures()],
-            ),
-          ),
-        ),
-      ],
-    ),
-  );
-
-  Widget _manualButtons(SlotMeta slot) => Padding(
-    padding: const EdgeInsets.only(top: 10),
-    child: Row(
-      children: [
-        Expanded(
-          child: OutlinedButton(
-            style: OutlinedButton.styleFrom(
-              foregroundColor: kGreen,
-              side: const BorderSide(color: kGreen, width: 1.5),
-              padding: const EdgeInsets.symmetric(vertical: 10),
-            ),
-            onPressed: () => _manualEntry(slot, 'buy'),
-            child: const Text(
-              '▲ BUY',
-              style: TextStyle(fontWeight: FontWeight.w700, fontSize: 12),
-            ),
-          ),
-        ),
-        const SizedBox(width: 10),
-        Expanded(
-          child: OutlinedButton(
-            style: OutlinedButton.styleFrom(
-              foregroundColor: kRed,
-              side: const BorderSide(color: kRed, width: 1.5),
-              padding: const EdgeInsets.symmetric(vertical: 10),
-            ),
-            onPressed: () => _manualEntry(slot, 'sell'),
-            child: const Text(
-              '▼ SELL',
-              style: TextStyle(fontWeight: FontWeight.w700, fontSize: 12),
-            ),
-          ),
-        ),
-      ],
-    ),
-  );
 
   Future<void> _toggleTp(SlotMeta slot) async {
     final cfg = (_tp[slot.key] as Map<String, dynamic>?) ?? {};
@@ -1381,18 +1219,63 @@ class _DashboardPageState extends State<DashboardPage> {
             const SizedBox(height: 10),
             if (st['dry_run'] == true) ...[
               _simulatedBody(st),
-              if (!open && slot.key == manualSlotNow()) _manualButtons(slot),
             ] else if (open)
               _openBody(slot, st, tpCfg)
-            else if (closed) ...[
-              _closedBody(st),
-              if (slot.key == manualSlotNow()) _manualButtons(slot),
-            ] else ...[
+            else if (closed)
+              _closedBody(st)
+            else
               _idleBody(slot),
-              if (slot.key == manualSlotNow()) _manualButtons(slot),
-            ],
+            if (st['_move_decision'] is Map<String, dynamic>)
+              _moveDecisionSummary(
+                st['_move_decision'] as Map<String, dynamic>,
+              ),
           ],
         ),
+      ),
+    );
+  }
+
+  Widget _moveDecisionSummary(Map<String, dynamic> view) {
+    final action = (view['action'] ?? 'NO_TRADE').toString();
+    final mode = (view['auto_mode'] ?? 'disabled').toString().toUpperCase();
+    final forecast =
+        (view['forecast'] as Map<String, dynamic>?) ?? <String, dynamic>{};
+    final eventKnown = forecast['event_score_available'] == true;
+    final color = action == 'LONG_MOVE'
+        ? kGreen
+        : action == 'SHORT_MOVE'
+        ? kRed
+        : kMuted;
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.only(top: 12),
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.08),
+        border: Border.all(color: color.withValues(alpha: 0.35)),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            '${action.replaceAll('_', ' ')} · $mode',
+            style: TextStyle(
+              color: color,
+              fontWeight: FontWeight.w700,
+              fontSize: 12,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            'Fair P20 / P50 / P80  '
+            '${fmtUsd(forecast['expected_payoff_low'])} / '
+            '${fmtUsd(forecast['expected_payoff_mid'])} / '
+            '${fmtUsd(forecast['expected_payoff_high'])}\n'
+            '${eventKnown ? 'Event risk scored' : 'Event risk UNKNOWN / HIGH — SHORT blocked'}',
+            style: const TextStyle(color: kMuted, fontSize: 10.5, height: 1.4),
+          ),
+        ],
       ),
     );
   }
@@ -2891,8 +2774,8 @@ class _ConfigsPageState extends State<ConfigsPage> {
   bool _morningExitEnabled = true;
   bool _eveningEnabled = true;
   bool _eveningExitEnabled = true;
-  String _morningSide = 'buy';
-  String _eveningSide = 'buy';
+  String _moveAutoMode = 'shadow';
+  String _loadedMoveAutoMode = 'shadow';
   bool _telegramAlerts = true;
   bool _dynamicLots = true;
   bool _loading = true;
@@ -2966,14 +2849,12 @@ class _ConfigsPageState extends State<ConfigsPage> {
       _morningExitEnabled = _envBool(d['MORNING_EXIT_ENABLED']);
       _eveningEnabled = _envBool(d['EVENING_ENABLED']);
       _eveningExitEnabled = _envBool(d['EVENING_EXIT_ENABLED']);
-      _morningSide =
-          (d['MORNING_SIDE'] ?? '').toString().toLowerCase() == 'sell'
-          ? 'sell'
-          : 'buy';
-      _eveningSide =
-          (d['EVENING_SIDE'] ?? '').toString().toLowerCase() == 'sell'
-          ? 'sell'
-          : 'buy';
+      final moveMode =
+          (d['MOVE_AUTO_ENTRY_MODE'] ?? 'shadow').toString().toLowerCase();
+      _moveAutoMode = {'disabled', 'shadow', 'live'}.contains(moveMode)
+          ? moveMode
+          : 'shadow';
+      _loadedMoveAutoMode = _moveAutoMode;
       _telegramAlerts = _envBool(d['TELEGRAM_ALERTS']);
       _dynamicLots = _envBool(d['DYNAMIC_LOTS']);
       setState(() => _loading = false);
@@ -2986,6 +2867,34 @@ class _ConfigsPageState extends State<ConfigsPage> {
   }
 
   Future<void> _save() async {
+    if (_moveAutoMode == 'live' && _loadedMoveAutoMode != 'live') {
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: kSurf,
+          title: const Text('Enable automatic MOVE entries?'),
+          content: const Text(
+            'At the scheduled Morning and Evening windows, the forecast may '
+            'select LONG, SHORT or NO TRADE. DRY RUN creates paper positions; '
+            'LIVE mode can place real IOC orders.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text(
+                'ENABLE AUTO',
+                style: TextStyle(color: kGold, fontWeight: FontWeight.bold),
+              ),
+            ),
+          ],
+        ),
+      );
+      if (confirmed != true) return;
+    }
     setState(() => _saving = true);
     final body = <String, dynamic>{
       'DRY_RUN': _dryRun ? 'true' : 'false',
@@ -2993,8 +2902,7 @@ class _ConfigsPageState extends State<ConfigsPage> {
       'MORNING_EXIT_ENABLED': _morningExitEnabled ? 'true' : 'false',
       'EVENING_ENABLED': _eveningEnabled ? 'true' : 'false',
       'EVENING_EXIT_ENABLED': _eveningExitEnabled ? 'true' : 'false',
-      'MORNING_SIDE': _morningSide,
-      'EVENING_SIDE': _eveningSide,
+      'MOVE_AUTO_ENTRY_MODE': _moveAutoMode,
       'TELEGRAM_ALERTS': _telegramAlerts ? 'true' : 'false',
       'DYNAMIC_LOTS': _dynamicLots ? 'true' : 'false',
     };
@@ -3024,6 +2932,7 @@ class _ConfigsPageState extends State<ConfigsPage> {
           backgroundColor: d['ok'] == true ? kGreen : kRed,
         ),
       );
+      if (d['ok'] == true) _loadedMoveAutoMode = _moveAutoMode;
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(
@@ -3122,33 +3031,48 @@ class _ConfigsPageState extends State<ConfigsPage> {
     onChanged: onChanged,
   );
 
-  Widget _sideField(String value, ValueChanged<String> onChanged) => Padding(
+  Widget _autoDirectionInfo() => Padding(
+    padding: const EdgeInsets.symmetric(vertical: 6),
+    child: ListTile(
+      contentPadding: EdgeInsets.zero,
+      title: const Text('Direction', style: TextStyle(fontSize: 14)),
+      subtitle: const Text(
+        'AUTO forecast — LONG, SHORT or NO TRADE is selected only at the scheduled entry.',
+        style: TextStyle(color: kMuted, fontSize: 11),
+      ),
+      trailing: const Icon(Icons.auto_graph, color: kGold),
+    ),
+  );
+
+  Widget _moveAutoModeField() => Padding(
     padding: const EdgeInsets.symmetric(vertical: 6),
     child: DropdownButtonFormField<String>(
-      initialValue: value,
+      initialValue: _moveAutoMode,
       decoration: InputDecoration(
-        labelText: 'Direction',
+        labelText: 'MOVE automatic entry mode',
         isDense: true,
         border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
       ),
       dropdownColor: kSurf,
       items: const [
         DropdownMenuItem(
-          value: 'buy',
-          child: Text(
-            'BUY straddle — long (big move)',
-            style: TextStyle(fontSize: 13.5),
-          ),
+          value: 'shadow',
+          child: Text('SHADOW — decide only', style: TextStyle(fontSize: 13.5)),
         ),
         DropdownMenuItem(
-          value: 'sell',
+          value: 'disabled',
+          child: Text('DISABLED', style: TextStyle(fontSize: 13.5)),
+        ),
+        DropdownMenuItem(
+          value: 'live',
           child: Text(
-            'SELL straddle — short (premium)',
+            'AUTO — selected trading mode',
             style: TextStyle(fontSize: 13.5),
           ),
         ),
       ],
-      onChanged: (v) => onChanged(v ?? 'buy'),
+      onChanged: (value) =>
+          setState(() => _moveAutoMode = value ?? 'shadow'),
     ),
   );
 
@@ -3203,6 +3127,7 @@ class _ConfigsPageState extends State<ConfigsPage> {
                       subtitle:
                           'At entry, buy min(configured, affordable with balance)',
                     ),
+                    _moveAutoModeField(),
                     _numField('MAX_TRADES_PER_DAY', 'Max trades per day'),
                     _numField('STRIKE_STEP', 'Strike step (\$)'),
                   ],
@@ -3221,10 +3146,7 @@ class _ConfigsPageState extends State<ConfigsPage> {
                       _morningEnabled,
                       (v) => setState(() => _morningEnabled = v),
                     ),
-                    _sideField(
-                      _morningSide,
-                      (v) => setState(() => _morningSide = v),
-                    ),
+                    _autoDirectionInfo(),
                     _numField('MORNING_LOTS', 'Lots'),
                     _timeField('morning', 'Entry time'),
                     _switchTile(
@@ -3250,10 +3172,7 @@ class _ConfigsPageState extends State<ConfigsPage> {
                       _eveningEnabled,
                       (v) => setState(() => _eveningEnabled = v),
                     ),
-                    _sideField(
-                      _eveningSide,
-                      (v) => setState(() => _eveningSide = v),
-                    ),
+                    _autoDirectionInfo(),
                     _numField('STRADDLE_LOTS', 'Lots'),
                     _timeField('entry', 'Entry time'),
                     _switchTile(

@@ -250,7 +250,7 @@ def test_open_dry_pnl_refreshes_from_mark_price_while_close_uses_book(
     assert close_pnl == -3.0
 
 
-def test_manual_move_dry_entry_writes_only_isolated_state_and_never_posts_order(
+def test_manual_move_dry_entry_is_disabled_and_never_writes_or_posts(
         isolated_dashboard, monkeypatch):
     account = isolated_dashboard
     contract = {
@@ -293,18 +293,12 @@ def test_manual_move_dry_entry_writes_only_isolated_state_and_never_posts_order(
             "/api/manual-entry?slot=evening", method="POST", json=body):
         payload, status = _result(dashboard.api_manual_entry())
 
-    assert status == 200
-    assert payload["ok"] is True
-    assert payload["dry_run"] is True
-    state = json.loads(
-        (account / "dry_run" / "straddle_state.json").read_text(
-            encoding="utf-8"))
-    assert state["status"] == "OPEN"
-    assert state["execution_mode"] == "dry_run"
-    assert state["simulation_id"]
-    assert state["symbol"] == contract["symbol"]
+    assert status == 410
+    assert payload["ok"] is False
+    assert payload["code"] == "MANUAL_MOVE_DISABLED"
+    assert not (account / "dry_run" / "straddle_state.json").exists()
     assert not (account / "straddle_state.json").exists()
-    assert lot_plan.call_args.kwargs["dry_run"] is True
+    lot_plan.assert_not_called()
     order_post.assert_not_called()
     raw_post.assert_not_called()
 
@@ -438,8 +432,8 @@ def test_mode_and_revision_mismatch_fail_before_move_or_trend_strategy_work(
             json={"expected_mode": "dry_run", "mode_revision": "stale"}):
         trend_payload, trend_status = _result(dashboard.api_trend_entry())
 
-    assert move_status == 409
-    assert "Trading Mode changed" in move_payload["error"]
+    assert move_status == 410
+    assert move_payload["code"] == "MANUAL_MOVE_DISABLED"
     assert trend_status == 409
     assert "Configuration changed" in trend_payload["error"]
     move_work.assert_not_called()

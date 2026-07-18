@@ -46,7 +46,7 @@
 
 <div class="stats" id="stats"></div>
 
-<div class="section-title"><span>MOVE contracts</span><small>Scheduled and manual entries</small></div>
+<div class="section-title"><span>MOVE contracts</span><small>Scheduled forecast-driven entries only</small></div>
 <div class="grid cols-2">
   <div class="card">
     <div class="card-hd slot-hd">🌅 <span>Morning Trade</span><span class="when" id="when-morning">5:45 AM IST</span></div>
@@ -96,20 +96,48 @@
 {% block scripts %}
 <script>
 /* ── Slot cards ──────────────────────────────────────────── */
-function manualSlotNow() {
-  return istNowMinutes() < 660 ? 'morning' : 'evening';   // same 11:00 IST boundary as exchange-sync
-}
-
-function manualBtns(slot) {
-  if (slot !== manualSlotNow()) return '';
-  if (window._dryRunMode) {
-    return `<div class="btn-row center">
-      <a class="btn secondary sm" href="/dry-run">Open Dry Run dashboard</a>
+function moveDecisionHtml(view) {
+  if (!view || !view.action) {
+    return `<div class="move-decision muted">
+      <div><strong>Automatic MOVE forecast</strong><span>Waiting for the next scheduled decision cycle.</span></div>
     </div>`;
   }
-  return `<div class="btn-row center">
-    <button class="btn success sm" onclick="manualEntry('${slot}','buy')">▲ Buy straddle</button>
-    <button class="btn danger sm"  onclick="manualEntry('${slot}','sell')">▼ Sell straddle</button>
+  const forecast = view.forecast || {};
+  const metrics = view.metrics || {};
+  const mode = String(view.auto_mode || 'disabled').toUpperCase();
+  const action = String(view.action || 'NO_TRADE');
+  const actionLabel = action === 'LONG_MOVE' ? 'LONG MOVE'
+    : action === 'SHORT_MOVE' ? 'SHORT MOVE'
+    : action === 'MANAGE_EXISTING_POSITION' ? 'MANAGE EXISTING' : 'NO TRADE';
+  const actionClass = action === 'LONG_MOVE' ? 'up'
+    : action === 'SHORT_MOVE' ? 'down' : 'muted';
+  const eventCopy = forecast.event_score_available
+    ? `Event risk ${fN(forecast.jump_event_score, 2)}`
+    : 'Event risk UNKNOWN / HIGH · SHORT blocked';
+  const common = view.failed_gates?.common || [];
+  const directional = action === 'LONG_MOVE'
+    ? (view.failed_gates?.long || [])
+    : action === 'SHORT_MOVE'
+      ? (view.failed_gates?.short || [])
+      : [...(view.failed_gates?.long || []).map(v => `LONG ${v}`),
+         ...(view.failed_gates?.short || []).map(v => `SHORT ${v}`)];
+  const failed = [...common, ...directional].slice(0, 6);
+  const recorded = view.recorded_at_utc
+    ? String(view.recorded_at_utc).replace('T', ' ').replace('Z', ' UTC')
+    : '—';
+  return `<div class="move-decision ${actionClass}">
+    <div class="move-decision-hd">
+      <strong>${esc(actionLabel)}</strong>
+      <span class="badge sim">${esc(mode)}</span>
+    </div>
+    <div class="move-decision-metrics">
+      <span>Fair value P20 / P50 / P80: <b>$${fN(forecast.expected_payoff_low, 2)} / $${fN(forecast.expected_payoff_mid, 2)} / $${fN(forecast.expected_payoff_high, 2)}</b></span>
+      <span>Payoff p99: <b>$${fN(forecast.payoff_p99, 2)}</b></span>
+      <span>Edge / lot · LONG <b>${f$(metrics.long_edge_per_contract)}</b> · SHORT <b>${f$(metrics.short_edge_per_contract)}</b></span>
+      <span>${esc(eventCopy)}</span>
+    </div>
+    ${failed.length ? `<small>Blocked gates: ${esc(failed.join(', '))}</small>` : '<small>All required gates passed.</small>'}
+    <small>${esc(view.symbol || '')} · ${esc(recorded)}</small>
   </div>`;
 }
 
@@ -168,7 +196,7 @@ function tpRow(slot, tp, positionOpen = true, cleanState = false) {
 function slotHtml(s, slot, tp) {
   if (!s || !s.status || s.status === 'IDLE'
       || (s.status === 'CLOSED' && s.dashboard_visible === false)) {
-    return `<div class="no-pos"><span class="icon">💤</span>No position</div>${manualBtns(slot)}${slot === 'trend' ? tpRow(slot, tp, false, true) : ''}`;
+    return `<div class="no-pos"><span class="icon">💤</span>No position</div>${slot === 'trend' ? tpRow(slot, tp, false, true) : moveDecisionHtml(s?._moveDecision)}`;
   }
   if (s.status === 'OPEN' && s.dry_run) {
     return `<div class="sim-note">⚠ SIMULATED entry — no real order was placed<br>
@@ -195,7 +223,8 @@ function slotHtml(s, slot, tp) {
           Payoff
         </button>
       </div>
-      ${tpRow(slot, tp)}`;
+      ${tpRow(slot, tp)}
+      ${slot === 'trend' ? '' : moveDecisionHtml(s._moveDecision)}`;
   }
   if (s.status === 'OWNERSHIP_AMBIGUOUS') {
     return `<div class="sim-note">⚠ Original Trend cycle closed before this same-product position appeared<br>
@@ -203,7 +232,7 @@ function slotHtml(s, slot, tp) {
       ${slot === 'trend' ? tpRow(slot, tp, false) : ''}`;
   }
   if (s.status === 'CLOSED' && s.dry_run) {
-    return `<div class="sim-note">⚠ SIMULATED — no real trade occurred<br><span class="hint">${esc(s.symbol)}</span></div>${manualBtns(slot)}${slot === 'trend' ? tpRow(slot, tp, false) : ''}`;
+    return `<div class="sim-note">⚠ SIMULATED — no real trade occurred<br><span class="hint">${esc(s.symbol)}</span></div>${slot === 'trend' ? tpRow(slot, tp, false) : moveDecisionHtml(s._moveDecision)}`;
   }
   /* CLOSED real */
   const pnl = +s.pnl_usd;
@@ -215,7 +244,7 @@ function slotHtml(s, slot, tp) {
       <dt>Entry → Exit</dt><dd>$${fN(s.entry_mark, 2)} → $${fN(s.exit_mark, 2)}</dd>
       <dt>Trigger</dt><dd>${esc(s.exit_trigger || '—')}</dd>
     </dl>
-    ${manualBtns(slot)}${slot === 'trend' ? tpRow(slot, tp, false) : ''}`;
+    ${slot === 'trend' ? tpRow(slot, tp, false) : moveDecisionHtml(s._moveDecision)}`;
 }
 
 function renderExternalOptions(rows) {
@@ -235,9 +264,11 @@ async function loadSlots() {
   const [st, tp] = await Promise.all([jget('/api/status'), jget('/api/tp-monitor').catch(() => ({}))]);
   window._dryRunMode = st.dry_run_mode === true;
   window._modeRevision = st.mode_revision || '';
+  const morning = { ...(st.morning || {}), _moveDecision: st.move_decisions?.morning || null };
   const evening = { ...st }; delete evening.morning; delete evening.trend;
-  window._slots = { morning: st.morning || {}, evening, trend: st.trend || {}, btc: +st.btc_futures_price || 0 };
-  document.getElementById('slot-morning').innerHTML = slotHtml(st.morning, 'morning', tp);
+  evening._moveDecision = st.move_decisions?.evening || null;
+  window._slots = { morning, evening, trend: st.trend || {}, btc: +st.btc_futures_price || 0 };
+  document.getElementById('slot-morning').innerHTML = slotHtml(morning, 'morning', tp);
   document.getElementById('slot-evening').innerHTML = slotHtml(evening, 'evening', tp);
   document.getElementById('slot-trend').innerHTML = slotHtml(st.trend, 'trend', tp);
   renderExternalOptions(st.external_options || []);
@@ -290,30 +321,6 @@ async function loadToday() {
 }
 
 /* ── Actions ────────────────────────────────────────────── */
-async function manualEntry(slot, side) {
-  let p;
-  try {
-    p = await jget('/api/manual-entry/preview?slot=' + encodeURIComponent(slot) +
-                   '&side=' + encodeURIComponent(side));
-  } catch (e) {}
-  if (!p || !p.ok) { toast('Cannot fetch preview: ' + (p && p.error || 'network error'), 'err'); return; }
-  const msg = `${side === 'buy' ? 'BUY (long)' : 'SELL (short — collect premium)'} — ${slot.toUpperCase()}\n\n` +
-    `Contract: ${p.symbol}\nStrike:   $${fN(p.strike)}\nMark:     $${fN(p.mark, 2)} / BTC\n` +
-    `Lots:     ${fN(p.lots)}\nValue:    ~$${fN(p.est_value)}\n\n` +
-    (p.dry_run ? '⚠ Mode is DRY RUN — this will be SIMULATED, no real order placed.\n\n' : '') +
-    `Place market ${side.toUpperCase()} order?`;
-  if (!confirm(msg)) return;
-  const d = await jpost('/api/manual-entry?slot=' + encodeURIComponent(slot), {
-    side, product_id: p.product_id, symbol: p.symbol, lots: p.lots, mark: p.mark,
-    expected_mode: p.execution_mode || 'live', mode_revision: p.mode_revision,
-    dry_run: p.dry_run
-  });
-  if (d.ok) {
-    toast(`${side.toUpperCase()} filled${d.dry_run ? ' (SIMULATED)' : ''}: ${fN(d.lots)} lots ${d.symbol} @ $${fN(d.fill, 2)}`, 'ok');
-    loadAll();
-  } else toast('Order failed: ' + JSON.stringify(d.error), 'err');
-}
-
 async function squareOff(slot) {
   const s = (window._slots || {})[slot] || {};
   const adopted = +s.externally_added_lots_adopted || 0;

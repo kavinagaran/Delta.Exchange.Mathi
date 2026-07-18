@@ -1,9 +1,9 @@
 {% extends "base.html" %}
 
 {% block content %}
-<div class="banner info">These settings apply to <b>{{ display_name }}'s account only</b> — its bot instance, TP monitors and manual trading. Every account has its own configuration.</div>
+<div class="banner info">These settings apply to <b>{{ display_name }}'s account only</b> — its bot instance, scheduled entries and TP monitors. Every account has its own configuration.</div>
 <div class="banner warn" id="config-load-banner">Loading verified account configuration — Save is locked.</div>
-<div class="banner warn" id="dry-banner">⚠ DRY RUN is ON account-wide — scheduled and manual MOVE entries plus Trend entries are simulated, and no real orders are placed.</div>
+<div class="banner warn" id="dry-banner">⚠ DRY RUN is ON account-wide — scheduled automatic MOVE entries and Trend entries are simulated, and no real orders are placed.</div>
 
 <div class="card">
   <div class="card-hd">Trading Mode</div>
@@ -54,10 +54,7 @@
         <select id="c-MORNING_ENABLED"><option value="false">No</option><option value="true">Yes</option></select>
       </label>
       <label class="fld"><span>Direction</span>
-        <select id="c-MORNING_SIDE">
-          <option value="buy">BUY straddle — long (profit on a big move)</option>
-          <option value="sell">SELL straddle — short (collect premium)</option>
-        </select>
+        <div class="hint" style="padding-top:9px"><b>AUTO forecast</b> — LONG, SHORT or NO TRADE is decided only at the scheduled entry.</div>
       </label>
       <label class="fld"><span>Lots</span><input id="c-MORNING_LOTS" type="number" min="1" max="5000"></label>
       <label class="fld"><span>Risk budget $</span><input id="c-RISK_PER_TRADE_USD_MORNING" type="number" min="1" step="1"></label>
@@ -77,10 +74,7 @@
         <select id="c-EVENING_ENABLED"><option value="false">No</option><option value="true">Yes</option></select>
       </label>
       <label class="fld"><span>Direction</span>
-        <select id="c-EVENING_SIDE">
-          <option value="buy">BUY straddle — long (profit on a big move)</option>
-          <option value="sell">SELL straddle — short (collect premium)</option>
-        </select>
+        <div class="hint" style="padding-top:9px"><b>AUTO forecast</b> — LONG, SHORT or NO TRADE is decided only at the scheduled entry.</div>
       </label>
       <label class="fld"><span>Lots</span><input id="c-STRADDLE_LOTS" type="number" min="1" max="5000"></label>
       <label class="fld"><span>Risk budget $</span><input id="c-RISK_PER_TRADE_USD_EVENING" type="number" min="1" step="1"></label>
@@ -98,11 +92,47 @@
   <div class="card-hd">🛡️ MOVE Strategy Safety &amp; Value Gates</div>
   <div class="card-bd">
     <div class="form-sec">
-      <div class="form-sec-title">Exposure policy</div>
+      <div class="form-sec-title">Automatic scheduled entry</div>
       <div class="form-grid">
+        <label class="fld"><span>MOVE automatic entry mode</span>
+          <select id="c-MOVE_AUTO_ENTRY_MODE">
+            <option value="shadow">SHADOW — decide and record, no entries</option>
+            <option value="disabled">DISABLED — do not evaluate entries</option>
+            <option value="live">AUTO — execute in the selected Trading Mode</option>
+          </select>
+          <em class="fld-hint">Applies only to scheduled Morning and Evening entry windows.</em>
+        </label>
+        <label class="fld"><span>DRY RUN virtual capital $</span>
+          <input id="c-MOVE_DRY_RUN_CAPITAL_USD" type="number" value="1000" readonly>
+          <em class="fld-hint">Fixed isolated paper capital; no LIVE wallet data is used.</em>
+        </label>
+        <label class="fld"><span>Long MOVE entries</span><select id="c-MOVE_ALLOW_LONG"><option value="true">Enabled</option><option value="false">Disabled</option></select></label>
         <label class="fld"><span>Short MOVE entries</span><select id="c-ALLOW_SHORT_MOVE" onchange="shortMoveUi()"><option value="false">Disabled (recommended)</option><option value="true">Enabled with explicit SL</option></select></label>
-        <label class="fld"><span>Maximum short risk $</span><input id="c-SHORT_MAX_RISK_USD" type="number" min="1" step="1" oninput="shortMoveUi()"><em class="fld-hint" id="short-risk-hint">Not required while short MOVE is disabled.</em></label>
+        <label class="fld"><span>Maximum short p99 risk $</span><input id="c-SHORT_MAX_RISK_USD" type="number" min="1" step="1" oninput="shortMoveUi()"><em class="fld-hint" id="short-risk-hint">Not required while short MOVE is disabled.</em></label>
+        <label class="fld"><span>Maximum long premium risk $</span><input id="c-MOVE_MAX_LONG_PREMIUM_RISK_USD" type="number" min="1" step="1"></label>
         <label class="fld"><span>Concurrent MOVE positions</span><input id="c-MAX_CONCURRENT_MOVE_POSITIONS" type="number" min="1" max="2"></label>
+      </div>
+    </div>
+    <div class="form-sec">
+      <div class="form-sec-title">Internal payoff forecast · completed 5M BTC index candles</div>
+      <div class="form-grid">
+        <label class="fld"><span>Historical lookback days</span><input id="c-MOVE_FORECAST_LOOKBACK_DAYS" type="number" min="7" max="30"></label>
+        <label class="fld"><span>Volatility scenarios</span><input id="c-MOVE_FORECAST_OUTER_SCENARIOS" type="number" min="8" max="128"></label>
+        <label class="fld"><span>Paths / scenario</span><input id="c-MOVE_FORECAST_PATHS_PER_SCENARIO" type="number" min="32" max="1024"></label>
+        <label class="fld"><span>Maximum model age secs</span><input id="c-MOVE_MAX_MODEL_AGE_SEC" type="number" min="1" max="3600"></label>
+        <label class="fld"><span>Minimum time to settlement mins</span><input id="c-MOVE_MIN_TTE_MINUTES" type="number" min="1" max="1440"></label>
+        <label class="fld"><span>Maximum contract TTE hrs</span><input id="c-MOVE_MAX_TTE_HOURS" type="number" min="1" max="168" step="0.5"></label>
+        <label class="fld"><span>Final no-entry buffer secs</span><input id="c-MOVE_NO_ENTRY_BEFORE_SETTLEMENT_SEC" type="number" min="0" max="86400"></label>
+      </div>
+    </div>
+    <div class="form-sec">
+      <div class="form-sec-title">Conservative fair-value edge</div>
+      <div class="form-grid">
+        <label class="fld"><span>Minimum LONG edge $ / lot</span><input id="c-MOVE_MIN_LONG_EDGE_ABS_USD" type="number" min="0" step="0.01"></label>
+        <label class="fld"><span>Minimum LONG edge %</span><input id="c-MOVE_MIN_LONG_EDGE_PCT" type="number" min="0" max="100" step="0.5"></label>
+        <label class="fld"><span>Minimum SHORT edge $ / lot</span><input id="c-MOVE_MIN_SHORT_EDGE_ABS_USD" type="number" min="0" step="0.01"></label>
+        <label class="fld"><span>Minimum SHORT edge %</span><input id="c-MOVE_MIN_SHORT_EDGE_PCT" type="number" min="0" max="100" step="0.5"><em class="fld-hint">Must be at least the LONG hurdle.</em></label>
+        <label class="fld"><span>Maximum event/jump score for SHORT</span><input id="c-MOVE_MAX_JUMP_SCORE_SHORT" type="number" min="0" max="1" step="0.05"><em class="fld-hint">Missing scheduled-event data is treated as 1.0 (unknown/high risk), blocking SHORT.</em></label>
       </div>
     </div>
     <div class="form-sec">
@@ -113,17 +143,18 @@
         <label class="fld"><span>Maximum slippage %</span><input id="c-MAX_SLIPPAGE_PCT" type="number" min="0.01" max="20" step="0.1"></label>
         <label class="fld"><span>Book depth multiple</span><input id="c-MIN_BOOK_DEPTH_MULTIPLE" type="number" min="0.01" max="100" step="0.1"><em class="fld-hint">1.0 requires depth for the full order</em></label>
         <label class="fld"><span>Maximum quote age secs</span><input id="c-MAX_QUOTE_AGE_SEC" type="number" min="1" max="300"></label>
+        <label class="fld"><span>Minimum displayed bid lots</span><input id="c-MOVE_MIN_BID_SIZE" type="number" min="0" step="1"><em class="fld-hint">Eligibility gate only; displayed depth does not cap order lots.</em></label>
+        <label class="fld"><span>Minimum displayed ask lots</span><input id="c-MOVE_MIN_ASK_SIZE" type="number" min="0" step="1"><em class="fld-hint">Eligibility gate only; displayed depth does not cap order lots.</em></label>
         <label class="fld"><span>IOC chunk lots</span><input id="c-ORDER_CHUNK_LOTS" type="number" min="1" max="5000"></label>
       </div>
     </div>
     <div class="form-sec">
-      <div class="form-sec-title">MOVE premium edge</div>
+      <div class="form-sec-title">Short-tail and account-state gates</div>
       <div class="form-grid">
-        <label class="fld"><span>Value filter</span><select id="c-MOVE_VALUE_FILTER_ENABLED"><option value="true">Enabled (recommended)</option><option value="false">Disabled</option></select></label>
-        <label class="fld"><span>Minimum forecast edge %</span><input id="c-MOVE_MIN_EDGE_PCT" type="number" min="0" step="0.5"></label>
-        <label class="fld"><span>Minimum TTE mins</span><input id="c-MOVE_MIN_TTE_MINUTES" type="number" min="1" max="1440"></label>
-        <label class="fld"><span>Maximum TTE hrs</span><input id="c-MOVE_MAX_TTE_HOURS" type="number" min="1" max="168" step="0.5"></label>
-        <label class="fld"><span>15M volatility lookback</span><input id="c-MOVE_VOL_LOOKBACK" type="number" min="30" max="1000"><em class="fld-hint">Completed candles only</em></label>
+        <label class="fld"><span>Maximum short margin usage %</span><input id="c-MOVE_MAX_SHORT_MARGIN_USAGE_PCT" type="number" min="0" max="100" step="1"></label>
+        <label class="fld"><span>Minimum liquidation buffer %</span><input id="c-MOVE_MIN_LIQUIDATION_BUFFER_PCT" type="number" min="0" max="100" step="1"></label>
+        <label class="fld"><span>Require no open orders</span><select id="c-MOVE_REQUIRE_NO_OPEN_ORDERS"><option value="true">Yes — fail closed</option><option value="false">No</option></select></label>
+        <label class="fld"><span>Require flat MOVE book</span><select id="c-MOVE_REQUIRE_FLAT"><option value="true">Yes — manage existing only</option><option value="false">No</option></select></label>
       </div>
     </div>
   </div>
@@ -210,17 +241,25 @@
 // TP/SL/TSL and poll are deliberately NOT here — the monitor is configured
 // on the Overview page, on the running trade's own card.
 const KEYS = ['DRY_RUN','STRADDLE_LOTS','STRIKE_STEP','EVENING_ENABLED','EVENING_EXIT_ENABLED',
-  'EVENING_SIDE','MORNING_SIDE','MAX_ORDER_LOTS',
+  'MAX_ORDER_LOTS',
   'TELEGRAM_BOT_TOKEN','TELEGRAM_CHAT_ID','TELEGRAM_ALERTS',
   'MORNING_ENABLED','MORNING_LOTS','MORNING_EXIT_ENABLED','TREND_LOTS','TREND_AUTO_ENTRY_MODE',
   'MAX_TRADES_PER_DAY_GLOBAL','MAX_DAILY_LOSS_USD','MAX_OPEN_RISK_USD',
   'MAX_CONSECUTIVE_LOSSES','LOSS_COOLDOWN_MINUTES','MAX_ACCOUNT_PREMIUM_AT_RISK_USD','RISK_FAIL_CLOSED',
   'ALLOW_EXTERNAL_POSITIONS_WITH_BOT',
-  'RISK_PER_TRADE_USD_MORNING','RISK_PER_TRADE_USD_EVENING','ALLOW_SHORT_MOVE','SHORT_MAX_RISK_USD',
+  'RISK_PER_TRADE_USD_MORNING','RISK_PER_TRADE_USD_EVENING',
+  'MOVE_AUTO_ENTRY_MODE','MOVE_ALLOW_LONG','ALLOW_SHORT_MOVE','SHORT_MAX_RISK_USD',
   'SAFE_EXECUTION_ENABLED','MAX_SPREAD_PCT','MAX_SLIPPAGE_PCT',
-  'MIN_BOOK_DEPTH_MULTIPLE','MAX_QUOTE_AGE_SEC','ORDER_CHUNK_LOTS','MOVE_VALUE_FILTER_ENABLED',
-  'MOVE_MIN_EDGE_PCT','MOVE_MIN_TTE_MINUTES','MOVE_MAX_TTE_HOURS','MOVE_VOL_LOOKBACK',
-  'MAX_CONCURRENT_MOVE_POSITIONS',
+  'MIN_BOOK_DEPTH_MULTIPLE','MAX_QUOTE_AGE_SEC','ORDER_CHUNK_LOTS',
+  'MOVE_MIN_LONG_EDGE_ABS_USD','MOVE_MIN_SHORT_EDGE_ABS_USD',
+  'MOVE_MIN_LONG_EDGE_PCT','MOVE_MIN_SHORT_EDGE_PCT',
+  'MOVE_MIN_TTE_MINUTES','MOVE_MAX_TTE_HOURS','MAX_CONCURRENT_MOVE_POSITIONS',
+  'MOVE_MAX_MODEL_AGE_SEC','MOVE_MIN_BID_SIZE','MOVE_MIN_ASK_SIZE',
+  'MOVE_MAX_JUMP_SCORE_SHORT','MOVE_MAX_LONG_PREMIUM_RISK_USD',
+  'MOVE_MAX_SHORT_MARGIN_USAGE_PCT','MOVE_MIN_LIQUIDATION_BUFFER_PCT',
+  'MOVE_NO_ENTRY_BEFORE_SETTLEMENT_SEC','MOVE_REQUIRE_NO_OPEN_ORDERS',
+  'MOVE_REQUIRE_FLAT','MOVE_DRY_RUN_CAPITAL_USD','MOVE_FORECAST_LOOKBACK_DAYS',
+  'MOVE_FORECAST_OUTER_SCENARIOS','MOVE_FORECAST_PATHS_PER_SCENARIO',
   'TREND_EMA_GAP_PCT','TREND_RSI_UP','TREND_RSI_DOWN','TREND_15M_SLOPE_BARS',
   'TREND_MIN_15M_SLOPE_PCT','TREND_ADX_MIN','TREND_1H_CONFIRM_SAMPLES',
   'TREND_MIN_TTE_HOURS','TREND_TARGET_DELTA','TREND_MAX_SPREAD_PCT',
@@ -422,6 +461,7 @@ async function loadConfig() {
     shortMoveUi();
     utcHints();
     window._loadedTrendAutoMode = document.getElementById('c-TREND_AUTO_ENTRY_MODE').value;
+    window._loadedMoveAutoMode = document.getElementById('c-MOVE_AUTO_ENTRY_MODE').value;
     window._loadedMarketFallback = document.getElementById('c-TREND_MARKET_FALLBACK_ENABLED').value;
     window._loadedExternalOverride = document.getElementById('c-ALLOW_EXTERNAL_POSITIONS_WITH_BOT').value;
     window._loadedShortMove = document.getElementById('c-ALLOW_SHORT_MOVE').value;
@@ -454,10 +494,10 @@ function resetToDefaults() {
     return;
   }
   const modeResetText = modeChangeAllowed
-    ? 'This enables DRY RUN, disables scheduled MOVE entries and exits, changes Trend auto-entry to SHADOW, '
+    ? 'This enables DRY RUN, disables scheduled MOVE entries and exits, changes MOVE and Trend auto-entry to SHADOW, '
     : `Trading Mode is currently locked and will remain ${loadedDryRun === 'true' ? 'DRY RUN' : 'LIVE'}; ` +
       'all other recommended defaults will still be loaded. This disables scheduled MOVE entries and exits, ' +
-      'changes Trend auto-entry to SHADOW, ';
+      'changes MOVE and Trend auto-entry to SHADOW, ';
   if (!confirm(
       'Load the recommended safe defaults for every setting on this page?\n\n' +
       modeResetText +
@@ -498,6 +538,9 @@ async function saveConfig() {
   const mode = document.getElementById('c-TREND_AUTO_ENTRY_MODE').value;
   if (mode === 'live' && window._loadedTrendAutoMode !== 'live' &&
       !confirm('Enable automatic Trend entries? Eligible signals are simulated when Trading Mode is DRY RUN and place real IOC orders only when Trading Mode is LIVE.')) return;
+  const moveMode = document.getElementById('c-MOVE_AUTO_ENTRY_MODE').value;
+  if (moveMode === 'live' && window._loadedMoveAutoMode !== 'live' &&
+      !confirm('Enable scheduled automatic MOVE entries? At each Morning and Evening entry window, the forecast can choose LONG, SHORT or NO TRADE. Eligible decisions are simulated in DRY RUN and can place real IOC orders only when Trading Mode is LIVE.')) return;
   const fallback = document.getElementById('c-TREND_MARKET_FALLBACK_ENABLED').value;
   if (fallback === 'true' && window._loadedMarketFallback !== 'true' &&
       !confirm('Market fallback removes the IOC price guarantee for an unfilled remainder. Save this higher-risk setting?')) return;
@@ -542,6 +585,7 @@ async function saveConfig() {
     const d = await jpost('/api/config', body);
     if (d.ok) {
       window._loadedTrendAutoMode = mode;
+      window._loadedMoveAutoMode = moveMode;
       window._loadedMarketFallback = fallback;
       window._loadedExternalOverride = externalOverride;
       window._loadedShortMove = shortMove;

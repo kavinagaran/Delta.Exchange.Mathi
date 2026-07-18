@@ -266,6 +266,24 @@ a { color: var(--accent); text-decoration: none; }
 .dry-entry-gate.ready.up { background: var(--pos-soft); border-color: color-mix(in srgb, var(--pos) 28%, var(--border)); }
 .dry-entry-gate.ready.down { background: var(--neg-soft); border-color: color-mix(in srgb, var(--neg) 28%, var(--border)); }
 .dry-entry-gate.muted { color: var(--muted); }
+.move-decision {
+  display: grid;
+  gap: 7px;
+  margin-top: 14px;
+  padding: 11px 12px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--muted);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--panel) 82%, var(--bg));
+  font-size: 11px;
+}
+.move-decision.up { border-left-color: var(--pos); background: var(--pos-soft); }
+.move-decision.down { border-left-color: var(--neg); background: var(--neg-soft); }
+.move-decision-hd { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.move-decision-hd strong { font-size: 12px; }
+.move-decision-metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px 14px; }
+.move-decision span, .move-decision small { color: var(--muted); overflow-wrap: anywhere; }
+.move-decision b { color: var(--text); }
 .dry-chart-box .dry-chart-empty {
   position: absolute; inset: 0; display: grid; place-items: center;
   color: var(--muted); font-size: 12.5px; background: var(--surface);
@@ -509,6 +527,7 @@ input.mono { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; fon
   .dry-run-hero { align-items: flex-start; flex-direction: column; padding: 15px 16px; }
   .dry-run-hero-actions { width: 100%; justify-content: space-between; }
   .dry-entry-gate.ready { align-items: stretch; flex-direction: column; }
+  .move-decision-metrics { grid-template-columns: 1fr; }
 }
 
 /* ── Logs ───────────────────────────────────────────────── */

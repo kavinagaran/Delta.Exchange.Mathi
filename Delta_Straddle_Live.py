@@ -1,6 +1,6 @@
 """
 Delta_Straddle_Live.py
-BTC MOVE Options (MV-BTC) Long Straddle — Delta Exchange India
+BTC MOVE Options (MV-BTC) Forecast-Selected LONG/SHORT — Delta Exchange India
 
 Schedule (IST):
   Entry : 5:35 PM IST  = 12:05 UTC
@@ -8,7 +8,7 @@ Schedule (IST):
 
 Guarantees:
   - Portfolio-wide daily loss/trade/open-risk controls shared with Trend
-  - Lots capped by configured, affordable, risk, liquidity and exchange limits
+  - Lots capped by configured, affordable, aggregate risk and exchange limits
   - Spread/slippage-bounded IOC entry execution with crash recovery journals
   - Crash-safe state and automatic protection-monitor recovery
 """
@@ -41,6 +41,16 @@ from risk_controls import (
     load_states,
     risk_based_lots,
     trading_date,
+)
+from move_decision import (
+    LONG_MOVE,
+    MANAGE_EXISTING_POSITION,
+    NO_TRADE,
+    SHORT_MOVE,
+    MoveInputError,
+    aggregate_risk_lot_caps,
+    evaluate_move_decision,
+    forecast_move_distribution,
 )
 
 # Force IPv4: Delta's IP whitelist holds our stable IPv4; Windows rotates
@@ -119,6 +129,7 @@ if _account_path.exists():
 
 # Per-account strategy config: users/<name>/config.json overrides the .env
 # defaults key by key, so every os.getenv below is account-scoped.
+_config_document: dict = {}
 if CFG_FILE.exists():
     try:
         _config_document = json.loads(CFG_FILE.read_text(encoding="utf-8"))
@@ -127,6 +138,7 @@ if CFG_FILE.exists():
         for _k, _v in _config_document.items():
             os.environ[str(_k)] = str(_v)
     except (OSError, ValueError, TypeError) as exc:
+        _config_document = {}
         ENTRY_CONFIGURATION_ERRORS.append(f"invalid config.json: {exc}")
 
 try:
@@ -188,13 +200,15 @@ assert 1 <= LOTS <= MAX_ORDER_LOTS, f"LOTS must be between 1 and {MAX_ORDER_LOTS
 EVENING_ENABLED      = os.getenv("EVENING_ENABLED", "true").lower() in ("1", "true", "yes")
 EVENING_EXIT_ENABLED = os.getenv("EVENING_EXIT_ENABLED", "true").lower() in ("1", "true", "yes")
 
-# Scheduled entry direction per slot: "buy" opens a long straddle (profit on
-# a big move), "sell" opens a short straddle (collect premium, profit on a
-# quiet day — losses are open-ended, margin requirements are the user's job).
-def _side_env(key: str) -> str:
-    return "sell" if os.getenv(key, "buy").strip().lower() == "sell" else "buy"
-EVENING_SIDE = _side_env("EVENING_SIDE")
-MORNING_SIDE = _side_env("MORNING_SIDE")
+# Scheduled MOVE direction is selected by the normalized forecast/decision
+# engine. Legacy MORNING_SIDE/EVENING_SIDE settings are intentionally ignored;
+# discretionary dashboard MOVE entry is no longer part of the strategy.
+MOVE_AUTO_ENTRY_MODE = str(
+    _config_document.get("MOVE_AUTO_ENTRY_MODE") or "shadow").strip().lower()
+if MOVE_AUTO_ENTRY_MODE not in {"disabled", "shadow", "live"}:
+    ENTRY_CONFIGURATION_ERRORS.append(
+        "MOVE_AUTO_ENTRY_MODE must be disabled, shadow, or live")
+    MOVE_AUTO_ENTRY_MODE = "disabled"
 
 # Timing in UTC — configurable via .env / dashboard (defaults: 12:05 entry, 19:30 exit)
 ENTRY_H_UTC = int(os.getenv("ENTRY_H_UTC", 12))
@@ -267,6 +281,48 @@ MOVE_MIN_TTE_MINUTES = int(os.getenv("MOVE_MIN_TTE_MINUTES", "90"))
 MOVE_MAX_TTE_HOURS = float(os.getenv("MOVE_MAX_TTE_HOURS", "30"))
 MOVE_VOL_LOOKBACK = max(int(os.getenv("MOVE_VOL_LOOKBACK", "96")), 30)
 MAX_CONCURRENT_MOVE_POSITIONS = max(int(os.getenv("MAX_CONCURRENT_MOVE_POSITIONS", "1")), 1)
+MOVE_ALLOW_LONG = os.getenv(
+    "MOVE_ALLOW_LONG", "true").lower() in ("1", "true", "yes")
+MOVE_MIN_LONG_EDGE_ABS_USD = float(os.getenv(
+    "MOVE_MIN_LONG_EDGE_ABS_USD", "0.01"))
+MOVE_MIN_SHORT_EDGE_ABS_USD = float(os.getenv(
+    "MOVE_MIN_SHORT_EDGE_ABS_USD", "0.02"))
+MOVE_MIN_LONG_EDGE_PCT = float(os.getenv(
+    "MOVE_MIN_LONG_EDGE_PCT", os.getenv("MOVE_MIN_EDGE_PCT", "5.0")))
+MOVE_MIN_SHORT_EDGE_PCT = float(os.getenv(
+    "MOVE_MIN_SHORT_EDGE_PCT", "10.0"))
+MOVE_MAX_MODEL_AGE_SEC = int(os.getenv("MOVE_MAX_MODEL_AGE_SEC", "600"))
+MOVE_MIN_BID_SIZE = float(os.getenv("MOVE_MIN_BID_SIZE", "1"))
+MOVE_MIN_ASK_SIZE = float(os.getenv("MOVE_MIN_ASK_SIZE", "1"))
+MOVE_MAX_JUMP_SCORE_SHORT = float(os.getenv(
+    "MOVE_MAX_JUMP_SCORE_SHORT", "0.30"))
+MOVE_MAX_LONG_PREMIUM_RISK_USD = float(os.getenv(
+    "MOVE_MAX_LONG_PREMIUM_RISK_USD", "1000"))
+MOVE_MAX_SHORT_MARGIN_USAGE_PCT = float(os.getenv(
+    "MOVE_MAX_SHORT_MARGIN_USAGE_PCT", "30"))
+MOVE_MIN_LIQUIDATION_BUFFER_PCT = float(os.getenv(
+    "MOVE_MIN_LIQUIDATION_BUFFER_PCT", "50"))
+MOVE_NO_ENTRY_BEFORE_SETTLEMENT_SEC = int(os.getenv(
+    "MOVE_NO_ENTRY_BEFORE_SETTLEMENT_SEC", "3600"))
+MOVE_REQUIRE_NO_OPEN_ORDERS = os.getenv(
+    "MOVE_REQUIRE_NO_OPEN_ORDERS", "true").lower() in ("1", "true", "yes")
+MOVE_REQUIRE_FLAT = os.getenv(
+    "MOVE_REQUIRE_FLAT", "true").lower() in ("1", "true", "yes")
+try:
+    _configured_move_dry_capital = float(os.getenv(
+        "MOVE_DRY_RUN_CAPITAL_USD", "1000"))
+except (TypeError, ValueError):
+    _configured_move_dry_capital = 0.0
+if not math.isclose(_configured_move_dry_capital, 1000.0):
+    ENTRY_CONFIGURATION_ERRORS.append(
+        "MOVE_DRY_RUN_CAPITAL_USD must remain fixed at 1000")
+MOVE_DRY_RUN_CAPITAL_USD = 1000.0
+MOVE_FORECAST_LOOKBACK_DAYS = max(int(os.getenv(
+    "MOVE_FORECAST_LOOKBACK_DAYS", "30")), 7)
+MOVE_FORECAST_OUTER_SCENARIOS = max(int(os.getenv(
+    "MOVE_FORECAST_OUTER_SCENARIOS", "32")), 8)
+MOVE_FORECAST_PATHS_PER_SCENARIO = max(int(os.getenv(
+    "MOVE_FORECAST_PATHS_PER_SCENARIO", "128")), 32)
 ALLOW_EXTERNAL_POSITIONS_WITH_BOT = os.getenv(
     "ALLOW_EXTERNAL_POSITIONS_WITH_BOT", "false").lower() in ("1", "true", "yes")
 
@@ -962,7 +1018,451 @@ def get_execution_snapshot(symbol: str, side: str) -> dict:
         "bid_size": int(float(quotes.get("bid_size") or 0)),
         "ask_size": int(float(quotes.get("ask_size") or 0)),
         "tick_size": float(ticker.get("tick_size") or 0.1),
+        "quote_timestamp_ms": int(quoted_at.timestamp() * 1000),
     }
+
+
+_MOVE_CANDLE_CACHE: dict = {}
+
+
+def _ticker_timestamp_ms(ticker: dict) -> int:
+    try:
+        raw = float(ticker.get("timestamp") or 0)
+    except (TypeError, ValueError, OverflowError):
+        raw = 0.0
+    while raw and raw < 100_000_000_000:
+        raw *= 1000
+    while raw > 100_000_000_000_000:
+        raw /= 1000
+    if raw > 0:
+        return int(raw)
+    text = str(ticker.get("time") or "")
+    try:
+        stamp = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=timezone.utc)
+        return int(stamp.timestamp() * 1000)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("MOVE quote timestamp is unavailable") from exc
+
+
+def get_move_decision_market(contract: dict) -> dict:
+    """Fetch one side-neutral top-of-book snapshot for AUTO direction."""
+    symbol = str(contract.get("symbol") or "")
+    ticker = _retry(_get, f"/v2/tickers/{symbol}").get("result") or {}
+    quotes = ticker.get("quotes") or {}
+    try:
+        bid = float(quotes.get("best_bid") or 0)
+        ask = float(quotes.get("best_ask") or 0)
+        bid_size = float(quotes.get("bid_size") or 0)
+        ask_size = float(quotes.get("ask_size") or 0)
+        mark = float(ticker.get("mark_price") or 0)
+        spot = float(ticker.get("spot_price") or 0)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise RuntimeError("MOVE ticker contains invalid numeric fields") from exc
+    if bid <= 0 or ask <= 0 or ask < bid or spot <= 0:
+        raise RuntimeError(
+            f"MOVE decision requires a fresh two-sided market: "
+            f"bid={bid}, ask={ask}, spot={spot}")
+    return {
+        "bid": bid,
+        "ask": ask,
+        "bid_size": max(bid_size, 0),
+        "ask_size": max(ask_size, 0),
+        "quote_timestamp_ms": _ticker_timestamp_ms(ticker),
+        "mark_price": mark if mark > 0 else (bid + ask) / 2,
+        "spot_price": spot,
+        "trading_status": str(
+            ticker.get("trading_status")
+            or contract.get("trading_status")
+            or ""),
+    }
+
+
+def _fetch_move_index_candles(
+    index_symbol: str,
+    now: datetime,
+) -> list[dict]:
+    """Fetch completed 5m index history in bounded chunks and cache one bar."""
+    end = int(now.timestamp())
+    completed_end = end - end % 300
+    key = (index_symbol, completed_end, MOVE_FORECAST_LOOKBACK_DAYS)
+    cached = _MOVE_CANDLE_CACHE.get(key)
+    if isinstance(cached, list):
+        return cached
+    start = completed_end - (MOVE_FORECAST_LOOKBACK_DAYS + 1) * 86_400
+    rows: dict[int, dict] = {}
+    cursor = start
+    chunk_seconds = 6 * 86_400
+    while cursor < completed_end:
+        chunk_end = min(cursor + chunk_seconds, completed_end)
+        response = _retry(
+            _get,
+            "/v2/history/candles",
+            params={
+                "resolution": "5m",
+                "symbol": index_symbol,
+                "start": cursor,
+                "end": chunk_end,
+            },
+        )
+        batch = response.get("result")
+        if not isinstance(batch, list):
+            raise RuntimeError("BTC index candle response is invalid")
+        for row in batch:
+            if not isinstance(row, dict):
+                continue
+            try:
+                timestamp = int(float(row.get("time") or 0))
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if timestamp > 0:
+                rows[timestamp] = row
+        cursor = chunk_end
+    ordered = [rows[timestamp] for timestamp in sorted(rows)]
+    if not ordered:
+        raise RuntimeError("BTC index candle history is empty")
+    _MOVE_CANDLE_CACHE.clear()
+    _MOVE_CANDLE_CACHE[key] = ordered
+    return ordered
+
+
+def _current_settlement_twap(
+    index_symbol: str,
+    *,
+    now: datetime,
+    settlement: datetime,
+) -> tuple[float, float]:
+    """Return the completed portion of Delta's final 30-minute index TWAP."""
+    window_start = settlement - timedelta(minutes=30)
+    if now <= window_start:
+        return 0.0, 0.0
+    end = min(now, settlement)
+    response = _retry(
+        _get,
+        "/v2/history/candles",
+        params={
+            "resolution": "1m",
+            "symbol": index_symbol,
+            "start": int(window_start.timestamp()),
+            "end": int(end.timestamp()),
+        },
+    )
+    rows = response.get("result")
+    if not isinstance(rows, list):
+        raise RuntimeError("settlement TWAP index response is invalid")
+    completed_before = int(end.timestamp()) - int(end.timestamp()) % 60
+    closes = []
+    seen = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        try:
+            timestamp = int(float(row.get("time") or 0))
+            close = float(row.get("close") or 0)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if (timestamp < int(window_start.timestamp())
+                or timestamp >= completed_before
+                or timestamp in seen or close <= 0):
+            continue
+        seen.add(timestamp)
+        closes.append(close)
+    fixed_minutes = min(len(closes), 30)
+    if fixed_minutes <= 0:
+        return 0.0, 0.0
+    return statistics.mean(closes), fixed_minutes / 30.0
+
+
+def _move_account_decision_snapshot(contract: dict) -> dict:
+    """Account inputs for one AUTO cycle; paper capital never reads LIVE funds."""
+    if DRY_RUN:
+        open_states = [
+            state for name, state in load_states(DATA_DIR).items()
+            if name in {"morning", "evening"}
+            and str(state.get("status") or "").upper() == "OPEN"
+            and _move_bool(state.get("dry_run"))
+        ]
+        position = sum(
+            (-1 if state.get("side") == "short" else 1)
+            * int(state.get("lots") or 0)
+            for state in open_states
+        )
+        average = (
+            float(open_states[0].get("entry_mark") or 0)
+            if len(open_states) == 1 else 0.0)
+        return {
+            "current_position_qty": position,
+            "average_entry_price": average,
+            "available_margin": MOVE_DRY_RUN_CAPITAL_USD,
+            "account_equity": MOVE_DRY_RUN_CAPITAL_USD,
+            "liquidation_buffer": 1.0,
+            "open_orders_count": 0,
+            "capital_source": "isolated_virtual_capital",
+        }
+
+    positions_response = _retry(
+        _get, "/v2/positions/margined", auth=True)
+    positions = positions_response.get("result")
+    if not positions_response.get("success") or not isinstance(positions, list):
+        raise RuntimeError("account positions are unavailable for MOVE decision")
+    move_positions = [
+        position for position in positions
+        if str(position.get("product_symbol") or "").startswith("MV-BTC-")
+        and float(position.get("size") or 0) != 0
+    ]
+    position_qty = sum(float(position.get("size") or 0)
+                       for position in move_positions)
+    average_entry = (
+        float(move_positions[0].get("entry_price") or 0)
+        if len(move_positions) == 1 else 0.0)
+
+    wallet_response = _retry(_get, "/v2/wallet/balances", auth=True)
+    wallets = wallet_response.get("result")
+    if not wallet_response.get("success") or not isinstance(wallets, list):
+        raise RuntimeError("wallet is unavailable for MOVE decision")
+    wallet = next(
+        (row for row in wallets if row.get("asset_symbol") == "USD"), None)
+    if not isinstance(wallet, dict):
+        raise RuntimeError("USD wallet is unavailable for MOVE decision")
+    available = float(wallet.get("available_balance") or 0)
+    equity = float(
+        wallet.get("balance")
+        or wallet.get("asset_balance")
+        or available
+        or 0
+    )
+    liquidation_buffer = (
+        max(min(available / equity, 1.0), 0.0) if equity > 0 else 0.0)
+
+    orders_response = _retry(
+        _get,
+        "/v2/orders",
+        params={"states": "open", "page_size": 100},
+        auth=True,
+    )
+    orders = orders_response.get("result")
+    if not orders_response.get("success") or not isinstance(orders, list):
+        raise RuntimeError("open orders are unavailable for MOVE decision")
+    return {
+        "current_position_qty": position_qty,
+        "average_entry_price": average_entry,
+        "available_margin": max(available, 0.0),
+        "account_equity": max(equity, 0.0),
+        "liquidation_buffer": liquidation_buffer,
+        "open_orders_count": len(orders),
+        "capital_source": "verified_exchange_wallet",
+    }
+
+
+def _move_strategy_config(
+    slot: str,
+    contract: dict,
+    configured_lots: int,
+) -> dict:
+    risk_budget, _ = _slot_risk(slot)
+    long_risk = min(
+        max(MOVE_MAX_LONG_PREMIUM_RISK_USD, 0),
+        max(risk_budget, 0),
+        MOVE_DRY_RUN_CAPITAL_USD if DRY_RUN else float("inf"),
+    )
+    short_risk = (
+        min(max(SHORT_MAX_RISK_USD, 0), max(risk_budget, 0))
+        if SHORT_MAX_RISK_USD > 0 else 0.0)
+    product_limit = max(int(float(
+        contract.get("position_size_limit") or MAX_ORDER_LOTS)), 1)
+    return {
+        "allow_long": MOVE_ALLOW_LONG,
+        "allow_short": ALLOW_SHORT_MOVE,
+        "min_long_edge_absolute": max(MOVE_MIN_LONG_EDGE_ABS_USD, 0),
+        "min_short_edge_absolute": max(MOVE_MIN_SHORT_EDGE_ABS_USD, 0),
+        "min_long_edge_pct": max(MOVE_MIN_LONG_EDGE_PCT, 0) / 100,
+        "min_short_edge_pct": max(MOVE_MIN_SHORT_EDGE_PCT, 0) / 100,
+        "max_spread_pct": max(MAX_SPREAD_PCT, 0) / 100,
+        "max_quote_age_ms": max(MAX_QUOTE_AGE_SEC, 0) * 1000,
+        "max_model_age_ms": max(MOVE_MAX_MODEL_AGE_SEC, 0) * 1000,
+        "min_bid_size": max(MOVE_MIN_BID_SIZE, 0),
+        "min_ask_size": max(MOVE_MIN_ASK_SIZE, 0),
+        "max_jump_event_score_for_short": max(
+            min(MOVE_MAX_JUMP_SCORE_SHORT, 1), 0),
+        "max_long_premium_risk": long_risk,
+        "max_short_p99_loss": short_risk,
+        "max_short_margin_usage": max(
+            min(MOVE_MAX_SHORT_MARGIN_USAGE_PCT / 100, 1), 0),
+        "max_contracts": min(max(configured_lots, 1), MAX_ORDER_LOTS),
+        "max_total_position": min(product_limit, MAX_ORDER_LOTS),
+        "no_new_entry_seconds_before_settlement": max(
+            MOVE_NO_ENTRY_BEFORE_SETTLEMENT_SEC,
+            MOVE_MIN_TTE_MINUTES * 60,
+        ),
+        "max_open_loss": max(risk_budget, 0),
+        "require_no_existing_orders": MOVE_REQUIRE_NO_OPEN_ORDERS,
+        "require_flat_before_entry": MOVE_REQUIRE_FLAT,
+        "required_liquidation_buffer": max(
+            min(MOVE_MIN_LIQUIDATION_BUFFER_PCT / 100, 1), 0),
+    }
+
+
+def _move_decision_path(slot: str) -> Path:
+    if slot not in {"morning", "evening"}:
+        raise ValueError("MOVE decision slot must be morning or evening")
+    return DATA_DIR / f"move_decision_{slot}.json"
+
+
+def _persist_move_decision(slot: str, context: dict) -> None:
+    _atomic_json(_move_decision_path(slot), context)
+    decision = context.get("decision") or {}
+    audit_event(DATA_DIR, "move_auto_decision", {
+        "slot": slot,
+        "decision_id": context.get("decision_id"),
+        "action": decision.get("action"),
+        "side": decision.get("side"),
+        "failed_gates": decision.get("failed_gates"),
+        "forecast": context.get("forecast"),
+        "auto_mode": MOVE_AUTO_ENTRY_MODE,
+        "dry_run": DRY_RUN,
+    })
+
+
+def build_move_auto_decision(
+    contract: dict,
+    slot: str,
+    configured_lots: int,
+    *,
+    now: datetime | None = None,
+) -> dict:
+    """Build, evaluate and persist one normalized AUTO decision cycle."""
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    settlement = _settlement_time(contract).astimezone(timezone.utc)
+    market = get_move_decision_market(contract)
+    index_symbol = str(
+        (contract.get("spot_index") or {}).get("symbol") or ".DEXBTUSD")
+    candles = _fetch_move_index_candles(index_symbol, now)
+    current_twap, fixed_fraction = _current_settlement_twap(
+        index_symbol, now=now, settlement=settlement)
+    forecast = forecast_move_distribution(
+        candles,
+        current_index_price=market["spot_price"],
+        strike=float(contract.get("strike_price") or 0),
+        now_ms=int(now.timestamp() * 1000),
+        settlement_end_ts_ms=int(settlement.timestamp() * 1000),
+        current_30m_twap=current_twap,
+        fraction_of_final_twap_fixed=fixed_fraction,
+        # No trusted calendar source is configured.  The forecast module marks
+        # event risk unknown/high and automatic shorts fail closed.
+        scheduled_event_score=None,
+        outer_scenarios=MOVE_FORECAST_OUTER_SCENARIOS,
+        paths_per_scenario=MOVE_FORECAST_PATHS_PER_SCENARIO,
+        minimum_history_days=MOVE_FORECAST_LOOKBACK_DAYS,
+    )
+    account = _move_account_decision_snapshot(contract)
+    cv = float(contract.get("contract_value") or 0.001)
+    strike = float(contract.get("strike_price") or 0)
+    long_fee = min(
+        OPTION_FEE_RATE * market["spot_price"],
+        OPTION_FEE_CAP_PCT * market["ask"],
+    ) * cv
+    short_fee = min(
+        OPTION_FEE_RATE * market["spot_price"],
+        OPTION_FEE_CAP_PCT * market["bid"],
+    ) * cv
+    settlement_end_ms = int(settlement.timestamp() * 1000)
+    normalized = {
+        "timestamp": {"now_ms": int(now.timestamp() * 1000)},
+        "contract": {
+            "symbol": str(contract.get("symbol") or ""),
+            "strike": strike,
+            "expiry_ts_ms": settlement_end_ms,
+            "settlement_window_start_ts_ms": settlement_end_ms - 1_800_000,
+            "settlement_window_end_ts_ms": settlement_end_ms,
+            "contract_multiplier": cv,
+            "tick_size": float(contract.get("tick_size") or 0.1),
+            "lot_size": 1,
+            "min_order_size": 1,
+            "max_position_size": float(
+                contract.get("position_size_limit") or MAX_ORDER_LOTS),
+        },
+        "market": {
+            "bid": market["bid"],
+            "ask": market["ask"],
+            "bid_size": market["bid_size"],
+            "ask_size": market["ask_size"],
+            "quote_timestamp_ms": market["quote_timestamp_ms"],
+            "mark_price": market["mark_price"],
+        },
+        "underlying": {
+            "btc_index_price": market["spot_price"],
+            "current_30m_twap": current_twap,
+            "fraction_of_final_twap_fixed": fixed_fraction,
+            "spot_index_symbol": index_symbol,
+        },
+        "forecast": {
+            key: forecast[key] for key in (
+                "expected_payoff_low",
+                "expected_payoff_mid",
+                "expected_payoff_high",
+                "payoff_p99",
+                "jump_event_score",
+                "model_timestamp_ms",
+            )
+        },
+        "costs": {
+            "long_round_trip_cost_per_contract": long_fee * 2,
+            "short_round_trip_cost_per_contract": short_fee * 2,
+            "long_slippage_per_contract": (
+                market["ask"] * cv * MAX_SLIPPAGE_PCT / 100),
+            "short_slippage_per_contract": (
+                market["bid"] * cv * MAX_SLIPPAGE_PCT / 100),
+        },
+        "account": {
+            "current_position_qty": account["current_position_qty"],
+            "average_entry_price": account["average_entry_price"],
+            "available_margin": account["available_margin"],
+            "liquidation_buffer": account["liquidation_buffer"],
+            "open_orders_count": account["open_orders_count"],
+        },
+        "exchange": {
+            "system_operational": True,
+            "product_operational": (
+                str(contract.get("state") or "live").lower() == "live"
+                and str(contract.get("trading_status") or "").lower()
+                == "operational"
+            ),
+            "trading_enabled": not _move_bool(
+                (contract.get("product_specs") or {}).get(
+                    "only_reduce_only_orders_allowed")),
+        },
+    }
+    strategy = _move_strategy_config(slot, contract, configured_lots)
+    decision = evaluate_move_decision(normalized, strategy)
+    decision_id = hashlib.sha256(json.dumps(
+        {
+            "slot": slot,
+            "symbol": contract.get("symbol"),
+            "model_timestamp_ms": forecast["model_timestamp_ms"],
+            "quote_timestamp_ms": market["quote_timestamp_ms"],
+            "action": decision["action"],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")).hexdigest()[:24]
+    context = {
+        "schema_version": 1,
+        "slot": slot,
+        "decision_id": decision_id,
+        "recorded_at_utc": now.isoformat().replace("+00:00", "Z"),
+        "auto_mode": MOVE_AUTO_ENTRY_MODE,
+        "dry_run": DRY_RUN,
+        "execution_mode": "dry_run" if DRY_RUN else "real",
+        "virtual_capital_usd": MOVE_DRY_RUN_CAPITAL_USD if DRY_RUN else None,
+        "normalized_input": normalized,
+        "forecast": forecast,
+        "account_snapshot": account,
+        "strategy_config": strategy,
+        "decision": decision,
+    }
+    _persist_move_decision(slot, context)
+    return context
 
 
 def _settlement_time(contract: dict) -> datetime:
@@ -1633,8 +2133,80 @@ def _account_unrealized_pnl() -> float:
     return round(total, 2)
 
 
-def build_move_entry_plan(contract: dict, configured_lots: int, side: str, slot: str) -> dict:
-    """Validate value, affordability, risk sizing and portfolio limits."""
+def _refresh_move_auto_context_for_execution(
+    auto_context: dict,
+    contract: dict,
+    slot: str,
+    configured_lots: int,
+    execution_snapshot: dict,
+) -> dict:
+    """Re-evaluate AUTO direction with the irreversible-boundary snapshot."""
+    context = json.loads(json.dumps(auto_context))
+    normalized = context.get("normalized_input") or {}
+    market = normalized.get("market") or {}
+    market.update({
+        "bid": execution_snapshot["bid"],
+        "ask": execution_snapshot["ask"],
+        "bid_size": execution_snapshot.get("bid_size", 0),
+        "ask_size": execution_snapshot.get("ask_size", 0),
+        "quote_timestamp_ms": execution_snapshot["quote_timestamp_ms"],
+        "mark_price": execution_snapshot.get("mark"),
+    })
+    normalized["market"] = market
+    normalized["timestamp"] = {
+        "now_ms": int(datetime.now(timezone.utc).timestamp() * 1000)}
+    account = _move_account_decision_snapshot(contract)
+    normalized["account"] = {
+        "current_position_qty": account["current_position_qty"],
+        "average_entry_price": account["average_entry_price"],
+        "available_margin": account["available_margin"],
+        "liquidation_buffer": account["liquidation_buffer"],
+        "open_orders_count": account["open_orders_count"],
+    }
+    strategy = _move_strategy_config(slot, contract, configured_lots)
+    decision = evaluate_move_decision(normalized, strategy)
+    expected_side = str(
+        (auto_context.get("decision") or {}).get("side") or "")
+    if decision.get("side") != expected_side or decision.get("action") not in {
+            LONG_MOVE, SHORT_MOVE}:
+        raise RuntimeError(
+            "MOVE AUTO decision changed before execution; no order was placed")
+    context.update({
+        "recorded_at_utc": datetime.now(timezone.utc).isoformat().replace(
+            "+00:00", "Z"),
+        "normalized_input": normalized,
+        "account_snapshot": account,
+        "strategy_config": strategy,
+        "decision": decision,
+        "execution_revalidated": True,
+    })
+    _persist_move_decision(slot, context)
+    return context
+
+
+def _short_initial_margin_per_contract(
+    contract: dict,
+    *,
+    spot: float,
+    premium: float,
+    contract_value: float,
+) -> float:
+    """Conservative base isolated margin estimate before exchange validation."""
+    raw = max(float(contract.get("initial_margin") or 0), 0)
+    ratio = raw / 100 if raw > 0.10 else raw
+    base = (ratio * spot + premium) * contract_value
+    return max(base, premium * contract_value, 0.00000001)
+
+
+def build_move_entry_plan(
+    contract: dict,
+    configured_lots: int,
+    side: str,
+    slot: str,
+    *,
+    auto_context: dict | None = None,
+) -> dict:
+    """Validate AUTO value, affordability, risk sizing and portfolio limits."""
     _assert_entry_configuration()
     protection = _protection_snapshot(slot)  # validate before any order is submitted
     unresolved = [p.name for p in DATA_DIR.glob("pending_*_entry.json")]
@@ -1655,11 +2227,73 @@ def build_move_entry_plan(contract: dict, configured_lots: int, side: str, slot:
             f"target product {symbol} already has net exposure; automated ownership would be ambiguous")
     cv = float(contract.get("contract_value") or 0.001)
     snapshot = get_execution_snapshot(symbol, side)
-    value_signal = move_value_signal(contract, snapshot, side)
+    if auto_context is not None:
+        auto_context = _refresh_move_auto_context_for_execution(
+            auto_context, contract, slot, configured_lots, snapshot)
+        auto_decision = auto_context["decision"]
+        if auto_decision.get("side") != side:
+            raise RuntimeError("MOVE AUTO side does not match the entry plan")
+        value_signal = {
+            "automatic": True,
+            "decision_id": auto_context.get("decision_id"),
+            "forecast": auto_context.get("forecast"),
+            "decision": auto_decision,
+        }
+    else:
+        # Retained only for recovery-compatible direct callers. Scheduled
+        # jobs always supply an AUTO context; no UI route uses this path.
+        auto_decision = None
+        value_signal = move_value_signal(contract, snapshot, side)
     premium = snapshot["ask"] if side == "buy" else snapshot["bid"]
-    affordable = _effective_lots(configured_lots, premium, cv, slot.upper())
+    if auto_context is not None:
+        strategy = auto_context["strategy_config"]
+        account_snapshot = auto_context["account_snapshot"]
+        spot_for_margin = float(
+            snapshot.get("spot")
+            or (auto_context.get("normalized_input", {}).get("underlying") or {})
+            .get("btc_index_price")
+            or 0
+        )
+        initial_margin_per_contract = _short_initial_margin_per_contract(
+            contract,
+            spot=spot_for_margin,
+            premium=premium,
+            contract_value=cv,
+        )
+        lot_caps = aggregate_risk_lot_caps(
+            auto_decision,
+            strategy,
+            available_margin=float(
+                account_snapshot.get("available_margin") or 0),
+            short_initial_margin_per_contract=initial_margin_per_contract,
+            current_position_qty=float(
+                account_snapshot.get("current_position_qty") or 0),
+        )
+        if side == "buy":
+            per_contract_funding = max(float(
+                auto_decision["metrics"].get(
+                    "long_premium_risk_per_contract") or 0), 0)
+            available_capital = float(
+                account_snapshot.get("available_margin") or 0)
+            lot_caps["funding"] = (
+                int((available_capital * 0.98) / per_contract_funding)
+                if per_contract_funding > 0 else 0)
+            lot_caps["effective"] = min(lot_caps.values())
+        affordable = min(
+            configured_lots,
+            int(lot_caps.get("effective") or 0),
+            MAX_ORDER_LOTS,
+        )
+    else:
+        initial_margin_per_contract = 0.0
+        lot_caps = {}
+        affordable = _effective_lots(
+            configured_lots, premium, cv, slot.upper())
     if affordable < 1:
-        raise RuntimeError("verified affordable lots is zero")
+        raise RuntimeError(
+            "AUTO aggregate premium/p99/margin lot cap produced zero lots"
+            if auto_context is not None else
+            "verified affordable lots is zero")
     risk_budget, stop_loss = _slot_risk(slot)
     configured_stop_loss = stop_loss
     paper_short_risk_assumption = 0.0
@@ -1698,7 +2332,18 @@ def build_move_entry_plan(contract: dict, configured_lots: int, side: str, slot:
     if lots < 1:
         raise RuntimeError(
             "risk sizing produced zero lots; verify risk budget, SL and affordability")
-    catastrophe = lots * (premium * cv + fee_one_way * 2 + slippage_per_lot)
+    if auto_decision is not None and side == "sell":
+        catastrophe = lots * max(
+            float(auto_decision["metrics"].get(
+                "short_p99_loss_per_contract") or 0),
+            initial_margin_per_contract,
+        )
+    elif auto_decision is not None:
+        catastrophe = lots * float(auto_decision["metrics"].get(
+            "long_premium_risk_per_contract") or 0)
+    else:
+        catastrophe = lots * (
+            premium * cv + fee_one_way * 2 + slippage_per_lot)
     # A configured SL is a trigger, not a guarantee of fill.  Long premium at
     # risk remains the catastrophe bound and must never be understated.
     proposed_risk = max(stop_loss, catastrophe)
@@ -1717,6 +2362,10 @@ def build_move_entry_plan(contract: dict, configured_lots: int, side: str, slot:
         "risk_budget_usd": risk_budget, "stop_loss_usd": stop_loss,
         "configured_stop_loss_usd": configured_stop_loss,
         "paper_short_risk_assumption_usd": paper_short_risk_assumption,
+        "auto_decision_id": (
+            auto_context.get("decision_id") if auto_context else None),
+        "aggregate_lot_caps": lot_caps,
+        "short_initial_margin_per_contract": initial_margin_per_contract,
         "proposed_risk_usd": round(proposed_risk, 2),
         "unrealized_pnl_usd": unrealized,
         "snapshot": snapshot, "value_signal": value_signal,
@@ -1731,6 +2380,9 @@ def build_move_entry_plan(contract: dict, configured_lots: int, side: str, slot:
         "risk_budget_usd": risk_budget, "stop_loss_usd": stop_loss,
         "configured_stop_loss_usd": configured_stop_loss,
         "paper_short_risk_assumption_usd": paper_short_risk_assumption,
+        "auto_context": auto_context,
+        "aggregate_lot_caps": lot_caps,
+        "short_initial_margin_per_contract": initial_margin_per_contract,
         "risk_at_entry_usd": round(proposed_risk, 2),
         "risk_decision": decision_dict(decision),
         "estimated_entry_fee_usd": round(fee_one_way * lots, 4),
@@ -2311,7 +2963,7 @@ def check_api_access():
 
 # ─────────────────────────────────────────────────────────────
 # MORNING ENTRY JOB  —  00:15 UTC  (5:45 AM IST)
-# Buys TODAY's contract (settles 12:00 UTC same day).
+# AUTO-selects LONG/SHORT/NO_TRADE for today's 12:00 UTC settlement.
 # ─────────────────────────────────────────────────────────────
 def morning_entry_job():
     # The mutex stays at the account root so a config transition can never
@@ -2341,7 +2993,11 @@ def _morning_entry_job_locked():
     if ms and ms.get("entry_date") == today:
         log.info("Morning trade already recorded today (status=%s). Skipping.",
                  ms.get("status", ""))
-        return
+        return {"terminal": True, "status": "already_recorded"}
+
+    if MOVE_AUTO_ENTRY_MODE == "disabled":
+        log.info("Morning MOVE AUTO is disabled.")
+        return {"terminal": True, "status": "auto_disabled"}
 
     contract = get_mv_contract(today)
     if not contract:
@@ -2352,10 +3008,39 @@ def _morning_entry_job_locked():
     contract_val = float(contract.get("contract_value", 0.001))
     settlement   = contract.get("settlement_time", "")
 
-    btc_price  = get_btc_price()
-    plan       = build_move_entry_plan(contract, MORNING_LOTS, MORNING_SIDE, "morning")
+    auto_context = build_move_auto_decision(
+        contract, "morning", MORNING_LOTS)
+    auto_decision = auto_context["decision"]
+    action = auto_decision["action"]
+    log.info(
+        "Morning AUTO decision: %s  long_edge=$%.4f  short_edge=$%.4f",
+        action,
+        float(auto_decision["metrics"]["long_edge_per_contract"]),
+        float(auto_decision["metrics"]["short_edge_per_contract"]),
+    )
+    if MOVE_AUTO_ENTRY_MODE == "shadow":
+        log.info("Morning AUTO shadow recorded; no position was opened.")
+        return {
+            "terminal": True, "status": "shadow_recorded",
+            "decision": auto_decision,
+        }
+    if action not in {LONG_MOVE, SHORT_MOVE}:
+        log.info(
+            "Morning AUTO placed no trade: %s",
+            auto_decision.get("failed_gates"),
+        )
+        return {
+            "terminal": True, "status": action.lower(),
+            "decision": auto_decision,
+        }
+    side = str(auto_decision["side"])
+    btc_price = float(
+        auto_context["normalized_input"]["underlying"]["btc_index_price"])
+    plan = build_move_entry_plan(
+        contract, MORNING_LOTS, side, "morning",
+        auto_context=auto_context)
     snap       = plan["snapshot"]
-    entry_mark = snap["ask"] if MORNING_SIDE == "buy" else snap["bid"]
+    entry_mark = snap["ask"] if side == "buy" else snap["bid"]
     lots       = plan["lots"]
     total_cost = entry_mark * contract_val * lots
 
@@ -2366,7 +3051,7 @@ def _morning_entry_job_locked():
     log.info("Lots        : %d  |  Total premium: $%.2f", lots, total_cost)
 
     cancel_product_stops(product_id)
-    order, lots = place_entry_order(product_id, symbol, MORNING_SIDE, lots,
+    order, lots = place_entry_order(product_id, symbol, side, lots,
                                     slot="morning", snapshot=snap, entry_context=plan)
     fill  = float(order.get("result", {}).get("average_fill_price") or entry_mark)
     entry_fee, entry_fee_source = _entry_fee_accounting(order, plan)
@@ -2375,7 +3060,7 @@ def _morning_entry_job_locked():
     _persist_entry_state("morning", {
         "slot":           "morning",
         "status":         "OPEN",
-        "side":           "long" if MORNING_SIDE == "buy" else "short",
+        "side":           "long" if side == "buy" else "short",
         "entry_date":     today,
         "trading_date":   trading_date(now, RISK_DAY_TZ_OFFSET_MIN),
         "entry_time_utc": now.strftime("%H:%M:%S"),
@@ -2395,9 +3080,11 @@ def _morning_entry_job_locked():
         "client_order_ids": order.get("result", {}).get("client_order_ids", []),
         "entry_commission_usd": entry_fee,
         "entry_fee_source": entry_fee_source,
-        "entry_trigger":  "morning_scheduled",
+        "entry_trigger":  f"morning_auto_{'long' if side == 'buy' else 'short'}",
         "execution_snapshot": snap,
         "move_value_signal": plan["value_signal"],
+        "move_auto_decision_id": auto_context.get("decision_id"),
+        "move_auto_context": plan.get("auto_context"),
         "risk_at_entry_usd": plan["risk_at_entry_usd"],
         "risk_decision": plan["risk_decision"],
         "protection_config": plan["protection_config"],
@@ -2416,10 +3103,10 @@ def _morning_entry_job_locked():
         log.exception("Morning entry audit write failed after protection was confirmed")
 
     send_telegram(
-        f"🌅 <b>MORNING STRADDLE {'SOLD (short)' if MORNING_SIDE == 'sell' else 'OPENED'} — {TAG}</b>\n"
+        f"🌅 <b>MORNING AUTO {'SHORT' if side == 'sell' else 'LONG'} — {TAG}</b>\n"
         f"<code>{'━' * 24}</code>\n"
         f"Symbol  » <code>{symbol}</code>\n"
-        f"Side    » <code>{'SHORT — sold to open' if MORNING_SIDE == 'sell' else 'LONG — bought'}</code>\n"
+        f"Side    » <code>{'SHORT — sold to open' if side == 'sell' else 'LONG — bought'}</code>\n"
         f"Strike  » <code>${strike:,.0f}</code>\n"
         f"Lots    » <code>{lots:,}</code>\n"
         f"Entry   » <code>${fill:.4f} / BTC</code>\n"
@@ -2429,6 +3116,10 @@ def _morning_entry_job_locked():
         f"Mode    » <code>{'DRY-RUN ⚠' if DRY_RUN else 'LIVE ●'}</code>"
     )
     log.info("Morning straddle opened: %d lots %s @ $%.4f", lots, symbol, fill)
+    return {
+        "terminal": True, "status": "opened", "side": side,
+        "lots": lots, "decision": auto_decision,
+    }
 
 
 # ─────────────────────────────────────────────────────────────
@@ -2450,7 +3141,11 @@ def _entry_job_locked():
 
     # ONE-ORDER-PER-DAY guard — double check before doing anything
     if already_traded_today():
-        return
+        return {"terminal": True, "status": "already_recorded"}
+
+    if MOVE_AUTO_ENTRY_MODE == "disabled":
+        log.info("Evening MOVE AUTO is disabled.")
+        return {"terminal": True, "status": "auto_disabled"}
 
     # Find MV contract
     contract     = find_active_mv_contract()
@@ -2460,11 +3155,37 @@ def _entry_job_locked():
     contract_val = float(contract.get("contract_value", 0.001))
     settlement   = contract.get("settlement_time", "")
 
-    # Market snapshot
-    btc_price  = get_btc_price()
-    plan       = build_move_entry_plan(contract, LOTS, EVENING_SIDE, "evening")
+    auto_context = build_move_auto_decision(contract, "evening", LOTS)
+    auto_decision = auto_context["decision"]
+    action = auto_decision["action"]
+    log.info(
+        "Evening AUTO decision: %s  long_edge=$%.4f  short_edge=$%.4f",
+        action,
+        float(auto_decision["metrics"]["long_edge_per_contract"]),
+        float(auto_decision["metrics"]["short_edge_per_contract"]),
+    )
+    if MOVE_AUTO_ENTRY_MODE == "shadow":
+        log.info("Evening AUTO shadow recorded; no position was opened.")
+        return {
+            "terminal": True, "status": "shadow_recorded",
+            "decision": auto_decision,
+        }
+    if action not in {LONG_MOVE, SHORT_MOVE}:
+        log.info(
+            "Evening AUTO placed no trade: %s",
+            auto_decision.get("failed_gates"),
+        )
+        return {
+            "terminal": True, "status": action.lower(),
+            "decision": auto_decision,
+        }
+    side = str(auto_decision["side"])
+    btc_price = float(
+        auto_context["normalized_input"]["underlying"]["btc_index_price"])
+    plan = build_move_entry_plan(
+        contract, LOTS, side, "evening", auto_context=auto_context)
     snap       = plan["snapshot"]
-    entry_mark = snap["ask"] if EVENING_SIDE == "buy" else snap["bid"]
+    entry_mark = snap["ask"] if side == "buy" else snap["bid"]
     lots       = plan["lots"]
     total_cost = entry_mark * contract_val * lots
 
@@ -2475,9 +3196,9 @@ def _entry_job_locked():
     log.info("Entry mark  : $%.4f/BTC  ($%.4f/lot)", entry_mark, entry_mark * contract_val)
     log.info("Lots        : %d  |  Total premium: $%.2f", lots, total_cost)
 
-    # Place the single entry order (direction per EVENING_SIDE config)
+    # Place the single entry order in the revalidated AUTO direction.
     cancel_product_stops(product_id)
-    order, lots = place_entry_order(product_id, symbol, EVENING_SIDE, lots,
+    order, lots = place_entry_order(product_id, symbol, side, lots,
                                     slot="evening", snapshot=snap, entry_context=plan)
     # Record the REAL fill, not the pre-order snapshot — all downstream P&L
     # (TP/SL triggers included) keys off entry_mark.
@@ -2490,7 +3211,7 @@ def _entry_job_locked():
     _persist_entry_state("evening", {
         "slot":           "evening",
         "status":         "OPEN",
-        "side":           "long" if EVENING_SIDE == "buy" else "short",
+        "side":           "long" if side == "buy" else "short",
         "entry_date":     today,
         "trading_date":   trading_date(now, RISK_DAY_TZ_OFFSET_MIN),
         "entry_time_utc": now.strftime("%H:%M:%S"),
@@ -2510,9 +3231,11 @@ def _entry_job_locked():
         "client_order_ids": order.get("result", {}).get("client_order_ids", []),
         "entry_commission_usd": entry_fee,
         "entry_fee_source": entry_fee_source,
-        "entry_trigger":  "evening_scheduled",
+        "entry_trigger":  f"evening_auto_{'long' if side == 'buy' else 'short'}",
         "execution_snapshot": snap,
         "move_value_signal": plan["value_signal"],
+        "move_auto_decision_id": auto_context.get("decision_id"),
+        "move_auto_context": plan.get("auto_context"),
         "risk_at_entry_usd": plan["risk_at_entry_usd"],
         "risk_decision": plan["risk_decision"],
         "protection_config": plan["protection_config"],
@@ -2533,10 +3256,10 @@ def _entry_job_locked():
              EXIT_H_UTC, EXIT_M_UTC)
 
     send_telegram(
-        f"{'🔻' if EVENING_SIDE == 'sell' else '🔺'} <b>ENTRY CONFIRMED — {TAG}</b>\n"
+        f"{'🔻' if side == 'sell' else '🔺'} <b>AUTO ENTRY CONFIRMED — {TAG}</b>\n"
         f"<code>{'━' * 24}</code>\n"
         f"Symbol  » <code>{symbol}</code>\n"
-        f"Side    » <code>{'SHORT — sold to open' if EVENING_SIDE == 'sell' else 'LONG — bought'}</code>\n"
+        f"Side    » <code>{'SHORT — sold to open' if side == 'sell' else 'LONG — bought'}</code>\n"
         f"Strike  » <code>${strike:,.0f}</code>\n"
         f"Lots    » <code>{lots:,}</code>\n"
         f"Premium » <code>${fill:.4f} / BTC</code>\n"
@@ -2545,6 +3268,10 @@ def _entry_job_locked():
         f"Time    » <code>{datetime.now(timezone.utc).strftime('%H:%M UTC')}  (IST +5:30)</code>\n"
         f"Mode    » <code>{'DRY-RUN ⚠' if DRY_RUN else 'LIVE ●'}</code>"
     )
+    return {
+        "terminal": True, "status": "opened", "side": side,
+        "lots": lots, "decision": auto_decision,
+    }
 
 # ─────────────────────────────────────────────────────────────
 # EXIT JOBS — shared close logic for both slots
@@ -3168,21 +3895,23 @@ def main():
     # simulations remain independently recoverable/closable.
     _resume_mode_namespace(False)
     _resume_mode_namespace(True)
-    log.info("  Morning: %02d:%02d UTC (%s)  lots=%d  side=%s  enabled=%s",
+    log.info("  Morning: %02d:%02d UTC (%s)  lots=%d  side=AUTO  enabled=%s",
              MORNING_H_UTC, MORNING_M_UTC,
              _ist_label(MORNING_H_UTC, MORNING_M_UTC), MORNING_LOTS,
-             MORNING_SIDE.upper(), MORNING_ENABLED)
+             MORNING_ENABLED)
     log.info("  M-Exit : %s",
              ("%02d:%02d UTC (%s)" % (MORNING_EXIT_H_UTC, MORNING_EXIT_M_UTC,
                                        _ist_label(MORNING_EXIT_H_UTC, MORNING_EXIT_M_UTC)))
              if MORNING_EXIT_ENABLED else "DISABLED (TP/settlement only)")
-    log.info("  Entry  : %02d:%02d UTC (%s)  side=%s  enabled=%s", ENTRY_H_UTC, ENTRY_M_UTC,
-             _ist_label(ENTRY_H_UTC, ENTRY_M_UTC), EVENING_SIDE.upper(), EVENING_ENABLED)
+    log.info("  Entry  : %02d:%02d UTC (%s)  side=AUTO  enabled=%s",
+             ENTRY_H_UTC, ENTRY_M_UTC,
+             _ist_label(ENTRY_H_UTC, ENTRY_M_UTC), EVENING_ENABLED)
     log.info("  Exit   : %s",
              ("%02d:%02d UTC (%s)" % (EXIT_H_UTC, EXIT_M_UTC,
                                        _ist_label(EXIT_H_UTC, EXIT_M_UTC)))
              if EVENING_EXIT_ENABLED else "DISABLED (TP/settlement only)")
-    log.info("  Lots   : %d  |  DRY-RUN: %s", LOTS, DRY_RUN)
+    log.info("  Lots   : %d  |  DRY-RUN: %s  |  MOVE AUTO: %s",
+             LOTS, DRY_RUN, MOVE_AUTO_ENTRY_MODE.upper())
     log.info("=" * 64)
 
     fired_entry        = False
@@ -3239,9 +3968,10 @@ def main():
                                  and h == MORNING_H_UTC
                                  and MORNING_WIN_START <= m < MORNING_WIN_END)
             if in_morning_window and not fired_morning:
-                fired_morning = True
                 try:
-                    morning_entry_job()
+                    result = morning_entry_job()
+                    fired_morning = bool(
+                        isinstance(result, dict) and result.get("terminal"))
                 except Exception as exc:
                     log.exception("Morning entry job failed")
                     send_telegram(f"⚠️ <b>MORNING ENTRY FAILED — {TAG}</b>\n<code>{exc}</code>")
@@ -3275,9 +4005,10 @@ def main():
                                and h == ENTRY_H_UTC
                                and ENTRY_WIN_START <= m < ENTRY_WIN_END)
             if in_entry_window and not fired_entry:
-                fired_entry = True
                 try:
-                    entry_job()
+                    result = entry_job()
+                    fired_entry = bool(
+                        isinstance(result, dict) and result.get("terminal"))
                 except Exception as exc:
                     log.exception("Entry job failed")
                     send_telegram(f"⚠️ <b>ENTRY FAILED — {TAG}</b>\n<code>{exc}</code>")

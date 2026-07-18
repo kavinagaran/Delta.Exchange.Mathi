@@ -155,15 +155,38 @@ function dryKnownNumber(value) {
     Number.isFinite(Number(value));
 }
 
-function dryManualSlotNow() {
-  return istNowMinutes() < 660 ? 'morning' : 'evening';
-}
-
-function dryMoveButtons(slot) {
-  if (!dryModeActive || slot !== dryManualSlotNow()) return '';
-  return `<div class="btn-row center">
-    <button class="btn success sm" type="button" onclick="dryMoveEntry('${slot}','buy')">▲ Simulate Buy</button>
-    <button class="btn danger sm" type="button" onclick="dryMoveEntry('${slot}','sell')">▼ Simulate Sell</button>
+function dryMoveDecisionHtml(view) {
+  if (!view || !view.action) {
+    return `<div class="move-decision muted">
+      <div><strong>Automatic MOVE forecast</strong><span>Waiting for the next scheduled decision cycle.</span></div>
+    </div>`;
+  }
+  const forecast = view.forecast || {};
+  const metrics = view.metrics || {};
+  const action = String(view.action || 'NO_TRADE');
+  const actionLabel = action === 'LONG_MOVE' ? 'LONG MOVE'
+    : action === 'SHORT_MOVE' ? 'SHORT MOVE'
+    : action === 'MANAGE_EXISTING_POSITION' ? 'MANAGE EXISTING' : 'NO TRADE';
+  const cls = action === 'LONG_MOVE' ? 'up' : action === 'SHORT_MOVE' ? 'down' : 'muted';
+  const eventCopy = forecast.event_score_available
+    ? `Event risk ${fN(forecast.jump_event_score, 2)}`
+    : 'Event risk UNKNOWN / HIGH · SHORT blocked';
+  const failed = [
+    ...(view.failed_gates?.common || []),
+    ...(view.failed_gates?.long || []).map(v => `LONG ${v}`),
+    ...(view.failed_gates?.short || []).map(v => `SHORT ${v}`),
+  ].slice(0, 6);
+  return `<div class="move-decision ${cls}">
+    <div class="move-decision-hd">
+      <strong>${esc(actionLabel)}</strong><span class="badge sim">${esc(String(view.auto_mode || 'disabled').toUpperCase())}</span>
+    </div>
+    <div class="move-decision-metrics">
+      <span>Fair P20 / P50 / P80: <b>$${fN(forecast.expected_payoff_low, 2)} / $${fN(forecast.expected_payoff_mid, 2)} / $${fN(forecast.expected_payoff_high, 2)}</b></span>
+      <span>Payoff p99: <b>$${fN(forecast.payoff_p99, 2)}</b></span>
+      <span>Edge / lot · LONG <b>${f$(metrics.long_edge_per_contract)}</b> · SHORT <b>${f$(metrics.short_edge_per_contract)}</b></span>
+      <span>${esc(eventCopy)}</span>
+    </div>
+    ${failed.length ? `<small>Blocked gates: ${esc(failed.join(', '))}</small>` : '<small>All required gates passed.</small>'}
   </div>`;
 }
 
@@ -172,11 +195,11 @@ function dryStateIsVisible(state) {
     !(state.status === 'CLOSED' && state.dashboard_visible === false);
 }
 
-function dryPositionDetails(state, slot) {
+function dryPositionDetails(state, slot, decision = null) {
+  const decisionHtml = slot === 'trend' ? '' : dryMoveDecisionHtml(decision);
   if (!dryStateIsVisible(state)) {
     const copy = dryModeActive ? 'No active simulation' : 'No saved simulation';
-    return `<div class="no-pos"><span class="icon">◇</span>${copy}</div>` +
-      (slot === 'trend' ? '' : dryMoveButtons(slot));
+    return `<div class="no-pos"><span class="icon">◇</span>${copy}</div>${decisionHtml}`;
   }
 
   if (state.status === 'OPEN') {
@@ -199,7 +222,7 @@ function dryPositionDetails(state, slot) {
         <button class="btn warn sm" type="button" onclick="endDrySimulation('${slot}')">
           End simulation
         </button>
-      </div>`;
+      </div>${decisionHtml}`;
   }
 
   if (state.status === 'CLOSED') {
@@ -214,10 +237,10 @@ function dryPositionDetails(state, slot) {
         <dt>Lots</dt><dd>${fN(state.lots)}</dd>
         <dt>Entry → Exit</dt><dd>$${fN(state.entry_mark, 4)} → $${fN(state.exit_mark, 4)}</dd>
         <dt>Trigger</dt><dd>${esc(state.exit_trigger || 'simulation ended')}</dd>
-      </dl>` + (slot === 'trend' ? '' : dryMoveButtons(slot));
+      </dl>${decisionHtml}`;
   }
 
-  return `<div class="no-pos"><span class="icon">◇</span>${esc(state.status)}</div>`;
+  return `<div class="no-pos"><span class="icon">◇</span>${esc(state.status)}</div>${decisionHtml}`;
 }
 
 function dryTrendActionHtml(preview) {
@@ -309,9 +332,9 @@ async function loadDryStatus(refreshTrend = true) {
     }
 
     document.getElementById('dry-slot-morning').innerHTML =
-      dryPositionDetails(dryStatus.morning || {}, 'morning');
+      dryPositionDetails(dryStatus.morning || {}, 'morning', dryStatus.move_decisions?.morning);
     document.getElementById('dry-slot-evening').innerHTML =
-      dryPositionDetails(dryStatus.evening || {}, 'evening');
+      dryPositionDetails(dryStatus.evening || {}, 'evening', dryStatus.move_decisions?.evening);
     document.getElementById('dry-slot-trend').innerHTML =
       dryPositionDetails(dryStatus.trend || {}, 'trend') +
       dryTrendActionHtml(dryTrendPreview);
@@ -321,50 +344,6 @@ async function loadDryStatus(refreshTrend = true) {
       dryStatusRefreshQueued = false;
       loadDryStatus(true);
     }
-  }
-}
-
-async function dryMoveEntry(slot, side) {
-  if (!dryModeActive) {
-    toast('Enable DRY RUN before starting a simulation', 'err');
-    return;
-  }
-  let preview;
-  try {
-    preview = await jget('/api/manual-entry/preview?slot=' + encodeURIComponent(slot) +
-      '&side=' + encodeURIComponent(side));
-  } catch (_) {}
-  if (!preview || !preview.ok || preview.dry_run !== true) {
-    const reason = preview?.error || (preview && preview.dry_run !== true
-      ? 'Trading Mode is no longer DRY RUN' : 'network error');
-    toast('Cannot prepare simulation: ' + reason, 'err');
-    return;
-  }
-  const paperShortRisk = side === 'sell'
-    ? Number(preview.sizing?.paper_short_risk_assumption_usd || 0) : 0;
-  const shortRiskLine = paperShortRisk > 0
-    ? `Paper short-risk assumption: $${fN(paperShortRisk, 2)}\n` : '';
-  const message = `SIMULATE ${side.toUpperCase()} — ${slot.toUpperCase()} MOVE\n\n` +
-    `Contract: ${preview.symbol}\nStrike:   $${fN(preview.strike)}\n` +
-    `Mark:     $${fN(preview.mark, 4)}\nLots:     ${fN(preview.lots)}\n` +
-    `Paper value: ~$${fN(preview.est_value, 2)}\n${shortRiskLine}\n` +
-    'No exchange order will be placed. Start this simulation?';
-  if (!confirm(message)) return;
-  const result = await jpost('/api/manual-entry?slot=' + encodeURIComponent(slot), {
-    side,
-    product_id: preview.product_id,
-    symbol: preview.symbol,
-    lots: preview.lots,
-    mark: preview.mark,
-    expected_mode: 'dry_run',
-    mode_revision: preview.mode_revision ?? dryStatus.mode_revision,
-  });
-  if (result.ok && result.dry_run) {
-    toast(`${side.toUpperCase()} simulation started: ${fN(result.lots)} lots ${result.symbol}`, 'ok');
-    await loadDryStatus();
-    await loadDryToday();
-  } else {
-    toast('Simulation failed: ' + (result.error || 'Trading Mode is no longer DRY RUN'), 'err');
   }
 }
 

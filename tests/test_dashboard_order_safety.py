@@ -36,8 +36,8 @@ def test_exposure_routes_reject_invalid_slot_before_exchange_call():
             "/api/manual-entry?slot=typo", method="POST", json={"side": "buy"}), \
             patch.object(dashboard.req, "post") as post:
         response, status = _response_tuple(dashboard.api_manual_entry())
-        assert status == 400
-        assert "slot" in response.get_json()["error"]
+        assert status == 410
+        assert response.get_json()["code"] == "MANUAL_MOVE_DISABLED"
         post.assert_not_called()
 
     with dashboard.app.test_request_context(
@@ -170,7 +170,7 @@ def test_manual_move_selector_uses_safe_defaults_for_nonfinite_tte_config():
             [product], 64000, "evening", now) is None
 
 
-def test_manual_preview_uses_requested_sell_side_and_rejects_zero_lot_plan():
+def test_manual_preview_is_disabled_before_strategy_or_exchange_work():
     contract = {
         "id": 9, "symbol": "MV-BTC-65000-180726", "contract_value": ".001",
         "strike_price": "65000", "settlement_time": "2026-07-18T12:00:00Z",
@@ -184,13 +184,13 @@ def test_manual_preview_uses_requested_sell_side_and_rejects_zero_lot_plan():
                          return_value={"lots": 0, "reason": "No affordable lots"}):
         response, status = _response_tuple(dashboard.api_manual_entry_preview())
 
-    assert status == 409
-    assert response.get_json()["error"] == "No affordable lots"
-    select.assert_called_once_with("evening")
-    pricing.assert_called_once_with(contract["symbol"], "sell")
+    assert status == 410
+    assert response.get_json()["code"] == "MANUAL_MOVE_DISABLED"
+    select.assert_not_called()
+    pricing.assert_not_called()
 
 
-def test_manual_entry_refuses_contract_that_changed_after_preview(isolated_user):
+def test_manual_entry_is_disabled_before_contract_or_exchange_work(isolated_user):
     selected = {"id": 10, "symbol": "MV-BTC-65500-180726"}
     with dashboard.app.test_request_context(
             "/api/manual-entry?slot=evening", method="POST",
@@ -202,13 +202,13 @@ def test_manual_entry_refuses_contract_that_changed_after_preview(isolated_user)
             patch.object(dashboard, "_post_dashboard_order") as submit:
         response, status = _response_tuple(dashboard.api_manual_entry())
 
-    assert status == 409
-    assert "changed after preview" in response.get_json()["error"]
+    assert status == 410
+    assert response.get_json()["code"] == "MANUAL_MOVE_DISABLED"
     positions.assert_not_called()
     submit.assert_not_called()
 
 
-def test_manual_entry_binds_preview_price_and_lots(isolated_user):
+def test_manual_entry_never_revalidates_or_submits_old_preview(isolated_user):
     selected = {"id": 9, "symbol": "MV-BTC-65000-180726"}
     with dashboard.app.test_request_context(
             "/api/manual-entry?slot=evening", method="POST",
@@ -225,20 +225,27 @@ def test_manual_entry_binds_preview_price_and_lots(isolated_user):
             patch.object(dashboard, "_post_dashboard_order") as submit:
         response, status = _response_tuple(dashboard.api_manual_entry())
 
-    assert status == 409
-    assert "sizing changed after preview" in response.get_json()["error"]
-    pricing.assert_called_once_with(selected["symbol"], "buy", reference_price=10)
+    assert status == 410
+    assert response.get_json()["code"] == "MANUAL_MOVE_DISABLED"
+    pricing.assert_not_called()
     submit.assert_not_called()
 
 
-def test_overview_manual_entry_sends_side_and_exact_preview_identity():
+def test_overview_has_no_manual_move_controls_and_shows_auto_diagnostics():
     source = (Path(__file__).resolve().parents[1] / "templates" / "overview.html").read_text(
         encoding="utf-8")
-    assert "'&side=' + encodeURIComponent(side)" in source
-    assert "product_id: p.product_id" in source
-    assert "symbol: p.symbol" in source
-    assert "lots: p.lots" in source
-    assert "mark: p.mark" in source
+    mobile = (
+        Path(__file__).resolve().parents[1]
+        / "mv_btc_bot" / "lib" / "main.dart"
+    ).read_text(encoding="utf-8")
+    assert "manualEntry(" not in source
+    assert "manualBtns(" not in source
+    assert "Scheduled forecast-driven entries only" in source
+    assert "function moveDecisionHtml(view)" in source
+    assert "/api/manual-entry" not in mobile
+    assert "MORNING_SIDE" not in mobile
+    assert "EVENING_SIDE" not in mobile
+    assert "AUTO forecast" in mobile
 
 
 def test_short_plan_requires_opt_in_positive_sl_and_short_cap():
@@ -623,8 +630,8 @@ def test_manual_entry_honors_shared_account_exposure_lock(isolated_user):
                 patch.object(dashboard, "_active_creds", return_value=("key", "secret")), \
                 patch.object(dashboard.req, "post") as post:
             response, status = _response_tuple(dashboard.api_manual_entry())
-    assert status == 409
-    assert "exposure change" in response.get_json()["error"]
+    assert status == 410
+    assert response.get_json()["code"] == "MANUAL_MOVE_DISABLED"
     post.assert_not_called()
 
 

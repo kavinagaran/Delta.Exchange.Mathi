@@ -345,13 +345,12 @@ def _spawn_tp(user: str, slot: str):
 # Keys the dashboard is allowed to read/write
 CONFIG_KEYS = [
     "DRY_RUN", "STRADDLE_LOTS", "STRIKE_STEP", "MAX_ORDER_LOTS",
-    "EVENING_ENABLED", "EVENING_EXIT_ENABLED", "EVENING_SIDE",
+    "EVENING_ENABLED", "EVENING_EXIT_ENABLED",
     "ENTRY_H_UTC", "ENTRY_M_UTC", "EXIT_H_UTC", "EXIT_M_UTC",
     "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "TELEGRAM_ALERTS",
     "TP_TARGET_PNL", "TP_POLL_SECS", "SL_TARGET_PNL", "TSL_TARGET_PNL",
     "MORNING_ENABLED", "MORNING_LOTS", "MORNING_H_UTC", "MORNING_M_UTC",
     "MORNING_EXIT_ENABLED", "MORNING_EXIT_H_UTC", "MORNING_EXIT_M_UTC",
-    "MORNING_SIDE",
     "DYNAMIC_LOTS",
     "TP_TARGET_PNL_MORNING", "TP_POLL_SECS_MORNING", "SL_TARGET_PNL_MORNING",
     "TSL_TARGET_PNL_MORNING", "TSL_ARM_PNL_MORNING", "TSL_TRAIL_PNL_MORNING",
@@ -382,6 +381,16 @@ CONFIG_KEYS = [
     "MAX_QUOTE_AGE_SEC", "ORDER_CHUNK_LOTS", "MOVE_VALUE_FILTER_ENABLED",
     "MOVE_MIN_EDGE_PCT", "MOVE_MIN_TTE_MINUTES", "MOVE_MAX_TTE_HOURS",
     "MOVE_VOL_LOOKBACK", "MAX_CONCURRENT_MOVE_POSITIONS",
+    "MOVE_AUTO_ENTRY_MODE", "MOVE_ALLOW_LONG",
+    "MOVE_MIN_LONG_EDGE_ABS_USD", "MOVE_MIN_SHORT_EDGE_ABS_USD",
+    "MOVE_MIN_LONG_EDGE_PCT", "MOVE_MIN_SHORT_EDGE_PCT",
+    "MOVE_MAX_MODEL_AGE_SEC", "MOVE_MIN_BID_SIZE", "MOVE_MIN_ASK_SIZE",
+    "MOVE_MAX_JUMP_SCORE_SHORT", "MOVE_MAX_LONG_PREMIUM_RISK_USD",
+    "MOVE_MAX_SHORT_MARGIN_USAGE_PCT", "MOVE_MIN_LIQUIDATION_BUFFER_PCT",
+    "MOVE_NO_ENTRY_BEFORE_SETTLEMENT_SEC", "MOVE_REQUIRE_NO_OPEN_ORDERS",
+    "MOVE_REQUIRE_FLAT", "MOVE_DRY_RUN_CAPITAL_USD",
+    "MOVE_FORECAST_LOOKBACK_DAYS", "MOVE_FORECAST_OUTER_SCENARIOS",
+    "MOVE_FORECAST_PATHS_PER_SCENARIO",
 ]
 
 # One explicit, fail-safe profile for every editable setting on the Config
@@ -405,7 +414,6 @@ CONFIG_PAGE_DEFAULTS = {
     "ALLOW_EXTERNAL_POSITIONS_WITH_BOT": "false",
     # Morning and evening MOVE slots. Times are UTC; the page renders IST.
     "MORNING_ENABLED": "false",
-    "MORNING_SIDE": "buy",
     "MORNING_LOTS": "1000",
     "RISK_PER_TRADE_USD_MORNING": "200",
     "MORNING_EXIT_ENABLED": "false",
@@ -414,7 +422,6 @@ CONFIG_PAGE_DEFAULTS = {
     "MORNING_EXIT_H_UTC": "11",
     "MORNING_EXIT_M_UTC": "30",
     "EVENING_ENABLED": "false",
-    "EVENING_SIDE": "buy",
     "RISK_PER_TRADE_USD_EVENING": "200",
     "EVENING_EXIT_ENABLED": "false",
     "ENTRY_H_UTC": "12",
@@ -422,6 +429,8 @@ CONFIG_PAGE_DEFAULTS = {
     "EXIT_H_UTC": "19",
     "EXIT_M_UTC": "30",
     # MOVE exposure, execution quality and value gates
+    "MOVE_AUTO_ENTRY_MODE": "shadow",
+    "MOVE_ALLOW_LONG": "true",
     "ALLOW_SHORT_MOVE": "false",
     "SHORT_MAX_RISK_USD": "0",
     "SAFE_EXECUTION_ENABLED": "true",
@@ -430,12 +439,27 @@ CONFIG_PAGE_DEFAULTS = {
     "MIN_BOOK_DEPTH_MULTIPLE": "1",
     "MAX_QUOTE_AGE_SEC": "20",
     "ORDER_CHUNK_LOTS": "1000",
-    "MOVE_VALUE_FILTER_ENABLED": "true",
-    "MOVE_MIN_EDGE_PCT": "5",
+    "MOVE_MIN_LONG_EDGE_ABS_USD": "0.01",
+    "MOVE_MIN_SHORT_EDGE_ABS_USD": "0.02",
+    "MOVE_MIN_LONG_EDGE_PCT": "5",
+    "MOVE_MIN_SHORT_EDGE_PCT": "10",
     "MOVE_MIN_TTE_MINUTES": "90",
     "MOVE_MAX_TTE_HOURS": "30",
-    "MOVE_VOL_LOOKBACK": "96",
     "MAX_CONCURRENT_MOVE_POSITIONS": "1",
+    "MOVE_MAX_MODEL_AGE_SEC": "600",
+    "MOVE_MIN_BID_SIZE": "1",
+    "MOVE_MIN_ASK_SIZE": "1",
+    "MOVE_MAX_JUMP_SCORE_SHORT": "0.30",
+    "MOVE_MAX_LONG_PREMIUM_RISK_USD": "1000",
+    "MOVE_MAX_SHORT_MARGIN_USAGE_PCT": "30",
+    "MOVE_MIN_LIQUIDATION_BUFFER_PCT": "50",
+    "MOVE_NO_ENTRY_BEFORE_SETTLEMENT_SEC": "3600",
+    "MOVE_REQUIRE_NO_OPEN_ORDERS": "true",
+    "MOVE_REQUIRE_FLAT": "true",
+    "MOVE_DRY_RUN_CAPITAL_USD": "1000",
+    "MOVE_FORECAST_LOOKBACK_DAYS": "30",
+    "MOVE_FORECAST_OUTER_SCENARIOS": "32",
+    "MOVE_FORECAST_PATHS_PER_SCENARIO": "128",
     # Trend signal, contract, liquidity and execution controls
     "TREND_LOTS": "100",
     "TREND_AUTO_ENTRY_MODE": "shadow",
@@ -931,6 +955,13 @@ def _saved_user_cfg() -> tuple[dict, bool]:
         raise AccountConfigError("Account Trend auto-entry mode is invalid")
     if raw_mode:
         saved = {**saved, "TREND_AUTO_ENTRY_MODE": raw_mode}
+    raw_move_mode = str(
+        saved.get("MOVE_AUTO_ENTRY_MODE") or "").strip().lower()
+    if raw_move_mode and raw_move_mode not in {
+            "disabled", "shadow", "live"}:
+        raise AccountConfigError("Account MOVE auto-entry mode is invalid")
+    if raw_move_mode:
+        saved = {**saved, "MOVE_AUTO_ENTRY_MODE": raw_move_mode}
     return saved, True
 
 
@@ -938,8 +969,9 @@ def _user_cfg() -> dict:
     """The active account's strategy config: .env values as global defaults,
     overridden key by key by users/<name>/config.json.
 
-    Trend auto-live is the exception: it must be explicitly persisted for the
-    active account and is never inherited from the process environment.
+    Trend and MOVE auto-live are exceptions: each must be explicitly
+    persisted for the active account and is never inherited from the process
+    environment.
     """
     cfg = {k: os.getenv(k, "") for k in CONFIG_KEYS}
     saved, _ = _saved_user_cfg()
@@ -949,6 +981,9 @@ def _user_cfg() -> dict:
         mode = "shadow"
     cfg["TREND_AUTO_ENTRY_MODE"] = mode
     cfg["TREND_AUTO_ENTRY_ENABLED"] = "true" if mode == "live" else "false"
+    move_mode = str(
+        saved.get("MOVE_AUTO_ENTRY_MODE") or "").strip().lower()
+    cfg["MOVE_AUTO_ENTRY_MODE"] = move_mode or "shadow"
     return cfg
 
 
@@ -1988,6 +2023,79 @@ def _latest_closed_trade(history: list, slot_states: dict[str, dict]) -> dict | 
     }
 
 
+def _move_decision_dashboard_view(
+    slot: str,
+    *,
+    dry_run: bool = False,
+) -> dict | None:
+    """Return the compact, non-sensitive part of the latest AUTO decision."""
+    if slot not in {"morning", "evening"}:
+        return None
+    raw = _load_json(
+        _mode_data_dir(dry_run) / f"move_decision_{slot}.json", {})
+    if not isinstance(raw, dict):
+        return None
+    decision = raw.get("decision")
+    forecast = raw.get("forecast")
+    normalized = raw.get("normalized_input")
+    if not all(isinstance(value, dict)
+               for value in (decision, forecast, normalized)):
+        return None
+    contract = normalized.get("contract")
+    metrics = decision.get("metrics")
+    failed = decision.get("failed_gates")
+    if not all(isinstance(value, dict)
+               for value in (contract, metrics, failed)):
+        return None
+
+    def _numbers(source: dict, keys: tuple[str, ...]) -> dict:
+        result = {}
+        for key in keys:
+            value = source.get(key)
+            if isinstance(value, (int, float)) and math.isfinite(float(value)):
+                result[key] = value
+        return result
+
+    failed_view = {}
+    for group in ("common", "long", "short"):
+        values = failed.get(group)
+        failed_view[group] = [
+            str(value) for value in values[:12]
+        ] if isinstance(values, list) else []
+    return {
+        "schema_version": raw.get("schema_version"),
+        "slot": slot,
+        "decision_id": str(raw.get("decision_id") or ""),
+        "recorded_at_utc": str(raw.get("recorded_at_utc") or ""),
+        "auto_mode": str(raw.get("auto_mode") or "disabled").lower(),
+        "dry_run": bool(raw.get("dry_run")),
+        "symbol": str(contract.get("symbol") or ""),
+        "action": str(decision.get("action") or "NO_TRADE"),
+        "side": decision.get("side"),
+        "conflict": bool(decision.get("conflict")),
+        "forecast": {
+            **_numbers(forecast, (
+                "expected_payoff_low", "expected_payoff_mid",
+                "expected_payoff_high", "payoff_p99", "jump_event_score",
+                "market_jump_score", "scheduled_event_score",
+                "model_timestamp_ms",
+            )),
+            "event_score_available": bool(
+                forecast.get("event_score_available")),
+            "event_risk_source": str(
+                forecast.get("event_risk_source") or "unknown_high_risk"),
+        },
+        "metrics": _numbers(metrics, (
+            "spread_pct", "quote_age_ms", "model_age_ms",
+            "seconds_until_final_settlement", "long_edge_per_contract",
+            "short_edge_per_contract", "long_hurdle", "short_hurdle",
+            "long_premium_risk_per_contract",
+            "short_p99_loss_per_contract",
+        )),
+        "failed_gates": failed_view,
+    }
+
+
 _last_revive = {"ts": 0.0}
 
 
@@ -2026,6 +2134,12 @@ def api_status():
     state["latest_closed_trade"] = latest_closed
     state["morning"] = morning
     state["trend"]   = trend
+    state["move_auto_mode"] = str(
+        _user_cfg().get("MOVE_AUTO_ENTRY_MODE") or "shadow").lower()
+    state["move_decisions"] = {
+        slot: _move_decision_dashboard_view(slot)
+        for slot in ("morning", "evening")
+    }
     state.update(_trading_mode_payload())
     # Unrelated C/P positions remain separate. Exact same-product additions
     # disappear from this list only after the Trend monitor confirms adoption.
@@ -3424,7 +3538,18 @@ def _manual_entry_lots(slot: str, mark: float, cv: float, strike: float = 0.0) -
 
 @app.route("/api/manual-entry/preview")
 def api_manual_entry_preview():
-    """What a manual buy/sell would do right now: contract, strike, sizing."""
+    """Manual MOVE direction selection was retired with scheduled AUTO."""
+    return jsonify({
+        "ok": False,
+        "error": (
+            "Manual MOVE BUY/SELL is disabled. Morning and Evening MOVE "
+            "directions are selected only by the scheduled forecast engine."
+        ),
+        "code": "MANUAL_MOVE_DISABLED",
+    }), 410
+
+    # Retained temporarily as rollback-compatible implementation context.
+    # This block is unreachable and may be removed after the AUTO rollout.
     slot = _strict_slot_arg(move_only=True)
     if slot is None:
         return jsonify({"ok": False, "error": "slot must be morning or evening"}), 400
@@ -3820,7 +3945,18 @@ def _submit_manual_move_entry(slot: str, side: str, contract: dict,
 
 @app.route("/api/manual-entry", methods=["POST"])
 def api_manual_entry():
-    """Open one verified, bounded and immediately protected manual MOVE trade."""
+    """Reject discretionary MOVE entries; only scheduled AUTO may open them."""
+    return jsonify({
+        "ok": False,
+        "error": (
+            "Manual MOVE BUY/SELL is disabled. Morning and Evening MOVE "
+            "entries can be opened only by the scheduled forecast engine."
+        ),
+        "code": "MANUAL_MOVE_DISABLED",
+    }), 410
+
+    # Retained temporarily as rollback-compatible implementation context.
+    # This block is unreachable and may be removed after the AUTO rollout.
     slot = _strict_slot_arg(move_only=True)
     if slot is None:
         return jsonify({"ok": False, "error": "slot must be morning or evening"}), 400
@@ -4706,6 +4842,12 @@ def api_dry_run_status():
         "morning": slots["morning"],
         "evening": slots["evening"],
         "trend": slots["trend"],
+        "move_auto_mode": str(
+            cfg.get("MOVE_AUTO_ENTRY_MODE") or "shadow").lower(),
+        "move_decisions": {
+            slot: _move_decision_dashboard_view(slot, dry_run=True)
+            for slot in ("morning", "evening")
+        },
         "morning_entry_ist": _schedule_ist_label(
             cfg, "MORNING_H_UTC", "MORNING_M_UTC", 0, 15),
         "evening_entry_ist": _schedule_ist_label(
@@ -6402,6 +6544,22 @@ _CONFIG_NUMERIC_BOUNDS = {
     "MOVE_MIN_EDGE_PCT": (0, 1000), "MOVE_MIN_TTE_MINUTES": (1, 1440),
     "MOVE_MAX_TTE_HOURS": (1, 168), "MOVE_VOL_LOOKBACK": (30, 1000),
     "MAX_CONCURRENT_MOVE_POSITIONS": (1, 2),
+    "MOVE_MIN_LONG_EDGE_ABS_USD": (0, 10_000),
+    "MOVE_MIN_SHORT_EDGE_ABS_USD": (0, 10_000),
+    "MOVE_MIN_LONG_EDGE_PCT": (0, 100),
+    "MOVE_MIN_SHORT_EDGE_PCT": (0, 100),
+    "MOVE_MAX_MODEL_AGE_SEC": (1, 3600),
+    "MOVE_MIN_BID_SIZE": (0, 10_000_000),
+    "MOVE_MIN_ASK_SIZE": (0, 10_000_000),
+    "MOVE_MAX_JUMP_SCORE_SHORT": (0, 1),
+    "MOVE_MAX_LONG_PREMIUM_RISK_USD": (1, 10_000_000),
+    "MOVE_MAX_SHORT_MARGIN_USAGE_PCT": (0, 100),
+    "MOVE_MIN_LIQUIDATION_BUFFER_PCT": (0, 100),
+    "MOVE_NO_ENTRY_BEFORE_SETTLEMENT_SEC": (0, 86_400),
+    "MOVE_DRY_RUN_CAPITAL_USD": (1000, 1000),
+    "MOVE_FORECAST_LOOKBACK_DAYS": (7, 30),
+    "MOVE_FORECAST_OUTER_SCENARIOS": (8, 128),
+    "MOVE_FORECAST_PATHS_PER_SCENARIO": (32, 1024),
 }
 
 
@@ -6414,6 +6572,20 @@ def _validate_config_update(data: dict, current: dict) -> str | None:
     mode = str(data.get("TREND_AUTO_ENTRY_MODE", current.get("TREND_AUTO_ENTRY_MODE", ""))).lower()
     if mode and mode not in {"disabled", "shadow", "live"}:
         return "TREND_AUTO_ENTRY_MODE must be disabled, shadow, or live"
+    move_mode = str(data.get(
+        "MOVE_AUTO_ENTRY_MODE",
+        current.get("MOVE_AUTO_ENTRY_MODE") or "shadow",
+    ) or "shadow").lower()
+    if move_mode not in {"disabled", "shadow", "live"}:
+        return "MOVE_AUTO_ENTRY_MODE must be disabled, shadow, or live"
+    for key in (
+        "MOVE_ALLOW_LONG", "MOVE_REQUIRE_NO_OPEN_ORDERS", "MOVE_REQUIRE_FLAT",
+    ):
+        if key not in data:
+            continue
+        raw = str(data.get(key) if data.get(key) is not None else "").lower()
+        if raw not in {"true", "false", "1", "0", "yes", "no", "on", "off"}:
+            return f"{key} must be enabled or disabled"
     for key, (low, high) in _CONFIG_NUMERIC_BOUNDS.items():
         if key not in data:
             continue
@@ -6435,6 +6607,21 @@ def _validate_config_update(data: dict, current: dict) -> str | None:
             return "MOVE minimum TTE must be below maximum TTE"
     except (TypeError, ValueError):
         return "MOVE TTE limits must be numeric"
+    try:
+        if (float(merged.get("MOVE_MIN_SHORT_EDGE_PCT") or 10)
+                < float(merged.get("MOVE_MIN_LONG_EDGE_PCT") or 5)):
+            return (
+                "MOVE short edge % must be at least the long edge % "
+                "because short MOVE has greater tail risk"
+            )
+        if (float(merged.get("MOVE_MIN_SHORT_EDGE_ABS_USD") or 0.02)
+                < float(merged.get("MOVE_MIN_LONG_EDGE_ABS_USD") or 0.01)):
+            return (
+                "MOVE short absolute edge must be at least the long "
+                "absolute edge"
+            )
+    except (TypeError, ValueError):
+        return "MOVE edge thresholds must be numeric"
     if str(merged.get("ALLOW_SHORT_MOVE") or "false").lower() in {"1", "true", "yes", "on"}:
         try:
             if float(merged.get("SHORT_MAX_RISK_USD") or 0) <= 0:

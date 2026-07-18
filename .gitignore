@@ -14,6 +14,7 @@ straddle_state.json
 morning_state.json
 __pycache__/
 *.pyc
+.test-*/
 
 # Flutter/Android build artifacts
 mv_btc_bot/build/
