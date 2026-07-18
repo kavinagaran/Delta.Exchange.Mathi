@@ -135,16 +135,26 @@ ThemeData buildAppTheme({required bool dark}) {
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
       ),
     ),
-    tabBarTheme: TabBarThemeData(
-      labelColor: accent,
-      unselectedLabelColor: muted,
-      indicatorColor: accent,
-      indicatorSize: TabBarIndicatorSize.tab,
-      dividerColor: border,
-      labelStyle: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
-      unselectedLabelStyle: const TextStyle(
-        fontSize: 12,
-        fontWeight: FontWeight.w600,
+    navigationBarTheme: NavigationBarThemeData(
+      height: 68,
+      backgroundColor: surface,
+      indicatorColor: accent.withValues(alpha: dark ? .20 : .10),
+      surfaceTintColor: Colors.transparent,
+      labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
+      labelTextStyle: WidgetStateProperty.resolveWith(
+        (states) => TextStyle(
+          color: states.contains(WidgetState.selected) ? accent : muted,
+          fontSize: 9.5,
+          fontWeight: states.contains(WidgetState.selected)
+              ? FontWeight.w700
+              : FontWeight.w600,
+        ),
+      ),
+      iconTheme: WidgetStateProperty.resolveWith(
+        (states) => IconThemeData(
+          color: states.contains(WidgetState.selected) ? accent : muted,
+          size: 21,
+        ),
       ),
     ),
     progressIndicatorTheme: ProgressIndicatorThemeData(color: accent),
@@ -169,7 +179,7 @@ class MathiBotApp extends StatelessWidget {
     return AnimatedBuilder(
       animation: appTheme,
       builder: (context, _) => MaterialApp(
-        title: 'Nithi BTC Bot',
+        title: 'Nithi Bot',
         debugShowCheckedModeBanner: false,
         theme: buildAppTheme(dark: false),
         darkTheme: buildAppTheme(dark: true),
@@ -183,31 +193,51 @@ class MathiBotApp extends StatelessWidget {
 class AppPageSpec {
   const AppPageSpec({
     required this.label,
+    required this.navLabel,
     required this.path,
     required this.icon,
   });
 
   final String label;
+  final String navLabel;
   final String path;
   final IconData icon;
 }
 
 const appPages = <AppPageSpec>[
-  AppPageSpec(label: 'Nithi BTC Bot', path: '/', icon: Icons.home_outlined),
+  AppPageSpec(
+    label: 'Nithi Bot',
+    navLabel: 'Home',
+    path: '/',
+    icon: Icons.home_outlined,
+  ),
   AppPageSpec(
     label: 'Trades & P&L',
+    navLabel: 'Trades',
     path: '/trades',
     icon: Icons.trending_up_rounded,
   ),
-  AppPageSpec(label: 'Dry Run', path: '/dry-run', icon: Icons.science_outlined),
+  AppPageSpec(
+    label: 'Dry Run',
+    navLabel: 'Dry Run',
+    path: '/dry-run',
+    icon: Icons.science_outlined,
+  ),
   AppPageSpec(
     label: 'Positions',
+    navLabel: 'Positions',
     path: '/positions',
     icon: Icons.view_list_outlined,
   ),
-  AppPageSpec(label: 'Bot Config', path: '/config', icon: Icons.tune_rounded),
+  AppPageSpec(
+    label: 'Bot Config',
+    navLabel: 'Config',
+    path: '/config',
+    icon: Icons.tune_rounded,
+  ),
   AppPageSpec(
     label: 'API Accounts',
+    navLabel: 'Accounts',
     path: '/accounts',
     icon: Icons.manage_accounts_outlined,
   ),
@@ -331,15 +361,14 @@ class HomeShell extends StatefulWidget {
   State<HomeShell> createState() => _HomeShellState();
 }
 
-class _HomeShellState extends State<HomeShell>
-    with SingleTickerProviderStateMixin {
-  late final TabController _tabs;
-  late final PageController _pages;
+class _HomeShellState extends State<HomeShell> {
   final _webKeys = List.generate(
     appPages.length,
     (_) => GlobalKey<DashboardWebPageState>(),
   );
 
+  final Set<int> _visitedTabs = {0};
+  int _tab = 0;
   bool _ready = false;
   bool _authenticated = false;
   String? _startupError;
@@ -347,8 +376,6 @@ class _HomeShellState extends State<HomeShell>
   @override
   void initState() {
     super.initState();
-    _tabs = TabController(length: appPages.length, vsync: this);
-    _pages = PageController();
     unawaited(_bootstrap());
   }
 
@@ -364,21 +391,6 @@ class _HomeShellState extends State<HomeShell>
     }
     if (!mounted) return;
     setState(() => _ready = true);
-  }
-
-  @override
-  void dispose() {
-    _tabs.dispose();
-    _pages.dispose();
-    super.dispose();
-  }
-
-  void _selectPage(int index) {
-    _pages.animateToPage(
-      index,
-      duration: const Duration(milliseconds: 260),
-      curve: Curves.easeOutCubic,
-    );
   }
 
   Future<void> _signOut() async {
@@ -434,7 +446,7 @@ class _HomeShellState extends State<HomeShell>
           crossAxisAlignment: CrossAxisAlignment.start,
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Text('Nithi BTC Bot'),
+            const Text('Nithi Bot'),
             const SizedBox(height: 2),
             Text(
               SessionService.displayName.isEmpty
@@ -451,7 +463,7 @@ class _HomeShellState extends State<HomeShell>
         actions: [
           IconButton(
             tooltip: 'Refresh this tab',
-            onPressed: () => _webKeys[_tabs.index].currentState?.reload(),
+            onPressed: () => _webKeys[_tab].currentState?.reload(),
             icon: const Icon(Icons.refresh_rounded, size: 21),
           ),
           Semantics(
@@ -517,45 +529,42 @@ class _HomeShellState extends State<HomeShell>
           ),
           const SizedBox(width: 4),
         ],
-        bottom: PreferredSize(
-          preferredSize: const Size.fromHeight(49),
-          child: Align(
-            alignment: Alignment.centerLeft,
-            child: TabBar(
-              controller: _tabs,
-              isScrollable: true,
-              tabAlignment: TabAlignment.start,
-              padding: const EdgeInsets.symmetric(horizontal: 8),
-              onTap: _selectPage,
-              tabs: [
-                for (final page in appPages)
-                  Tab(
-                    height: 48,
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(page.icon, size: 17),
-                        const SizedBox(width: 7),
-                        Text(page.label),
-                      ],
-                    ),
-                  ),
-              ],
-            ),
+      ),
+      body: IndexedStack(
+        index: _tab,
+        children: [
+          for (var index = 0; index < appPages.length; index++)
+            if (_visitedTabs.contains(index))
+              DashboardWebPage(
+                key: _webKeys[index],
+                page: appPages[index],
+                dark: dark,
+                onSessionExpired: _signOut,
+              )
+            else
+              const SizedBox.shrink(),
+        ],
+      ),
+      bottomNavigationBar: DecoratedBox(
+        decoration: BoxDecoration(
+          border: Border(
+            top: BorderSide(color: Theme.of(context).dividerColor),
           ),
         ),
-      ),
-      body: PageView.builder(
-        controller: _pages,
-        itemCount: appPages.length,
-        onPageChanged: (index) {
-          if (_tabs.index != index) _tabs.animateTo(index);
-        },
-        itemBuilder: (context, index) => DashboardWebPage(
-          key: _webKeys[index],
-          page: appPages[index],
-          dark: dark,
-          onSessionExpired: _signOut,
+        child: NavigationBar(
+          selectedIndex: _tab,
+          onDestinationSelected: (index) => setState(() {
+            _tab = index;
+            _visitedTabs.add(index);
+          }),
+          destinations: [
+            for (final page in appPages)
+              NavigationDestination(
+                icon: Icon(page.icon),
+                selectedIcon: Icon(page.icon),
+                label: page.navLabel,
+              ),
+          ],
         ),
       ),
     );
@@ -584,7 +593,7 @@ class _StartupScreen extends StatelessWidget {
             ),
             const SizedBox(height: 12),
             Text(
-              'Preparing Nithi BTC Bot…',
+              'Preparing Nithi Bot…',
               style: TextStyle(
                 color: Theme.of(context).colorScheme.onSurfaceVariant,
                 fontSize: 12,
@@ -701,7 +710,7 @@ class _LoginScreenState extends State<LoginScreen> {
                             ),
                             const SizedBox(height: 18),
                             Text(
-                              'Nithi BTC Bot',
+                              'Nithi Bot',
                               textAlign: TextAlign.center,
                               style: TextStyle(
                                 color: colors.onSurface,
@@ -863,6 +872,7 @@ class DashboardWebPageState extends State<DashboardWebPage>
     super.initState();
     _controller = WebViewController()
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
+      ..setVerticalScrollBarEnabled(true)
       ..setBackgroundColor(widget.dark ? kDarkBackground : kLightBackground)
       ..setNavigationDelegate(
         NavigationDelegate(

@@ -12,7 +12,7 @@ void main() {
     expect(
       appPages.map((page) => page.label),
       equals([
-        'Nithi BTC Bot',
+        'Nithi Bot',
         'Trades & P&L',
         'Dry Run',
         'Positions',

@@ -20,10 +20,13 @@ def test_android_embedded_pages_hide_web_chrome_and_accept_native_theme():
     assert "body.native-app .sidebar" in styles
     assert "body.native-app .topbar" in styles
     assert "body.native-app .content" in styles
-    assert "PageView.builder(" in flutter
-    assert "TabBar(" in flutter
+    assert "PageView.builder(" not in flutter
+    assert "TabBar(" not in flutter
+    assert "IndexedStack(" in flutter
+    assert "NavigationBar(" in flutter
+    assert "setVerticalScrollBarEnabled(true)" in flutter
     assert "Switch.adaptive(" in flutter
-    assert "label: 'Nithi BTC Bot'" in flutter
+    assert "label: 'Nithi Bot'" in flutter
     assert "path: '/dry-run'" in flutter
     assert "path: '/logs'" not in flutter
 

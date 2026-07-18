@@ -4371,7 +4371,7 @@ def download_apk():
     apk = BASE / "mv_btc_bot" / "build" / "app" / "outputs" / "flutter-apk" / "app-release.apk"
     if not apk.exists():
         abort(404)
-    return send_file(str(apk), as_attachment=True, download_name="mathi-bot.apk")
+    return send_file(str(apk), as_attachment=True, download_name="nithi-bot.apk")
 
 
 @app.route("/api/logs")

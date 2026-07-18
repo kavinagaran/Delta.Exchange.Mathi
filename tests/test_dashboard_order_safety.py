@@ -249,7 +249,8 @@ def test_overview_has_no_manual_move_controls_and_shows_auto_diagnostics():
         "AUTO forecast" in mobile
         or (
             "class DashboardWebPage" in mobile
-            and "AppPageSpec(label: 'Nithi BTC Bot', path: '/'" in mobile
+            and "label: 'Nithi Bot'" in mobile
+            and "path: '/'" in mobile
         )
     )
 
