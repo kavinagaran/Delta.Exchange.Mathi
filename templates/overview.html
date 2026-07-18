@@ -108,9 +108,9 @@ function manualBtns(slot) {
   </div>`;
 }
 
-function tpRow(slot, tp, positionOpen = true) {
+function tpRow(slot, tp, positionOpen = true, cleanState = false) {
   const t = (tp || {})[slot] || {};
-  const on = !!t.running;
+  const on = cleanState ? false : !!t.running;
   const protectedLots = +t.protected_lots || 0;
   const botLots = +t.bot_entry_lots || protectedLots;
   const externalLots = +t.external_protected_lots || 0;
@@ -119,16 +119,24 @@ function tpRow(slot, tp, positionOpen = true) {
     : t.coverage_status === 'local_fallback' ? 'LOCAL FALLBACK'
     : t.coverage_status === 'resizing' ? 'RESIZING'
     : 'VERIFYING';
-  const coverageNote = t.lot_attribution_status === 'fungible_after_reduction'
+  const coverageNote = cleanState ? ''
+    : t.lot_attribution_status === 'fungible_after_reduction'
     ? `<b class="c-pos">${fN(protectedLots)} aggregate lots targeted</b> · original bot entry ${fN(botLots)} lots · remaining-lot attribution is fungible · `
     : externalLots > 0
       ? `<b class="c-pos">${fN(protectedLots)} aggregate lots targeted = ${fN(botLots)} bot entry + ${fN(externalLots)} externally added matching lots</b> · `
       : '';
-  const coverageState = t.coverage_status === 'exchange_protected'
+  const coverageState = cleanState ? ''
+    : t.coverage_status === 'exchange_protected'
     ? '<b class="c-pos">Full-size exchange coverage confirmed</b> · '
     : t.coverage_status === 'local_fallback'
       ? '<b class="c-muted">Executable full-position local fallback active</b> · '
       : (on && positionOpen ? '<b class="c-neg">Full-size protection is being verified</b> · ' : '');
+  const protectionNote = cleanState ? ''
+    : (t.tsl_armed
+        ? `<b class="c-pos">TSL armed — floor ${f$(t.tsl_floor)}${t.tsl_on_exchange ? ' · resting stop on exchange' : ''}</b> · `
+        : (t.sl_on_exchange ? `<b class="c-neg">SL resting on exchange</b> · ` : ''))
+      + (t.tp_on_exchange ? '<b class="c-pos">TP resting on exchange</b> · ' : '')
+      + (t.monitor_error ? `<b class="c-neg">Monitor: ${esc(t.monitor_error)}</b> · ` : '');
   return `<div class="tp-box">
     <div class="tp-box-hd">
       <span class="tp-title">TP / SL / TSL Monitor</span>
@@ -148,16 +156,14 @@ function tpRow(slot, tp, positionOpen = true) {
         <button class="btn ${on ? 'warn' : 'success'} sm" onclick="toggleTp('${slot}', ${on})" ${positionOpen ? '' : 'disabled title="Opens automatically with the trend position"'}>${on ? 'Stop' : (positionOpen ? 'Start' : 'Auto-starts on entry')}</button>
       </span>
     </div>
-    <div class="tp-note">${coverageNote}${coverageState}${t.tsl_armed
-        ? `<b class="c-pos">TSL armed — floor ${f$(t.tsl_floor)}${t.tsl_on_exchange ? ' · resting stop on exchange' : ''}</b> · `
-        : (t.sl_on_exchange ? `<b class="c-neg">SL resting on exchange</b> · ` : '')
-      }${t.tp_on_exchange ? '<b class="c-pos">TP resting on exchange</b> · ' : ''}${t.monitor_error ? `<b class="c-neg">Monitor: ${esc(t.monitor_error)}</b> · ` : ''}0 disables that protection · TSL activation, allowed giveback and minimum locked profit are configured independently.</div>
+    <div class="tp-note">${coverageNote}${coverageState}${protectionNote}0 disables that protection · TSL activation, allowed giveback and minimum locked profit are configured independently.</div>
   </div>`;
 }
 
 function slotHtml(s, slot, tp) {
-  if (!s || !s.status || s.status === 'IDLE') {
-    return `<div class="no-pos"><span class="icon">💤</span>No position</div>${manualBtns(slot)}${slot === 'trend' ? tpRow(slot, tp, false) : ''}`;
+  if (!s || !s.status || s.status === 'IDLE'
+      || (s.status === 'CLOSED' && s.dashboard_visible === false)) {
+    return `<div class="no-pos"><span class="icon">💤</span>No position</div>${manualBtns(slot)}${slot === 'trend' ? tpRow(slot, tp, false, true) : ''}`;
   }
   if (s.status === 'OPEN' && s.dry_run) {
     return `<div class="sim-note">⚠ SIMULATED entry — no real order was placed<br>

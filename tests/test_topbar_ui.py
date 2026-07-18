@@ -113,3 +113,77 @@ if ('theme' in root.dataset || storage.get('nithi-theme') !== 'light') {
         check=False,
     )
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.skipif(NODE is None, reason="Node.js is required for frontend JavaScript tests")
+def test_stale_closed_card_renders_clean_idle_state_without_old_protection_health():
+    script = r"""
+const fs = require('fs');
+const vm = require('vm');
+const source = fs.readFileSync('templates/overview.html', 'utf8');
+const start = source.indexOf('function tpRow');
+const end = source.indexOf('function renderExternalOptions');
+if (start < 0 || end <= start) throw new Error('Overview card functions not found');
+
+global.manualBtns = () => '<button>MANUAL</button>';
+global.fN = value => String(value ?? '');
+global.f$ = value => '$' + String(value ?? '');
+global.esc = value => String(value ?? '');
+global.utcToIst = value => String(value ?? '');
+global.pnlCls = () => 'c-neg';
+vm.runInThisContext(source.slice(start, end));
+
+const html = slotHtml({
+  status: 'CLOSED',
+  dashboard_visible: false,
+  symbol: 'OLD-CONTRACT',
+  pnl_usd: -99,
+}, 'trend', {
+  trend: {
+    running: true,
+    protection_established: true,
+    protected_lots: 6,
+    bot_entry_lots: 3,
+    external_protected_lots: 3,
+    coverage_status: 'exchange_protected',
+    monitor_error: 'stale monitor error',
+  },
+});
+
+for (const stale of ['OLD-CONTRACT', '-99', 'aggregate lots targeted',
+                     'Full-size exchange coverage', 'stale monitor error']) {
+  if (html.includes(stale)) throw new Error(`stale detail remained: ${stale}`);
+}
+if (!html.includes('No position') || !html.includes('Auto-starts on entry')) {
+  throw new Error(`clean idle state was not rendered: ${html}`);
+}
+
+const current = slotHtml({
+  status: 'CLOSED',
+  dashboard_visible: true,
+  symbol: 'TODAY-CONTRACT',
+  pnl_usd: 5,
+  exit_time_utc: '05:00:00',
+}, 'trend', {
+  trend: {
+    running: true,
+    protected_lots: 6,
+    bot_entry_lots: 3,
+    external_protected_lots: 3,
+    coverage_status: 'exchange_protected',
+    monitor_error: 'current reconciliation',
+  },
+});
+for (const currentDetail of ['TODAY-CONTRACT', 'aggregate lots targeted',
+                             'Full-size exchange coverage',
+                             'current reconciliation']) {
+  if (!current.includes(currentDetail)) {
+    throw new Error(`same-day detail was hidden: ${currentDetail}`);
+  }
+}
+"""
+    result = subprocess.run(
+        [NODE, "-e", script], cwd=ROOT, text=True, capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr

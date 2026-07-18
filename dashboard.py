@@ -1656,7 +1656,9 @@ def _utc_trade_exit_at(record: dict) -> datetime | None:
     position closed after midnight on the following UTC day.  Newer records
     can carry an authoritative ``exit_date`` or ISO ``exit_at_utc`` instead.
     """
-    stamp = str(record.get("exit_at_utc") or "").strip()
+    stamp = str(
+        record.get("exit_at_utc") or record.get("closed_at_utc") or ""
+    ).strip()
     if stamp:
         try:
             dt = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
@@ -1716,6 +1718,40 @@ def _utc_trade_exit_at(record: dict) -> datetime | None:
             except (TypeError, ValueError):
                 pass
     return exited
+
+
+_IST_TIMEZONE = timezone(timedelta(hours=5, minutes=30))
+
+
+def _slot_state_visible_on_dashboard(
+        state: dict, now: datetime | None = None) -> bool:
+    """Whether a slot's position details belong on today's Overview card.
+
+    CLOSED state remains persisted for history, reconciliation and re-entry
+    safety.  Its card is presentation-only and expires at the next IST
+    midnight.  An unparseable legacy close remains visible because its age
+    cannot be proven; only definitively old position details are suppressed.
+    """
+    if not isinstance(state, dict):
+        return False
+    if str(state.get("status") or "").upper() != "CLOSED":
+        return True
+    exited = _utc_trade_exit_at(state)
+    if exited is None:
+        return True
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    return (exited.astimezone(_IST_TIMEZONE).date()
+            >= current.astimezone(_IST_TIMEZONE).date())
+
+
+def _dashboard_slot_view(
+        state: dict, now: datetime | None = None) -> dict:
+    """Return an API presentation copy without mutating persisted state."""
+    view = dict(state) if isinstance(state, dict) else {}
+    view["dashboard_visible"] = _slot_state_visible_on_dashboard(view, now)
+    return view
 
 
 def _closed_trade_pnl(record: dict) -> float | None:
@@ -1793,13 +1829,18 @@ def api_status():
         except Exception:
             pass
     _sync_states_from_exchange()
-    state   = _enrich_live(_load_json(_slot_file("evening"), {}))
-    morning = _enrich_live(_load_json(_slot_file("morning"), {}))
-    trend   = _enrich_live(_load_json(_slot_file("trend"), {}))
-    state["latest_closed_trade"] = _latest_closed_trade(
+    raw_state   = _enrich_live(_load_json(_slot_file("evening"), {}))
+    raw_morning = _enrich_live(_load_json(_slot_file("morning"), {}))
+    raw_trend   = _enrich_live(_load_json(_slot_file("trend"), {}))
+    latest_closed = _latest_closed_trade(
         _load_json(_hist_file(), []),
-        {"evening": state, "morning": morning, "trend": trend},
+        {"evening": raw_state, "morning": raw_morning, "trend": raw_trend},
     )
+    view_now = datetime.now(timezone.utc)
+    state   = _dashboard_slot_view(raw_state, view_now)
+    morning = _dashboard_slot_view(raw_morning, view_now)
+    trend   = _dashboard_slot_view(raw_trend, view_now)
+    state["latest_closed_trade"] = latest_closed
     state["morning"] = morning
     state["trend"]   = trend
     # Unrelated C/P positions remain separate. Exact same-product additions
@@ -2405,9 +2446,14 @@ def api_square_off():
                 sign = -1 if state.get("side") == "short" else 1
                 pnl = round((mark - entry_mark) * float(state.get("contract_value") or 0.001)
                             * int(state.get("lots") or 0) * sign, 2)
-                state.update(status="CLOSED", exit_mark=mark, pnl_usd=pnl,
-                             exit_time_utc=datetime.now(timezone.utc).strftime("%H:%M:%S"),
-                             exit_trigger="manual_squareoff_simulated")
+                exited = datetime.now(timezone.utc)
+                state.update(
+                    status="CLOSED", exit_mark=mark, pnl_usd=pnl,
+                    exit_date=exited.strftime("%Y-%m-%d"),
+                    exit_time_utc=exited.strftime("%H:%M:%S"),
+                    exit_at_utc=exited.isoformat().replace("+00:00", "Z"),
+                    exit_trigger="manual_squareoff_simulated",
+                )
                 _atomic_write_json(state_file, state)
                 return jsonify({"ok": True, "pnl": pnl, "fill": mark,
                                 "order_id": None, "dry_run": True})

@@ -1,5 +1,6 @@
 import json
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -112,6 +113,106 @@ def test_history_is_authoritative_for_same_closed_trade_timestamp():
     latest = dashboard._latest_closed_trade(history, states)
 
     assert latest["pnl_usd"] == -7.25
+
+
+def test_closed_slot_dashboard_visibility_resets_at_ist_midnight():
+    now = datetime(2026, 7, 18, 18, 31, tzinfo=timezone.utc)  # Jul 19 00:01 IST
+    previous_ist_day = {
+        "status": "CLOSED", "entry_date": "2026-07-18",
+        "entry_time_utc": "12:00:00", "exit_date": "2026-07-18",
+        "exit_time_utc": "18:29:00",  # Jul 18 23:59 IST
+    }
+    current_ist_day = {
+        **previous_ist_day,
+        "exit_time_utc": "18:30:00",  # Jul 19 00:00 IST
+    }
+
+    assert dashboard._slot_state_visible_on_dashboard(
+        previous_ist_day, now) is False
+    assert dashboard._slot_state_visible_on_dashboard(
+        current_ist_day, now) is True
+
+
+def test_closed_slot_visibility_handles_legacy_overnight_and_uncertain_states():
+    now = datetime(2026, 7, 19, 1, 0, tzinfo=timezone.utc)
+    overnight = {
+        "status": "CLOSED", "entry_date": "2026-07-18",
+        "entry_time_utc": "23:55:00", "exit_time_utc": "00:10:00",
+    }
+
+    assert dashboard._slot_state_visible_on_dashboard(overnight, now) is True
+    assert dashboard._slot_state_visible_on_dashboard(
+        {"status": "CLOSED", "entry_date": "2026-07-18"}, now) is True
+    assert dashboard._slot_state_visible_on_dashboard(
+        {"status": "OPEN", "entry_date": "2020-01-01"}, now) is True
+
+
+def test_stale_dry_run_view_is_hidden_without_mutating_persisted_state():
+    state = {
+        "slot": "evening", "status": "CLOSED", "dry_run": True,
+        "symbol": "MV-BTC-64000-100726",
+        "entry_date": "2026-07-10", "entry_time_utc": "07:51:19",
+        "exit_date": "2026-07-10", "exit_time_utc": "09:48:33",
+    }
+    original = dict(state)
+
+    view = dashboard._dashboard_slot_view(
+        state, datetime(2026, 7, 18, 4, 0, tzinfo=timezone.utc))
+
+    assert view["dashboard_visible"] is False
+    assert state == original
+    assert "dashboard_visible" not in state
+
+
+def test_status_marks_only_old_closed_cards_hidden_and_keeps_latest_trade(
+        isolated_status_account, monkeypatch):
+    fixed_now = datetime(2026, 7, 18, 6, 0, tzinfo=timezone.utc)
+
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed_now if tz else fixed_now.replace(tzinfo=None)
+
+    old_evening = {
+        "slot": "evening", "status": "CLOSED",
+        "symbol": "OLD-EVENING", "pnl_usd": -3.44,
+        "entry_date": "2026-07-17", "entry_time_utc": "12:06:17",
+        "exit_date": "2026-07-17", "exit_time_utc": "13:38:04",
+    }
+    today_morning = {
+        "slot": "morning", "status": "CLOSED",
+        "symbol": "TODAY-MORNING", "pnl_usd": 2.39,
+        "entry_date": "2026-07-18", "entry_time_utc": "00:11:31",
+        "exit_date": "2026-07-18", "exit_time_utc": "05:33:01",
+    }
+    _write(isolated_status_account / "straddle_state.json", old_evening)
+    _write(isolated_status_account / "morning_state.json", today_morning)
+    _write(isolated_status_account / "trend_state.json", {"status": "IDLE"})
+
+    monkeypatch.setattr(dashboard, "datetime", FixedDateTime)
+    monkeypatch.setattr(dashboard, "_sync_states_from_exchange", lambda: None)
+    monkeypatch.setattr(dashboard, "_revive_tp_monitors", lambda: None)
+    monkeypatch.setattr(dashboard, "_user_cfg", lambda: {})
+    monkeypatch.setitem(dashboard._last_revive, "ts", time.time())
+
+    class TickerResponse:
+        @staticmethod
+        def json():
+            return {"result": {"mark_price": "64637"}}
+
+    monkeypatch.setattr(
+        dashboard.req, "get", lambda *args, **kwargs: TickerResponse())
+
+    with dashboard.app.test_request_context("/api/status"):
+        payload = dashboard.api_status().get_json()
+
+    assert payload["dashboard_visible"] is False
+    assert payload["morning"]["dashboard_visible"] is True
+    assert payload["trend"]["dashboard_visible"] is True
+    assert payload["latest_closed_trade"]["symbol"] == "TODAY-MORNING"
+    assert json.loads(
+        (isolated_status_account / "straddle_state.json").read_text(
+            encoding="utf-8")) == old_evening
 
 
 def test_status_latest_closed_trade_skips_dry_run_and_preserves_unknown_pnl(
