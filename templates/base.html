@@ -7,8 +7,11 @@
 <script>
   /* Apply a saved choice before the stylesheet loads, avoiding a light-theme flash. */
   try {
-    if (localStorage.getItem('nithi-theme') === 'dark') {
+    const appTheme = new URLSearchParams(window.location.search).get('theme');
+    if (appTheme === 'dark' || (!appTheme && localStorage.getItem('nithi-theme') === 'dark')) {
       document.documentElement.dataset.theme = 'dark';
+    } else if (appTheme === 'light') {
+      delete document.documentElement.dataset.theme;
     }
   } catch (_) {}
 </script>
@@ -17,7 +20,7 @@
 <script src="/static/js/app.js?v={{ asset_v('js/app.js') }}"></script>
 {% block head %}{% endblock %}
 </head>
-<body>
+<body class="{{ 'native-app' if request.args.get('app') == '1' else '' }}">
 <div class="layout">
 
   <aside class="sidebar">

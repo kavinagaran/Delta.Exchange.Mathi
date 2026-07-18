@@ -9,6 +9,25 @@ ROOT = Path(__file__).resolve().parents[1]
 NODE = shutil.which("node")
 
 
+def test_android_embedded_pages_hide_web_chrome_and_accept_native_theme():
+    template = (ROOT / "templates" / "base.html").read_text(encoding="utf-8")
+    styles = (ROOT / "static" / "css" / "app.css").read_text(encoding="utf-8")
+    flutter = (ROOT / "mv_btc_bot" / "lib" / "main.dart").read_text(
+        encoding="utf-8")
+
+    assert "request.args.get('app') == '1'" in template
+    assert "new URLSearchParams(window.location.search).get('theme')" in template
+    assert "body.native-app .sidebar" in styles
+    assert "body.native-app .topbar" in styles
+    assert "body.native-app .content" in styles
+    assert "PageView.builder(" in flutter
+    assert "TabBar(" in flutter
+    assert "Switch.adaptive(" in flutter
+    assert "label: 'Nithi BTC Bot'" in flutter
+    assert "path: '/dry-run'" in flutter
+    assert "path: '/logs'" not in flutter
+
+
 @pytest.mark.skipif(NODE is None, reason="Node.js is required for frontend JavaScript tests")
 def test_closed_trade_capsule_classifies_pnl_and_uses_latest_trade():
     script = r"""

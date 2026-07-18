@@ -245,7 +245,13 @@ def test_overview_has_no_manual_move_controls_and_shows_auto_diagnostics():
     assert "/api/manual-entry" not in mobile
     assert "MORNING_SIDE" not in mobile
     assert "EVENING_SIDE" not in mobile
-    assert "AUTO forecast" in mobile
+    assert (
+        "AUTO forecast" in mobile
+        or (
+            "class DashboardWebPage" in mobile
+            and "AppPageSpec(label: 'Nithi BTC Bot', path: '/'" in mobile
+        )
+    )
 
 
 def test_short_plan_requires_opt_in_positive_sl_and_short_cap():

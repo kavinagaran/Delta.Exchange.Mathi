@@ -75,6 +75,19 @@ a { color: var(--accent); text-decoration: none; }
 /* ── Layout ─────────────────────────────────────────────── */
 .layout { display: flex; min-height: 100vh; }
 
+/* Native Android shell: Flutter supplies branding, tabs and theme controls;
+   the embedded page keeps the exact dashboard content and interactions. */
+body.native-app .sidebar,
+body.native-app .topbar { display: none !important; }
+body.native-app .layout { display: block; min-height: 100vh; }
+body.native-app .main { width: 100%; min-height: 100vh; }
+body.native-app .content {
+  width: 100%;
+  min-height: 100vh;
+  padding: 14px 12px 30px;
+}
+body.native-app .toast { left: 12px; right: 12px; bottom: 16px; max-width: none; }
+
 .sidebar {
   width: 224px; flex-shrink: 0;
   background: var(--sidebar-bg);
