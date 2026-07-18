@@ -549,11 +549,17 @@ def test_dry_run_cards_are_equal_sized_and_every_open_slot_has_manual_exit():
         encoding="utf-8")
 
     assert "grid-auto-rows: 1fr" in styles
+    assert ".dry-slot-grid > .card {" in styles
+    assert (
+        ".grid > .card, .dry-slot-grid > .card { margin-top: 0; }"
+        in styles
+    )
     assert ".dry-slot-card {" in styles
     assert "min-height: 420px; flex: 1 1 auto" in styles
     assert "dry-slot-footer-panel" in template
     assert "min-height: 86px" in styles
-    assert "Manual Exit" in template
+    assert "\n          Exit\n" in template
+    assert ">Exit</button>" in overview
     assert "endDrySimulation('${slot}')" in template
     for slot in ("morning", "evening", "trend"):
         assert f"dryPositionDetails(dryStatus.{slot} || {{}}, '{slot}'" in template

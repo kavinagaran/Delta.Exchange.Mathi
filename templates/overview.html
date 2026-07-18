@@ -211,7 +211,7 @@ function slotHtml(s, slot, tp) {
   if (s.status === 'OPEN' && s.dry_run) {
     return `<div class="sim-note">⚠ SIMULATED entry — no real order was placed<br>
       <span class="hint">${esc(s.symbol)} · Mode was DRY RUN at entry time</span></div>
-      <div class="btn-row center"><button class="btn danger sm" onclick="squareOff('${slot}', 'dry_run')">Manual Exit</button></div>`;
+      <div class="btn-row center"><button class="btn danger sm" onclick="squareOff('${slot}', 'dry_run')">Exit</button></div>`;
   }
   if (s.status === 'OPEN') {
     const pnl = s.live_pnl;
@@ -227,7 +227,7 @@ function slotHtml(s, slot, tp) {
         <dt>Cost</dt><dd>$${fN(s.total_cost_usd, 2)}</dd>
       </dl>
       <div class="btn-row center">
-        <button class="btn danger" onclick="squareOff('${slot}', 'live')">Manual Exit</button>
+        <button class="btn danger" onclick="squareOff('${slot}', 'live')">Exit</button>
         <button class="btn secondary" onclick="showPayoff('${slot}')" title="Payoff at settlement">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18M7 14l4-6 4 3 5-8"/></svg>
           Payoff
