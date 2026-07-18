@@ -2129,9 +2129,224 @@ def _move_client_id(action: str, slot: str) -> str:
 def _strict_exchange_positions() -> list[dict]:
     data = req.get(f"{API_BASE}/v2/positions/margined",
                    headers=_sign("GET", "/v2/positions/margined"), timeout=8).json()
-    if not data.get("success") or not isinstance(data.get("result"), list):
-        raise RuntimeError(f"exchange positions could not be verified: {data.get('error') or data}")
-    return [p for p in data["result"] if int(float(p.get("size") or 0)) != 0]
+    if (not isinstance(data, dict) or not data.get("success")
+            or not isinstance(data.get("result"), list)):
+        error = data.get("error") if isinstance(data, dict) else data
+        raise RuntimeError(f"exchange positions could not be verified: {error or data}")
+    positions = []
+    for position in data["result"]:
+        if not isinstance(position, dict):
+            raise RuntimeError("exchange positions could not be verified: malformed position")
+        raw_size = position.get("size")
+        if raw_size in (None, "") or isinstance(raw_size, bool):
+            raise RuntimeError(
+                "exchange positions could not be verified: missing position size")
+        try:
+            size = float(raw_size)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise RuntimeError(
+                "exchange positions could not be verified: malformed size"
+            ) from exc
+        if not math.isfinite(size):
+            raise RuntimeError(
+                "exchange positions could not be verified: non-finite size")
+        # Do not truncate before comparing with zero. Although Delta contracts
+        # normally use integer lots, any fractional external exposure must
+        # still keep account-wide Trading Mode locked.
+        if size != 0:
+            positions.append(position)
+    return positions
+
+
+_MODE_INACTIVE_STATE_STATUSES = {"", "IDLE", "CLOSED"}
+
+
+def _strict_mode_state(path: Path) -> dict:
+    """Read one mode state without falling back to a potentially stale backup."""
+    if not path.exists():
+        return {}
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError) as exc:
+        raise RuntimeError(f"{path.name} is unreadable") from exc
+    if not isinstance(state, dict):
+        raise RuntimeError(f"{path.name} is not a JSON object")
+    return state
+
+
+def _mode_local_position_blockers() -> list[dict]:
+    """Return every local position or unresolved entry that may own exposure.
+
+    LIVE and isolated DRY RUN persistence are intentionally scanned together:
+    changing the configured mode does not close or transfer either namespace.
+    """
+    account_dir = _user_dir()
+    blockers = []
+    for namespace_dry, data_dir in (
+            (False, account_dir), (True, account_dir / "dry_run")):
+        namespace = "dry_run" if namespace_dry else "live"
+        for slot in SLOTS:
+            state = _strict_mode_state(data_dir / SLOT_STATE_FILES[slot])
+            status = str(state.get("status") or "").strip().upper()
+            unresolved_submission = any(
+                str(state.get(key) or "").strip()
+                for key in (
+                    "pending_entry_submission_state",
+                    "pending_close_submission_state",
+                )
+            )
+            if (status in _MODE_INACTIVE_STATE_STATUSES
+                    and not unresolved_submission):
+                continue
+            effective_dry = namespace_dry or _is_dry_record(state)
+            blockers.append({
+                "source": "state",
+                "execution_mode": "dry_run" if effective_dry else "live",
+                "slot": slot,
+                "status": status or "UNRESOLVED",
+                "label": (
+                    f"{'DRY RUN' if effective_dry else 'LIVE'} "
+                    f"{slot.title()} ({status or 'unresolved'})"
+                ),
+            })
+
+        # Scheduled MOVE entries keep a separate crash-recovery journal before
+        # their state becomes OPEN. Its mere presence means a fill may exist.
+        if data_dir.exists():
+            for journal in sorted(data_dir.glob("pending_*_entry.json")):
+                blockers.append({
+                    "source": "entry_journal",
+                    "execution_mode": namespace,
+                    "slot": journal.stem.removeprefix(
+                        "pending_").removesuffix("_entry"),
+                    "status": "ENTRY_PENDING",
+                    "label": (
+                        f"{'DRY RUN' if namespace_dry else 'LIVE'} "
+                        f"unresolved entry ({journal.name})"
+                    ),
+                })
+            for journal in sorted(data_dir.glob("pending_trend_order_*.json")):
+                blockers.append({
+                    "source": "trend_order_intent",
+                    "execution_mode": namespace,
+                    "slot": "trend",
+                    "status": "ENTRY_PENDING",
+                    "label": (
+                        f"{'DRY RUN' if namespace_dry else 'LIVE'} "
+                        f"unresolved Trend order ({journal.name})"
+                    ),
+                })
+    return blockers
+
+
+def _trading_mode_change_status() -> dict:
+    """Prove whether the account is flat enough to change execution mode.
+
+    This is deliberately uncached. The POST path calls it while holding the
+    same account entry mutex used by scheduled and manual entries.
+    """
+    result = {
+        **_trading_mode_payload(),
+        "mode_change_allowed": False,
+        "mode_selection_enabled": False,
+        "verification_ok": False,
+        "open_position_count": 0,
+        "exchange_position_count": None,
+        "open_position_labels": [],
+        "blockers": [],
+        "checked_at_utc": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        local_blockers = _mode_local_position_blockers()
+    except Exception as exc:
+        app.logger.warning(
+            "Trading Mode local position verification failed for %s: %s",
+            _active_user(), exc,
+        )
+        result["mode_lock_reason"] = (
+            "Trading Mode is locked because local position status could not "
+            "be verified. Repair the account state before switching."
+        )
+        return result
+
+    if local_blockers:
+        result.update({
+            "verification_ok": True,
+            "open_position_count": len(local_blockers),
+            "open_position_labels": [item["label"] for item in local_blockers],
+            "blockers": local_blockers,
+            "mode_lock_reason": (
+                "Trading Mode is locked while a LIVE or DRY RUN position or "
+                "unresolved entry is open. Close every position and wait for "
+                "pending entries to resolve before switching."
+            ),
+        })
+        return result
+
+    key, secret = _active_creds()
+    if not key or not secret:
+        result["mode_lock_reason"] = (
+            "Trading Mode is locked because exchange positions cannot be "
+            "verified without this account's API credentials."
+        )
+        return result
+    try:
+        exchange_positions = _strict_exchange_positions()
+    except Exception as exc:
+        app.logger.warning(
+            "Trading Mode exchange position verification failed for %s: %s",
+            _active_user(), exc,
+        )
+        result["mode_lock_reason"] = (
+            "Trading Mode is locked because exchange positions could not be "
+            "verified. Retry after the exchange connection recovers."
+        )
+        return result
+
+    if exchange_positions:
+        labels = []
+        blockers = []
+        for position in exchange_positions:
+            symbol = str(
+                position.get("product_symbol")
+                or position.get("symbol")
+                or position.get("product_id")
+                or "unknown product"
+            )[:80]
+            label = f"LIVE exchange position ({symbol})"
+            labels.append(label)
+            blockers.append({
+                "source": "exchange",
+                "execution_mode": "live",
+                "slot": "",
+                "status": "OPEN",
+                "label": label,
+            })
+        result.update({
+            "verification_ok": True,
+            "open_position_count": len(exchange_positions),
+            "exchange_position_count": len(exchange_positions),
+            "open_position_labels": labels,
+            "blockers": blockers,
+            "mode_lock_reason": (
+                "Trading Mode is locked while exchange positions are open, "
+                "including external/manual positions. Close every position "
+                "before switching."
+            ),
+        })
+        return result
+
+    result.update({
+        "mode_change_allowed": True,
+        "mode_selection_enabled": True,
+        "verification_ok": True,
+        "exchange_position_count": 0,
+        "mode_lock_reason": (
+            "No open LIVE, DRY RUN, pending, or external positions — "
+            "Trading Mode can be changed."
+        ),
+    })
+    return result
 
 
 def _strict_realtime_position(product_id: int) -> dict:
@@ -5355,9 +5570,26 @@ def _exchange_option_position(product_id: int) -> dict | None:
 
 def _journal_order_intent(payload: dict, preview: dict, chunk_index: int) -> bool:
     """Durably record client identity before an irreversible exchange call."""
+    client_id = str(payload.get("client_order_id") or "").strip()
+    safe_client_id = re.sub(r"[^a-zA-Z0-9_-]", "_", client_id)[:80]
+    pending_path = (_user_dir() / f"pending_trend_order_{safe_client_id}.json"
+                    if safe_client_id else None)
     try:
+        if pending_path is None:
+            raise RuntimeError("Trend order intent has no client identity")
+        _atomic_write_json(pending_path, {
+            "status": "PENDING",
+            "client_order_id": client_id,
+            "product_id": payload.get("product_id"),
+            "symbol": preview.get("symbol"),
+            "size": payload.get("size"),
+            "order_type": payload.get("order_type"),
+            "created_at_utc": datetime.now(timezone.utc).isoformat(),
+            "chunk_index": chunk_index,
+            "signal_key": preview.get("signal_key"),
+        })
         audit_event(_user_dir(), "trend_order_intent", {
-            "client_order_id": payload.get("client_order_id"),
+            "client_order_id": client_id,
             "product_id": payload.get("product_id"), "symbol": preview.get("symbol"),
             "size": payload.get("size"), "order_type": payload.get("order_type"),
             "limit_price": payload.get("limit_price"), "time_in_force": payload.get("time_in_force"),
@@ -5367,6 +5599,20 @@ def _journal_order_intent(payload: dict, preview: dict, chunk_index: int) -> boo
     except Exception as exc:
         _trend_auto_health.setdefault(_active_user(), {})["last_audit_error"] = str(exc)
         return False
+
+
+def _clear_pending_trend_intents(client_ids) -> None:
+    for client_id in client_ids or ():
+        safe_client_id = re.sub(r"[^a-zA-Z0-9_-]", "_", str(client_id or "").strip())[:80]
+        if not safe_client_id:
+            continue
+        try:
+            (_user_dir() / f"pending_trend_order_{safe_client_id}.json").unlink(
+                missing_ok=True)
+        except OSError:
+            # Retaining the marker is fail-closed: a later mode check will keep
+            # the selector locked until the operator can verify the intent.
+            pass
 
 
 def _submit_trend_order(payload: dict) -> tuple[dict | None, dict]:
@@ -5387,6 +5633,7 @@ def _execute_trend_chunks(preview: dict, requested_lots: int) -> dict:
     reference_ask = _as_float(preview.get("ask"), 0)
     remaining, filled_total, weighted = requested_lots, 0, 0.0
     executions, error = [], None
+    pending_intent_ids, unresolved_intent_ids = [], []
     chunk_index = 0
     while remaining > 0:
         chunk_index += 1
@@ -5418,6 +5665,7 @@ def _execute_trend_chunks(preview: dict, requested_lots: int) -> dict:
         if not _journal_order_intent(payload, preview, chunk_index):
             error = "Durable order-intent journal failed; no exchange order was sent"
             break
+        pending_intent_ids.append(client_id)
         order, result = _submit_trend_order(payload)
         if not order:
             err = result.get("error") or {}
@@ -5450,6 +5698,7 @@ def _execute_trend_chunks(preview: dict, requested_lots: int) -> dict:
                            "paid_commission_usd": _order_commission_optional_usd(order)})
 
         if not quantity_proven:
+            unresolved_intent_ids.append(client_id)
             error = (f"Order {order.get('id')} quantity could not be verified; "
                      "intent is journaled for reconciliation and no fallback was sent")
             break
@@ -5465,6 +5714,7 @@ def _execute_trend_chunks(preview: dict, requested_lots: int) -> dict:
                 filled_total += filled
                 remaining -= filled
                 break
+            pending_intent_ids.append(fallback_id)
             fallback, fallback_result = _submit_trend_order(fallback_payload)
             if fallback:
                 fallback = _refresh_order(fallback, pid, unfilled)
@@ -5492,6 +5742,7 @@ def _execute_trend_chunks(preview: dict, requested_lots: int) -> dict:
                 weighted += fallback_price * fallback_filled
                 filled += fallback_filled
                 if not fallback_proven:
+                    unresolved_intent_ids.append(fallback_id)
                     error = (f"Fallback order {fallback.get('id')} quantity is unverified; "
                              "no further order was sent")
             else:
@@ -5525,7 +5776,9 @@ def _execute_trend_chunks(preview: dict, requested_lots: int) -> dict:
             "executions": executions, "unfilled_lots": requested_lots - filled_total,
             "paid_commission_usd": paid_commission if fee_complete else None,
             "entry_fees_complete": fee_complete,
-            "error": error, "market_fallback_enabled": market_fallback}
+            "error": error, "market_fallback_enabled": market_fallback,
+            "pending_intent_ids": pending_intent_ids,
+            "unresolved_intent_ids": unresolved_intent_ids}
 
 
 def _execute_trend_entry(
@@ -5614,6 +5867,9 @@ def _execute_trend_entry(
             else:
                 execution = _execute_trend_chunks(preview, requested)
                 if execution["filled_lots"] <= 0:
+                    resolved_intents = set(execution.get("pending_intent_ids") or ()) - set(
+                        execution.get("unresolved_intent_ids") or ())
+                    _clear_pending_trend_intents(resolved_intents)
                     _trend_audit("trend_entry_failed", {
                         "auto": auto, "signal_key": preview.get("signal_key"),
                         "symbol": preview["symbol"], "requested_lots": requested,
@@ -5707,6 +5963,9 @@ def _execute_trend_entry(
                 })
             _atomic_write_json(
                 _slot_file("trend", dry_run=is_dry_run), new_state)
+            resolved_intents = set(execution.get("pending_intent_ids") or ()) - set(
+                execution.get("unresolved_intent_ids") or ())
+            _clear_pending_trend_intents(resolved_intents)
             # The new generation is durable. Release close-trend before the
             # monitor starts, because its first protection cycle takes this
             # same lock.
@@ -5982,6 +6241,24 @@ def get_config():
                         "error": str(exc)}), 409
 
 
+@app.route("/api/trading-mode-availability", methods=["GET"])
+def trading_mode_availability():
+    try:
+        return jsonify(_trading_mode_change_status())
+    except AccountConfigError as exc:
+        return jsonify({
+            "ok": False,
+            "mode_change_allowed": False,
+            "mode_selection_enabled": False,
+            "verification_ok": False,
+            "error": str(exc),
+            "mode_lock_reason": (
+                "Trading Mode is locked because account configuration could "
+                "not be verified."
+            ),
+        }), 409
+
+
 def _restart_tp_monitor(user: str, slot: str) -> bool:
     """Stop and respawn a user's slot TP monitor so freshly saved targets
     apply. Only called for monitors that are already running."""
@@ -6056,7 +6333,8 @@ _CONFIG_NUMERIC_BOUNDS = {
 
 def _validate_config_update(data: dict, current: dict) -> str | None:
     if "DRY_RUN" in data:
-        raw_dry_run = str(data.get("DRY_RUN") or "").strip().lower()
+        raw_value = data.get("DRY_RUN")
+        raw_dry_run = str(raw_value if raw_value is not None else "").strip().lower()
         if raw_dry_run not in {"true", "false", "1", "0", "yes", "no", "on", "off"}:
             return "DRY_RUN must be enabled or disabled"
     mode = str(data.get("TREND_AUTO_ENTRY_MODE", current.get("TREND_AUTO_ENTRY_MODE", ""))).lower()
@@ -6098,24 +6376,52 @@ def _save_config_data(data: dict):
     users/<name>/config.json, never to the shared .env (which now serves
     purely as the global default for keys an account hasn't set). The
     account's bot instance watches its config.json and self-reloads."""
-    saved = _load_json(_cfg_file(), {})
-    if not isinstance(saved, dict):
-        saved = {}
-    error = _validate_config_update(data, _user_cfg())
-    if error:
-        return jsonify({"ok": False, "error": error}), 400
-    if "MAX_TRADES_PER_DAY_GLOBAL" in data:
-        # The scheduler still reads this legacy alias in one pre-entry check.
-        # Keep both caps identical so the visible setting is the effective one.
-        data["MAX_TRADES_PER_DAY"] = data["MAX_TRADES_PER_DAY_GLOBAL"]
-    if "TREND_AUTO_ENTRY_MODE" in data:
-        # Keep old Android clients meaningful: only live mode maps to true.
-        data["TREND_AUTO_ENTRY_ENABLED"] = str(data["TREND_AUTO_ENTRY_MODE"]).lower() == "live"
-    elif "TREND_AUTO_ENTRY_ENABLED" in data:
-        legacy_on = str(data["TREND_AUTO_ENTRY_ENABLED"]).lower() in {"1", "true", "yes", "on"}
-        data["TREND_AUTO_ENTRY_MODE"] = "live" if legacy_on else "disabled"
-    saved.update({k: str(v) for k, v in data.items() if k in CONFIG_KEYS})
-    _atomic_write_json(_cfg_file(), saved)
+    user_dir = _user_dir()
+    with account_file_lock(
+        user_dir,
+        "config",
+        f"dashboard-config-save:{os.getpid()}:{time.time_ns()}",
+        stale_after_sec=30,
+        wait_sec=5,
+    ) as acquired:
+        if not acquired:
+            return jsonify({
+                "ok": False,
+                "config_saved": False,
+                "error": (
+                    "Configuration is busy in another request. No settings "
+                    "were changed; retry Save."
+                ),
+            }), 409
+        try:
+            saved, _ = _saved_user_cfg()
+            current = _user_cfg()
+        except AccountConfigError as exc:
+            return jsonify({
+                "ok": False,
+                "config_saved": False,
+                "error": str(exc),
+            }), 409
+        error = _validate_config_update(data, current)
+        if error:
+            return jsonify({"ok": False, "config_saved": False,
+                            "error": error}), 400
+        if "MAX_TRADES_PER_DAY_GLOBAL" in data:
+            # The scheduler still reads this legacy alias in one pre-entry check.
+            # Keep both caps identical so the visible setting is the effective one.
+            data["MAX_TRADES_PER_DAY"] = data["MAX_TRADES_PER_DAY_GLOBAL"]
+        if "TREND_AUTO_ENTRY_MODE" in data:
+            # Keep old Android clients meaningful: only live mode maps to true.
+            data["TREND_AUTO_ENTRY_ENABLED"] = (
+                str(data["TREND_AUTO_ENTRY_MODE"]).lower() == "live")
+        elif "TREND_AUTO_ENTRY_ENABLED" in data:
+            legacy_on = str(data["TREND_AUTO_ENTRY_ENABLED"]).lower() in {
+                "1", "true", "yes", "on",
+            }
+            data["TREND_AUTO_ENTRY_MODE"] = (
+                "live" if legacy_on else "disabled")
+        saved.update({k: str(v) for k, v in data.items() if k in CONFIG_KEYS})
+        _atomic_write_json(_cfg_file(), saved)
     # Running TP monitors don't watch config — bounce any of the active
     # user's monitors whose targets just changed.
     user = _active_user()
@@ -6189,6 +6495,32 @@ def set_config():
                     "processed. Retry Save after the entry finishes."
                 ),
             }), 409
+        raw_value = data.get("DRY_RUN")
+        raw_requested = str(raw_value if raw_value is not None else "").strip().lower()
+        if raw_requested in {"true", "1", "yes", "on"}:
+            requested_dry_run = True
+        elif raw_requested in {"false", "0", "no", "off"}:
+            requested_dry_run = False
+        else:
+            # Preserve the normal validation response for malformed clients.
+            return _save_config_data(data)
+        try:
+            current_dry_run, _ = _trading_mode()
+        except AccountConfigError as exc:
+            return jsonify({
+                "ok": False,
+                "config_saved": False,
+                "error": str(exc),
+            }), 409
+        if requested_dry_run != current_dry_run:
+            availability = _trading_mode_change_status()
+            if not availability["mode_change_allowed"]:
+                return jsonify({
+                    **availability,
+                    "ok": False,
+                    "config_saved": False,
+                    "error": availability["mode_lock_reason"],
+                }), 409
         return _save_config_data(data)
 
 

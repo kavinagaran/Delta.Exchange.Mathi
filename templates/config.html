@@ -12,11 +12,12 @@
       <div class="form-sec-title">Operation</div>
       <div class="form-grid">
         <label class="fld"><span>Mode</span>
-          <select id="c-DRY_RUN" onchange="dryBanner()">
+          <select id="c-DRY_RUN" onchange="modeSelectionChanged()" disabled
+                  aria-describedby="mode-lock-hint">
             <option value="true">DRY RUN — simulate</option>
             <option value="false">LIVE — real orders</option>
           </select>
-          <em class="fld-hint">Account-wide execution mode for every MOVE and Trend entry.</em>
+          <em class="fld-hint" id="mode-lock-hint" role="status" aria-live="polite">Verifying that LIVE, DRY RUN and external positions are closed…</em>
         </label>
         <label class="fld"><span>MOVE lot sizing</span>
           <div class="hint" style="padding-top:9px">Mandatory min(configured, affordable, risk and liquidity caps)</div>
@@ -229,6 +230,12 @@ const KEYS = ['DRY_RUN','STRADDLE_LOTS','STRIKE_STEP','EVENING_ENABLED','EVENING
   'TREND_ALLOW_MISSING_BOOK','OPTION_FEE_RATE','OPTION_FEE_CAP_PCT'];
 
 let configReady = false;
+let loadedDryRun = '';
+let modeChangeAllowed = false;
+let modeDirty = false;
+let modeAvailabilityBusy = false;
+let modeAvailabilityRequestId = 0;
+let lastModeAvailability = null;
 const DEFAULTS = {{ config_page_defaults | tojson }};
 const RESET_PRESERVED_KEYS = new Set({{ config_page_preserved_keys | tojson }});
 
@@ -253,6 +260,82 @@ const istHHMMToUtc = v => {
 function dryBanner() {
   const on = document.getElementById('c-DRY_RUN').value === 'true';
   document.getElementById('dry-banner').style.display = on ? 'flex' : 'none';
+}
+
+function modeSelectionChanged() {
+  const select = document.getElementById('c-DRY_RUN');
+  modeDirty = select.value !== loadedDryRun;
+  dryBanner();
+}
+
+function applyModeSelectionStatus(payload) {
+  const select = document.getElementById('c-DRY_RUN');
+  const hint = document.getElementById('mode-lock-hint');
+  const status = payload && typeof payload === 'object' ? payload : {};
+  const serverMode = typeof status.dry_run_mode === 'boolean'
+    ? (status.dry_run_mode ? 'true' : 'false')
+    : '';
+  const explicitlyAllowed =
+    status.mode_change_allowed === true &&
+    status.mode_selection_enabled !== false &&
+    status.verification_ok === true;
+
+  lastModeAvailability = status;
+  modeChangeAllowed = explicitlyAllowed;
+  if (!explicitlyAllowed) {
+    const authoritativeMode = serverMode || loadedDryRun;
+    if (authoritativeMode) {
+      loadedDryRun = authoritativeMode;
+      select.value = authoritativeMode;
+    }
+    modeDirty = false;
+    select.disabled = true;
+    select.setAttribute('aria-disabled', 'true');
+    const reason = status.mode_lock_reason ||
+      'Trading Mode is locked because open positions could not be verified.';
+    hint.textContent = `${reason} Other settings can still be saved.`;
+    select.title = reason;
+  } else {
+    if (serverMode && !modeDirty) {
+      loadedDryRun = serverMode;
+      select.value = serverMode;
+    }
+    select.disabled = !configReady;
+    select.setAttribute('aria-disabled', select.disabled ? 'true' : 'false');
+    hint.textContent = status.mode_lock_reason ||
+      'No open positions — Trading Mode can be changed.';
+    select.title = '';
+  }
+  dryBanner();
+}
+
+async function refreshModeAvailability(force = false) {
+  if (modeAvailabilityBusy && !force) return;
+  const requestId = ++modeAvailabilityRequestId;
+  modeAvailabilityBusy = true;
+  try {
+    const status = await jget('/api/trading-mode-availability');
+    if (!status || typeof status.mode_change_allowed !== 'boolean') {
+      throw new Error((status && status.error) || 'Position status was incomplete');
+    }
+    if (requestId === modeAvailabilityRequestId) {
+      applyModeSelectionStatus(status);
+    }
+  } catch (error) {
+    if (requestId === modeAvailabilityRequestId) {
+      applyModeSelectionStatus({
+        mode_change_allowed: false,
+        mode_selection_enabled: false,
+        verification_ok: false,
+        mode_lock_reason:
+          'Trading Mode is locked because open positions could not be verified.',
+      });
+    }
+  } finally {
+    if (requestId === modeAvailabilityRequestId) {
+      modeAvailabilityBusy = false;
+    }
+  }
 }
 
 function shortMoveUi() {
@@ -300,7 +383,12 @@ async function loadConfig() {
   const saveButton = document.getElementById('config-save');
   const resetButton = document.getElementById('config-reset');
   const loadBanner = document.getElementById('config-load-banner');
+  const modeSelect = document.getElementById('c-DRY_RUN');
   configReady = false;
+  modeChangeAllowed = false;
+  lastModeAvailability = null;
+  modeSelect.disabled = true;
+  modeSelect.setAttribute('aria-disabled', 'true');
   saveButton.disabled = true;
   resetButton.disabled = true;
   try {
@@ -337,11 +425,15 @@ async function loadConfig() {
     window._loadedMarketFallback = document.getElementById('c-TREND_MARKET_FALLBACK_ENABLED').value;
     window._loadedExternalOverride = document.getElementById('c-ALLOW_EXTERNAL_POSITIONS_WITH_BOT').value;
     window._loadedShortMove = document.getElementById('c-ALLOW_SHORT_MOVE').value;
+    loadedDryRun = modeSelect.value;
+    modeDirty = false;
     rememberSavedPreservedValues();
     configReady = true;
     saveButton.disabled = false;
     resetButton.disabled = false;
     loadBanner.style.display = 'none';
+    if (lastModeAvailability) applyModeSelectionStatus(lastModeAvailability);
+    refreshModeAvailability(true);
   } catch (error) {
     loadBanner.style.display = 'flex';
     loadBanner.textContent = 'Configuration could not be verified — Save remains locked. ' +
@@ -361,9 +453,14 @@ function resetToDefaults() {
     toast('Reset is unavailable because the default profile is incomplete', 'err');
     return;
   }
+  const modeResetText = modeChangeAllowed
+    ? 'This enables DRY RUN, disables scheduled MOVE entries and exits, changes Trend auto-entry to SHADOW, '
+    : `Trading Mode is currently locked and will remain ${loadedDryRun === 'true' ? 'DRY RUN' : 'LIVE'}; ` +
+      'all other recommended defaults will still be loaded. This disables scheduled MOVE entries and exits, ' +
+      'changes Trend auto-entry to SHADOW, ';
   if (!confirm(
       'Load the recommended safe defaults for every setting on this page?\n\n' +
-      'This enables DRY RUN, disables scheduled MOVE entries and exits, changes Trend auto-entry to SHADOW, ' +
+      modeResetText +
       'and restores standard sizing, timing, risk, signal, liquidity and execution values.\n\n' +
       'Important: after Save, any open Morning / Evening MOVE position will no longer have a scheduled ' +
       'exit; its TP / SL / TSL, manual square-off and settlement remain available.\n\n' +
@@ -374,7 +471,9 @@ function resetToDefaults() {
   for (const k of KEYS) {
     const el = document.getElementById('c-' + k);
     if (!el) continue;
-    if (RESET_PRESERVED_KEYS.has(k)) {
+    if (k === 'DRY_RUN' && !modeChangeAllowed) {
+      el.value = loadedDryRun;
+    } else if (RESET_PRESERVED_KEYS.has(k)) {
       el.value = window._loadedPreservedValues[k];
     } else {
       el.value = DEFAULTS[k];
@@ -384,6 +483,7 @@ function resetToDefaults() {
     document.getElementById(id).value = utcToIstHHMM(
       parseInt(DEFAULTS[hk], 10), parseInt(DEFAULTS[mk], 10));
   }
+  modeDirty = document.getElementById('c-DRY_RUN').value !== loadedDryRun;
   dryBanner();
   shortMoveUi();
   utcHints();
@@ -417,7 +517,12 @@ async function saveConfig() {
   const body = {};
   for (const k of KEYS) {
     const el = document.getElementById('c-' + k);
-    if (el && el.value !== '') body[k] = el.value;
+    if (!el || el.value === '') continue;
+    if (k === 'DRY_RUN') {
+      if (modeChangeAllowed && el.value !== loadedDryRun) body[k] = el.value;
+      continue;
+    }
+    body[k] = el.value;
   }
   for (const [id, [hk, mk]] of Object.entries(TIME_FIELDS)) {
     const v = document.getElementById(id).value;
@@ -428,8 +533,11 @@ async function saveConfig() {
   }
   const saveButton = document.getElementById('config-save');
   const resetButton = document.getElementById('config-reset');
+  const modeSelect = document.getElementById('c-DRY_RUN');
   saveButton.disabled = true;
   resetButton.disabled = true;
+  modeSelect.disabled = true;
+  modeSelect.setAttribute('aria-disabled', 'true');
   try {
     const d = await jpost('/api/config', body);
     if (d.ok) {
@@ -437,17 +545,41 @@ async function saveConfig() {
       window._loadedMarketFallback = fallback;
       window._loadedExternalOverride = externalOverride;
       window._loadedShortMove = shortMove;
+      if (Object.prototype.hasOwnProperty.call(body, 'DRY_RUN')) {
+        loadedDryRun = modeSelect.value;
+        modeDirty = false;
+        // Do not let the pre-save availability snapshot restore the old
+        // server mode while the fresh post-save position check is in flight.
+        lastModeAvailability = null;
+        modeChangeAllowed = false;
+      }
       rememberSavedPreservedValues(body);
       toast('Saved for this account — its bot reloads within ~30 s' +
             (d.tp_restarted?.length ? ` (TP restarted: ${d.tp_restarted.join(', ')})` : ''), 'ok');
       refreshTopbar();
+      refreshModeAvailability(true);
     }
-    else toast('Save failed: ' + (d.error || 'unknown error'), 'err');
+    else {
+      if (typeof d.mode_change_allowed === 'boolean') {
+        applyModeSelectionStatus(d);
+      }
+      refreshModeAvailability(true);
+      toast('Save failed: ' + (d.error || 'unknown error'), 'err');
+    }
   } catch (error) {
+    applyModeSelectionStatus({
+      mode_change_allowed: false,
+      mode_selection_enabled: false,
+      verification_ok: false,
+      mode_lock_reason:
+        'Trading Mode is locked until the interrupted Save is re-verified.',
+    });
+    refreshModeAvailability(true);
     toast('Save failed: ' + (error && error.message ? error.message : 'network error'), 'err');
   } finally {
     saveButton.disabled = !configReady;
     resetButton.disabled = !configReady;
+    if (lastModeAvailability) applyModeSelectionStatus(lastModeAvailability);
   }
 }
 
@@ -458,6 +590,7 @@ async function testTelegram() {
 }
 
 document.addEventListener('input', e => { if ((e.target.id || '').startsWith('t-')) utcHints(); });
+document.addEventListener('status', () => refreshModeAvailability());
 loadConfig();
 </script>
 {% endblock %}

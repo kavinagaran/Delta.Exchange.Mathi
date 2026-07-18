@@ -419,6 +419,12 @@ input, select {
   font: inherit; font-size: 13px;
 }
 input:focus, select:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
+input:disabled, select:disabled {
+  cursor: not-allowed;
+  opacity: .72;
+  color: var(--muted);
+  background: var(--surface-subtle);
+}
 .form-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 14px; }
 .form-grid.two   { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }   /* fixed pairs: entry|exit stay on one line */
 .form-grid.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
