@@ -99,7 +99,14 @@
 function moveDecisionHtml(view) {
   if (!view || !view.action) {
     return `<div class="move-decision muted">
-      <div><strong>Automatic MOVE forecast</strong><span>Waiting for the next scheduled decision cycle.</span></div>
+      <div class="move-decision-hd">
+        <div class="move-decision-title">
+          <span>MOVE strategy</span>
+          <strong>Automatic MOVE Forecast</strong>
+        </div>
+        <span class="badge sim">WAITING</span>
+      </div>
+      <p class="move-decision-copy">Waiting for the next scheduled decision cycle.</p>
     </div>`;
   }
   const forecast = view.forecast || {};
@@ -127,7 +134,10 @@ function moveDecisionHtml(view) {
     : '—';
   return `<div class="move-decision ${actionClass}">
     <div class="move-decision-hd">
-      <strong>${esc(actionLabel)}</strong>
+      <div class="move-decision-title">
+        <span>Automatic MOVE Forecast</span>
+        <strong>${esc(actionLabel)}</strong>
+      </div>
       <span class="badge sim">${esc(mode)}</span>
     </div>
     <div class="move-decision-metrics">

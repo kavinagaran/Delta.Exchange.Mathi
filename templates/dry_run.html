@@ -158,7 +158,14 @@ function dryKnownNumber(value) {
 function dryMoveDecisionHtml(view) {
   if (!view || !view.action) {
     return `<div class="move-decision muted">
-      <div><strong>Automatic MOVE forecast</strong><span>Waiting for the next scheduled decision cycle.</span></div>
+      <div class="move-decision-hd">
+        <div class="move-decision-title">
+          <span>MOVE strategy</span>
+          <strong>Automatic MOVE Forecast</strong>
+        </div>
+        <span class="badge sim">WAITING</span>
+      </div>
+      <p class="move-decision-copy">Waiting for the next scheduled decision cycle.</p>
     </div>`;
   }
   const forecast = view.forecast || {};
@@ -178,7 +185,11 @@ function dryMoveDecisionHtml(view) {
   ].slice(0, 6);
   return `<div class="move-decision ${cls}">
     <div class="move-decision-hd">
-      <strong>${esc(actionLabel)}</strong><span class="badge sim">${esc(String(view.auto_mode || 'disabled').toUpperCase())}</span>
+      <div class="move-decision-title">
+        <span>Automatic MOVE Forecast</span>
+        <strong>${esc(actionLabel)}</strong>
+      </div>
+      <span class="badge sim">${esc(String(view.auto_mode || 'disabled').toUpperCase())}</span>
     </div>
     <div class="move-decision-metrics">
       <span>Fair P20 / P50 / P80: <b>$${fN(forecast.expected_payoff_low, 2)} / $${fN(forecast.expected_payoff_mid, 2)} / $${fN(forecast.expected_payoff_high, 2)}</b></span>
