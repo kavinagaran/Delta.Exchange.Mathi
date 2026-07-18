@@ -218,7 +218,7 @@ def test_short_move_requires_explicit_enable():
 def test_scheduled_dry_short_uses_short_cap_as_paper_risk_assumption(tmp_path):
     snapshot = {
         "ask": 145, "bid": 144, "spot": 64000,
-        "liquidity_cap": 1000,
+        "liquidity_cap": 7,
     }
     decision = RiskDecision(
         True, "risk checks passed", "2026-07-18", 0, 0, 0, 0)
@@ -247,6 +247,8 @@ def test_scheduled_dry_short_uses_short_cap_as_paper_risk_assumption(tmp_path):
     assert plan["stop_loss_usd"] == 250
     assert plan["paper_short_risk_assumption_usd"] == 250
     assert plan["risk_at_entry_usd"] == 250
+    assert plan["observed_executable_depth_lots"] == 7
+    assert plan["book_depth_applied_to_sizing"] is False
 
 
 def test_scheduled_live_short_still_requires_positive_sl(tmp_path):

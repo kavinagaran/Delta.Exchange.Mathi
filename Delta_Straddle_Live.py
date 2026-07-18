@@ -889,11 +889,12 @@ def get_mv_mark(symbol: str) -> float:
 
 
 def get_execution_snapshot(symbol: str, side: str) -> dict:
-    """Return a validated top-of-book snapshot and executable depth.
+    """Return a validated top-of-book snapshot and executable IOC depth.
 
     Entries are priced from the side we actually consume (ask for buys, bid
-    for sells), never from mark.  The liquidity cap only counts levels inside
-    the configured slippage envelope.
+    for sells), never from mark.  Executable depth only sizes each LIVE IOC
+    chunk inside the configured slippage envelope; it does not reduce the
+    strategy's planned total lots.
     """
     ticker = _retry(_get, f"/v2/tickers/{symbol}").get("result") or {}
     book = _retry(_get, f"/v2/l2orderbook/{symbol}").get("result") or {}
@@ -1633,7 +1634,7 @@ def _account_unrealized_pnl() -> float:
 
 
 def build_move_entry_plan(contract: dict, configured_lots: int, side: str, slot: str) -> dict:
-    """Validate value, liquidity, affordability, risk sizing and portfolio limits."""
+    """Validate value, affordability, risk sizing and portfolio limits."""
     _assert_entry_configuration()
     protection = _protection_snapshot(slot)  # validate before any order is submitted
     unresolved = [p.name for p in DATA_DIR.glob("pending_*_entry.json")]
@@ -1683,7 +1684,9 @@ def build_move_entry_plan(contract: dict, configured_lots: int, side: str, slot:
     lots = risk_based_lots(
         configured=configured_lots,
         affordable=affordable,
-        liquidity_cap=int(snapshot["liquidity_cap"]),
+        # MOVE depth controls bounded LIVE IOC chunks in
+        # _place_controlled_entry_impl; it is not a strategy sizing cap.
+        liquidity_cap=MAX_ORDER_LOTS,
         max_order_lots=MAX_ORDER_LOTS,
         risk_budget_usd=risk_budget,
         stop_loss_usd=stop_loss,
@@ -1694,7 +1697,7 @@ def build_move_entry_plan(contract: dict, configured_lots: int, side: str, slot:
     )
     if lots < 1:
         raise RuntimeError(
-            "risk sizing produced zero lots; verify risk budget, SL, liquidity and affordability")
+            "risk sizing produced zero lots; verify risk budget, SL and affordability")
     catastrophe = lots * (premium * cv + fee_one_way * 2 + slippage_per_lot)
     # A configured SL is a trigger, not a guarantee of fill.  Long premium at
     # risk remains the catastrophe bound and must never be understated.
@@ -1709,7 +1712,8 @@ def build_move_entry_plan(contract: dict, configured_lots: int, side: str, slot:
     audit_event(DATA_DIR, "move_entry_evaluated", {
         "slot": slot, "symbol": symbol, "side": side,
         "configured_lots": configured_lots, "affordable_lots": affordable,
-        "liquidity_cap_lots": snapshot["liquidity_cap"], "risk_lots": lots,
+        "observed_executable_depth_lots": snapshot["liquidity_cap"],
+        "book_depth_applied_to_sizing": False, "risk_lots": lots,
         "risk_budget_usd": risk_budget, "stop_loss_usd": stop_loss,
         "configured_stop_loss_usd": configured_stop_loss,
         "paper_short_risk_assumption_usd": paper_short_risk_assumption,
@@ -1722,6 +1726,8 @@ def build_move_entry_plan(contract: dict, configured_lots: int, side: str, slot:
         raise RuntimeError(f"portfolio risk blocked entry: {decision.reason}")
     return {
         "lots": lots, "snapshot": snapshot, "value_signal": value_signal,
+        "observed_executable_depth_lots": snapshot["liquidity_cap"],
+        "book_depth_applied_to_sizing": False,
         "risk_budget_usd": risk_budget, "stop_loss_usd": stop_loss,
         "configured_stop_loss_usd": configured_stop_loss,
         "paper_short_risk_assumption_usd": paper_short_risk_assumption,

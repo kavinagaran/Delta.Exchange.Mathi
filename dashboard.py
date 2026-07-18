@@ -3206,12 +3206,13 @@ def _move_lot_plan(
     *,
     dry_run: bool = False,
 ) -> dict:
-    """Fail-closed minimum of configured, funding, cap, risk and depth.
+    """Fail-closed minimum of configured, funding, order and risk caps.
 
     A paper trade has no real-wallet funding requirement.  In DRY RUN its
-    configured size is therefore the virtual affordability ceiling; every
-    other safety cap below still applies.  LIVE entries continue to require a
-    verified exchange-wallet balance.
+    configured size is therefore the virtual affordability ceiling.  MOVE
+    order-book quantity is diagnostic only and never reduces the planned lots;
+    LIVE entries continue to use bounded IOC execution and accept only proven
+    fills.  LIVE entries also continue to require a verified exchange wallet.
     """
     cfg = _user_cfg()
     lot_key, lot_default = (("MORNING_LOTS", 2000) if slot == "morning"
@@ -3228,8 +3229,7 @@ def _move_lot_plan(
     affordable = (max(configured, 0) if dry_run
                   else _affordable_option_lots(price, cv, strike))
     affordability_source = "paper_configured_cap" if dry_run else "exchange_wallet"
-    depth_multiple = max(_as_float(cfg.get("MIN_BOOK_DEPTH_MULTIPLE") or 1, 1), 0.01)
-    liquidity_cap = int(float(quote.get("entry_depth") or 0) / depth_multiple)
+    observed_entry_depth = max(int(float(quote.get("entry_depth") or 0)), 0)
     risk_key = "RISK_PER_TRADE_USD_MORNING" if slot == "morning" \
         else "RISK_PER_TRADE_USD_EVENING"
     risk_budget = max(_as_float(cfg.get(risk_key) or 200, 200), 0)
@@ -3270,7 +3270,10 @@ def _move_lot_plan(
         premium_cap = int(remaining / premium_per_lot) if premium_per_lot > 0 else 0
     lots = risk_based_lots(
         configured=max(configured, 0), affordable=max(int(affordable or 0), 0),
-        liquidity_cap=max(min(liquidity_cap, premium_cap), 0),
+        # risk_based_lots is shared with Trend, where book participation still
+        # is a strategy cap. For MOVE, feed only its independent premium cap;
+        # observed order-book quantity must not reduce the planned position.
+        liquidity_cap=max(premium_cap, 0),
         max_order_lots=max(min(max_order, chunk_cap), 0),
         risk_budget_usd=risk_budget, stop_loss_usd=sl_target,
         premium_per_lot=premium_per_lot,
@@ -3285,7 +3288,9 @@ def _move_lot_plan(
         "lots": lots, "configured": configured, "affordable": affordable,
         "affordability_source": affordability_source,
         "max_order_lots": max_order, "chunk_cap": chunk_cap,
-        "liquidity_cap": liquidity_cap, "risk_budget_usd": risk_budget,
+        "observed_entry_depth_lots": observed_entry_depth,
+        "book_depth_applied_to_sizing": False,
+        "risk_budget_usd": risk_budget,
         "sl_target_pnl": configured_sl_target,
         "risk_stop_loss_usd": sl_target,
         "paper_short_risk_assumption_usd": paper_short_risk_assumption,
