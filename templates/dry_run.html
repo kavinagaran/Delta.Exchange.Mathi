@@ -139,6 +139,8 @@ let dryStatus = {};
 let dryTrendPreview = null;
 let dryRunChart = null;
 let dryHistory = [];
+let dryStatusRefreshPending = false;
+let dryStatusRefreshQueued = false;
 
 function drySlotLabel(slot, symbol = '') {
   if (slot === 'morning') return 'Morning MOVE';
@@ -273,7 +275,12 @@ function dryAutoLabel(mode) {
   return 'Auto disabled';
 }
 
-async function loadDryStatus() {
+async function loadDryStatus(refreshTrend = true) {
+  if (dryStatusRefreshPending) {
+    dryStatusRefreshQueued = dryStatusRefreshQueued || refreshTrend;
+    return;
+  }
+  dryStatusRefreshPending = true;
   let status;
   try {
     status = await jget('/api/dry-run/status');
@@ -282,28 +289,39 @@ async function loadDryStatus() {
       document.getElementById(`dry-slot-${slot}`).innerHTML =
         '<div class="no-pos c-neg">Dry-run status is unavailable</div>';
     }
+    dryStatusRefreshPending = false;
     return;
   }
-  dryStatus = status || {};
-  renderDryMode(dryStatus);
-  document.getElementById('dry-when-morning').textContent =
-    'Entry ' + (dryStatus.morning_entry_ist || '—');
-  document.getElementById('dry-when-evening').textContent =
-    'Entry ' + (dryStatus.evening_entry_ist || dryStatus.entry_ist || '—');
-  document.getElementById('dry-trend-auto').textContent = dryAutoLabel(dryStatus.auto_mode);
+  try {
+    dryStatus = status || {};
+    renderDryMode(dryStatus);
+    document.getElementById('dry-when-morning').textContent =
+      'Entry ' + (dryStatus.morning_entry_ist || '—');
+    document.getElementById('dry-when-evening').textContent =
+      'Entry ' + (dryStatus.evening_entry_ist || dryStatus.entry_ist || '—');
+    document.getElementById('dry-trend-auto').textContent = dryAutoLabel(dryStatus.auto_mode);
 
-  dryTrendPreview = null;
-  if (dryModeActive && !(dryStatus.trend && dryStatus.trend.status === 'OPEN')) {
-    try { dryTrendPreview = await jget('/api/trend-entry/preview'); } catch (_) {}
+    if (refreshTrend) {
+      dryTrendPreview = null;
+      if (dryModeActive && !(dryStatus.trend && dryStatus.trend.status === 'OPEN')) {
+        try { dryTrendPreview = await jget('/api/trend-entry/preview'); } catch (_) {}
+      }
+    }
+
+    document.getElementById('dry-slot-morning').innerHTML =
+      dryPositionDetails(dryStatus.morning || {}, 'morning');
+    document.getElementById('dry-slot-evening').innerHTML =
+      dryPositionDetails(dryStatus.evening || {}, 'evening');
+    document.getElementById('dry-slot-trend').innerHTML =
+      dryPositionDetails(dryStatus.trend || {}, 'trend') +
+      dryTrendActionHtml(dryTrendPreview);
+  } finally {
+    dryStatusRefreshPending = false;
+    if (dryStatusRefreshQueued) {
+      dryStatusRefreshQueued = false;
+      loadDryStatus(true);
+    }
   }
-
-  document.getElementById('dry-slot-morning').innerHTML =
-    dryPositionDetails(dryStatus.morning || {}, 'morning');
-  document.getElementById('dry-slot-evening').innerHTML =
-    dryPositionDetails(dryStatus.evening || {}, 'evening');
-  document.getElementById('dry-slot-trend').innerHTML =
-    dryPositionDetails(dryStatus.trend || {}, 'trend') +
-    dryTrendActionHtml(dryTrendPreview);
 }
 
 async function dryMoveEntry(slot, side) {
@@ -588,7 +606,8 @@ window.addEventListener('themechange', () => {
   if (dryHistory.length) drawDryChart(dryHistory);
 });
 loadDryDashboard();
-setInterval(loadDryStatus, 12_000);
+setInterval(() => loadDryStatus(false), 4_000);
+setInterval(() => loadDryStatus(true), 20_000);
 setInterval(loadDryToday, 12_000);
 setInterval(loadDryResults, 60_000);
 </script>

@@ -1,7 +1,7 @@
 /* NITHI-BOT dashboard — shared helpers + topbar live data */
 
 async function jget(url) {
-  const r = await fetch(url);
+  const r = await fetch(url, { cache: 'no-store' });
   if (r.status === 401) { location.href = '/login'; throw new Error('unauthenticated'); }
   return r.json();
 }

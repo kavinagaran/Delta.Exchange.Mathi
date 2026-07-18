@@ -206,6 +206,50 @@ def test_dry_status_trades_and_summary_publish_only_simulations(
     assert summary["losses"] == 1
 
 
+def test_open_dry_pnl_refreshes_from_mark_price_while_close_uses_book(
+        isolated_dashboard, monkeypatch):
+    state = _dry_state(
+        entry_mark=145.0,
+        lots=1000,
+        contract_value=0.001,
+        entry_fees_usd=0.0,
+    )
+    marks = iter(("143.50", "144.25", "145.00"))
+
+    class Response:
+        def __init__(self, mark):
+            self.mark = mark
+
+        def json(self):
+            return {
+                "result": {
+                    "mark_price": self.mark,
+                    "quotes": {"best_bid": "142.00", "best_ask": "147.00"},
+                },
+            }
+
+    monkeypatch.setattr(
+        dashboard.req, "get",
+        lambda *args, **kwargs: Response(next(marks)),
+    )
+    monkeypatch.setattr(
+        dashboard, "_option_fee_per_lot",
+        lambda mark, cv, notional_reference=0: 0.0,
+    )
+
+    first = dashboard._enrich_dry_state(state)
+    second = dashboard._enrich_dry_state(state)
+    close_mark, close_pnl, _, _ = dashboard._dry_run_mark_and_pnl(state)
+
+    assert first["current_mark"] == 143.5
+    assert first["live_pnl"] == -1.5
+    assert first["live_pnl_price_source"] == "mark_price"
+    assert second["current_mark"] == 144.25
+    assert second["live_pnl"] == -0.75
+    assert close_mark == 142.0
+    assert close_pnl == -3.0
+
+
 def test_manual_move_dry_entry_writes_only_isolated_state_and_never_posts_order(
         isolated_dashboard, monkeypatch):
     account = isolated_dashboard
@@ -477,3 +521,17 @@ def test_topbar_contains_server_driven_trading_mode_next_to_theme():
     assert theme_index < mode_index < spacer_index
     assert "Trading Mode" in template
     assert "setTradingModeIndicator(st.trading_mode, st.dry_run_mode)" in script
+
+
+def test_dry_run_live_status_refresh_is_fast_uncached_and_non_overlapping():
+    root = Path(dashboard.__file__).resolve().parent
+    template = (root / "templates" / "dry_run.html").read_text(
+        encoding="utf-8")
+    script = (root / "static" / "js" / "app.js").read_text(
+        encoding="utf-8")
+
+    assert "fetch(url, { cache: 'no-store' })" in script
+    assert "let dryStatusRefreshPending = false;" in template
+    assert "if (dryStatusRefreshPending)" in template
+    assert "setInterval(() => loadDryStatus(false), 4_000);" in template
+    assert "setInterval(() => loadDryStatus(true), 20_000);" in template

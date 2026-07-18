@@ -2826,8 +2826,8 @@ def _close_move_state_locked(slot: str, state: dict,
             "protection_cleanup_errors": cleanup_errors}
 
 
-def _dry_run_mark_and_pnl(state: dict) -> tuple[float, float, float, float]:
-    """Public-market-only executable exit estimate for a simulation."""
+def _dry_run_market_mark(state: dict, *, executable: bool) -> float:
+    """Return a fresh public mark for display or simulated execution."""
     entry_mark = float(state.get("entry_mark") or 0)
     symbol = str(state.get("symbol") or "")
     try:
@@ -2835,19 +2835,42 @@ def _dry_run_mark_and_pnl(state: dict) -> tuple[float, float, float, float]:
             f"{API_BASE}/v2/tickers/{symbol}", timeout=5
         ).json().get("result", {})
         quotes = ticker.get("quotes") or {}
-        if state.get("side") == "short":
-            raw_exit = (
-                quotes.get("best_ask") or ticker.get("best_ask")
-                or ticker.get("ask") or ticker.get("mark_price")
+        if executable and state.get("side") == "short":
+            candidates = (
+                quotes.get("best_ask"), ticker.get("best_ask"),
+                ticker.get("ask"), ticker.get("mark_price"),
+            )
+        elif executable:
+            candidates = (
+                quotes.get("best_bid"), ticker.get("best_bid"),
+                ticker.get("bid"), ticker.get("mark_price"),
+            )
+        elif state.get("side") == "short":
+            candidates = (
+                ticker.get("mark_price"), quotes.get("best_ask"),
+                ticker.get("best_ask"), ticker.get("ask"),
             )
         else:
-            raw_exit = (
-                quotes.get("best_bid") or ticker.get("best_bid")
-                or ticker.get("bid") or ticker.get("mark_price")
+            candidates = (
+                ticker.get("mark_price"), quotes.get("best_bid"),
+                ticker.get("best_bid"), ticker.get("bid"),
             )
-        mark = float(raw_exit or entry_mark)
+        mark = next(
+            (float(raw) for raw in candidates
+             if raw is not None and float(raw) > 0),
+            entry_mark,
+        )
     except Exception:
         mark = entry_mark
+    return mark
+
+
+def _dry_run_pnl_at_mark(
+    state: dict,
+    mark: float,
+) -> tuple[float, float, float, float]:
+    """Return fee-aware simulated P&L at a supplied market price."""
+    entry_mark = float(state.get("entry_mark") or 0)
     cv = float(state.get("contract_value") or 0.001)
     lots = int(state.get("lots") or 0)
     sign = -1 if state.get("side") == "short" else 1
@@ -2858,6 +2881,20 @@ def _dry_run_mark_and_pnl(state: dict) -> tuple[float, float, float, float]:
         mark, cv, float(state.get("strike") or 0)
     ) * lots
     return mark, gross - entry_fee - exit_fee, gross, exit_fee
+
+
+def _dry_run_mark_and_pnl(state: dict) -> tuple[float, float, float, float]:
+    """Public-market-only executable exit estimate for a simulation."""
+    mark = _dry_run_market_mark(state, executable=True)
+    return _dry_run_pnl_at_mark(state, mark)
+
+
+def _dry_run_live_mark_and_pnl(
+    state: dict,
+) -> tuple[float, float, float, float]:
+    """Continuously moving mark-price valuation for an open simulation."""
+    mark = _dry_run_market_mark(state, executable=False)
+    return _dry_run_pnl_at_mark(state, mark)
 
 
 def _close_dry_simulation_locked(
@@ -4636,9 +4673,10 @@ def _enrich_dry_state(state: dict) -> dict:
     view = dict(state) if isinstance(state, dict) else {}
     if str(view.get("status") or "").upper() == "OPEN":
         try:
-            mark, pnl, _, _ = _dry_run_mark_and_pnl(view)
+            mark, pnl, _, _ = _dry_run_live_mark_and_pnl(view)
             view["current_mark"] = round(mark, 8)
             view["live_pnl"] = round(pnl, 2)
+            view["live_pnl_price_source"] = "mark_price"
         except Exception:
             view["current_mark"] = None
             view["live_pnl"] = None
