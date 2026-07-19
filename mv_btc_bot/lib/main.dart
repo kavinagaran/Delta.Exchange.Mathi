@@ -26,6 +26,8 @@ const kDarkAccent = Color(0xFF70A5FF);
 
 final appTheme = AppThemeController();
 
+const kWebAssetRevision = '3.2.0+5-dry-protection-monitor';
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await appTheme.load();
@@ -351,6 +353,31 @@ class SessionService {
     password = '';
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove('server_pass');
+  }
+}
+
+class WebAssetCache {
+  static const _preferenceKey = 'web_asset_revision';
+  static Future<void>? _preparation;
+
+  static Future<void> prepare(WebViewController controller) {
+    return _preparation ??= _prepare(controller);
+  }
+
+  static Future<void> _prepare(WebViewController controller) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      if (prefs.getString(_preferenceKey) == kWebAssetRevision) return;
+      // Existing installations retain Android WebView cache across APK
+      // upgrades. Clear only HTTP assets once for this release so the new
+      // DRY RUN monitor UI/CSS is guaranteed to replace the previous page.
+      // Cookies and local storage remain untouched.
+      await controller.clearCache();
+      await prefs.setString(_preferenceKey, kWebAssetRevision);
+    } catch (_) {
+      // Cache maintenance must never prevent the authenticated dashboard
+      // itself from loading.
+    }
   }
 }
 
@@ -932,7 +959,10 @@ class DashboardWebPageState extends State<DashboardWebPage>
         );
   }
 
-  Future<void> _load() => _controller.loadRequest(_pageUri);
+  Future<void> _load() async {
+    await WebAssetCache.prepare(_controller);
+    await _controller.loadRequest(_pageUri);
+  }
 
   Future<void> reload() async {
     setState(() {

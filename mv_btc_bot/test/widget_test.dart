@@ -32,4 +32,8 @@ void main() {
     );
     expect(SessionService.sessionCookieFromHeader('other=value'), isNull);
   });
+
+  test('APK release refreshes cached web assets for the protection monitor', () {
+    expect(kWebAssetRevision, '3.2.0+5-dry-protection-monitor');
+  });
 }
