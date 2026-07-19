@@ -292,6 +292,51 @@ body.native-app .toast { left: 12px; right: 12px; bottom: 16px; max-width: none;
 .dry-entry-gate.ready.up { background: var(--pos-soft); border-color: color-mix(in srgb, var(--pos) 28%, var(--border)); }
 .dry-entry-gate.ready.down { background: var(--neg-soft); border-color: color-mix(in srgb, var(--neg) 28%, var(--border)); }
 .dry-entry-gate.muted { color: var(--muted); }
+.dry-protection-box {
+  display: grid; gap: 10px; margin-top: 14px; padding: 12px;
+  border: 1px solid color-mix(in srgb, var(--warn) 24%, var(--border));
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--warn-soft) 46%, var(--surface-subtle));
+}
+.dry-protection-hd {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 10px; min-width: 0;
+}
+.dry-protection-hd > div {
+  display: flex; flex-direction: column; gap: 2px; min-width: 0;
+}
+.dry-protection-hd > div > span {
+  color: var(--muted); font-size: 9px; font-weight: 750;
+  letter-spacing: .09em; line-height: 1.2; text-transform: uppercase;
+}
+.dry-protection-hd strong { font-size: 12px; line-height: 1.3; }
+.dry-protection-grid {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 10px;
+}
+.dry-protection-grid label.fld { min-width: 0; font-size: 10.5px; }
+.dry-protection-grid label.fld span { margin-bottom: 3px; }
+.dry-protection-grid input {
+  min-width: 0; height: 31px; padding: 5px 8px; font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.dry-protection-actions {
+  display: flex; align-items: flex-end; justify-content: space-between;
+  gap: 10px;
+}
+.dry-protection-telemetry {
+  display: flex; flex-direction: column; gap: 2px; min-width: 0;
+  color: var(--muted); font-size: 9.5px; line-height: 1.35;
+  font-variant-numeric: tabular-nums;
+}
+.dry-protection-error {
+  padding: 7px 8px; border-radius: 6px; background: var(--neg-soft);
+  color: var(--neg); font-size: 10px; line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+.dry-protection-box > p {
+  margin: 0; color: var(--muted); font-size: 9.5px; line-height: 1.4;
+}
 .move-decision {
   display: grid;
   gap: 9px;
@@ -566,6 +611,8 @@ input.mono { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; fon
   .dry-run-hero { align-items: flex-start; flex-direction: column; padding: 15px 16px; }
   .dry-run-hero-actions { width: 100%; justify-content: space-between; }
   .dry-entry-gate.ready { align-items: stretch; flex-direction: column; }
+  .dry-protection-actions { align-items: stretch; flex-direction: column; }
+  .dry-protection-actions .btn { width: 100%; }
   .move-decision-metrics { grid-template-columns: 1fr; }
 }
 

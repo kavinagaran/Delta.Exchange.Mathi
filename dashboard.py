@@ -4805,6 +4805,110 @@ def _schedule_ist_label(
     )
 
 
+def _dry_protection_policy(state: dict) -> dict:
+    """Return the position-snapshotted paper protection policy."""
+    policy = state.get("protection_config") if isinstance(state, dict) else None
+    if not isinstance(policy, dict):
+        slot = str(state.get("slot") or "") if isinstance(state, dict) else ""
+        policy = _tp_policy(slot) if slot in SLOTS else {}
+
+    def nonnegative(key: str, default: float = 0.0) -> float:
+        value = _as_float(policy.get(key), default)
+        return max(value, 0) if math.isfinite(value) else float(default)
+
+    legacy_tsl = nonnegative("tsl_target_pnl")
+    raw_poll = _as_float(policy.get("poll_secs"), 30)
+    poll_secs = int(raw_poll) if math.isfinite(raw_poll) else 30
+    return {
+        "tp_target_pnl": nonnegative("tp_target_pnl"),
+        "sl_target_pnl": nonnegative("sl_target_pnl"),
+        "tsl_arm_pnl": nonnegative("tsl_arm_pnl", legacy_tsl),
+        "tsl_trail_pnl": nonnegative("tsl_trail_pnl", legacy_tsl),
+        "tsl_lock_min_pnl": nonnegative("tsl_lock_min_pnl"),
+        "poll_secs": max(poll_secs, 10),
+    }
+
+
+def _parse_utc_stamp(value) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _dry_protection_view(
+    state: dict,
+    *,
+    now: datetime | None = None,
+) -> dict:
+    """Compact, explicit monitor telemetry for one paper position."""
+    policy = _dry_protection_policy(state)
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    current = current.astimezone(timezone.utc)
+    is_open = (
+        str(state.get("status") or "").upper() == "OPEN"
+        and _is_dry_record(state)
+    )
+    checked_at = _parse_utc_stamp(
+        state.get("dry_last_protection_check_utc"))
+    next_at = _parse_utc_stamp(
+        state.get("dry_next_protection_check_utc"))
+    last_error = str(state.get("dry_protection_last_error") or "")
+    age_secs = (
+        max(int((current - checked_at).total_seconds()), 0)
+        if checked_at else None
+    )
+    stale_after = max(policy["poll_secs"] * 2 + 5, 30)
+    stale = bool(is_open and checked_at and age_secs > stale_after)
+    if not is_open:
+        status = "closed"
+    elif last_error:
+        status = "error"
+    elif stale:
+        status = "stale"
+    elif state.get("dry_tsl_armed"):
+        status = "tsl_armed"
+    elif checked_at:
+        status = "running"
+    else:
+        status = "starting"
+    return {
+        **policy,
+        "running": is_open,
+        "status": status,
+        "last_check_utc": (
+            checked_at.isoformat().replace("+00:00", "Z")
+            if checked_at else None
+        ),
+        "next_check_utc": (
+            next_at.isoformat().replace("+00:00", "Z")
+            if next_at else None
+        ),
+        "last_attempt_utc": state.get(
+            "dry_last_protection_attempt_utc"),
+        "last_error": last_error,
+        "age_secs": age_secs,
+        "stale": stale,
+        "peak_pnl_usd": (
+            round(_as_float(state.get("dry_peak_pnl_usd"), 0), 2)
+            if state.get("dry_peak_pnl_usd") is not None else None
+        ),
+        "tsl_armed": bool(state.get("dry_tsl_armed")),
+        "tsl_floor_usd": (
+            round(_as_float(state.get("dry_tsl_floor_usd"), 0), 2)
+            if state.get("dry_tsl_floor_usd") is not None else None
+        ),
+    }
+
+
 def _enrich_dry_state(state: dict) -> dict:
     view = dict(state) if isinstance(state, dict) else {}
     if str(view.get("status") or "").upper() == "OPEN":
@@ -4816,6 +4920,7 @@ def _enrich_dry_state(state: dict) -> dict:
         except Exception:
             view["current_mark"] = None
             view["live_pnl"] = None
+    view["dry_protection"] = _dry_protection_view(view)
     return view
 
 
@@ -6713,6 +6818,12 @@ def _save_config_data(data: dict):
                 if (state.get("status") == "OPEN"
                         and _is_dry_record(state) is dry_run):
                     state["protection_config"] = _tp_policy(slot)
+                    if dry_run:
+                        # A saved paper policy must become effective on the
+                        # next scheduler tick, not after the old interval.
+                        state["dry_next_protection_check_utc"] = (
+                            datetime.now(timezone.utc).isoformat())
+                        state["dry_protection_last_error"] = ""
                     _atomic_write_json(state_path, state)
                     if not dry_run:
                         snapshot_slots.append(slot)
@@ -6873,9 +6984,16 @@ def _revive_tp_monitors():
     return _ensure_open_monitors(force=True)
 
 
-def _dry_run_protection_cycle() -> int:
+def _dry_run_protection_cycle(
+    *,
+    now: datetime | None = None,
+) -> int:
     """Evaluate TP/SL/TSL for all isolated simulations of the active user."""
     closed = 0
+    cycle_at = now or datetime.now(timezone.utc)
+    if cycle_at.tzinfo is None:
+        cycle_at = cycle_at.replace(tzinfo=timezone.utc)
+    cycle_at = cycle_at.astimezone(timezone.utc)
     try:
         _import_legacy_dry_records()
     except Exception:
@@ -6886,29 +7004,55 @@ def _dry_run_protection_cycle() -> int:
         if (str(state.get("status") or "").upper() != "OPEN"
                 or not _is_dry_record(state)):
             continue
-        policy = state.get("protection_config")
-        if not isinstance(policy, dict):
-            policy = _tp_policy(slot)
+        policy = _dry_protection_policy(state)
+        next_check = _parse_utc_stamp(
+            state.get("dry_next_protection_check_utc"))
+        if next_check and cycle_at < next_check:
+            continue
+        attempted_at = cycle_at.isoformat()
+        poll_secs = policy["poll_secs"]
         try:
             _, pnl, _, _ = _dry_run_mark_and_pnl(state)
-        except Exception:
+        except Exception as exc:
+            with account_file_lock(
+                _mode_data_dir(True), f"close-{slot}",
+                f"dry-protection-error:{os.getpid()}",
+                stale_after_sec=30, wait_sec=0,
+            ) as acquired:
+                if not acquired:
+                    continue
+                latest = _load_json(state_path, {})
+                if (str(latest.get("status") or "").upper() != "OPEN"
+                        or not _is_dry_record(latest)
+                        or _simulation_identity(latest, slot)
+                        != _simulation_identity(state, slot)):
+                    continue
+                retry_secs = min(poll_secs, 10)
+                latest.update({
+                    "dry_last_protection_attempt_utc": attempted_at,
+                    "dry_next_protection_check_utc": (
+                        cycle_at + timedelta(seconds=retry_secs)
+                    ).isoformat(),
+                    "dry_protection_last_error": str(exc)[:300],
+                })
+                _atomic_write_json(state_path, latest)
             continue
         previous_peak = _as_float(
             state.get("dry_peak_pnl_usd"), max(pnl, 0))
         peak = max(previous_peak, pnl)
-        tp = max(_as_float(policy.get("tp_target_pnl"), 0), 0)
-        sl = max(_as_float(policy.get("sl_target_pnl"), 0), 0)
-        arm = max(_as_float(
-            policy.get("tsl_arm_pnl") or policy.get("tsl_target_pnl"), 0), 0)
-        trail = max(_as_float(
-            policy.get("tsl_trail_pnl") or policy.get("tsl_target_pnl"), 0), 0)
-        locked = max(_as_float(policy.get("tsl_lock_min_pnl"), 0), 0)
+        tp = policy["tp_target_pnl"]
+        sl = policy["sl_target_pnl"]
+        arm = policy["tsl_arm_pnl"]
+        trail = policy["tsl_trail_pnl"]
+        locked = policy["tsl_lock_min_pnl"]
+        tsl_armed = bool(arm and trail and peak >= arm)
+        tsl_floor = max(peak - trail, locked) if tsl_armed else None
         trigger = None
         if tp and pnl >= tp:
             trigger = "take_profit_simulated"
         elif sl and pnl <= -sl:
             trigger = "stop_loss_simulated"
-        elif arm and trail and peak >= arm and pnl <= max(peak - trail, locked):
+        elif tsl_armed and pnl <= tsl_floor:
             trigger = "trailing_stop_simulated"
         if not trigger:
             settlement = str(state.get("settlement") or "")
@@ -6917,7 +7061,7 @@ def _dry_run_protection_cycle() -> int:
                     settlement.replace("Z", "+00:00"))
                 if settles_at.tzinfo is None:
                     settles_at = settles_at.replace(tzinfo=timezone.utc)
-                if datetime.now(timezone.utc) >= settles_at.astimezone(timezone.utc):
+                if cycle_at >= settles_at.astimezone(timezone.utc):
                     trigger = "settlement_simulated"
             except (TypeError, ValueError):
                 pass
@@ -6934,23 +7078,28 @@ def _dry_run_protection_cycle() -> int:
                     or _simulation_identity(latest, slot)
                     != _simulation_identity(state, slot)):
                 continue
+            latest.update({
+                "dry_last_protection_attempt_utc": attempted_at,
+                "dry_last_protection_check_utc": attempted_at,
+                "dry_next_protection_check_utc": (
+                    cycle_at + timedelta(seconds=poll_secs)
+                ).isoformat(),
+                "dry_protection_last_error": "",
+                "dry_peak_pnl_usd": round(peak, 8),
+                "dry_tsl_armed": tsl_armed,
+                "dry_tsl_floor_usd": (
+                    round(tsl_floor, 8) if tsl_floor is not None else None),
+            })
             if trigger:
                 _close_dry_simulation_locked(slot, latest, trigger=trigger)
                 closed += 1
-            elif (peak != previous_peak
-                  or bool(latest.get("dry_tsl_armed")) != bool(arm and peak >= arm)):
-                latest.update({
-                    "dry_peak_pnl_usd": round(peak, 8),
-                    "dry_tsl_armed": bool(arm and peak >= arm),
-                    "dry_last_protection_check_utc": (
-                        datetime.now(timezone.utc).isoformat()),
-                })
+            else:
                 _atomic_write_json(state_path, latest)
     return closed
 
 
 def _dry_run_protection_loop() -> None:
-    """Public-data-only simulator worker; never calls an order endpoint."""
+    """Public-data-only due-time scheduler; never calls an order endpoint."""
     while True:
         try:
             for account in _load_accounts():
@@ -6965,7 +7114,10 @@ def _dry_run_protection_loop() -> None:
                     print(f"Dry-run protection error for {user}: {exc}")
         except Exception as exc:
             print(f"Dry-run protection supervisor error: {exc}")
-        time.sleep(10)
+        # Each OPEN state carries its own next-check time. A short scheduler
+        # tick keeps configured intervals accurate without polling the market
+        # until that individual slot is due.
+        time.sleep(1)
 
 
 # ─────────────────────────────────────────────────────────────

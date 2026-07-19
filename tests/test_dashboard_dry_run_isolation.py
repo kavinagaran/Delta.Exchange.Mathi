@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -512,6 +513,106 @@ def test_dry_protection_tp_sl_tsl_close_locally_and_append_once(
     raw_post.assert_not_called()
 
 
+def test_dry_protection_honors_each_positions_poll_interval_and_reports_health(
+        isolated_dashboard, monkeypatch):
+    account = isolated_dashboard
+    now = datetime(2026, 7, 18, 12, 0, tzinfo=timezone.utc)
+    state = _dry_state(
+        "morning",
+        dry_next_protection_check_utc=(
+            now + timedelta(seconds=30)).isoformat(),
+    )
+    state["protection_config"]["poll_secs"] = 30
+    state_path = account / "dry_run" / "morning_state.json"
+    _write(state_path, state)
+    price = Mock(return_value=(100.0, 8.0, 8.0, 0.0))
+    monkeypatch.setattr(dashboard, "_dry_run_mark_and_pnl", price)
+
+    with dashboard.app.test_request_context("/api/dry-run/status"):
+        assert dashboard._dry_run_protection_cycle(
+            now=now + timedelta(seconds=29)) == 0
+        price.assert_not_called()
+        check_at = now + timedelta(seconds=30)
+        assert dashboard._dry_run_protection_cycle(now=check_at) == 0
+
+    price.assert_called_once()
+    saved = json.loads(state_path.read_text(encoding="utf-8"))
+    assert saved["dry_last_protection_check_utc"] == check_at.isoformat()
+    assert saved["dry_next_protection_check_utc"] == (
+        check_at + timedelta(seconds=30)).isoformat()
+    assert saved["dry_peak_pnl_usd"] == 8
+    assert saved["dry_tsl_armed"] is False
+    assert saved["dry_protection_last_error"] == ""
+
+    health = dashboard._dry_protection_view(saved, now=check_at)
+    assert health["running"] is True
+    assert health["status"] == "running"
+    assert health["poll_secs"] == 30
+    assert health["age_secs"] == 0
+    assert health["peak_pnl_usd"] == 8
+
+
+def test_dry_protection_failure_is_visible_and_retries_without_market_hammering(
+        isolated_dashboard, monkeypatch):
+    account = isolated_dashboard
+    now = datetime(2026, 7, 18, 12, 0, tzinfo=timezone.utc)
+    state_path = account / "dry_run" / "trend_state.json"
+    state = _dry_state("trend")
+    state["protection_config"]["poll_secs"] = 30
+    _write(state_path, state)
+    price = Mock(side_effect=RuntimeError("ticker unavailable"))
+    monkeypatch.setattr(dashboard, "_dry_run_mark_and_pnl", price)
+
+    with dashboard.app.test_request_context("/api/dry-run/status"):
+        assert dashboard._dry_run_protection_cycle(now=now) == 0
+        assert dashboard._dry_run_protection_cycle(
+            now=now + timedelta(seconds=9)) == 0
+
+    price.assert_called_once()
+    saved = json.loads(state_path.read_text(encoding="utf-8"))
+    assert saved["dry_last_protection_attempt_utc"] == now.isoformat()
+    assert saved["dry_next_protection_check_utc"] == (
+        now + timedelta(seconds=10)).isoformat()
+    assert saved["dry_protection_last_error"] == "ticker unavailable"
+    health = dashboard._dry_protection_view(saved, now=now)
+    assert health["status"] == "error"
+    assert health["last_error"] == "ticker unavailable"
+
+
+def test_saving_dry_protection_updates_open_snapshot_and_makes_check_due(
+        isolated_dashboard, monkeypatch):
+    account = isolated_dashboard
+    state_path = account / "dry_run" / "straddle_state.json"
+    _write(state_path, _dry_state(
+        dry_next_protection_check_utc="2099-07-18T12:00:00+00:00",
+        dry_protection_last_error="old error",
+    ))
+    policy = {
+        "tp_target_pnl": 125.0,
+        "sl_target_pnl": 45.0,
+        "tsl_arm_pnl": 30.0,
+        "tsl_trail_pnl": 15.0,
+        "tsl_lock_min_pnl": 5.0,
+        "tsl_target_pnl": 0.0,
+        "poll_secs": 20,
+    }
+    monkeypatch.setattr(dashboard, "_tp_policy", lambda slot: policy)
+    before = datetime.now(timezone.utc)
+
+    with dashboard.app.test_request_context(
+            "/api/config", method="POST", json={"TP_TARGET_PNL": "125"}):
+        payload, status = _result(dashboard.set_config())
+
+    after = datetime.now(timezone.utc)
+    saved = json.loads(state_path.read_text(encoding="utf-8"))
+    due = datetime.fromisoformat(saved["dry_next_protection_check_utc"])
+    assert status == 200
+    assert payload["ok"] is True
+    assert saved["protection_config"] == policy
+    assert before <= due <= after
+    assert saved["dry_protection_last_error"] == ""
+
+
 def test_topbar_contains_server_driven_trading_mode_next_to_theme():
     root = Path(dashboard.__file__).resolve().parent
     template = (root / "templates" / "base.html").read_text(encoding="utf-8")
@@ -561,6 +662,12 @@ def test_dry_run_cards_are_equal_sized_and_every_open_slot_has_manual_exit():
     assert "\n          Exit\n" in template
     assert ">Exit</button>" in overview
     assert "endDrySimulation('${slot}')" in template
+    assert "function dryProtectionHtml(state, slot)" in template
+    assert "TP / SL / TSL Monitor" in template
+    assert "function saveDryProtection(slot)" in template
+    assert "dryProtectionSaving.has(slot)" in template
+    assert ".dry-protection-grid {" in styles
+    assert "Paper-only monitor · always active" in template
     for slot in ("morning", "evening", "trend"):
         assert f"dryPositionDetails(dryStatus.{slot} || {{}}, '{slot}'" in template
 
