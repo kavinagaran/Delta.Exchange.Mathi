@@ -428,7 +428,8 @@ async function loadDryStatus(refreshTrend = true) {
     dryStatus = status || {};
     renderDryMode(dryStatus);
     document.getElementById('dry-when-morning').textContent =
-      'Entry ' + (dryStatus.morning_entry_ist || '—');
+      'Scheduled ' + (dryStatus.morning_entry_ist || '—') +
+      ' · SIDEWAYS SELL immediate';
     document.getElementById('dry-when-evening').textContent =
       'Entry ' + (dryStatus.evening_entry_ist || dryStatus.entry_ist || '—');
     document.getElementById('dry-trend-auto').textContent = dryAutoLabel(dryStatus.auto_mode);

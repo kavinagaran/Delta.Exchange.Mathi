@@ -4077,6 +4077,31 @@ def _flush_all_mode_histories() -> None:
                           "DRY-RUN" if dry_run else "REAL")
 
 
+def _immediate_morning_sideways_due(
+    today: str,
+    *,
+    state: dict | None = None,
+    signal: dict | None = None,
+) -> tuple[bool, str, dict]:
+    """Whether the flat Morning slot may run outside its schedule window."""
+    signal = signal or _load_morning_sideways_signal()
+    if not MORNING_ENABLED:
+        return False, "morning_disabled", signal
+    if MOVE_AUTO_ENTRY_MODE == "disabled":
+        return False, "move_auto_disabled", signal
+    current = state if isinstance(state, dict) else (load_morning_state() or {})
+    status = str(current.get("status") or "IDLE").upper()
+    if status in {"OPEN", "ENTRY_PENDING", "CLOSE_PENDING"}:
+        return False, f"morning_{status.lower()}", signal
+    if current.get("entry_date") == today:
+        return False, "morning_already_recorded_today", signal
+    if not signal.get("available"):
+        return False, "trend_snapshot_unavailable", signal
+    if not signal.get("all_sideways"):
+        return False, "timeframes_not_all_sideways", signal
+    return True, "all_sideways_flat_morning", signal
+
+
 def main():
     log.info("=" * 64)
     log.info("Delta MV Straddle Bot")
@@ -4088,6 +4113,7 @@ def main():
              MORNING_H_UTC, MORNING_M_UTC,
              _ist_label(MORNING_H_UTC, MORNING_M_UTC), MORNING_LOTS,
              MORNING_ENABLED)
+    log.info("  M-SIDEWAYS: immediate SHORT when 5M/15M/live-1H are all SIDEWAYS")
     log.info("  M-Exit : %s",
              ("%02d:%02d UTC (%s)" % (MORNING_EXIT_H_UTC, MORNING_EXIT_M_UTC,
                                        _ist_label(MORNING_EXIT_H_UTC, MORNING_EXIT_M_UTC)))
@@ -4111,6 +4137,7 @@ def main():
     }
     next_pending_recovery = 0.0
     next_history_flush = 0.0
+    next_sideways_morning_attempt = 0.0
     last_day           = None
     env_mtime          = ENV_FILE.stat().st_mtime if ENV_FILE.exists() else 0
     cfg_mtime          = CFG_FILE.stat().st_mtime if CFG_FILE.exists() else 0
@@ -4147,21 +4174,54 @@ def main():
             if today != last_day:
                 fired_entry        = False
                 fired_morning      = False
+                next_sideways_morning_attempt = 0.0
                 for retry_key in next_exit_retry:
                     next_exit_retry[retry_key] = 0.0
                 last_day           = today
                 log.info("New UTC day: %s — daily flags reset.", today)
 
-            # MORNING ENTRY TRIGGER  00:15–00:24 UTC (5:45 AM IST)
+            # MORNING ENTRY TRIGGER
+            # - Normal AUTO forecast: configured 10-minute schedule window.
+            # - All-SIDEWAYS rule: immediate whenever the Morning slot is flat
+            #   and has not already recorded a trade today.
             in_morning_window = (MORNING_ENABLED
                                  and h == MORNING_H_UTC
                                  and MORNING_WIN_START <= m < MORNING_WIN_END)
-            if in_morning_window and not fired_morning:
+            immediate_sideways_due = False
+            # A scheduled NO_TRADE must not consume a later all-SIDEWAYS
+            # opportunity. In live-auto mode the durable state/day guard,
+            # rather than the schedule's in-process fired flag, controls this
+            # continuous trigger.
+            check_immediate = (
+                MOVE_AUTO_ENTRY_MODE == "live" or not fired_morning)
+            if (check_immediate
+                    and time.time() >= next_sideways_morning_attempt):
+                immediate_sideways_due, _, _ = \
+                    _immediate_morning_sideways_due(today)
+            scheduled_morning_due = in_morning_window and not fired_morning
+            if scheduled_morning_due or immediate_sideways_due:
                 try:
+                    if immediate_sideways_due and not in_morning_window:
+                        log.info(
+                            "Immediate Morning entry: 5M, 15M and 1H are "
+                            "SIDEWAYS and the slot is flat.")
                     result = morning_entry_job()
-                    fired_morning = bool(
+                    status = (
+                        str(result.get("status") or "")
+                        if isinstance(result, dict) else "")
+                    terminal = bool(
                         isinstance(result, dict) and result.get("terminal"))
+                    if immediate_sideways_due and status == "no_trade":
+                        # SIDEWAYS still owns the direction, but a preserved
+                        # safety gate may be transient. Retry without hammering
+                        # market/account APIs.
+                        next_sideways_morning_attempt = time.time() + 60
+                        fired_morning = False
+                    else:
+                        fired_morning = terminal
                 except Exception as exc:
+                    if immediate_sideways_due:
+                        next_sideways_morning_attempt = time.time() + 60
                     log.exception("Morning entry job failed")
                     send_telegram(f"⚠️ <b>MORNING ENTRY FAILED — {TAG}</b>\n<code>{exc}</code>")
 

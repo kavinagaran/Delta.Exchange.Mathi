@@ -162,6 +162,58 @@ def test_all_sideways_preserves_independent_short_safety_gates():
     assert override["preserved_safety_blockers"] == ["bid_liquidity"]
 
 
+def test_flat_morning_all_sideways_is_due_without_a_schedule_time():
+    with patch.object(bot, "MORNING_ENABLED", True), \
+            patch.object(bot, "MOVE_AUTO_ENTRY_MODE", "live"):
+        due, reason, _ = bot._immediate_morning_sideways_due(
+            "2026-07-20",
+            state={"status": "CLOSED", "entry_date": "2026-07-19"},
+            signal=_sideways_signal(),
+        )
+
+    assert due is True
+    assert reason == "all_sideways_flat_morning"
+
+
+@pytest.mark.parametrize("state, expected_reason", [
+    ({"status": "OPEN", "entry_date": "2026-07-20"}, "morning_open"),
+    ({"status": "ENTRY_PENDING"}, "morning_entry_pending"),
+    ({"status": "CLOSED", "entry_date": "2026-07-20"},
+     "morning_already_recorded_today"),
+])
+def test_immediate_morning_sideways_never_duplicates_position_or_daily_cycle(
+        state, expected_reason):
+    with patch.object(bot, "MORNING_ENABLED", True), \
+            patch.object(bot, "MOVE_AUTO_ENTRY_MODE", "live"):
+        due, reason, _ = bot._immediate_morning_sideways_due(
+            "2026-07-20", state=state, signal=_sideways_signal())
+
+    assert due is False
+    assert reason == expected_reason
+
+
+def test_immediate_morning_sideways_requires_fresh_all_sideways_snapshot():
+    with patch.object(bot, "MORNING_ENABLED", True), \
+            patch.object(bot, "MOVE_AUTO_ENTRY_MODE", "live"):
+        unavailable, unavailable_reason, _ = \
+            bot._immediate_morning_sideways_due(
+                "2026-07-20",
+                state={"status": "IDLE"},
+                signal={"available": False, "all_sideways": False},
+            )
+        directional, directional_reason, _ = \
+            bot._immediate_morning_sideways_due(
+                "2026-07-20",
+                state={"status": "IDLE"},
+                signal={"available": True, "all_sideways": False},
+            )
+
+    assert unavailable is False
+    assert unavailable_reason == "trend_snapshot_unavailable"
+    assert directional is False
+    assert directional_reason == "timeframes_not_all_sideways"
+
+
 def test_evening_shadow_records_decision_without_planning_or_order():
     plan = Mock(side_effect=AssertionError("shadow mode reached entry planning"))
     submit = Mock(side_effect=AssertionError("shadow mode reached order submission"))

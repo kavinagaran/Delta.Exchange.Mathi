@@ -286,7 +286,8 @@ async function loadSlots() {
   document.getElementById('slot-evening').innerHTML = slotHtml(evening, 'evening', tp);
   document.getElementById('slot-trend').innerHTML = slotHtml(st.trend, 'trend', tp);
   renderExternalOptions(st.external_options || []);
-  if (st.morning_entry_ist) document.getElementById('when-morning').textContent = 'Entry ' + st.morning_entry_ist;
+  if (st.morning_entry_ist) document.getElementById('when-morning').textContent =
+    'Scheduled ' + st.morning_entry_ist + ' · SIDEWAYS SELL immediate';
   if (st.entry_ist)         document.getElementById('when-evening').textContent = 'Entry ' + st.entry_ist;
 }
 
