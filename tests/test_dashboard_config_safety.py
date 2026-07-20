@@ -82,7 +82,7 @@ def test_only_explicit_valid_per_account_mode_enables_live(isolated_account):
 def test_move_decision_dashboard_view_is_mode_isolated_and_compact(
         isolated_account):
     def decision(action, dry_run):
-        return {
+        result = {
             "schema_version": 1,
             "slot": "morning",
             "decision_id": f"{action}-1",
@@ -105,7 +105,10 @@ def test_move_decision_dashboard_view_is_mode_isolated_and_compact(
             },
             "decision": {
                 "action": action,
-                "side": "buy" if action == "LONG_MOVE" else None,
+                "side": (
+                    "buy" if action == "LONG_MOVE" else
+                    "sell" if action == "SHORT_MOVE" else None
+                ),
                 "conflict": False,
                 "metrics": {
                     "long_edge_per_contract": .01,
@@ -114,10 +117,28 @@ def test_move_decision_dashboard_view_is_mode_isolated_and_compact(
                 "failed_gates": {
                     "common": [],
                     "long": [],
-                    "short": ["jump_event_risk"],
+                    "short": [] if dry_run else ["jump_event_risk"],
                 },
             },
         }
+        if dry_run:
+            result["strategy_override"] = {
+                "kind": "morning_all_sideways_short",
+                "applied": True,
+                "signal_observed_at_utc": "2026-07-18T00:14:58Z",
+                "timeframes": {
+                    key: {
+                        "trend": "neutral",
+                        "display": "sideways",
+                        "candle_time": index,
+                        "live_candle": key == "1h",
+                    }
+                    for index, key in enumerate(
+                        ("5m", "15m", "1h"), start=1)
+                },
+                "preserved_safety_blockers": [],
+            }
+        return result
 
     _write_json(
         isolated_account / "move_decision_morning.json",
@@ -125,7 +146,7 @@ def test_move_decision_dashboard_view_is_mode_isolated_and_compact(
     )
     _write_json(
         isolated_account / "dry_run" / "move_decision_morning.json",
-        decision("NO_TRADE", True),
+        decision("SHORT_MOVE", True),
     )
 
     live = dashboard._move_decision_dashboard_view("morning")
@@ -133,10 +154,13 @@ def test_move_decision_dashboard_view_is_mode_isolated_and_compact(
         "morning", dry_run=True)
 
     assert live["action"] == "LONG_MOVE"
-    assert paper["action"] == "NO_TRADE"
+    assert paper["action"] == "SHORT_MOVE"
     assert paper["dry_run"] is True
     assert paper["forecast"]["event_score_available"] is False
-    assert paper["failed_gates"]["short"] == ["jump_event_risk"]
+    assert paper["failed_gates"]["short"] == []
+    assert paper["strategy_override"]["applied"] is True
+    assert paper["strategy_override"]["timeframes"]["1h"]["display"] == \
+        "sideways"
     assert "normalized_input" not in paper
     assert "model_features" not in paper["forecast"]
 

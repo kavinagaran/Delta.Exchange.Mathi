@@ -176,13 +176,22 @@ function dryMoveDecisionHtml(view) {
     : action === 'SHORT_MOVE' ? 'SHORT MOVE'
     : action === 'MANAGE_EXISTING_POSITION' ? 'MANAGE EXISTING' : 'NO TRADE';
   const cls = action === 'LONG_MOVE' ? 'up' : action === 'SHORT_MOVE' ? 'down' : 'muted';
-  const eventCopy = forecast.event_score_available
-    ? `Event risk ${fN(forecast.jump_event_score, 2)}`
-    : 'Event risk UNKNOWN / HIGH · SHORT blocked';
+  const sidewaysShort = view.strategy_override?.kind === 'morning_all_sideways_short'
+    && view.strategy_override?.applied === true;
+  const eventCopy = sidewaysShort
+    ? '5M, 15M and 1H SIDEWAYS · Morning SELL rule'
+    : forecast.event_score_available
+      ? `Event risk ${fN(forecast.jump_event_score, 2)}`
+      : 'Event risk UNKNOWN / HIGH · SHORT blocked';
+  const directional = action === 'LONG_MOVE'
+    ? (view.failed_gates?.long || [])
+    : action === 'SHORT_MOVE'
+      ? (view.failed_gates?.short || [])
+      : [...(view.failed_gates?.long || []).map(v => `LONG ${v}`),
+         ...(view.failed_gates?.short || []).map(v => `SHORT ${v}`)];
   const failed = [
     ...(view.failed_gates?.common || []),
-    ...(view.failed_gates?.long || []).map(v => `LONG ${v}`),
-    ...(view.failed_gates?.short || []).map(v => `SHORT ${v}`),
+    ...directional,
   ].slice(0, 6);
   return `<div class="move-decision dry-slot-footer-panel ${cls}">
     <div class="move-decision-hd">

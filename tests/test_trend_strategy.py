@@ -27,6 +27,39 @@ class TrendCalculationTests(unittest.TestCase):
         self.assertFalse(dashboard.TREND_TIMEFRAMES["15m"]["include_live"])
         self.assertTrue(dashboard.TREND_TIMEFRAMES["1h"]["include_live"])
 
+    def test_snapshot_publishes_the_exact_displayed_timeframes(self):
+        candles = [
+            {"time": index, "open": 100, "high": 100, "low": 100,
+             "close": 100}
+            for index in range(1, 71)
+        ]
+        response = type("Response", (), {
+            "json": lambda self: {"success": True, "result": candles},
+        })()
+        filters = {
+            "ema_gap_pct": 0.05,
+            "rsi_up": 55,
+            "rsi_down": 45,
+            "slope_bars": 3,
+            "min_slope_pct": 0,
+            "adx_min": 18,
+            "hour_confirm_samples": 2,
+        }
+        dashboard._trend_cache.clear()
+        dashboard._trend_debounce.clear()
+        with patch.object(dashboard, "_active_user", return_value="alice"), \
+                patch.object(dashboard, "_trend_filter_config",
+                             return_value=filters), \
+                patch.object(dashboard.req, "get", return_value=response), \
+                patch.object(
+                    dashboard, "_persist_trend_signal_snapshot") as persist:
+            snapshot = dashboard._trend_snapshot(force=True)
+
+        self.assertTrue(all(
+            row["trend"] == "neutral"
+            for row in snapshot["timeframes"].values()))
+        persist.assert_called_once_with(snapshot)
+
 
 class OptionSelectionTests(unittest.TestCase):
     @staticmethod

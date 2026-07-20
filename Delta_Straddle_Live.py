@@ -90,6 +90,8 @@ BOT_USER = os.getenv("BOT_USER", os.getenv("DASH_USER", "mathi"))
 ACCOUNT_DIR = Path(__file__).parent / "users" / BOT_USER
 LIVE_DATA_DIR = ACCOUNT_DIR
 DRY_DATA_DIR = ACCOUNT_DIR / "dry_run"
+TREND_SIGNAL_SNAPSHOT_FILE = ACCOUNT_DIR / "trend_signal_snapshot.json"
+MORNING_SIDEWAYS_SNAPSHOT_MAX_AGE_SEC = 45.0
 ACCOUNT_DIR.mkdir(parents=True, exist_ok=True)
 DRY_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -1309,6 +1311,152 @@ def _move_decision_path(slot: str) -> Path:
     return DATA_DIR / f"move_decision_{slot}.json"
 
 
+def _load_morning_sideways_signal(
+    *,
+    now: datetime | None = None,
+) -> dict:
+    """Read the dashboard-published MTF signal without recalculating it.
+
+    The published snapshot is the source of truth for what the operator sees:
+    completed 5M, completed 15M and live/debounced 1H. Missing, malformed,
+    future-dated or stale data never authorises a short.
+    """
+    checked_at = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    unavailable = {
+        "available": False,
+        "all_sideways": False,
+        "checked_at_utc": checked_at.isoformat(),
+    }
+    try:
+        document = json.loads(
+            TREND_SIGNAL_SNAPSHOT_FILE.read_text(encoding="utf-8"))
+        if not isinstance(document, dict):
+            raise ValueError("snapshot is not an object")
+        observed_raw = str(document.get("observed_at_utc") or "")
+        observed_at = datetime.fromisoformat(
+            observed_raw.replace("Z", "+00:00"))
+        if observed_at.tzinfo is None:
+            observed_at = observed_at.replace(tzinfo=timezone.utc)
+        observed_at = observed_at.astimezone(timezone.utc)
+        age = (checked_at - observed_at).total_seconds()
+        if age < -5:
+            raise ValueError("snapshot timestamp is in the future")
+        if age > MORNING_SIDEWAYS_SNAPSHOT_MAX_AGE_SEC:
+            raise ValueError(
+                f"snapshot is stale ({age:.1f}s > "
+                f"{MORNING_SIDEWAYS_SNAPSHOT_MAX_AGE_SEC:.0f}s)")
+
+        source_frames = document.get("timeframes")
+        if not isinstance(source_frames, dict):
+            raise ValueError("snapshot timeframes are unavailable")
+        expected_live = {"5m": False, "15m": False, "1h": True}
+        frames = {}
+        for timeframe, live_candle in expected_live.items():
+            row = source_frames.get(timeframe)
+            if not isinstance(row, dict):
+                raise ValueError(f"{timeframe} snapshot is unavailable")
+            trend = str(row.get("trend") or "").strip().lower()
+            if trend not in {"up", "down", "neutral"}:
+                raise ValueError(f"{timeframe} trend is invalid")
+            if bool(row.get("live_candle")) is not live_candle:
+                raise ValueError(f"{timeframe} candle policy is invalid")
+            if row.get("candle_time") in (None, ""):
+                raise ValueError(f"{timeframe} candle time is unavailable")
+            frames[timeframe] = {
+                "trend": trend,
+                "display": "sideways" if trend == "neutral" else trend,
+                "candle_time": row.get("candle_time"),
+                "live_candle": live_candle,
+                "unfiltered_trend": row.get("unfiltered_trend"),
+                "debounce_pending": bool(row.get("debounce_pending")),
+            }
+        return {
+            "available": True,
+            "all_sideways": all(
+                row["trend"] == "neutral" for row in frames.values()),
+            "observed_at_utc": observed_at.isoformat(),
+            "checked_at_utc": checked_at.isoformat(),
+            "age_seconds": round(max(age, 0), 3),
+            "timeframes": frames,
+        }
+    except Exception as exc:
+        return {**unavailable, "reason": str(exc)}
+
+
+def _apply_morning_sideways_short_decision(
+    decision: dict,
+    signal: dict,
+) -> tuple[dict, dict | None]:
+    """Give the all-SIDEWAYS Morning rule priority over value/event gates.
+
+    Only ``edge`` and ``jump_event_risk`` are replaced by this explicit
+    strategy signal. Common exchange gates and the independent short-side
+    permission, liquidity, p99, margin and liquidation gates must still pass.
+    """
+    if not signal.get("available") or not signal.get("all_sideways"):
+        return decision, None
+
+    updated = json.loads(json.dumps(decision))
+    original = json.loads(json.dumps(decision))
+    short_gates = updated.get("gates", {}).get("short", {})
+    required_short_gates = (
+        "allowed",
+        "bid_liquidity",
+        "p99_risk_per_contract",
+        "available_margin",
+        "liquidation_buffer",
+    )
+    blockers = []
+    if updated.get("common_passed") is not True:
+        blockers.append("common")
+    if (original.get("action") == MANAGE_EXISTING_POSITION
+            or float((original.get("metrics") or {}).get(
+                "current_position_qty") or 0) != 0):
+        blockers.append("existing_position")
+    blockers.extend(
+        gate for gate in required_short_gates
+        if short_gates.get(gate) is not True
+    )
+    override = {
+        "kind": "morning_all_sideways_short",
+        "applied": not blockers,
+        "signal_observed_at_utc": signal.get("observed_at_utc"),
+        "timeframes": signal.get("timeframes", {}),
+        "replaced_gates": ["edge", "jump_event_risk"],
+        "preserved_safety_blockers": blockers,
+        "original_action": original.get("action"),
+        "original_side": original.get("side"),
+        "original_failed_gates": original.get("failed_gates"),
+    }
+    if blockers:
+        # All-SIDEWAYS owns the Morning direction choice. If its SHORT cannot
+        # pass the preserved safety gates, do not fall back to a forecast LONG.
+        updated.update({
+            "action": NO_TRADE,
+            "side": None,
+            "long_signal": False,
+            "short_signal": False,
+            "conflict": False,
+            "strategy_override": override,
+        })
+        return updated, override
+
+    failed = updated.setdefault("failed_gates", {})
+    failed["short"] = [
+        name for name in failed.get("short", [])
+        if name not in {"edge", "jump_event_risk"}
+    ]
+    updated.update({
+        "action": SHORT_MOVE,
+        "side": "sell",
+        "long_signal": False,
+        "short_signal": True,
+        "conflict": False,
+        "strategy_override": override,
+    })
+    return updated, override
+
+
 def _persist_move_decision(slot: str, context: dict) -> None:
     _atomic_json(_move_decision_path(slot), context)
     decision = context.get("decision") or {}
@@ -1319,6 +1467,8 @@ def _persist_move_decision(slot: str, context: dict) -> None:
         "side": decision.get("side"),
         "failed_gates": decision.get("failed_gates"),
         "forecast": context.get("forecast"),
+        "strategy_override": context.get("strategy_override"),
+        "morning_sideways_signal": context.get("morning_sideways_signal"),
         "auto_mode": MOVE_AUTO_ENTRY_MODE,
         "dry_run": DRY_RUN,
     })
@@ -1435,6 +1585,12 @@ def build_move_auto_decision(
     }
     strategy = _move_strategy_config(slot, contract, configured_lots)
     decision = evaluate_move_decision(normalized, strategy)
+    morning_sideways_signal = None
+    strategy_override = None
+    if slot == "morning":
+        morning_sideways_signal = _load_morning_sideways_signal(now=now)
+        decision, strategy_override = _apply_morning_sideways_short_decision(
+            decision, morning_sideways_signal)
     decision_id = hashlib.sha256(json.dumps(
         {
             "slot": slot,
@@ -1442,6 +1598,15 @@ def build_move_auto_decision(
             "model_timestamp_ms": forecast["model_timestamp_ms"],
             "quote_timestamp_ms": market["quote_timestamp_ms"],
             "action": decision["action"],
+            "strategy_override": (
+                strategy_override.get("kind")
+                if strategy_override and strategy_override.get("applied")
+                else None
+            ),
+            "trend_observed_at_utc": (
+                morning_sideways_signal.get("observed_at_utc")
+                if morning_sideways_signal else None
+            ),
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -1460,6 +1625,8 @@ def build_move_auto_decision(
         "account_snapshot": account,
         "strategy_config": strategy,
         "decision": decision,
+        "morning_sideways_signal": morning_sideways_signal,
+        "strategy_override": strategy_override,
     }
     _persist_move_decision(slot, context)
     return context
@@ -2165,6 +2332,19 @@ def _refresh_move_auto_context_for_execution(
     }
     strategy = _move_strategy_config(slot, contract, configured_lots)
     decision = evaluate_move_decision(normalized, strategy)
+    previous_override = context.get("strategy_override") or {}
+    if (slot == "morning"
+            and previous_override.get("kind") == "morning_all_sideways_short"
+            and previous_override.get("applied") is True):
+        current_signal = _load_morning_sideways_signal()
+        decision, current_override = _apply_morning_sideways_short_decision(
+            decision, current_signal)
+        if not current_override or current_override.get("applied") is not True:
+            raise RuntimeError(
+                "Morning all-SIDEWAYS signal changed or a preserved SHORT "
+                "safety gate failed before execution; no order was placed")
+        context["morning_sideways_signal"] = current_signal
+        context["strategy_override"] = current_override
     expected_side = str(
         (auto_context.get("decision") or {}).get("side") or "")
     if decision.get("side") != expected_side or decision.get("action") not in {
@@ -3057,6 +3237,11 @@ def _morning_entry_job_locked():
     entry_fee, entry_fee_source = _entry_fee_accounting(order, plan)
 
     now = datetime.now(timezone.utc)
+    strategy_override = auto_context.get("strategy_override") or {}
+    sideways_short = (
+        strategy_override.get("kind") == "morning_all_sideways_short"
+        and strategy_override.get("applied") is True
+    )
     _persist_entry_state("morning", {
         "slot":           "morning",
         "status":         "OPEN",
@@ -3080,11 +3265,15 @@ def _morning_entry_job_locked():
         "client_order_ids": order.get("result", {}).get("client_order_ids", []),
         "entry_commission_usd": entry_fee,
         "entry_fee_source": entry_fee_source,
-        "entry_trigger":  f"morning_auto_{'long' if side == 'buy' else 'short'}",
+        "entry_trigger":  (
+            "morning_all_sideways_short" if sideways_short else
+            f"morning_auto_{'long' if side == 'buy' else 'short'}"
+        ),
         "execution_snapshot": snap,
         "move_value_signal": plan["value_signal"],
         "move_auto_decision_id": auto_context.get("decision_id"),
         "move_auto_context": plan.get("auto_context"),
+        "move_strategy_override": strategy_override or None,
         "risk_at_entry_usd": plan["risk_at_entry_usd"],
         "risk_decision": plan["risk_decision"],
         "protection_config": plan["protection_config"],

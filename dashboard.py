@@ -86,6 +86,7 @@ _trend_auto_health: dict[str, dict] = {}
 _trend_debounce: dict[str, dict] = {}
 _trend_shadow_seen: dict[str, str] = {}
 _external_options: dict[str, list] = {}
+TREND_SIGNAL_SNAPSHOT_FILE = "trend_signal_snapshot.json"
 
 
 def _pid_alive(pid: int) -> bool:
@@ -2050,6 +2051,32 @@ def _move_decision_dashboard_view(
         failed_view[group] = [
             str(value) for value in values[:12]
         ] if isinstance(values, list) else []
+    raw_override = raw.get("strategy_override")
+    strategy_override = None
+    if isinstance(raw_override, dict):
+        timeframe_view = {}
+        for key in ("5m", "15m", "1h"):
+            row = (raw_override.get("timeframes") or {}).get(key)
+            if isinstance(row, dict):
+                timeframe_view[key] = {
+                    "trend": str(row.get("trend") or ""),
+                    "display": str(row.get("display") or ""),
+                    "candle_time": row.get("candle_time"),
+                    "live_candle": bool(row.get("live_candle")),
+                }
+        strategy_override = {
+            "kind": str(raw_override.get("kind") or ""),
+            "applied": raw_override.get("applied") is True,
+            "signal_observed_at_utc": str(
+                raw_override.get("signal_observed_at_utc") or ""),
+            "timeframes": timeframe_view,
+            "preserved_safety_blockers": [
+                str(value)
+                for value in (
+                    raw_override.get("preserved_safety_blockers") or []
+                )[:12]
+            ],
+        }
     return {
         "schema_version": raw.get("schema_version"),
         "slot": slot,
@@ -2081,6 +2108,7 @@ def _move_decision_dashboard_view(
             "short_p99_loss_per_contract",
         )),
         "failed_gates": failed_view,
+        "strategy_override": strategy_override,
     }
 
 
@@ -5143,6 +5171,11 @@ def _trend_filter_config() -> dict:
     }
 
 
+def _persist_trend_signal_snapshot(data: dict) -> None:
+    """Publish the dashboard's exact displayed MTF signal for the MOVE worker."""
+    _atomic_write_json(_user_dir() / TREND_SIGNAL_SNAPSHOT_FILE, data)
+
+
 def _debounced_hourly_trend(user: str, candidate: str, candle_time,
                             required_samples: int) -> tuple[str, dict]:
     """Require consecutive fresh observations before accepting a 1H flip."""
@@ -5229,6 +5262,12 @@ def _trend_snapshot(force: bool = False) -> dict:
     data = {**frames["1h"], "combined": combined, "timeframes": frames,
             "all_aligned": combined in ("up", "down"),
             "filters": filters, "observed_at_utc": datetime.now(timezone.utc).isoformat()}
+    try:
+        _persist_trend_signal_snapshot(data)
+    except Exception as exc:
+        # The Trend dashboard remains readable, but the Morning MOVE worker
+        # will reject a missing/stale snapshot instead of guessing SIDEWAYS.
+        print(f"WARNING: could not persist trend signal snapshot for {user}: {exc}")
     _trend_cache[user] = {"ts": time.time(), "data": data}
     return data
 
@@ -6449,6 +6488,10 @@ def _trend_auto_loop() -> None:
                 try:
                     with app.test_request_context("/api/trend-entry"):
                         g.basic_user = user
+                        # Publish the displayed 5M/15M/live-1H state for the
+                        # Morning MOVE rule even when Trend auto-entry itself
+                        # is disabled. The 15-second cache limits API traffic.
+                        _trend_snapshot()
                         _maybe_auto_trend_entry()
                 except Exception as exc:
                     _trend_auto_health.setdefault(user, {}).update(

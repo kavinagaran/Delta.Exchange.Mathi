@@ -118,9 +118,13 @@ function moveDecisionHtml(view) {
     : action === 'MANAGE_EXISTING_POSITION' ? 'MANAGE EXISTING' : 'NO TRADE';
   const actionClass = action === 'LONG_MOVE' ? 'up'
     : action === 'SHORT_MOVE' ? 'down' : 'muted';
-  const eventCopy = forecast.event_score_available
-    ? `Event risk ${fN(forecast.jump_event_score, 2)}`
-    : 'Event risk UNKNOWN / HIGH · SHORT blocked';
+  const sidewaysShort = view.strategy_override?.kind === 'morning_all_sideways_short'
+    && view.strategy_override?.applied === true;
+  const eventCopy = sidewaysShort
+    ? '5M, 15M and 1H SIDEWAYS · Morning SELL rule'
+    : forecast.event_score_available
+      ? `Event risk ${fN(forecast.jump_event_score, 2)}`
+      : 'Event risk UNKNOWN / HIGH · SHORT blocked';
   const common = view.failed_gates?.common || [];
   const directional = action === 'LONG_MOVE'
     ? (view.failed_gates?.long || [])
