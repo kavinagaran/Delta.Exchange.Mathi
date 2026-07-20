@@ -746,7 +746,14 @@ def aggregate_risk_lot_caps(
     short_initial_margin_per_contract: float,
     current_position_qty: float = 0.0,
 ) -> dict[str, int]:
-    """Convert aggregate premium/p99/margin limits into contract caps."""
+    """Convert aggregate funding and position limits into lot caps.
+
+    The SHORT p99 estimate remains a decision diagnostic, but it is not a
+    sizing input. SHORT exposure is sized by configured quantity and position
+    ceilings; live affordability remains authoritative at exchange submission,
+    where an insufficient-margin response safely downsizes the order. Its
+    configured SL is the risk amount used by the portfolio ledger.
+    """
 
     metrics = decision.get("metrics") or {}
     action = decision.get("action")
@@ -772,31 +779,5 @@ def aggregate_risk_lot_caps(
             minimum=0,
         )
         caps["premium_risk"] = max(int(total // per_contract), 0)
-    elif action == SHORT_MOVE:
-        p99_per_contract = _finite(
-            metrics.get("short_p99_loss_per_contract"),
-            "short_p99_loss_per_contract",
-            minimum=0.0000000001,
-        )
-        p99_total = _finite(
-            strategy_config.get("max_short_p99_loss"),
-            "max_short_p99_loss",
-            minimum=0,
-        )
-        caps["p99_risk"] = max(int(p99_total // p99_per_contract), 0)
-        margin_per_contract = _finite(
-            short_initial_margin_per_contract,
-            "short_initial_margin_per_contract",
-            minimum=0.0000000001,
-        )
-        margin = _finite(available_margin, "available_margin", minimum=0)
-        max_usage = _finite(
-            strategy_config.get("max_short_margin_usage"),
-            "max_short_margin_usage",
-            minimum=0,
-        )
-        if max_usage > 1:
-            raise MoveInputError("max_short_margin_usage cannot exceed 1")
-        caps["margin"] = max(int((margin * max_usage) // margin_per_contract), 0)
     caps["effective"] = min(caps.values()) if caps else 0
     return caps

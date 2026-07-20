@@ -2495,38 +2495,48 @@ def build_move_entry_plan(
     spot = snapshot.get("spot") or get_btc_price()
     fee_one_way = min(OPTION_FEE_RATE * spot, OPTION_FEE_CAP_PCT * premium) * cv
     slippage_per_lot = premium * cv * MAX_SLIPPAGE_PCT / 100
-    lots = risk_based_lots(
-        configured=configured_lots,
-        affordable=affordable,
-        # MOVE depth controls bounded LIVE IOC chunks in
-        # _place_controlled_entry_impl; it is not a strategy sizing cap.
-        liquidity_cap=MAX_ORDER_LOTS,
-        max_order_lots=MAX_ORDER_LOTS,
-        risk_budget_usd=risk_budget,
-        stop_loss_usd=stop_loss,
-        premium_per_lot=premium * cv,
-        round_trip_fee_per_lot=fee_one_way * 2,
-        slippage_per_lot=slippage_per_lot,
-        short=side == "sell",
-    )
+    if side == "sell":
+        # SHORT MOVE risk is managed as total-position P&L by its configured
+        # TP/SL/TSL monitor. Do not translate the model's p99 estimate or the
+        # received premium into a second, implicit lot-size cap.
+        lots = max(min(configured_lots, affordable, MAX_ORDER_LOTS), 0)
+    else:
+        lots = risk_based_lots(
+            configured=configured_lots,
+            affordable=affordable,
+            # MOVE depth controls bounded LIVE IOC chunks in
+            # _place_controlled_entry_impl; it is not a strategy sizing cap.
+            liquidity_cap=MAX_ORDER_LOTS,
+            max_order_lots=MAX_ORDER_LOTS,
+            risk_budget_usd=risk_budget,
+            stop_loss_usd=stop_loss,
+            premium_per_lot=premium * cv,
+            round_trip_fee_per_lot=fee_one_way * 2,
+            slippage_per_lot=slippage_per_lot,
+            short=False,
+        )
     if lots < 1:
         raise RuntimeError(
             "risk sizing produced zero lots; verify risk budget, SL and affordability")
     if auto_decision is not None and side == "sell":
-        catastrophe = lots * max(
+        model_stress_risk = lots * max(
             float(auto_decision["metrics"].get(
                 "short_p99_loss_per_contract") or 0),
             initial_margin_per_contract,
         )
     elif auto_decision is not None:
-        catastrophe = lots * float(auto_decision["metrics"].get(
+        model_stress_risk = lots * float(auto_decision["metrics"].get(
             "long_premium_risk_per_contract") or 0)
     else:
-        catastrophe = lots * (
+        model_stress_risk = lots * (
             premium * cv + fee_one_way * 2 + slippage_per_lot)
-    # A configured SL is a trigger, not a guarantee of fill.  Long premium at
-    # risk remains the catastrophe bound and must never be understated.
-    proposed_risk = max(stop_loss, catastrophe)
+    # SHORT risk is explicitly delegated to the total-position SL monitor.
+    # Keep the model stress estimate as telemetry only. LONG premium at risk
+    # remains a catastrophe bound because paid premium can be lost in full.
+    proposed_risk = (
+        stop_loss if side == "sell"
+        else max(stop_loss, model_stress_risk)
+    )
     # Paper results have their own state/history risk ledger.  Pulling the
     # exchange account's live P&L into a simulation would mix the two modes
     # and could make a harmless paper entry depend on unrelated real exposure.
@@ -2546,6 +2556,10 @@ def build_move_entry_plan(
             auto_context.get("decision_id") if auto_context else None),
         "aggregate_lot_caps": lot_caps,
         "short_initial_margin_per_contract": initial_margin_per_contract,
+        "model_stress_risk_usd": round(model_stress_risk, 2),
+        "short_sizing_policy": (
+            "configured_affordable_with_sl_monitor"
+            if side == "sell" else None),
         "proposed_risk_usd": round(proposed_risk, 2),
         "unrealized_pnl_usd": unrealized,
         "snapshot": snapshot, "value_signal": value_signal,
@@ -2563,6 +2577,10 @@ def build_move_entry_plan(
         "auto_context": auto_context,
         "aggregate_lot_caps": lot_caps,
         "short_initial_margin_per_contract": initial_margin_per_contract,
+        "model_stress_risk_usd": round(model_stress_risk, 2),
+        "short_sizing_policy": (
+            "configured_affordable_with_sl_monitor"
+            if side == "sell" else None),
         "risk_at_entry_usd": round(proposed_risk, 2),
         "risk_decision": decision_dict(decision),
         "estimated_entry_fee_usd": round(fee_one_way * lots, 4),

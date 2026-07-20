@@ -251,6 +251,62 @@ def test_scheduled_dry_short_uses_short_cap_as_paper_risk_assumption(tmp_path):
     assert plan["book_depth_applied_to_sizing"] is False
 
 
+def test_auto_short_uses_configured_lots_and_sl_not_p99_sizing(tmp_path):
+    snapshot = {
+        "ask": 425, "bid": 422, "spot": 64_800,
+        "liquidity_cap": 10,
+    }
+    context = {
+        "decision_id": "short-without-p99-sizing",
+        "normalized_input": {"underlying": {"btc_index_price": 64_800}},
+        "decision": {
+            "action": "SHORT_MOVE",
+            "side": "sell",
+            "metrics": {"short_p99_loss_per_contract": 1.61642097115},
+        },
+        "strategy_config": {
+            "max_contracts": 1000,
+            "max_total_position": 1000,
+        },
+        "account_snapshot": {
+            "available_margin": 1000,
+            "current_position_qty": 0,
+        },
+    }
+    decision = RiskDecision(
+        True, "risk checks passed", "2026-07-20", 0, 0, 0, 0)
+    with patch.object(bot, "DATA_DIR", tmp_path), \
+         patch.object(bot, "DRY_RUN", True), \
+         patch.object(bot, "ALLOW_SHORT_MOVE", True), \
+         patch.object(bot, "SHORT_MAX_RISK_USD", 250), \
+         patch.object(bot, "MAX_ORDER_LOTS", 1000), \
+         patch.object(bot, "_assert_entry_configuration"), \
+         patch.object(bot, "_protection_snapshot", return_value={
+             "tp_target_pnl": 350, "sl_target_pnl": 160,
+             "tsl_arm_pnl": 100, "tsl_trail_pnl": 100,
+         }), \
+         patch.object(bot, "load_states", return_value={}), \
+         patch.object(bot, "get_execution_snapshot", return_value=snapshot), \
+         patch.object(bot, "_refresh_move_auto_context_for_execution",
+                      return_value=context), \
+         patch.object(bot, "_slot_risk", return_value=(500, 160)), \
+         patch.object(bot, "evaluate_entry", return_value=decision), \
+         patch.object(bot, "audit_event"):
+        plan = bot.build_move_entry_plan(
+            {"id": 7, "symbol": "MV-X", "contract_value": ".001"},
+            1000, "sell", "morning", auto_context=context)
+
+    assert plan["lots"] == 1000
+    assert plan["aggregate_lot_caps"] == {
+        "position": 1000, "effective": 1000}
+    assert plan["risk_at_entry_usd"] == 160
+    assert plan["model_stress_risk_usd"] == pytest.approx(1616.42)
+    assert plan["short_sizing_policy"] == (
+        "configured_affordable_with_sl_monitor")
+    assert plan["observed_executable_depth_lots"] == 10
+    assert plan["book_depth_applied_to_sizing"] is False
+
+
 def test_scheduled_live_short_still_requires_positive_sl(tmp_path):
     snapshot = {
         "ask": 145, "bid": 144, "spot": 64000,

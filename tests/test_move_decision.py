@@ -264,7 +264,7 @@ def test_conflicting_forecast_signals_fail_closed():
         evaluate_move_decision(snapshot, _config())
 
 
-def test_aggregate_lot_caps_apply_long_premium_and_short_p99_margin():
+def test_aggregate_lot_caps_apply_long_premium_and_short_position_only():
     long_decision = evaluate_move_decision(_snapshot(), _config())
     long_caps = aggregate_risk_lot_caps(
         long_decision,
@@ -291,6 +291,6 @@ def test_aggregate_lot_caps_apply_long_premium_and_short_p99_margin():
         available_margin=1_000,
         short_initial_margin_per_contract=0.50,
     )
-    assert short_caps["margin"] == 600
-    assert short_caps["effective"] == min(
-        short_caps["position"], short_caps["p99_risk"], short_caps["margin"])
+    assert "p99_risk" not in short_caps
+    assert "margin" not in short_caps
+    assert short_caps["effective"] == short_caps["position"]
