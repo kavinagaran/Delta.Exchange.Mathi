@@ -114,28 +114,6 @@
       </div>
     </div>
     <div class="form-sec">
-      <div class="form-sec-title">Internal payoff forecast · completed 5M BTC index candles</div>
-      <div class="form-grid">
-        <label class="fld"><span>Historical lookback days</span><input id="c-MOVE_FORECAST_LOOKBACK_DAYS" type="number" min="7" max="30"></label>
-        <label class="fld"><span>Volatility scenarios</span><input id="c-MOVE_FORECAST_OUTER_SCENARIOS" type="number" min="8" max="128"></label>
-        <label class="fld"><span>Paths / scenario</span><input id="c-MOVE_FORECAST_PATHS_PER_SCENARIO" type="number" min="32" max="1024"></label>
-        <label class="fld"><span>Maximum model age secs</span><input id="c-MOVE_MAX_MODEL_AGE_SEC" type="number" min="1" max="3600"></label>
-        <label class="fld"><span>Minimum time to settlement mins</span><input id="c-MOVE_MIN_TTE_MINUTES" type="number" min="1" max="1440"></label>
-        <label class="fld"><span>Maximum contract TTE hrs</span><input id="c-MOVE_MAX_TTE_HOURS" type="number" min="1" max="168" step="0.5"></label>
-        <label class="fld"><span>Final no-entry buffer secs</span><input id="c-MOVE_NO_ENTRY_BEFORE_SETTLEMENT_SEC" type="number" min="0" max="86400"></label>
-      </div>
-    </div>
-    <div class="form-sec">
-      <div class="form-sec-title">Conservative fair-value edge</div>
-      <div class="form-grid">
-        <label class="fld"><span>Minimum LONG edge $ / lot</span><input id="c-MOVE_MIN_LONG_EDGE_ABS_USD" type="number" min="0" step="0.01"></label>
-        <label class="fld"><span>Minimum LONG edge %</span><input id="c-MOVE_MIN_LONG_EDGE_PCT" type="number" min="0" max="100" step="0.5"></label>
-        <label class="fld"><span>Minimum SHORT edge $ / lot</span><input id="c-MOVE_MIN_SHORT_EDGE_ABS_USD" type="number" min="0" step="0.01"></label>
-        <label class="fld"><span>Minimum SHORT edge %</span><input id="c-MOVE_MIN_SHORT_EDGE_PCT" type="number" min="0" max="100" step="0.5"><em class="fld-hint">Must be at least the LONG hurdle.</em></label>
-        <label class="fld"><span>Maximum event/jump score for SHORT</span><input id="c-MOVE_MAX_JUMP_SCORE_SHORT" type="number" min="0" max="1" step="0.05"><em class="fld-hint">Missing scheduled-event data is treated as 1.0 (unknown/high risk), blocking SHORT.</em></label>
-      </div>
-    </div>
-    <div class="form-sec">
       <div class="form-sec-title">Quote and execution quality</div>
       <div class="form-grid">
         <label class="fld"><span>Safe IOC execution</span><select id="c-SAFE_EXECUTION_ENABLED"><option value="true">Enabled (required for entries)</option><option value="false">Disabled — blocks scheduled entries</option></select></label>
@@ -251,15 +229,10 @@ const KEYS = ['DRY_RUN','STRADDLE_LOTS','STRIKE_STEP','EVENING_ENABLED','EVENING
   'MOVE_AUTO_ENTRY_MODE','MOVE_ALLOW_LONG','ALLOW_SHORT_MOVE','SHORT_MAX_RISK_USD',
   'SAFE_EXECUTION_ENABLED','MAX_SPREAD_PCT','MAX_SLIPPAGE_PCT',
   'MIN_BOOK_DEPTH_MULTIPLE','MAX_QUOTE_AGE_SEC','ORDER_CHUNK_LOTS',
-  'MOVE_MIN_LONG_EDGE_ABS_USD','MOVE_MIN_SHORT_EDGE_ABS_USD',
-  'MOVE_MIN_LONG_EDGE_PCT','MOVE_MIN_SHORT_EDGE_PCT',
-  'MOVE_MIN_TTE_MINUTES','MOVE_MAX_TTE_HOURS','MAX_CONCURRENT_MOVE_POSITIONS',
-  'MOVE_MAX_MODEL_AGE_SEC','MOVE_MIN_BID_SIZE','MOVE_MIN_ASK_SIZE',
-  'MOVE_MAX_JUMP_SCORE_SHORT','MOVE_MAX_LONG_PREMIUM_RISK_USD',
+  'MAX_CONCURRENT_MOVE_POSITIONS','MOVE_MIN_BID_SIZE','MOVE_MIN_ASK_SIZE',
+  'MOVE_MAX_LONG_PREMIUM_RISK_USD',
   'MOVE_MAX_SHORT_MARGIN_USAGE_PCT','MOVE_MIN_LIQUIDATION_BUFFER_PCT',
-  'MOVE_NO_ENTRY_BEFORE_SETTLEMENT_SEC','MOVE_REQUIRE_NO_OPEN_ORDERS',
-  'MOVE_REQUIRE_FLAT','MOVE_DRY_RUN_CAPITAL_USD','MOVE_FORECAST_LOOKBACK_DAYS',
-  'MOVE_FORECAST_OUTER_SCENARIOS','MOVE_FORECAST_PATHS_PER_SCENARIO',
+  'MOVE_REQUIRE_NO_OPEN_ORDERS','MOVE_REQUIRE_FLAT','MOVE_DRY_RUN_CAPITAL_USD',
   'TREND_EMA_GAP_PCT','TREND_RSI_UP','TREND_RSI_DOWN','TREND_15M_SLOPE_BARS',
   'TREND_MIN_15M_SLOPE_PCT','TREND_ADX_MIN','TREND_1H_CONFIRM_SAMPLES',
   'TREND_MIN_TTE_HOURS','TREND_TARGET_DELTA','TREND_MAX_SPREAD_PCT',

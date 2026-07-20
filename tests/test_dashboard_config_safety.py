@@ -207,11 +207,27 @@ def test_config_reset_profile_covers_every_page_field_and_is_fail_safe():
         "ENTRY_H_UTC", "ENTRY_M_UTC", "EXIT_H_UTC", "EXIT_M_UTC",
     }
 
-    assert len(page_keys) == 77
+    assert len(page_keys) == 65
     assert preserved == {"TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"}
     assert page_keys - preserved == set(dashboard.CONFIG_PAGE_DEFAULTS) - time_keys
     assert time_keys <= set(dashboard.CONFIG_PAGE_DEFAULTS)
     assert set(dashboard.CONFIG_PAGE_DEFAULTS) <= set(dashboard.CONFIG_KEYS)
+    internal_move_keys = {
+        "MOVE_FORECAST_LOOKBACK_DAYS",
+        "MOVE_FORECAST_OUTER_SCENARIOS",
+        "MOVE_FORECAST_PATHS_PER_SCENARIO",
+        "MOVE_MAX_MODEL_AGE_SEC",
+        "MOVE_MIN_TTE_MINUTES",
+        "MOVE_MAX_TTE_HOURS",
+        "MOVE_NO_ENTRY_BEFORE_SETTLEMENT_SEC",
+        "MOVE_MIN_LONG_EDGE_ABS_USD",
+        "MOVE_MIN_LONG_EDGE_PCT",
+        "MOVE_MIN_SHORT_EDGE_ABS_USD",
+        "MOVE_MIN_SHORT_EDGE_PCT",
+        "MOVE_MAX_JUMP_SCORE_SHORT",
+    }
+    assert internal_move_keys.isdisjoint(page_keys)
+    assert internal_move_keys <= set(dashboard.CONFIG_KEYS)
 
     defaults = dashboard.CONFIG_PAGE_DEFAULTS
     assert defaults["DRY_RUN"] == "true"
