@@ -332,6 +332,10 @@ ALLOW_EXTERNAL_POSITIONS_WITH_BOT = os.getenv(
 TELEGRAM_TOKEN  = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHATID = os.getenv("TELEGRAM_CHAT_ID",   "")
 TELEGRAM_ON     = os.getenv("TELEGRAM_ALERTS", "true").lower() in ("1", "true", "yes")
+TELEGRAM_EVENT_FILE = ACCOUNT_DIR / "telegram_event_alerts.json"
+TELEGRAM_EVENT_RETENTION_DAYS = max(
+    int(os.getenv("TELEGRAM_EVENT_RETENTION_DAYS", "14")), 1)
+_TELEGRAM_EVENT_MEMORY: set[str] = set()
 
 # ─────────────────────────────────────────────────────────────
 # LOGGING
@@ -786,19 +790,141 @@ def _flush_pending_move_history() -> bool:
 # ─────────────────────────────────────────────────────────────
 # TELEGRAM ALERTS
 # ─────────────────────────────────────────────────────────────
-def send_telegram(text: str):
+def send_telegram(text: str) -> bool:
     """Fire-and-forget Telegram message. Silently skips if not configured."""
     if not TELEGRAM_ON or not TELEGRAM_TOKEN or not TELEGRAM_CHATID:
-        return
+        return False
     try:
-        requests.post(
+        response = requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
             json={"chat_id": TELEGRAM_CHATID, "text": text, "parse_mode": "HTML"},
             timeout=8,
         )
+        response.raise_for_status()
         log.info("Telegram alert sent.")
+        return True
     except Exception as exc:
         log.warning("Telegram alert failed: %s", exc)
+        return False
+
+
+def _load_telegram_event_registry() -> dict:
+    if not TELEGRAM_EVENT_FILE.exists():
+        return {}
+    try:
+        document = json.loads(TELEGRAM_EVENT_FILE.read_text(encoding="utf-8"))
+        events = document.get("events", {}) if isinstance(document, dict) else {}
+        if not isinstance(events, dict):
+            raise ValueError("events is not an object")
+        return {str(key): value for key, value in events.items()}
+    except (OSError, ValueError, TypeError) as exc:
+        log.warning("Telegram event ledger is unreadable; using process memory: %s", exc)
+        return {}
+
+
+def _save_telegram_event_registry(events: dict) -> None:
+    cutoff = datetime.now(timezone.utc) - timedelta(
+        days=TELEGRAM_EVENT_RETENTION_DAYS)
+    retained = {}
+    for key, value in events.items():
+        try:
+            raw = value.get("sent_at_utc") if isinstance(value, dict) else value
+            sent_at = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+            if sent_at.tzinfo is None:
+                sent_at = sent_at.replace(tzinfo=timezone.utc)
+            if sent_at < cutoff:
+                continue
+        except (TypeError, ValueError):
+            # Unknown legacy values are retained rather than risking a repeat.
+            pass
+        retained[str(key)] = value
+    _atomic_json(TELEGRAM_EVENT_FILE, {
+        "version": 1,
+        "events": retained,
+    })
+
+
+def send_telegram_once(event_key: str, text: str) -> bool:
+    """Send one Telegram alert for one durable event identity.
+
+    The account-scoped ledger survives service restarts. The event is claimed
+    before the network call, providing strict at-most-once behavior even when
+    Telegram times out after accepting a message.
+    """
+    key = str(event_key or "").strip()
+    if not key:
+        raise ValueError("Telegram event key is required")
+    if not TELEGRAM_ON or not TELEGRAM_TOKEN or not TELEGRAM_CHATID:
+        return False
+    if key in _TELEGRAM_EVENT_MEMORY:
+        log.info("Telegram event already alerted; suppressing retry: %s", key)
+        return False
+    owner = f"telegram-event-{os.getpid()}-{hashlib.sha256(key.encode()).hexdigest()[:10]}"
+    try:
+        with account_file_lock(
+                ACCOUNT_DIR, "telegram-events", owner,
+                stale_after_sec=30, wait_sec=2) as acquired:
+            if not acquired:
+                # Fail closed for notification delivery. The trading retry is
+                # unaffected and a later loop may claim after the lock clears.
+                log.warning("Telegram event claim lock unavailable; alert suppressed: %s", key)
+                return False
+            events = _load_telegram_event_registry()
+            if key in events:
+                _TELEGRAM_EVENT_MEMORY.add(key)
+                log.info("Telegram event already alerted; suppressing retry: %s", key)
+                return False
+            claimed_at = datetime.now(timezone.utc).isoformat()
+            events[key] = {
+                "sent_at_utc": claimed_at,
+                "claimed_at_utc": claimed_at,
+                "delivery_policy": "at_most_once",
+                "message_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            }
+            _save_telegram_event_registry(events)
+            _TELEGRAM_EVENT_MEMORY.add(key)
+    except Exception as exc:
+        # Never send without a durable claim: that could recreate the spam
+        # after a process restart or an ambiguous Telegram timeout.
+        log.warning("Telegram event claim failed; alert suppressed for %s: %s", key, exc)
+        return False
+    delivered = send_telegram(text)
+    if not delivered:
+        log.warning(
+            "Telegram event %s was claimed but delivery failed; at-most-once policy prevents retry",
+            key,
+        )
+    return delivered
+
+
+def _entry_failure_event_key(slot: str, event_date: str,
+                             trigger: str = "scheduled") -> str:
+    mode = "dry" if DRY_RUN else "real"
+    return f"entry-failed:{mode}:{slot}:{trigger}:{event_date}"
+
+
+def _position_failure_event_key(category: str, slot: str, dry_run: bool,
+                                state: dict | None) -> str:
+    state = state if isinstance(state, dict) else {}
+    identity = state.get("position_cycle_id") or "|".join(str(value or "") for value in (
+        state.get("product_id"), state.get("entry_date"),
+        state.get("entry_time_utc"), state.get("symbol"),
+    ))
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:20]
+    mode = "dry" if dry_run else "real"
+    return f"{category}:{mode}:{slot}:{digest}"
+
+
+def _pending_entry_event_key(category: str, slot: str,
+                             journal: dict | None) -> str:
+    journal = journal if isinstance(journal, dict) else {}
+    identity = "|".join(str(value or "") for value in (
+        journal.get("started_at_utc"), journal.get("product_id"),
+        journal.get("symbol"), journal.get("side"),
+        journal.get("requested_lots"),
+    ))
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:20]
+    return f"{category}:real:{slot}:{digest}"
 
 # ─────────────────────────────────────────────────────────────
 # ONE-ORDER-PER-DAY GUARD
@@ -2600,6 +2726,7 @@ def recover_pending_entries(slots=("morning", "evening")) -> None:
         path = DATA_DIR / f"pending_{slot}_entry.json"
         if not path.exists():
             continue
+        journal = {}
         try:
             journal = json.loads(path.read_text(encoding="utf-8"))
             pid = int(journal.get("product_id") or 0)
@@ -2717,7 +2844,9 @@ def recover_pending_entries(slots=("morning", "evening")) -> None:
                     "slot": slot, "product_id": pid, "exchange_size": actual_size,
                     "proven_bot_fills": proven_lots, "orders": unresolved,
                 })
-                send_telegram(
+                send_telegram_once(
+                    _pending_entry_event_key(
+                        "pending-entry-ownership", slot, journal),
                     f"🚨 <b>UNRESOLVED ENTRY OWNERSHIP — {slot.upper()} ({TAG})</b>\n"
                     f"Product <code>{pid}</code> has <code>{actual_size}</code> live lots but only "
                     f"<code>{proven_lots}</code> lots are proven bot fills.\n"
@@ -2829,15 +2958,20 @@ def recover_pending_entries(slots=("morning", "evening")) -> None:
                 })
             except Exception:
                 log.exception("Recovered-entry audit failed after protection was confirmed")
-            send_telegram(
+            send_telegram_once(
+                _pending_entry_event_key(
+                    "pending-entry-recovered", slot, journal),
                 f"⚠️ <b>RECOVERED INTERRUPTED {slot.upper()} ENTRY — {TAG}</b>\n"
                 f"<code>{state['symbol']}</code> · {lots:,} lots @ ${fill:.4f}\n"
                 "Protection monitor is confirmed."
             )
         except Exception as exc:
             log.exception("Pending %s entry recovery failed", slot)
-            send_telegram(f"🚨 <b>PENDING ENTRY RECOVERY FAILED — {slot.upper()} ({TAG})</b>\n"
-                          f"<code>{exc}</code>\nNew entries remain blocked by the journal.")
+            send_telegram_once(
+                _pending_entry_event_key(
+                    "pending-entry-recovery-failed", slot, journal),
+                f"🚨 <b>PENDING ENTRY RECOVERY FAILED — {slot.upper()} ({TAG})</b>\n"
+                f"<code>{exc}</code>\nNew entries remain blocked by the journal.")
 
 # ─────────────────────────────────────────────────────────────
 # TP MONITOR SPAWN + STALE-STOP SWEEP
@@ -2975,13 +3109,22 @@ def start_tp_monitor(slot: str):
             state["protection_start_failure"] = message
             state["protection_established"] = False
             (save_morning_state if slot == "morning" else save_state)(state)
-        send_telegram(f"🚨 <b>PROTECTION NOT CONFIRMED — {slot.upper()} ({TAG})</b>\n"
-                      f"<code>{message}</code>\nNo further slot entry is allowed while this position is open.")
+        send_telegram_once(
+            _position_failure_event_key(
+                "protection-not-confirmed", slot,
+                _state_flag((state or {}).get("dry_run")), state),
+            f"🚨 <b>PROTECTION NOT CONFIRMED — {slot.upper()} ({TAG})</b>\n"
+            f"<code>{message}</code>\nNo further slot entry is allowed while this position is open.")
         return False
     except Exception as exc:
         log.warning("TP monitor spawn failed for %s: %s", slot, exc)
-        send_telegram(f"⚠️ <b>TP MONITOR SPAWN FAILED — {slot.upper()} ({TAG})</b>\n"
-                      f"<code>{exc}</code>\nProtection failed; entry fail-safe will flatten the position.")
+        failed_state = load_morning_state() if slot == "morning" else load_state()
+        send_telegram_once(
+            _position_failure_event_key(
+                "tp-monitor-spawn-failed", slot,
+                _state_flag((failed_state or {}).get("dry_run")), failed_state),
+            f"⚠️ <b>TP MONITOR SPAWN FAILED — {slot.upper()} ({TAG})</b>\n"
+            f"<code>{exc}</code>\nProtection failed; entry fail-safe will flatten the position.")
         return False
 
 
@@ -3946,7 +4089,10 @@ def _close_position_job_locked(state: dict, save_fn, label: str,
             "filled_lots": filled_lots, "remaining_lots": abs(remaining_size),
             "exit_order_id": terminal_order_id,
         })
-        send_telegram(
+        send_telegram_once(
+            _position_failure_event_key(
+                "exit-failed", label.lower(),
+                _state_flag(state.get("dry_run")), state),
             f"🚨 <b>{label} EXIT INCOMPLETE — {TAG}</b>\n"
             f"<code>{symbol}</code> still has <code>{abs(remaining_size)}</code> lots open.\n"
             "State remains OPEN and exchange protection is retained."
@@ -4241,13 +4387,19 @@ def main():
                     if immediate_sideways_due:
                         next_sideways_morning_attempt = time.time() + 60
                     log.exception("Morning entry job failed")
-                    send_telegram(f"⚠️ <b>MORNING ENTRY FAILED — {TAG}</b>\n<code>{exc}</code>")
+                    trigger = (
+                        "sideways" if immediate_sideways_due and not in_morning_window
+                        else "scheduled")
+                    send_telegram_once(
+                        _entry_failure_event_key("morning", today, trigger),
+                        f"⚠️ <b>MORNING ENTRY FAILED — {TAG}</b>\n<code>{exc}</code>")
 
             # Existing REAL and DRY-RUN positions retain independent scheduled
             # exits after a mode switch.  A paper close is local-only; a real
             # close still uses the authenticated reduce-only path.
             for dry_run in (False, True):
                 retry_key = (dry_run, "morning")
+                morning_open = {}
                 try:
                     with _storage_namespace(dry_run):
                         morning_open = load_morning_state()
@@ -4262,7 +4414,9 @@ def main():
                     next_exit_retry[retry_key] = time.time() + 60
                     mode_label = "DRY-RUN" if dry_run else "REAL"
                     log.exception("%s morning exit job failed", mode_label)
-                    send_telegram(
+                    send_telegram_once(
+                        _position_failure_event_key(
+                            "exit-failed", "morning", dry_run, morning_open),
                         f"⚠️ <b>{mode_label} MORNING EXIT FAILED — {TAG}</b>\n"
                         f"<code>{exc}</code>\n"
                         "The bot will retry in 60 seconds while state remains OPEN.")
@@ -4278,10 +4432,13 @@ def main():
                         isinstance(result, dict) and result.get("terminal"))
                 except Exception as exc:
                     log.exception("Entry job failed")
-                    send_telegram(f"⚠️ <b>ENTRY FAILED — {TAG}</b>\n<code>{exc}</code>")
+                    send_telegram_once(
+                        _entry_failure_event_key("evening", today),
+                        f"⚠️ <b>ENTRY FAILED — {TAG}</b>\n<code>{exc}</code>")
 
             for dry_run in (False, True):
                 retry_key = (dry_run, "evening")
+                evening_open = {}
                 try:
                     with _storage_namespace(dry_run):
                         evening_open = load_state()
@@ -4296,7 +4453,9 @@ def main():
                     next_exit_retry[retry_key] = time.time() + 60
                     mode_label = "DRY-RUN" if dry_run else "REAL"
                     log.exception("%s evening exit job failed", mode_label)
-                    send_telegram(
+                    send_telegram_once(
+                        _position_failure_event_key(
+                            "exit-failed", "evening", dry_run, evening_open),
                         f"⚠️ <b>{mode_label} EVENING EXIT FAILED — {TAG}</b>\n"
                         f"<code>{exc}</code>\n"
                         "The bot will retry in 60 seconds while state remains OPEN.")
