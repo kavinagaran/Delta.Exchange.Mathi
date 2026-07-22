@@ -353,6 +353,7 @@ def conservative_intrinsic_scenario(
     costs_per_lot: float,
     time_exit: Any,
     now: Any,
+    horizon_anchor: Any | None = None,
     min_complete_days: int = 7,
     lower_quantile: float = 0.20,
     prepared_history: Mapping[str, Any] | None = None,
@@ -376,12 +377,21 @@ def conservative_intrinsic_scenario(
     }
     try:
         evaluated_now = _utc_datetime(now, "now")
+        pricing_anchor = (
+            evaluated_now
+            if horizon_anchor is None
+            else _utc_datetime(horizon_anchor, "horizon_anchor")
+        )
+        if pricing_anchor > evaluated_now:
+            raise _ScenarioInputError(
+                "INVALID_HORIZON", "horizon_anchor must not be later than now"
+            )
         requested_exit = _utc_datetime(time_exit, "time_exit")
         if requested_exit <= evaluated_now:
             raise _ScenarioInputError(
                 "INVALID_HORIZON", "time_exit must be later than now"
             )
-        requested_horizon = (requested_exit - evaluated_now).total_seconds()
+        requested_horizon = (requested_exit - pricing_anchor).total_seconds()
         horizon_bars = int(requested_horizon // BAR_SECONDS)
         if horizon_bars < 1:
             raise _ScenarioInputError(
@@ -464,11 +474,12 @@ def conservative_intrinsic_scenario(
             days = _complete_days(rows)
         initial_audit.update({
             "now": _iso(evaluated_now),
+            "horizon_anchor": _iso(pricing_anchor),
             "requested_time_exit": _iso(requested_exit),
             "requested_horizon_seconds": _rounded(requested_horizon),
             "evaluated_horizon_seconds": horizon_bars * BAR_SECONDS,
             "effective_time_exit": _iso(
-                evaluated_now + timedelta(seconds=horizon_bars * BAR_SECONDS)
+                pricing_anchor + timedelta(seconds=horizon_bars * BAR_SECONDS)
             ),
             "horizon_bars": horizon_bars,
             "min_complete_days": minimum_days,

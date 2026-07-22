@@ -671,6 +671,50 @@ def test_nondefault_scenario_quantile_has_generic_audit_fields():
     assert scenario["net_edge_upper_quantile"] is not None
 
 
+@pytest.mark.parametrize("pricing_mode", ["calibrated", "historical_replay"])
+def test_entry_risk_plan_is_stable_across_one_second_clock_advance(
+        pricing_mode):
+    snapshot = _snapshot(1)
+    if pricing_mode == "historical_replay":
+        spot = snapshot["market"]["spot"]
+        snapshot["forecast"] = {
+            "target_underlying": spot + 700,
+            "invalidation_level": spot - 300,
+            "holding_days": 1,
+            "cost_adjusted_required_move": 10,
+        }
+        snapshot["option_contracts"][0].update(bid=49.5, ask=50)
+        snapshot["forecast_history_5m"] = _forecast_history_5m(
+            favourable=True
+        )
+
+    advanced = deepcopy(snapshot)
+    advanced["timestamp"] = (NOW + timedelta(seconds=1)).isoformat()
+
+    first = evaluate_trend(snapshot)
+    second = evaluate_trend(advanced)
+
+    assert first["decision"] == second["decision"] == "BUY_CE"
+    assert first["order_plan"] == second["order_plan"]
+    assert (
+        (first["audit"]["scenario"].get("scenario_evidence") or {}).get(
+            "horizon_bars"
+        )
+        == (second["audit"]["scenario"].get("scenario_evidence") or {}).get(
+            "horizon_bars"
+        )
+    )
+
+    # Exercise the same binding used by DRY RUN preview/apply confirmation.
+    import dashboard
+
+    assert dashboard._trend_engine_risk_plan_fingerprint(
+        first, snapshot["option_contracts"][0]
+    ) == dashboard._trend_engine_risk_plan_fingerprint(
+        second, advanced["option_contracts"][0]
+    )
+
+
 def test_replay_gap_loss_drives_sizing_and_reported_maximum_loss():
     snapshot = _snapshot(1)
     spot = snapshot["market"]["spot"]

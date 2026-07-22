@@ -1451,10 +1451,15 @@ def _scenario_and_order(contract: Mapping[str, Any], context: Mapping[str, Any],
         )
     if time_exit <= context["now"]:
         return {"valid": False, "reason": "EXPIRY_RESTRICTION"}
-    if time_exit > context["now"] + timedelta(
+    if time_exit > signal_anchor + timedelta(
             days=float(config["max_holding_days"])):
         return {"valid": False, "reason": "RISK_CALCULATION_FAILED"}
-    holding_days = (time_exit - context["now"]).total_seconds() / 86400.0
+    # Price a candidate from the immutable close of the signal candle.  Wall
+    # clock time still governs freshness, expiry and whether the requested
+    # exit remains in the future, but a confirmation one second later must not
+    # silently alter theta, risk sizing or the replay horizon for the same
+    # closed-candle signal.
+    holding_days = (time_exit - signal_anchor).total_seconds() / 86400.0
     target = forecast.get("target_underlying")
     if target is None:
         # Target is a transparent ATR projection, not fabricated market input.
@@ -1532,6 +1537,7 @@ def _scenario_and_order(contract: Mapping[str, Any], context: Mapping[str, Any],
             costs_per_lot=costs_per_lot,
             time_exit=time_exit,
             now=context["now"],
+            horizon_anchor=signal_anchor,
             min_complete_days=int(config["scenario_min_complete_days"]),
             lower_quantile=float(config["scenario_lower_quantile"]),
             prepared_history=context.get("prepared_scenario_history"),
