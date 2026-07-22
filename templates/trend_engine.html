@@ -200,18 +200,43 @@
   <section class="card te-reasons-card" aria-labelledby="te-reasons-title">
     <div class="card-hd">
       <div>
-        <span class="te-kicker">AUDIT TRAIL</span>
-        <strong id="te-reasons-title">Decision reasons</strong>
+        <span class="te-kicker">WHY THIS DECISION?</span>
+        <strong id="te-reasons-title">Clear explanation</strong>
       </div>
       <span class="te-card-note" id="te-decision-id">Decision —</span>
     </div>
     <div class="card-bd">
-      <div class="te-reasons" id="te-reasons"><span class="te-reason is-muted">AWAITING_EVALUATION</span></div>
-      <p class="te-final-summary" id="te-final-summary">The engine has not returned a completed decision yet.</p>
-      <div class="te-model-meta">
-        <span id="te-model-version">Model —</span>
-        <span id="te-schema-version">Schema —</span>
+      <div class="te-reason-overview is-waiting" id="te-reason-overview">
+        <span class="te-reason-symbol" id="te-reason-symbol" aria-hidden="true">…</span>
+        <div>
+          <span>IN PLAIN ENGLISH</span>
+          <strong id="te-reason-headline">Waiting for the engine’s decision</strong>
+          <p id="te-reason-explanation">The result and its practical meaning will appear here.</p>
+        </div>
       </div>
+
+      <div class="te-reason-cards" id="te-reason-cards">
+        <div class="te-reason-card is-muted">
+          <div class="te-reason-card-head"><span>STATUS</span><strong>Evaluation pending</strong></div>
+          <p>No decision reasons are available yet.</p>
+          <small><b>Next:</b> Wait for the current evaluation to finish.</small>
+        </div>
+      </div>
+
+      <div class="te-next-step" id="te-next-step">
+        <span>WHAT TO DO NEXT</span>
+        <p id="te-next-step-copy">Wait for the current evaluation to finish.</p>
+      </div>
+
+      <details class="te-technical-details">
+        <summary>Show technical details</summary>
+        <div class="te-reasons" id="te-reasons"><span class="te-reason is-muted">AWAITING_EVALUATION</span></div>
+        <p class="te-final-summary" id="te-final-summary">The engine has not returned a completed decision yet.</p>
+        <div class="te-model-meta">
+          <span id="te-model-version">Model —</span>
+          <span id="te-schema-version">Schema —</span>
+        </div>
+      </details>
     </div>
   </section>
 </div>
@@ -251,6 +276,236 @@
     ['reward_risk_pass', 'Reward / risk'],
     ['portfolio_risk_pass', 'Portfolio risk'],
   ];
+  const positionEntryOnlyGates = new Set([
+    'direction_pass', 'price_action_pass', 'contract_pass', 'spread_pass',
+    'expiry_pass', 'expected_value_pass', 'reward_risk_pass',
+  ]);
+  const reasonCatalog = Object.freeze({
+    ALL_ENTRY_GATES_PASSED: {
+      title: 'The setup passed every required check',
+      explanation: 'Market direction, price action, contract quality, expected edge and portfolio risk all meet the configured rules.',
+      action: 'Review the proposed plan. Placing an order remains a separate, explicitly authorized action.',
+    },
+    EXISTING_POSITION_THESIS_VALID: {
+      title: 'The position still follows its original plan',
+      explanation: 'Its direction, stop, target, time limit and remaining expected edge are still valid, so no exit rule is active.',
+      action: 'Continue monitoring the position against its defined stop, target and time exit.',
+    },
+    INVALID_OR_STALE_DATA: {
+      title: 'Required information is missing or out of date',
+      explanation: 'The engine stopped because it could not verify all data needed for a safe decision. It will not fill gaps with guesses.',
+      action: 'Refresh the analysis and check the market, account and position feeds if the issue remains.',
+    },
+    QUOTE_REVALIDATION_FAILED: {
+      title: 'The price changed during the final confirmation',
+      explanation: 'The contract, direction or entry price no longer matched the setup when the engine checked it a second time.',
+      action: 'Refresh the analysis and do not use the earlier quote.',
+    },
+    EVENT_DATA_UNAVAILABLE: {
+      title: 'Event risk could not be verified',
+      explanation: 'The engine could not confirm whether a scheduled market-moving event is inside the restricted window.',
+      action: 'Restore or verify the event calendar before entering; review an open position manually if EXIT is shown.',
+      exitAction: 'Review the open position immediately. Verify event risk from an authoritative source, then manually manage or close the position; do not wait on an unverified calendar.',
+    },
+    EVENT_BLACKOUT: {
+      title: 'Trading is paused around a scheduled event',
+      explanation: 'A restricted market-moving event is currently inside the configured blackout window.',
+      action: 'Wait until the blackout window has ended, then refresh the analysis.',
+      exitAction: 'Review the open position now and follow the manual EXIT recommendation; do not wait passively for the blackout window to end.',
+    },
+    KILL_SWITCH_ACTIVE: {
+      title: 'Trading is paused by the safety switch',
+      explanation: 'The emergency kill switch is active, so the engine will not approve additional risk.',
+      action: 'Investigate why it was activated and clear it only after conditions are safe.',
+      exitAction: 'Review the open position immediately and manage or close it manually according to the safety policy. Do not add risk while the kill switch is active.',
+    },
+    DAILY_LOSS_LIMIT: {
+      title: 'Today’s loss limit has been reached',
+      explanation: 'The account has reached the configured maximum daily loss, so new exposure is blocked.',
+      action: 'Stop new entries and review the trading session before resuming on an eligible day.',
+      exitAction: 'Review the open position now and follow the manual EXIT recommendation so portfolio risk is not extended beyond today’s loss limit.',
+    },
+    CONSECUTIVE_LOSS_LIMIT: {
+      title: 'The losing-streak limit has been reached',
+      explanation: 'The configured number of consecutive losing trades has been reached.',
+      action: 'Pause entries and review the recent trades before enabling new risk.',
+      exitAction: 'Review the open position now and follow the manual EXIT recommendation before pausing and reviewing the recent trades.',
+    },
+    BROKER_CONNECTION_UNRELIABLE: {
+      title: 'The broker connection is not reliable',
+      explanation: 'Account, position or order information may not be current while the broker connection is unstable.',
+      action: 'Restore the broker connection and refresh before acting.',
+      exitAction: 'Treat the position as requiring immediate review. Restore the connection, confirm the actual position, then manually manage or close it; do not place an order from uncertain state.',
+    },
+    BROKER_OR_EXCHANGE_ERROR: {
+      title: 'The broker or exchange reported a problem',
+      explanation: 'The trading venue is not operating normally, so its prices or order state cannot be trusted.',
+      action: 'Wait for service recovery and refresh the analysis.',
+      exitAction: 'Treat the position as requiring immediate review. Confirm venue recovery and the actual position before manually managing or closing it.',
+    },
+    POSITION_STATE_MISMATCH: {
+      title: 'The saved positions do not match the account',
+      explanation: 'The engine found inconsistent position records, or more open positions than it can safely manage at once.',
+      action: 'Reconcile the dashboard and exchange positions before relying on this decision.',
+      exitAction: 'Reconcile the dashboard and exchange positions immediately, then manually manage or close the confirmed position. Do not act on an uncertain position record.',
+    },
+    ORDER_STATE_UNKNOWN: {
+      title: 'Open-order status could not be confirmed',
+      explanation: 'The engine cannot tell whether an earlier order is still active, filled or cancelled.',
+      action: 'Check and reconcile open orders before proceeding.',
+      exitAction: 'Check and reconcile all open orders immediately, then manually manage or close the confirmed position without creating a duplicate order.',
+    },
+    ACCOUNT_RISK_STATE_UNKNOWN: {
+      title: 'Account risk could not be verified',
+      explanation: 'Balance, profit/loss or exposure information is incomplete, so the engine cannot prove that risk limits are respected.',
+      action: 'Restore the missing account values and refresh the analysis.',
+      exitAction: 'Review the open position immediately. Verify the account state, then manually manage or close the position; do not add exposure while risk is unknown.',
+    },
+    ABNORMAL_SPREAD_OR_VOLATILITY: {
+      title: 'Market conditions are outside the safe range',
+      explanation: 'Spread or volatility is unusually high relative to the engine’s configured operating limits.',
+      action: 'Wait for conditions to normalize before acting.',
+      exitAction: 'Review the open position now and follow the manual EXIT recommendation using an appropriate order type for the abnormal spread or volatility.',
+    },
+    EXPOSURE_LIMIT: {
+      title: 'The portfolio exposure limit has been reached',
+      explanation: 'Current positions already use more exposure than the configured portfolio cap allows.',
+      action: 'Reduce exposure or wait for an existing position to close.',
+      exitAction: 'Review the open position now and reduce or close it manually so portfolio exposure returns within the configured limit.',
+    },
+    PENDING_ORDER_EXISTS: {
+      title: 'Another order is already pending',
+      explanation: 'Approving another entry could duplicate exposure while the earlier order is unresolved.',
+      action: 'Resolve the pending order, then refresh the analysis.',
+    },
+    TIMEFRAME_CONFLICT: {
+      title: 'The 5, 15 and 60-minute views disagree',
+      explanation: 'Short-term and higher-timeframe signals are materially opposed, so direction is not dependable yet.',
+      action: 'Wait for completed candles to align before entering.',
+    },
+    DIRECTION_SCORE_TOO_LOW: {
+      title: 'There is no strong market direction yet',
+      explanation: 'The combined directional evidence is below the minimum required for a bullish or bearish position.',
+      action: 'Wait for a clearer directional signal and refresh later.',
+    },
+    PRICE_ACTION_NOT_CONFIRMED: {
+      title: 'Price action has not confirmed an entry',
+      explanation: 'A directional bias exists, but the required market structure or trigger is not confirmed.',
+      action: 'Wait for price action confirmation rather than anticipating it.',
+    },
+    DIRECTION_REVERSAL: {
+      title: 'Market direction has reversed against the position',
+      explanation: 'The directional score now materially opposes the held CE or PE thesis.',
+      action: 'Review and exit the position; do not add risk to the invalidated direction.',
+    },
+    WRONG_OPTION_TYPE: {
+      title: 'The contract does not match the predicted direction',
+      explanation: 'This contract is the opposite option type from the engine’s current CE or PE bias.',
+      action: 'Evaluate a contract that matches the predicted direction instead.',
+    },
+    INSUFFICIENT_LIQUIDITY: {
+      title: 'The contract is not liquid enough',
+      explanation: 'Its quote, order-book depth, volume or open interest is below the safe minimum.',
+      action: 'Wait or use a more liquid contract.',
+    },
+    SPREAD_TOO_WIDE: {
+      title: 'The bid–ask spread is too wide',
+      explanation: 'Expected trading cost exceeds the maximum spread allowed by the strategy.',
+      action: 'Wait for a tighter spread or evaluate another contract.',
+    },
+    EXPIRY_RESTRICTION: {
+      title: 'The expiry is outside the permitted range',
+      explanation: 'The contract expiry or planned exit time does not fit the configured holding window.',
+      action: 'Choose an eligible expiry or wait for a new setup.',
+    },
+    ENTRY_PRICE_DEVIATION: {
+      title: 'The entry price moved too far',
+      explanation: 'The current ask is above the maximum permitted deviation from the evaluated quote.',
+      action: 'Refresh the quote or skip this entry.',
+    },
+    NO_ELIGIBLE_CONTRACT: {
+      title: 'No suitable option contract is available',
+      explanation: 'No contract matching the predicted CE or PE direction passed every mandatory quality filter.',
+      action: 'Wait for an eligible contract rather than lowering the safety rules.',
+    },
+    CONTRACT_SCORE_TOO_LOW: {
+      title: 'Contract quality is below the minimum',
+      explanation: 'The combined liquidity, spread, delta, expiry, volatility and cost score is not high enough.',
+      action: 'Choose a stronger contract or wait for market quality to improve.',
+    },
+    TRADE_SCORE_TOO_LOW: {
+      title: 'The overall setup is not strong enough',
+      explanation: 'The combined market-direction and contract-quality score is below the entry threshold.',
+      action: 'Wait for a stronger complete setup.',
+    },
+    RISK_CALCULATION_FAILED: {
+      title: 'A safe trade plan could not be calculated',
+      explanation: 'The engine could not produce valid size, stop, target or timing values from the available inputs.',
+      action: 'Review the plan inputs and do not trade until sizing can be verified.',
+    },
+    BREAKEVEN_UNREALISTIC: {
+      title: 'The forecast move does not clear breakeven',
+      explanation: 'The expected move is not large enough to overcome option premium and estimated trading costs.',
+      action: 'Skip this setup and wait for a better price or stronger forecast.',
+    },
+    EXPECTED_VALUE_UNAVAILABLE: {
+      title: 'Expected value could not be verified',
+      explanation: 'Reliable probability or option-scenario inputs are missing, so the expected edge cannot be calculated.',
+      action: 'Restore validated forecast inputs or wait.',
+    },
+    NEGATIVE_EXPECTED_VALUE: {
+      title: 'The estimated edge is not positive',
+      explanation: 'Expected gains do not currently outweigh likely losses and trading costs.',
+      action: 'Skip a new entry, or review the open position for exit if one is held.',
+    },
+    REWARD_RISK_TOO_LOW: {
+      title: 'The potential reward does not justify the risk',
+      explanation: 'Expected reward is below the configured minimum relative to the estimated loss.',
+      action: 'Skip this contract and wait for a better reward-to-risk setup.',
+    },
+    MINIMUM_LOT_EXCEEDS_RISK_LIMIT: {
+      title: 'Even one lot would exceed the risk limit',
+      explanation: 'The smallest possible position is too large for available funds, risk, exposure or market depth.',
+      action: 'Use a lower-risk contract or do not enter this trade.',
+    },
+    NAKED_OPTION_SELLING_PROHIBITED: {
+      title: 'Short option positions are not supported',
+      explanation: 'This Trend Engine manages long options only and cannot safely manage a naked short option.',
+      action: 'Close or manage the short position outside this model.',
+    },
+    UNDERLYING_INVALIDATION_REACHED: {
+      title: 'The market thesis has been invalidated',
+      explanation: 'The underlying price crossed the level that defined the original trade idea as wrong.',
+      action: 'Exit the position and do not average down.',
+    },
+    EMERGENCY_OPTION_STOP_REACHED: {
+      title: 'The option’s emergency stop has been reached',
+      explanation: 'The option price touched or crossed the maximum-loss stop defined for this position.',
+      action: 'Exit promptly according to the position’s risk plan.',
+    },
+    TARGET_REACHED: {
+      title: 'The planned profit target has been reached',
+      explanation: 'The option price reached the target defined when the position was opened.',
+      action: 'Review and secure the planned exit.',
+    },
+    TIME_STOP_REACHED: {
+      title: 'The planned holding time has ended',
+      explanation: 'The position reached its time-based exit, so the original plan no longer supports holding it.',
+      action: 'Close the position rather than extending it without a new validated plan.',
+    },
+  });
+  const positionFieldLabels = Object.freeze({
+    symbol: 'contract symbol',
+    option_type: 'option type',
+    quantity_lots: 'position size',
+    entry_price: 'entry price',
+    current_price: 'current option price',
+    underlying_invalidation: 'underlying invalidation level',
+    stop_option_price: 'emergency option stop',
+    target_option_price: 'profit target',
+    time_exit: 'planned exit time',
+    remaining_expected_value: 'remaining expected edge',
+  });
 
   const byId = id => document.getElementById(id);
   const hasValue = value => value !== null && value !== undefined && value !== '';
@@ -259,6 +514,12 @@
   const humanize = value => hasValue(value)
     ? String(value).replace(/_/g, ' ').replace(/\b\w/g, char => char.toUpperCase())
     : '—';
+  const naturalList = values => {
+    if (!values.length) return '';
+    if (values.length === 1) return values[0];
+    if (values.length === 2) return `${values[0]} and ${values[1]}`;
+    return `${values.slice(0, -1).join(', ')}, and ${values.at(-1)}`;
+  };
   const safeText = value => String(value ?? '')
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
@@ -432,15 +693,26 @@
 
   function renderGates(decision) {
     const values = decision.hard_gates || {};
+    const codes = Array.isArray(decision.reason_codes) ? decision.reason_codes : [];
+    const positionDecision = decision.decision === 'HOLD' || decision.decision === 'EXIT';
+    const invalidSnapshot = values.data_valid === false && codes.includes('INVALID_OR_STALE_DATA');
     let passed = 0;
     let failed = 0;
+    let notApplicable = 0;
     const html = gates.map(([key, label]) => {
       const value = values[key];
-      const state = value === true ? 'is-pass' : value === false ? 'is-fail' : 'is-unknown';
-      const word = value === true ? 'Pass' : value === false ? 'Fail' : 'Unknown';
-      const symbol = value === true ? '✓' : value === false ? '×' : '–';
-      if (value === true) passed += 1;
-      if (value === false) failed += 1;
+      const isNotApplicable = (positionDecision && positionEntryOnlyGates.has(key))
+        || (invalidSnapshot && key !== 'data_valid');
+      const state = isNotApplicable
+        ? 'is-na'
+        : value === true ? 'is-pass' : value === false ? 'is-fail' : 'is-unknown';
+      const word = isNotApplicable
+        ? 'N/A'
+        : value === true ? 'Pass' : value === false ? 'Fail' : 'Unknown';
+      const symbol = isNotApplicable ? '–' : value === true ? '✓' : value === false ? '×' : '–';
+      if (isNotApplicable) notApplicable += 1;
+      else if (value === true) passed += 1;
+      else if (value === false) failed += 1;
       return `<div class="te-gate ${state}">
         <span class="te-gate-icon" aria-hidden="true">${symbol}</span>
         <span>${safeText(label)}</span>
@@ -449,7 +721,9 @@
     }).join('');
     byId('te-gates').innerHTML = html;
     const tally = byId('te-gate-tally');
-    tally.textContent = failed ? `${failed} failed · ${passed} passed` : `${passed}/${gates.length} passed`;
+    tally.textContent = notApplicable
+      ? `${failed} failed · ${passed} passed · ${notApplicable} not applicable`
+      : failed ? `${failed} failed · ${passed} passed` : `${passed}/${gates.length} passed`;
     tally.className = `te-gate-tally ${failed ? 'has-failures' : passed === gates.length ? 'all-passed' : ''}`;
   }
 
@@ -551,12 +825,144 @@
     }
   }
 
+  function positionLabel(decision) {
+    const audit = decision.audit && typeof decision.audit === 'object' ? decision.audit : {};
+    const context = audit.position_context && typeof audit.position_context === 'object'
+      ? audit.position_context
+      : {};
+    const mode = String(context.source || '').toLowerCase() === 'dry_run' ? 'DRY RUN ' : '';
+    const slot = hasValue(context.slot) ? `${humanize(context.slot)} position` : 'open position';
+    const scopedPosition = `${mode}${slot}`;
+    return hasValue(context.symbol) ? `${scopedPosition} ${context.symbol}` : scopedPosition;
+  }
+
+  function reasonDetails(code, decision) {
+    const audit = decision.audit && typeof decision.audit === 'object' ? decision.audit : {};
+    if (code === 'INVALID_OR_STALE_DATA' && audit.position_state_issue) {
+      const missing = Array.isArray(audit.missing_position_fields)
+        ? audit.missing_position_fields
+          .filter(hasValue)
+          .map(field => positionFieldLabels[field] || humanize(field).toLowerCase())
+        : [];
+      const label = positionLabel(decision);
+      return {
+        title: missing.length
+          ? 'This open position does not have a complete risk plan'
+          : 'This open position has an invalid risk-plan value',
+        explanation: missing.length
+          ? `The saved ${label} is missing ${naturalList(missing)}. Without these values, the engine cannot verify its stop, target, planned exit or remaining edge.`
+          : `One or more saved values for the ${label} are invalid. The engine therefore cannot prove that continuing to hold it is safe.`,
+        action: 'Review the position now. Restore missing values only if they can be recovered exactly from an authoritative original entry record; otherwise manage or close the position manually. Do not invent a new risk plan after entry.',
+      };
+    }
+    if (code === 'INVALID_OR_STALE_DATA' && hasValue(audit.collection_error)) {
+      return {
+        title: 'Live market or account data could not be loaded',
+        explanation: 'The latest feed did not provide a complete snapshot, so the engine stopped instead of making a decision from partial information.',
+        action: 'Check the market and account connections, then refresh the analysis.',
+      };
+    }
+    if (code === 'INVALID_OR_STALE_DATA' && hasValue(audit.validation_error)) {
+      return {
+        title: 'The latest data did not pass safety validation',
+        explanation: 'At least one required market, account or position value was missing, outdated or malformed, so the snapshot was rejected.',
+        action: 'Refresh the data. If the warning remains, inspect the technical validation detail or the relevant feed.',
+      };
+    }
+    if (reasonCatalog[code]) {
+      const item = reasonCatalog[code];
+      return decision.decision === 'EXIT' && item.exitAction
+        ? { ...item, action: item.exitAction }
+        : item;
+    }
+    return {
+      title: humanize(code),
+      explanation: 'This safety rule affected the decision, but this dashboard version does not yet have a dedicated plain-English description for it.',
+      action: 'Review the technical details and do not act until the rule is understood.',
+    };
+  }
+
+  function decisionOutcome(decision) {
+    const audit = decision.audit && typeof decision.audit === 'object' ? decision.audit : {};
+    if (decision.decision === 'EXIT' && audit.position_state_issue) {
+      return {
+        tone: 'is-exit',
+        symbol: '!',
+        sectionTitle: 'Why the engine recommends exiting',
+        headline: `The ${positionLabel(decision)} needs attention`,
+        explanation: 'The engine found the position, but it cannot verify that holding is safe because the saved trade plan is incomplete or invalid. EXIT is a fail-safe recommendation only; the Trend Engine has not placed an exit order.',
+      };
+    }
+    const outcomes = {
+      EXIT: {
+        tone: 'is-exit', symbol: '!', sectionTitle: 'Why the engine recommends exiting',
+        headline: 'An exit rule is active for the open position',
+        explanation: 'At least one mandatory safety condition no longer supports holding. This is guidance only; the Trend Engine has not placed an exit order.',
+      },
+      HOLD: {
+        tone: 'is-hold', symbol: '✓', sectionTitle: 'Why the engine recommends holding',
+        headline: 'The open position still follows its trade plan',
+        explanation: 'No mandatory exit rule is active. Continue monitoring the defined invalidation, stop, target and time limit.',
+      },
+      NO_TRADE: {
+        tone: 'is-no-trade', symbol: '–', sectionTitle: 'Why the engine is waiting',
+        headline: 'No new position should be opened now',
+        explanation: 'One or more mandatory checks did not pass. The engine is waiting rather than forcing a low-quality or unverifiable setup.',
+      },
+      BUY_CE: {
+        tone: 'is-buy', symbol: '↑', sectionTitle: 'Why this bullish setup qualifies',
+        headline: 'Every rule supports a bullish call setup',
+        explanation: 'Direction, price action, contract quality, expected edge and portfolio risk passed. This is a decision only; no order has been placed.',
+      },
+      BUY_PE: {
+        tone: 'is-buy', symbol: '↓', sectionTitle: 'Why this bearish setup qualifies',
+        headline: 'Every rule supports a bearish put setup',
+        explanation: 'Direction, price action, contract quality, expected edge and portfolio risk passed. This is a decision only; no order has been placed.',
+      },
+    };
+    return outcomes[decision.decision] || {
+      tone: 'is-waiting', symbol: '…', sectionTitle: 'Clear explanation',
+      headline: 'The decision could not be interpreted',
+      explanation: 'Refresh the analysis before acting.',
+    };
+  }
+
   function renderReasons(decision) {
     const codes = Array.isArray(decision.reason_codes) ? decision.reason_codes.filter(hasValue) : [];
+    const details = codes.map(code => ({ code, ...reasonDetails(code, decision) }));
+    const outcome = decisionOutcome(decision);
+    const overview = byId('te-reason-overview');
+    overview.className = `te-reason-overview ${outcome.tone}`;
+    byId('te-reason-symbol').textContent = outcome.symbol;
+    byId('te-reason-headline').textContent = outcome.headline;
+    byId('te-reason-explanation').textContent = outcome.explanation;
+    byId('te-reasons-title').textContent = outcome.sectionTitle;
+
+    const positiveCodes = new Set(['ALL_ENTRY_GATES_PASSED', 'EXISTING_POSITION_THESIS_VALID']);
+    byId('te-reason-cards').innerHTML = details.length
+      ? details.map((item, index) => `<article class="te-reason-card ${positiveCodes.has(item.code) ? 'is-positive' : ''}">
+          <div class="te-reason-card-head">
+            <span>REASON ${String(index + 1).padStart(2, '0')}</span>
+            <strong>${safeText(item.title)}</strong>
+          </div>
+          <p>${safeText(item.explanation)}</p>
+          <small><b>What to do:</b> ${safeText(item.action)}</small>
+        </article>`).join('')
+      : `<article class="te-reason-card is-muted">
+          <div class="te-reason-card-head"><span>STATUS</span><strong>No explanation was returned</strong></div>
+          <p>The decision response did not contain a reason.</p>
+          <small><b>What to do:</b> Refresh the analysis; if this continues, inspect the engine log.</small>
+        </article>`;
+
+    const firstAction = details[0]?.action || 'Refresh the analysis before acting.';
+    byId('te-next-step-copy').textContent = details.length > 1
+      ? `${firstAction} Also resolve the other ${details.length - 1} reason${details.length === 2 ? '' : 's'} shown above before acting.`
+      : firstAction;
+
     byId('te-reasons').innerHTML = codes.length
       ? codes.map(code => `<span class="te-reason">${safeText(code)}</span>`).join('')
       : '<span class="te-reason is-muted">NO_REASON_CODES_RETURNED</span>';
-    byId('te-final-summary').textContent = decision.decision_summary || 'No factual decision summary was returned.';
+    byId('te-final-summary').textContent = `Engine summary: ${decision.decision_summary || 'No factual decision summary was returned.'}`;
     byId('te-decision-id').textContent = `Decision ${decision.decision_id || '—'}`;
     byId('te-model-version').textContent = `Model ${decision.model_version || '—'}`;
     byId('te-schema-version').textContent = `Schema ${decision.schema_version || '—'}`;

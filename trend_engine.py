@@ -1487,16 +1487,39 @@ def _manage_existing(result: dict[str, Any], context: Mapping[str, Any],
     if len(positions) != 1:
         result["decision"] = "EXIT"
         result["reason_codes"] = ["POSITION_STATE_MISMATCH"]
-        result["decision_summary"] = "Multiple positions violate the single-position mandate."
+        result["decision_summary"] = (
+            f"Manual review is required: the Trend Engine found {len(positions)} "
+            "open positions, but it can safely manage only one position at a "
+            "time. No order was submitted."
+        )
+        result["audit"] = {
+            "position_count": len(positions),
+            "position_contexts": [{
+                "symbol": str(item.get("symbol") or "").strip() or None,
+                "slot": str(item.get("slot") or "").strip() or None,
+                "source": str(item.get("source") or "").strip() or None,
+            } for item in positions if isinstance(item, Mapping)],
+        }
         return result
     raw = _mapping(positions[0], "positions[0]")
+    position_context = {
+        "symbol": str(raw.get("symbol") or "").strip() or None,
+        "slot": str(raw.get("slot") or "").strip() or None,
+        "source": str(raw.get("source") or "").strip() or None,
+    }
+    result["audit"] = {"position_context": position_context}
     required = ("symbol", "option_type", "quantity_lots", "entry_price",
                 "current_price", "underlying_invalidation", "stop_option_price",
                 "target_option_price", "time_exit", "remaining_expected_value")
     try:
-        for key in required:
-            if raw.get(key) is None:
-                raise TrendInputError(f"positions[0].{key} is required")
+        missing_fields = [key for key in required if raw.get(key) is None]
+        if missing_fields:
+            raise TrendInputError(
+                "missing existing-position fields: " + ", ".join(missing_fields)
+            )
+        symbol = str(raw["symbol"]).strip()
+        if not symbol:
+            raise TrendInputError("positions[0].symbol is required")
         option_type = str(raw["option_type"]).upper()
         if option_type not in {"CE", "PE"}:
             raise TrendInputError("positions[0].option_type must be CE or PE")
@@ -1504,6 +1527,8 @@ def _manage_existing(result: dict[str, Any], context: Mapping[str, Any],
         if side not in {"long", "buy", "short", "sell"}:
             raise TrendInputError("positions[0].side is invalid")
         _integer(raw["quantity_lots"], "positions[0].quantity_lots", minimum=1)
+        _finite(raw["entry_price"], "positions[0].entry_price",
+                minimum=0.00000001)
         current = _finite(raw["current_price"], "positions[0].current_price", minimum=0)
         stop = _finite(raw["stop_option_price"], "positions[0].stop_option_price", minimum=0)
         target = _finite(raw["target_option_price"], "positions[0].target_option_price", minimum=0)
@@ -1512,10 +1537,22 @@ def _manage_existing(result: dict[str, Any], context: Mapping[str, Any],
         remaining_ev = _finite(raw["remaining_expected_value"],
                                "positions[0].remaining_expected_value")
         time_exit = _parse_time(raw["time_exit"], "positions[0].time_exit")
-    except TrendInputError:
+    except TrendInputError as exc:
         result["decision"] = "EXIT"
         result["reason_codes"] = ["INVALID_OR_STALE_DATA"]
-        result["decision_summary"] = "Existing-position state is incomplete; exit is required."
+        result["decision_summary"] = (
+            "Manual review is required: the existing position does not contain "
+            "enough verified trade-plan data for the engine to justify HOLD. "
+            "This is an advisory EXIT decision; no order was submitted."
+        )
+        result["audit"] = {
+            "position_context": position_context,
+            "position_state_issue": "INCOMPLETE_OR_INVALID_TRADE_PLAN",
+            "position_validation_error": str(exc),
+            "missing_position_fields": [
+                key for key in required if raw.get(key) is None
+            ],
+        }
         return result
     if side in {"short", "sell"}:
         result["decision"] = "EXIT"
@@ -1628,7 +1665,11 @@ def evaluate_trend(snapshot: Mapping[str, Any],
     if context["positions"]:
         managed = _manage_existing(result, context, direction, risk_reasons,
                                    event_pass, config)
+        management_audit = (
+            managed.get("audit") if isinstance(managed.get("audit"), dict) else {}
+        )
         managed["audit"] = {
+            **management_audit,
             "underlying_core_score": _round_score(direction["underlying_core"]),
             "features": direction["features"], "config": dict(config),
         }

@@ -32,6 +32,49 @@ REQUIRED_DECISION_KEYS = {
     "audit",
 }
 
+REASON_CODES_WITH_PLAIN_ENGLISH_COPY = {
+    "ALL_ENTRY_GATES_PASSED",
+    "EXISTING_POSITION_THESIS_VALID",
+    "INVALID_OR_STALE_DATA",
+    "QUOTE_REVALIDATION_FAILED",
+    "EVENT_DATA_UNAVAILABLE",
+    "EVENT_BLACKOUT",
+    "KILL_SWITCH_ACTIVE",
+    "DAILY_LOSS_LIMIT",
+    "CONSECUTIVE_LOSS_LIMIT",
+    "BROKER_CONNECTION_UNRELIABLE",
+    "BROKER_OR_EXCHANGE_ERROR",
+    "POSITION_STATE_MISMATCH",
+    "ORDER_STATE_UNKNOWN",
+    "ACCOUNT_RISK_STATE_UNKNOWN",
+    "ABNORMAL_SPREAD_OR_VOLATILITY",
+    "EXPOSURE_LIMIT",
+    "PENDING_ORDER_EXISTS",
+    "TIMEFRAME_CONFLICT",
+    "DIRECTION_SCORE_TOO_LOW",
+    "PRICE_ACTION_NOT_CONFIRMED",
+    "DIRECTION_REVERSAL",
+    "WRONG_OPTION_TYPE",
+    "INSUFFICIENT_LIQUIDITY",
+    "SPREAD_TOO_WIDE",
+    "EXPIRY_RESTRICTION",
+    "ENTRY_PRICE_DEVIATION",
+    "NO_ELIGIBLE_CONTRACT",
+    "CONTRACT_SCORE_TOO_LOW",
+    "TRADE_SCORE_TOO_LOW",
+    "RISK_CALCULATION_FAILED",
+    "BREAKEVEN_UNREALISTIC",
+    "EXPECTED_VALUE_UNAVAILABLE",
+    "NEGATIVE_EXPECTED_VALUE",
+    "REWARD_RISK_TOO_LOW",
+    "MINIMUM_LOT_EXCEEDS_RISK_LIMIT",
+    "NAKED_OPTION_SELLING_PROHIBITED",
+    "UNDERLYING_INVALIDATION_REACHED",
+    "EMERGENCY_OPTION_STOP_REACHED",
+    "TARGET_REACHED",
+    "TIME_STOP_REACHED",
+}
+
 
 @pytest.fixture
 def isolated_trend_endpoint(tmp_path, monkeypatch):
@@ -317,3 +360,36 @@ def test_trend_engine_page_has_navigation_read_only_notice_and_get_only_fetch():
     assert "/api/trend-entry" not in page
     assert "method: 'POST'" not in page
     assert "method: 'DELETE'" not in page
+
+
+def test_trend_engine_page_explains_reasons_in_plain_english():
+    page = (Path(dashboard.BASE) / "templates" / "trend_engine.html").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'id="te-reason-headline"' in page
+    assert 'id="te-reason-explanation"' in page
+    assert 'id="te-reason-cards"' in page
+    assert 'id="te-next-step-copy"' in page
+    assert '<details class="te-technical-details">' in page
+    assert page.index('<details class="te-technical-details">') < page.index(
+        'id="te-reasons"'
+    )
+    assert "This open position does not have a complete risk plan" in page
+    assert "the Trend Engine has not placed an exit order" in page
+    assert "Live market or account data could not be loaded" in page
+    assert "The latest data did not pass safety validation" in page
+    assert "this dashboard version does not yet have a dedicated plain-English" in page
+    assert "decision.decision === 'EXIT' && item.exitAction" in page
+    assert "do not wait passively for the blackout window to end" in page
+    assert "recovered exactly from an authoritative original entry record" in page
+    assert "Do not invent a new risk plan after entry" in page
+    assert "add the missing or corrected risk-plan values" not in page
+    assert "safeText(item.title)" in page
+    assert "safeText(item.explanation)" in page
+    assert "safeText(item.action)" in page
+    assert "positionEntryOnlyGates" in page
+    assert "isNotApplicable" in page
+    assert "not applicable" in page
+    for code in REASON_CODES_WITH_PLAIN_ENGLISH_COPY:
+        assert f"{code}: {{" in page

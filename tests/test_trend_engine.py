@@ -380,6 +380,72 @@ def test_existing_position_hold_and_mandatory_exit_are_independent_of_entry():
     assert "EMERGENCY_OPTION_STOP_REACHED" in exited["reason_codes"]
 
 
+def test_incomplete_existing_position_explains_exact_missing_trade_plan_fields():
+    snapshot = _snapshot(1)
+    snapshot["positions"] = [{
+        "source": "dry_run",
+        "slot": "trend",
+        "symbol": "C-BTC-LEGACY",
+        "option_type": "CE",
+        "quantity_lots": 1_000,
+        "entry_price": 450,
+    }]
+
+    result = evaluate_trend(snapshot)
+
+    assert result["decision"] == "EXIT"
+    assert result["reason_codes"] == ["INVALID_OR_STALE_DATA"]
+    assert result["order_plan"]["quantity_lots"] == 0
+    assert "Manual review is required" in result["decision_summary"]
+    assert "advisory EXIT decision" in result["decision_summary"]
+    assert "no order was submitted" in result["decision_summary"].lower()
+    assert result["audit"]["missing_position_fields"] == [
+        "current_price",
+        "underlying_invalidation",
+        "stop_option_price",
+        "target_option_price",
+        "time_exit",
+        "remaining_expected_value",
+    ]
+    assert result["audit"]["position_context"] == {
+        "symbol": "C-BTC-LEGACY",
+        "slot": "trend",
+        "source": "dry_run",
+    }
+    assert "underlying_core_score" in result["audit"]
+    assert "features" in result["audit"]
+    assert "config" in result["audit"]
+
+
+def test_invalid_existing_position_value_keeps_specific_audit_context():
+    snapshot = _snapshot(1)
+    spot = snapshot["market"]["spot"]
+    snapshot["positions"] = [{
+        "source": "dry_run",
+        "slot": "trend",
+        "symbol": "C-BTC-BAD-TIME",
+        "option_type": "CE",
+        "quantity_lots": 100,
+        "entry_price": 450,
+        "current_price": 510,
+        "underlying_invalidation": spot - 300,
+        "stop_option_price": 400,
+        "target_option_price": 700,
+        "time_exit": "tomorrow afternoon",
+        "remaining_expected_value": 25,
+    }]
+
+    result = evaluate_trend(snapshot)
+
+    assert result["decision"] == "EXIT"
+    assert result["reason_codes"] == ["INVALID_OR_STALE_DATA"]
+    assert result["audit"]["missing_position_fields"] == []
+    assert "time_exit must be ISO-8601" in result["audit"][
+        "position_validation_error"
+    ]
+    assert result["audit"]["position_context"]["symbol"] == "C-BTC-BAD-TIME"
+
+
 def test_short_option_position_is_never_returned_as_hold():
     snapshot = _snapshot(1)
     spot = snapshot["market"]["spot"]
