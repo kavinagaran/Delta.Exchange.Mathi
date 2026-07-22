@@ -28,7 +28,13 @@ def test_android_embedded_pages_hide_web_chrome_and_accept_native_theme():
     assert "NavigationBar(" in flutter
     assert "setVerticalScrollBarEnabled(true)" in flutter
     assert "Switch.adaptive(" in flutter
+    assert "'RED'" in flutter
+    assert "'BLUE'" in flutter
+    assert "kRedBackgroundAsset = 'assets/crimson-dashboard-bg.png'" in flutter
+    assert "kBlueBackgroundAsset = 'assets/sparkling-blue-dashboard-bg.png'" in flutter
     assert "label: 'Nithi Bot'" in flutter
+    assert "label: 'Trend Engine'" in flutter
+    assert "path: '/trend-engine'" in flutter
     assert "path: '/dry-run'" in flutter
     assert "path: '/logs'" not in flutter
 

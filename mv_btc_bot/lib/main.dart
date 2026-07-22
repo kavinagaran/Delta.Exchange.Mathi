@@ -2,31 +2,40 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
-const kAccent = Color(0xFF2563EB);
-const kPositive = Color(0xFF08875D);
-const kNegative = Color(0xFFD92D20);
-const kWarning = Color(0xFFB45309);
+const kPositive = Color(0xFF38D99A);
+const kWarning = Color(0xFFFFC267);
 
-const kLightBackground = Color(0xFFF2F4F8);
-const kLightSurface = Color(0xFFFFFFFF);
-const kLightBorder = Color(0xFFE4E8F0);
-const kLightText = Color(0xFF1A2333);
-const kLightMuted = Color(0xFF68758A);
+const kRedBackground = Color(0xFF0D0608);
+const kRedSurface = Color(0xFF180B0E);
+const kRedSubtle = Color(0xFF240F13);
+const kRedBorder = Color(0x38FF5B6C);
+const kRedText = Color(0xFFFFF5F6);
+const kRedMuted = Color(0xFFC4A8AD);
+const kRedAccent = Color(0xFFFF2F4B);
+const kRedAccentBright = Color(0xFFFF7A8D);
+const kRedNegative = Color(0xFFFF6172);
 
-const kDarkBackground = Color(0xFF101722);
-const kDarkSurface = Color(0xFF182231);
-const kDarkBorder = Color(0xFF2C3A50);
-const kDarkText = Color(0xFFEDF3FC);
-const kDarkMuted = Color(0xFFA0AFC3);
-const kDarkAccent = Color(0xFF70A5FF);
+const kBlueBackground = Color(0xFF030914);
+const kBlueSurface = Color(0xFF071223);
+const kBlueSubtle = Color(0xFF081D39);
+const kBlueBorder = Color(0x3B5BB4FF);
+const kBlueText = Color(0xFFF3F9FF);
+const kBlueMuted = Color(0xFFA7BDD6);
+const kBlueAccent = Color(0xFF39A7FF);
+const kBlueAccentBright = Color(0xFF8BD0FF);
+const kBlueNegative = Color(0xFFFF7180);
+
+const kRedBackgroundAsset = 'assets/crimson-dashboard-bg.png';
+const kBlueBackgroundAsset = 'assets/sparkling-blue-dashboard-bg.png';
 
 final appTheme = AppThemeController();
 
-const kWebAssetRevision = '3.2.0+5-dry-protection-monitor';
+const kWebAssetRevision = '3.3.0+6-red-blue-trend-tabs';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -35,58 +44,72 @@ Future<void> main() async {
 }
 
 class AppThemeController extends ChangeNotifier {
-  ThemeMode _mode = ThemeMode.light;
+  static const _preferenceKey = 'app_blue_theme';
+  static const _legacyPreferenceKey = 'app_dark_theme';
 
-  ThemeMode get mode => _mode;
-  bool get isDark => _mode == ThemeMode.dark;
+  bool _isBlue = false;
+
+  bool get isBlue => _isBlue;
 
   Future<void> load() async {
     final prefs = await SharedPreferences.getInstance();
-    _mode = prefs.getBool('app_dark_theme') == true
-        ? ThemeMode.dark
-        : ThemeMode.light;
+    final saved = prefs.getBool(_preferenceKey);
+    final legacy = prefs.getBool(_legacyPreferenceKey);
+    _isBlue = saved ?? legacy ?? false;
+    if (saved == null && legacy != null) {
+      await prefs.setBool(_preferenceKey, legacy);
+    }
   }
 
-  Future<void> setDark(bool enabled) async {
-    final next = enabled ? ThemeMode.dark : ThemeMode.light;
-    if (_mode == next) return;
-    _mode = next;
+  Future<void> setBlue(bool enabled) async {
+    if (_isBlue == enabled) return;
+    _isBlue = enabled;
     notifyListeners();
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setBool('app_dark_theme', enabled);
+    await prefs.setBool(_preferenceKey, enabled);
   }
 }
 
-ThemeData buildAppTheme({required bool dark}) {
-  final background = dark ? kDarkBackground : kLightBackground;
-  final surface = dark ? kDarkSurface : kLightSurface;
-  final border = dark ? kDarkBorder : kLightBorder;
-  final text = dark ? kDarkText : kLightText;
-  final muted = dark ? kDarkMuted : kLightMuted;
-  final accent = dark ? kDarkAccent : kAccent;
+ThemeData buildAppTheme({required bool blue}) {
+  final background = blue ? kBlueBackground : kRedBackground;
+  final surface = blue ? kBlueSurface : kRedSurface;
+  final subtle = blue ? kBlueSubtle : kRedSubtle;
+  final border = blue ? kBlueBorder : kRedBorder;
+  final text = blue ? kBlueText : kRedText;
+  final muted = blue ? kBlueMuted : kRedMuted;
+  final accent = blue ? kBlueAccent : kRedAccent;
+  final accentBright = blue ? kBlueAccentBright : kRedAccentBright;
+  final negative = blue ? kBlueNegative : kRedNegative;
 
-  final scheme = ColorScheme(
-    brightness: dark ? Brightness.dark : Brightness.light,
-    primary: accent,
-    onPrimary: dark ? kDarkBackground : Colors.white,
-    secondary: accent,
-    onSecondary: dark ? kDarkBackground : Colors.white,
-    error: dark ? const Color(0xFFFF7B72) : kNegative,
-    onError: dark ? kDarkBackground : Colors.white,
-    surface: surface,
-    onSurface: text,
-  );
+  final scheme =
+      ColorScheme(
+        brightness: Brightness.dark,
+        primary: accent,
+        onPrimary: Colors.white,
+        secondary: accentBright,
+        onSecondary: background,
+        error: negative,
+        onError: background,
+        surface: surface,
+        onSurface: text,
+      ).copyWith(
+        onSurfaceVariant: muted,
+        outline: border,
+        outlineVariant: border,
+        surfaceContainerHighest: subtle,
+      );
 
   return ThemeData(
     useMaterial3: true,
-    brightness: dark ? Brightness.dark : Brightness.light,
+    brightness: Brightness.dark,
     fontFamily: 'Roboto',
-    scaffoldBackgroundColor: background,
+    scaffoldBackgroundColor: Colors.transparent,
+    canvasColor: surface,
     colorScheme: scheme,
     dividerColor: border,
     splashFactory: InkSparkle.splashFactory,
     appBarTheme: AppBarTheme(
-      backgroundColor: surface,
+      backgroundColor: surface.withValues(alpha: .91),
       foregroundColor: text,
       surfaceTintColor: Colors.transparent,
       elevation: 0,
@@ -101,7 +124,7 @@ ThemeData buildAppTheme({required bool dark}) {
       ),
     ),
     cardTheme: CardThemeData(
-      color: surface,
+      color: surface.withValues(alpha: .88),
       elevation: 0,
       surfaceTintColor: Colors.transparent,
       shape: RoundedRectangleBorder(
@@ -111,7 +134,7 @@ ThemeData buildAppTheme({required bool dark}) {
     ),
     inputDecorationTheme: InputDecorationTheme(
       filled: true,
-      fillColor: surface,
+      fillColor: subtle.withValues(alpha: .86),
       labelStyle: TextStyle(color: muted, fontSize: 13),
       hintStyle: TextStyle(color: muted, fontSize: 13),
       contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
@@ -131,22 +154,22 @@ ThemeData buildAppTheme({required bool dark}) {
     filledButtonTheme: FilledButtonThemeData(
       style: FilledButton.styleFrom(
         backgroundColor: accent,
-        foregroundColor: dark ? kDarkBackground : Colors.white,
+        foregroundColor: Colors.white,
         minimumSize: const Size(0, 48),
         textStyle: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
       ),
     ),
     navigationBarTheme: NavigationBarThemeData(
-      height: 68,
-      backgroundColor: surface,
-      indicatorColor: accent.withValues(alpha: dark ? .20 : .10),
+      height: 70,
+      backgroundColor: surface.withValues(alpha: .94),
+      indicatorColor: accent.withValues(alpha: .20),
       surfaceTintColor: Colors.transparent,
       labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
       labelTextStyle: WidgetStateProperty.resolveWith(
         (states) => TextStyle(
           color: states.contains(WidgetState.selected) ? accent : muted,
-          fontSize: 9.5,
+          fontSize: 9,
           fontWeight: states.contains(WidgetState.selected)
               ? FontWeight.w700
               : FontWeight.w600,
@@ -162,15 +185,148 @@ ThemeData buildAppTheme({required bool dark}) {
     progressIndicatorTheme: ProgressIndicatorThemeData(color: accent),
     switchTheme: SwitchThemeData(
       thumbColor: WidgetStateProperty.resolveWith(
-        (states) => states.contains(WidgetState.selected)
-            ? (dark ? kDarkBackground : Colors.white)
-            : muted,
+        (states) =>
+            states.contains(WidgetState.selected) ? kBlueText : kRedText,
       ),
       trackColor: WidgetStateProperty.resolveWith(
-        (states) => states.contains(WidgetState.selected) ? accent : border,
+        (states) =>
+            states.contains(WidgetState.selected) ? kBlueAccent : kRedAccent,
+      ),
+    ),
+    popupMenuTheme: PopupMenuThemeData(
+      color: surface.withValues(alpha: .98),
+      surfaceTintColor: Colors.transparent,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+        side: BorderSide(color: border),
       ),
     ),
   );
+}
+
+class ThemeBackdrop extends StatelessWidget {
+  const ThemeBackdrop({super.key, required this.blue, required this.child});
+
+  final bool blue;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final background = blue ? kBlueBackground : kRedBackground;
+    final image = blue ? kBlueBackgroundAsset : kRedBackgroundAsset;
+    final systemOverlay = SystemUiOverlayStyle.light.copyWith(
+      statusBarColor: Colors.transparent,
+      systemNavigationBarColor: background,
+      systemNavigationBarIconBrightness: Brightness.light,
+    );
+    return AnnotatedRegion<SystemUiOverlayStyle>(
+      value: systemOverlay,
+      child: ColoredBox(
+        color: background,
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            ExcludeSemantics(
+              child: Image.asset(
+                image,
+                fit: BoxFit.cover,
+                alignment: Alignment.bottomCenter,
+                filterQuality: FilterQuality.medium,
+              ),
+            ),
+            DecoratedBox(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  colors: blue
+                      ? const [Color(0x2902060D), Color(0xA3030914)]
+                      : const [Color(0x2E080406), Color(0xA60D0608)],
+                ),
+              ),
+            ),
+            child,
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class RedBlueThemeToggle extends StatelessWidget {
+  const RedBlueThemeToggle({super.key, this.compact = false});
+
+  final bool compact;
+
+  @override
+  Widget build(BuildContext context) {
+    final blue = appTheme.isBlue;
+    final message = blue ? 'Switch to Red theme' : 'Switch to Blue theme';
+    return Semantics(
+      label: message,
+      toggled: blue,
+      child: Tooltip(
+        message: message,
+        child: Container(
+          height: compact ? 30 : 34,
+          padding: EdgeInsets.symmetric(horizontal: compact ? 5 : 7),
+          decoration: BoxDecoration(
+            color: Theme.of(context).colorScheme.surface.withValues(alpha: .78),
+            borderRadius: BorderRadius.circular(999),
+            border: Border.all(color: Theme.of(context).dividerColor),
+            boxShadow: [
+              BoxShadow(
+                color: Theme.of(
+                  context,
+                ).colorScheme.primary.withValues(alpha: .12),
+                blurRadius: 12,
+              ),
+            ],
+          ),
+          child: ExcludeSemantics(
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  'RED',
+                  style: TextStyle(
+                    color: blue
+                        ? kRedAccentBright.withValues(alpha: .58)
+                        : kRedAccentBright,
+                    fontSize: compact ? 8 : 9,
+                    fontWeight: FontWeight.w900,
+                    letterSpacing: .35,
+                  ),
+                ),
+                SizedBox(
+                  width: compact ? 30 : 34,
+                  height: compact ? 23 : 26,
+                  child: FittedBox(
+                    fit: BoxFit.fill,
+                    child: Switch.adaptive(
+                      value: blue,
+                      onChanged: appTheme.setBlue,
+                    ),
+                  ),
+                ),
+                Text(
+                  'BLUE',
+                  style: TextStyle(
+                    color: blue
+                        ? kBlueAccentBright
+                        : kBlueAccentBright.withValues(alpha: .58),
+                    fontSize: compact ? 8 : 9,
+                    fontWeight: FontWeight.w900,
+                    letterSpacing: .25,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 class MathiBotApp extends StatelessWidget {
@@ -183,9 +339,12 @@ class MathiBotApp extends StatelessWidget {
       builder: (context, _) => MaterialApp(
         title: 'Nithi Bot',
         debugShowCheckedModeBanner: false,
-        theme: buildAppTheme(dark: false),
-        darkTheme: buildAppTheme(dark: true),
-        themeMode: appTheme.mode,
+        theme: buildAppTheme(blue: appTheme.isBlue),
+        themeAnimationDuration: const Duration(milliseconds: 220),
+        builder: (context, child) => ThemeBackdrop(
+          blue: appTheme.isBlue,
+          child: child ?? const SizedBox.shrink(),
+        ),
         home: const HomeShell(),
       ),
     );
@@ -212,6 +371,12 @@ const appPages = <AppPageSpec>[
     navLabel: 'Home',
     path: '/',
     icon: Icons.home_outlined,
+  ),
+  AppPageSpec(
+    label: 'Trend Engine',
+    navLabel: 'Trend',
+    path: '/trend-engine',
+    icon: Icons.insights_rounded,
   ),
   AppPageSpec(
     label: 'Trades & P&L',
@@ -369,8 +534,8 @@ class WebAssetCache {
       final prefs = await SharedPreferences.getInstance();
       if (prefs.getString(_preferenceKey) == kWebAssetRevision) return;
       // Existing installations retain Android WebView cache across APK
-      // upgrades. Clear only HTTP assets once for this release so the new
-      // DRY RUN monitor UI/CSS is guaranteed to replace the previous page.
+      // upgrades. Clear only HTTP assets once for this release so the latest
+      // Red/Blue artwork and Trend Engine UI replace the previous page.
       // Cookies and local storage remain untouched.
       await controller.clearCache();
       await prefs.setString(_preferenceKey, kWebAssetRevision);
@@ -429,6 +594,14 @@ class _HomeShellState extends State<HomeShell> {
     });
   }
 
+  void _selectTab(int index) {
+    if (index < 0 || index >= appPages.length) return;
+    setState(() {
+      _tab = index;
+      _visitedTabs.add(index);
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     if (!_ready) {
@@ -444,8 +617,8 @@ class _HomeShellState extends State<HomeShell> {
       );
     }
 
-    final dark = Theme.of(context).brightness == Brightness.dark;
-    final colors = Theme.of(context).colorScheme;
+    final blue = appTheme.isBlue;
+    final muted = blue ? kBlueMuted : kRedMuted;
     return Scaffold(
       appBar: AppBar(
         toolbarHeight: 62,
@@ -457,8 +630,10 @@ class _HomeShellState extends State<HomeShell> {
               borderRadius: BorderRadius.circular(10),
               boxShadow: [
                 BoxShadow(
-                  color: Colors.black.withValues(alpha: dark ? .28 : .10),
-                  blurRadius: 10,
+                  color: Theme.of(
+                    context,
+                  ).colorScheme.primary.withValues(alpha: .18),
+                  blurRadius: 12,
                   offset: const Offset(0, 2),
                 ),
               ],
@@ -480,7 +655,7 @@ class _HomeShellState extends State<HomeShell> {
                   ? SessionService.username
                   : SessionService.displayName,
               style: TextStyle(
-                color: dark ? kDarkMuted : kLightMuted,
+                color: muted,
                 fontSize: 10.5,
                 fontWeight: FontWeight.w500,
               ),
@@ -493,26 +668,7 @@ class _HomeShellState extends State<HomeShell> {
             onPressed: () => _webKeys[_tab].currentState?.reload(),
             icon: const Icon(Icons.refresh_rounded, size: 21),
           ),
-          Semantics(
-            label: dark ? 'Switch to light theme' : 'Switch to dark theme',
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(
-                  dark ? Icons.dark_mode_outlined : Icons.light_mode_outlined,
-                  size: 18,
-                  color: colors.primary,
-                ),
-                Transform.scale(
-                  scale: .78,
-                  child: Switch.adaptive(
-                    value: dark,
-                    onChanged: appTheme.setDark,
-                  ),
-                ),
-              ],
-            ),
-          ),
+          const RedBlueThemeToggle(compact: true),
           PopupMenuButton<String>(
             tooltip: 'Account',
             onSelected: (value) {
@@ -533,10 +689,7 @@ class _HomeShellState extends State<HomeShell> {
                     Text(
                       SessionService.baseUrl,
                       overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        color: dark ? kDarkMuted : kLightMuted,
-                        fontSize: 11,
-                      ),
+                      style: TextStyle(color: muted, fontSize: 11),
                     ),
                   ],
                 ),
@@ -565,8 +718,9 @@ class _HomeShellState extends State<HomeShell> {
               DashboardWebPage(
                 key: _webKeys[index],
                 page: appPages[index],
-                dark: dark,
+                blue: blue,
                 onSessionExpired: _signOut,
+                onPageSelected: _selectTab,
               )
             else
               const SizedBox.shrink(),
@@ -580,10 +734,7 @@ class _HomeShellState extends State<HomeShell> {
         ),
         child: NavigationBar(
           selectedIndex: _tab,
-          onDestinationSelected: (index) => setState(() {
-            _tab = index;
-            _visitedTabs.add(index);
-          }),
+          onDestinationSelected: _selectTab,
           destinations: [
             for (final page in appPages)
               NavigationDestination(
@@ -687,32 +838,12 @@ class _LoginScreenState extends State<LoginScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final dark = Theme.of(context).brightness == Brightness.dark;
     final colors = Theme.of(context).colorScheme;
     return Scaffold(
       body: SafeArea(
         child: Stack(
           children: [
-            Positioned(
-              top: 8,
-              right: 10,
-              child: Row(
-                children: [
-                  Icon(
-                    dark ? Icons.dark_mode_outlined : Icons.light_mode_outlined,
-                    size: 18,
-                    color: colors.primary,
-                  ),
-                  Transform.scale(
-                    scale: .82,
-                    child: Switch.adaptive(
-                      value: dark,
-                      onChanged: appTheme.setDark,
-                    ),
-                  ),
-                ],
-              ),
-            ),
+            Positioned(top: 8, right: 10, child: const RedBlueThemeToggle()),
             Center(
               child: SingleChildScrollView(
                 padding: const EdgeInsets.fromLTRB(20, 72, 20, 28),
@@ -872,13 +1003,15 @@ class DashboardWebPage extends StatefulWidget {
   const DashboardWebPage({
     super.key,
     required this.page,
-    required this.dark,
+    required this.blue,
     required this.onSessionExpired,
+    required this.onPageSelected,
   });
 
   final AppPageSpec page;
-  final bool dark;
+  final bool blue;
   final Future<void> Function() onSessionExpired;
+  final ValueChanged<int> onPageSelected;
 
   @override
   State<DashboardWebPage> createState() => DashboardWebPageState();
@@ -900,9 +1033,10 @@ class DashboardWebPageState extends State<DashboardWebPage>
     _controller = WebViewController()
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
       ..setVerticalScrollBarEnabled(true)
-      ..setBackgroundColor(widget.dark ? kDarkBackground : kLightBackground)
+      ..setBackgroundColor(widget.blue ? kBlueBackground : kRedBackground)
       ..setNavigationDelegate(
         NavigationDelegate(
+          onNavigationRequest: _handleNavigation,
           onProgress: (progress) {
             if (mounted) setState(() => _progress = progress);
           },
@@ -936,10 +1070,10 @@ class DashboardWebPageState extends State<DashboardWebPage>
   @override
   void didUpdateWidget(covariant DashboardWebPage oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.dark != widget.dark) {
+    if (oldWidget.blue != widget.blue) {
       unawaited(
         _controller.setBackgroundColor(
-          widget.dark ? kDarkBackground : kLightBackground,
+          widget.blue ? kBlueBackground : kRedBackground,
         ),
       );
       unawaited(_applyNativePresentation());
@@ -954,9 +1088,32 @@ class DashboardWebPageState extends State<DashboardWebPage>
         .replace(
           queryParameters: {
             'app': '1',
-            'theme': widget.dark ? 'dark' : 'light',
+            // The web dashboard keeps its existing compatibility values:
+            // light selects Red and dark selects Blue.
+            'theme': widget.blue ? 'dark' : 'light',
           },
         );
+  }
+
+  NavigationDecision _handleNavigation(NavigationRequest request) {
+    final target = Uri.tryParse(request.url);
+    final server = Uri.tryParse(SessionService.baseUrl);
+    if (target == null || server == null) return NavigationDecision.navigate;
+    final sameServer =
+        target.scheme == server.scheme &&
+        target.host == server.host &&
+        target.port == server.port;
+    if (!sameServer) return NavigationDecision.navigate;
+
+    final targetIndex = appPages.indexWhere((page) => page.path == target.path);
+    final currentIndex = appPages.indexOf(widget.page);
+    if (targetIndex >= 0 && targetIndex != currentIndex) {
+      scheduleMicrotask(() {
+        if (mounted) widget.onPageSelected(targetIndex);
+      });
+      return NavigationDecision.prevent;
+    }
+    return NavigationDecision.navigate;
   }
 
   Future<void> _load() async {
@@ -973,8 +1130,8 @@ class DashboardWebPageState extends State<DashboardWebPage>
   }
 
   Future<void> _applyNativePresentation() async {
-    final theme = widget.dark ? 'dark' : 'light';
-    final background = widget.dark ? '#101722' : '#f2f4f8';
+    final theme = widget.blue ? 'dark' : 'light';
+    final background = widget.blue ? '#030914' : '#0d0608';
     try {
       await _controller.runJavaScript('''
         (() => {
