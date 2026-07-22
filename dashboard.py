@@ -27,6 +27,8 @@ from flask import (Flask, jsonify, request, abort, send_file, session,
 
 from risk_controls import (account_entry_lock, account_file_lock, audit_event,
                            decision_dict, evaluate_entry, risk_based_lots)
+from trend_engine import DEFAULT_CONFIG as TREND_ENGINE_DEFAULT_CONFIG, evaluate_trend
+from trend_engine_live import collect_delta_trend_snapshot
 
 # Force IPv4 — Delta's whitelist holds our IPv4; IPv6 rotates and gets rejected
 import socket as _socket
@@ -85,6 +87,7 @@ _trend_auto_last_attempt: dict[str, float] = {}
 _trend_auto_health: dict[str, dict] = {}
 _trend_debounce: dict[str, dict] = {}
 _trend_shadow_seen: dict[str, str] = {}
+_trend_engine_cache: dict[tuple[str, str, str, str], dict] = {}
 _external_options: dict[str, list] = {}
 TREND_SIGNAL_SNAPSHOT_FILE = "trend_signal_snapshot.json"
 
@@ -1354,6 +1357,7 @@ def _pnl_stats(trades: list, *, dry_run: bool = False) -> dict:
 # ─────────────────────────────────────────────────────────────
 _PAGES = {
     "":          ("overview.html",  "Overview"),
+    "trend-engine": ("trend_engine.html", "Trend Engine"),
     "dry-run":   ("dry_run.html",   "Dry Run Dashboard"),
     "trades":    ("trades.html",    "Trades & P&L"),
     "positions": ("positions.html", "Positions"),
@@ -5280,6 +5284,206 @@ def api_trend():
     except Exception as e:
         return jsonify({"trend": "na", "combined": "na", "timeframes": {},
                         "error": str(e)}), 502
+
+
+def _trend_engine_config_overrides() -> dict:
+    """Approved model overrides from account config or process environment.
+
+    The new engine has its own namespace so the legacy Trend strategy's more
+    permissive spread/TTE settings cannot weaken the supplied rule set.
+    """
+    saved, _ = _saved_user_cfg()
+    overrides = {"underlying": "BTCUSD"}
+    for key, default in TREND_ENGINE_DEFAULT_CONFIG.items():
+        env_key = f"TREND_ENGINE_{key.upper()}"
+        raw = saved.get(env_key)
+        if raw in (None, ""):
+            raw = os.getenv(env_key)
+        if raw in (None, ""):
+            continue
+        if isinstance(default, bool):
+            lowered = str(raw).strip().lower()
+            overrides[key] = (
+                lowered in {"1", "true", "yes", "on"}
+                if lowered in {"1", "true", "yes", "on", "0", "false", "no", "off"}
+                else raw
+            )
+        elif isinstance(default, int):
+            try:
+                overrides[key] = int(float(raw))
+            except (TypeError, ValueError, OverflowError):
+                overrides[key] = raw
+        elif isinstance(default, float):
+            try:
+                overrides[key] = float(raw)
+            except (TypeError, ValueError, OverflowError):
+                overrides[key] = raw
+        else:
+            overrides[key] = str(raw)
+    return overrides
+
+
+def _trend_engine_strategy_config() -> dict:
+    """Account-scoped adapter settings, including explicit safety switches."""
+    config = dict(_user_cfg())
+    saved, _ = _saved_user_cfg()
+    for key in (
+        "TREND_ENGINE_DRY_RUN_EQUITY_USD",
+        "TREND_ENGINE_EVENT_STATUS",
+        "TREND_ENGINE_KILL_SWITCH",
+        "TREND_ENGINE_SLIPPAGE_PCT",
+    ):
+        value = saved.get(key)
+        if value in (None, ""):
+            value = os.getenv(key)
+        if value not in (None, ""):
+            config[key] = value
+    return config
+
+
+def _trend_engine_invalid_decision(error: Exception, config: dict | None = None) -> dict:
+    """Return a complete fail-closed schema for collection/config failures."""
+    now = datetime.now(timezone.utc).isoformat()
+    approved = config if isinstance(config, dict) else {"underlying": "BTCUSD"}
+    decision = evaluate_trend({
+        "timestamp": now,
+        "underlying": str(approved.get("underlying") or "BTCUSD"),
+        "collection_error": str(error),
+    }, approved)
+    audit = decision.get("audit") if isinstance(decision.get("audit"), dict) else {}
+    decision["audit"] = {**audit, "collection_error": str(error)[:500]}
+    return decision
+
+
+@app.route("/api/trend-engine")
+def api_trend_engine():
+    """Read-only, account-scoped rules engine; this endpoint cannot trade."""
+    user = _active_user()
+    try:
+        mode = _trading_mode_payload()
+        engine_config = _trend_engine_config_overrides()
+        strategy_config = _trend_engine_strategy_config()
+    except Exception as exc:
+        decision = _trend_engine_invalid_decision(exc)
+        decision["audit"] = {
+            **decision.get("audit", {}), "order_submitted": False,
+        }
+        return jsonify(decision)
+
+    config_fingerprint = hashlib.sha256(json.dumps(
+        {"engine": engine_config, "adapter": strategy_config},
+        sort_keys=True, separators=(",", ":"), default=str,
+    ).encode("utf-8")).hexdigest()[:16]
+    cache_key = (
+        user, mode["execution_mode"], mode["mode_revision"], config_fingerprint,
+    )
+    cached = _trend_engine_cache.get(cache_key, {})
+    force = str(request.args.get("refresh") or "").lower() in {
+        "1", "true", "yes", "on",
+    }
+    if (not force and isinstance(cached.get("decision"), dict)
+            and cached["decision"].get("decision") == "NO_TRADE"
+            and time.time() - float(cached.get("at", 0)) < 15):
+        return jsonify(cached["decision"])
+
+    try:
+        snapshot = collect_delta_trend_snapshot(
+            http_get=req.get,
+            api_base=API_BASE,
+            sign=_sign,
+            user_dir=_user_dir(),
+            dry_run=mode["dry_run_mode"],
+            mode_revision=mode["mode_revision"],
+            strategy_config=strategy_config,
+        )
+        decision = evaluate_trend(snapshot, engine_config)
+        if decision.get("decision") in {"BUY_CE", "BUY_PE"}:
+            initial = decision
+            recheck_snapshot = collect_delta_trend_snapshot(
+                http_get=req.get,
+                api_base=API_BASE,
+                sign=_sign,
+                user_dir=_user_dir(),
+                dry_run=mode["dry_run_mode"],
+                mode_revision=mode["mode_revision"],
+                strategy_config=strategy_config,
+            )
+            rechecked = evaluate_trend(recheck_snapshot, engine_config)
+            initial_symbol = (initial.get("selected_contract") or {}).get("symbol")
+            rechecked_symbol = (rechecked.get("selected_contract") or {}).get("symbol")
+            try:
+                initial_maximum = float(
+                    (initial.get("order_plan") or {}).get("maximum_entry_price")
+                )
+                rechecked_entry = float(
+                    (rechecked.get("order_plan") or {}).get("entry_price")
+                )
+                price_stable = (
+                    math.isfinite(initial_maximum)
+                    and math.isfinite(rechecked_entry)
+                    and rechecked_entry <= initial_maximum
+                )
+            except (TypeError, ValueError, OverflowError):
+                price_stable = False
+            stable = (
+                rechecked.get("decision") == initial.get("decision")
+                and rechecked_symbol == initial_symbol
+                and price_stable
+            )
+            decision = rechecked
+            recheck_audit = (
+                decision.get("audit")
+                if isinstance(decision.get("audit"), dict) else {}
+            )
+            decision["audit"] = {
+                **recheck_audit,
+                "quote_revalidated": stable,
+                "initial_decision_id": initial.get("decision_id"),
+            }
+            if not stable and decision.get("decision") in {"BUY_CE", "BUY_PE"}:
+                decision["decision"] = "NO_TRADE"
+                decision["reason_codes"] = ["QUOTE_REVALIDATION_FAILED"]
+                decision["order_plan"] = {
+                    "order_type": None, "entry_price": None,
+                    "maximum_entry_price": None, "quantity_lots": 0,
+                    "lot_size": None, "stop_option_price": None,
+                    "underlying_invalidation": None,
+                    "target_option_price": None, "underlying_target": None,
+                    "time_exit": None, "estimated_total_costs": None,
+                    "maximum_estimated_loss": None, "reward_risk": None,
+                }
+                decision["decision_summary"] = (
+                    "No trade: the contract or entry quote changed during "
+                    "mandatory revalidation."
+                )
+    except Exception as exc:
+        # A bad feed or account snapshot is a successful NO_TRADE decision,
+        # not an HTTP error and never a reason to fall back to guessed values.
+        print(f"Trend Engine collection warning for {user}: {exc}")
+        decision = _trend_engine_invalid_decision(exc, engine_config)
+
+    audit = decision.get("audit") if isinstance(decision.get("audit"), dict) else {}
+    decision["audit"] = {
+        **audit,
+        "execution_mode": mode["execution_mode"],
+        "mode_revision": mode["mode_revision"],
+        "order_submitted": False,
+    }
+    if decision.get("decision") == "NO_TRADE":
+        _trend_engine_cache[cache_key] = {"at": time.time(), "decision": decision}
+    else:
+        _trend_engine_cache.pop(cache_key, None)
+    try:
+        data_dir = _mode_data_dir(mode["dry_run_mode"])
+        with account_file_lock(
+            data_dir, "trend-engine", f"dashboard-trend-engine-{os.getpid()}",
+            stale_after_sec=30, wait_sec=1,
+        ) as acquired:
+            if acquired:
+                _atomic_write_json(data_dir / "trend_engine_decision.json", decision)
+    except Exception as exc:
+        print(f"Trend Engine audit warning for {user}: {exc}")
+    return jsonify(decision)
 
 
 def _pick_two_step_itm(products: list, spot: float, option_type: str,
