@@ -139,6 +139,42 @@ def _snapshot(direction=1, *, flat=False):
     }
 
 
+def _forecast_history_5m(*, favourable=True, direction=1):
+    start = NOW - timedelta(minutes=5 * 4_000)
+    rows = []
+    for index in range(4_000):
+        opened = 20_000.0
+        rows.append({
+            "timestamp": (start + timedelta(minutes=5 * index)).isoformat(),
+            "open": opened,
+            "high": opened * (
+                1.05 if favourable and direction > 0 else 1.01
+            ),
+            "low": opened * (
+                0.95 if favourable and direction < 0 else 0.99
+            ),
+            "close": opened,
+            "volume": 1_000,
+            "complete": True,
+        })
+    return {
+        "source": {
+            "provider": "delta_exchange",
+            "transport": "public_rest",
+            "endpoint": "/v2/history/candles",
+            "symbol": "BTCUSD",
+            "resolution": "5m",
+            "interval_seconds": 300,
+            "completed_only": True,
+        },
+        "requested_limit": 4_000,
+        "returned_count": len(rows),
+        "first_timestamp": rows[0]["timestamp"],
+        "last_timestamp": rows[-1]["timestamp"],
+        "candles": rows,
+    }
+
+
 def test_bullish_direction_selects_ce_only_after_direction_and_sizes_delta_lots():
     snapshot = _snapshot(1)
     result = evaluate_trend(snapshot)
@@ -215,6 +251,55 @@ def test_unknown_event_calendar_preserves_scores_but_blocks_entry():
     assert "INVALID_OR_STALE_DATA" not in result["reason_codes"]
 
 
+def test_unknown_event_calendar_can_be_explicitly_approved_without_claiming_clear():
+    snapshot = _snapshot(1)
+    snapshot["events"] = None
+    snapshot["market"]["event_data_available"] = False
+
+    result = evaluate_trend(snapshot, {"allow_unknown_event_risk": True})
+
+    assert result["decision"] == "BUY_CE"
+    assert result["hard_gates"]["event_pass"] is True
+    assert result["audit"]["event_policy"] == {
+        "event_data_available": False,
+        "unknown_risk_override_applied": True,
+        "known_blackout_detected": False,
+        "known_blackout_override_applied": False,
+    }
+
+
+def test_known_event_blackout_still_blocks_unknown_risk_override():
+    snapshot = _snapshot(1)
+    snapshot["events"] = [{
+        "timestamp": (NOW + timedelta(minutes=15)).isoformat(),
+        "name": "KNOWN_EVENT",
+        "prohibited": True,
+    }]
+
+    result = evaluate_trend(snapshot, {"allow_unknown_event_risk": True})
+
+    assert result["decision"] == "NO_TRADE"
+    assert result["hard_gates"]["event_pass"] is False
+    assert "EVENT_BLACKOUT" in result["reason_codes"]
+
+
+def test_known_blackout_is_audited_even_when_event_trading_is_overridden():
+    snapshot = _snapshot(1)
+    snapshot["events"] = [{
+        "timestamp": (NOW + timedelta(minutes=15)).isoformat(),
+        "name": "KNOWN_EVENT",
+        "prohibited": True,
+    }]
+
+    result = evaluate_trend(snapshot, {"allow_event_trading": True})
+
+    assert result["decision"] == "BUY_CE"
+    assert result["audit"]["event_policy"]["known_blackout_detected"] is True
+    assert result["audit"]["event_policy"][
+        "known_blackout_override_applied"
+    ] is True
+
+
 @pytest.mark.parametrize(
     "mutation",
     [
@@ -270,6 +355,134 @@ def test_unvalidated_probability_is_reported_not_invented():
     assert result["audit"]["scenario"]["net_expected_value_per_lot"] is None
 
 
+def test_probability_free_history_supplies_auditable_conservative_edge():
+    snapshot = _snapshot(1)
+    snapshot["forecast"] = {
+        "target_underlying": snapshot["market"]["spot"] + 700,
+        "invalidation_level": snapshot["market"]["spot"] - 300,
+        "holding_days": 1,
+        "cost_adjusted_required_move": 10,
+    }
+    snapshot["option_contracts"][0].update(bid=49.5, ask=50)
+    snapshot["forecast_history_5m"] = _forecast_history_5m(favourable=True)
+
+    result = evaluate_trend(snapshot)
+
+    assert result["decision"] == "BUY_CE"
+    scenario = result["audit"]["scenario"]
+    assert scenario["expected_value_method"] == (
+        "btc_historical_replay_intrinsic_floor_v1"
+    )
+    assert scenario["pricing_method"] == "historical_replay_intrinsic_floor"
+    assert scenario["probability_win"] is None
+    assert scenario["probability_validated"] is False
+    assert scenario["net_expected_value_per_lot"] > 0
+    assert scenario["complete_day_count"] >= 7
+    assert scenario["path_count"] >= 7
+    assert len(scenario["history_hash"]) == 64
+    assert scenario["scenario_evidence"]["source"]["provider"] == (
+        "delta_exchange"
+    )
+
+
+def test_probability_free_history_with_nonpositive_p20_blocks_entry():
+    snapshot = _snapshot(1)
+    snapshot["forecast"] = {
+        "target_underlying": snapshot["market"]["spot"] + 700,
+        "invalidation_level": snapshot["market"]["spot"] - 300,
+        "holding_days": 1,
+        "cost_adjusted_required_move": 10,
+    }
+    snapshot["option_contracts"][0].update(bid=49.5, ask=50)
+    snapshot["forecast_history_5m"] = _forecast_history_5m(favourable=False)
+
+    result = evaluate_trend(snapshot)
+
+    assert result["decision"] == "NO_TRADE"
+    assert "NEGATIVE_EXPECTED_VALUE" in result["reason_codes"]
+    assert result["audit"]["scenario"]["net_expected_value_per_lot"] < 0
+
+
+def test_unvalidated_partial_forecast_cannot_disable_historical_replay():
+    snapshot = _snapshot(1)
+    snapshot["forecast"].update({
+        "expected_iv_change": 0,
+        "probability_win": 0.9,
+        "probability_validated": False,
+        "cost_adjusted_required_move": 10,
+    })
+    snapshot["option_contracts"][0].update(bid=49.5, ask=50)
+    snapshot["forecast_history_5m"] = _forecast_history_5m(favourable=True)
+
+    result = evaluate_trend(snapshot)
+
+    assert result["decision"] == "BUY_CE"
+    assert result["audit"]["scenario"]["pricing_method"] == (
+        "historical_replay_intrinsic_floor"
+    )
+    assert result["audit"]["scenario"]["probability_win"] is None
+
+
+def test_probability_free_pe_uses_exact_90_minute_contract_and_safe_exit():
+    snapshot = _snapshot(-1)
+    snapshot["forecast"] = {
+        "target_underlying": snapshot["market"]["spot"] - 700,
+        "invalidation_level": snapshot["market"]["spot"] + 300,
+        "holding_days": 1,
+        "cost_adjusted_required_move": 10,
+    }
+    snapshot["option_contracts"][1].update(
+        bid=49.5,
+        ask=50,
+        expiry=(NOW + timedelta(hours=1, minutes=30)).isoformat(),
+    )
+    snapshot["forecast_history_5m"] = _forecast_history_5m(
+        favourable=True, direction=-1,
+    )
+
+    result = evaluate_trend(snapshot)
+
+    assert result["decision"] == "BUY_PE"
+    assert result["selected_contract"]["time_to_expiry_hours"] == 1.5
+    assert result["order_plan"]["time_exit"] == (
+        NOW + timedelta(hours=1)
+    ).isoformat().replace("+00:00", "Z")
+    assert result["audit"]["scenario"]["probability_validated"] is False
+
+
+def test_history_provenance_is_verified_before_it_can_supply_edge():
+    snapshot = _snapshot(1)
+    snapshot["forecast"] = {}
+    snapshot["forecast_history_5m"] = _forecast_history_5m()
+    snapshot["forecast_history_5m"]["source"]["provider"] = "unverified"
+
+    result = evaluate_trend(snapshot)
+
+    assert result["decision"] == "NO_TRADE"
+    assert result["reason_codes"] == ["INVALID_OR_STALE_DATA"]
+    assert "source.provider is not approved" in result["audit"][
+        "validation_error"
+    ]
+
+
+def test_implicit_atr_target_and_same_explicit_target_score_identically():
+    implicit_snapshot = _snapshot(1)
+    implicit_snapshot["forecast"].pop("target_underlying")
+    implicit = evaluate_trend(implicit_snapshot)
+    resolved_target = implicit["order_plan"]["underlying_target"]
+
+    explicit_snapshot = _snapshot(1)
+    explicit_snapshot["forecast"]["target_underlying"] = resolved_target
+    explicit = evaluate_trend(explicit_snapshot)
+
+    assert implicit["selected_contract"]["contract_components"] == explicit[
+        "selected_contract"
+    ]["contract_components"]
+    assert implicit["selected_contract"]["contract_score"] == explicit[
+        "selected_contract"
+    ]["contract_score"]
+
+
 def test_position_size_respects_visible_depth_and_exchange_order_limit():
     snapshot = _snapshot(1)
     snapshot["option_contracts"][0]["ask_quantity"] = 7
@@ -316,7 +529,7 @@ def test_contract_ranking_selects_highest_scoring_candidate_that_passes_edge():
     ("time_exit", "reason"),
     [
         (NOW - timedelta(minutes=1), "RISK_CALCULATION_FAILED"),
-        (NOW + timedelta(days=15), "EXPIRY_RESTRICTION"),
+        (NOW + timedelta(days=15), "RISK_CALCULATION_FAILED"),
     ],
 )
 def test_entry_time_exit_must_be_future_dated_and_before_expiry(time_exit, reason):
@@ -327,6 +540,181 @@ def test_entry_time_exit_must_be_future_dated_and_before_expiry(time_exit, reaso
 
     assert result["decision"] == "NO_TRADE"
     assert reason in result["reason_codes"]
+
+
+@pytest.mark.parametrize(
+    ("time_to_expiry", "eligible"),
+    [
+        (timedelta(hours=1, minutes=29, seconds=59), False),
+        (timedelta(hours=1, minutes=30), True),
+        (timedelta(days=45), True),
+    ],
+)
+def test_daily_btc_expiry_uses_exact_90_minute_floor_without_maximum_dte(
+        time_to_expiry, eligible):
+    snapshot = _snapshot(1)
+    snapshot["option_contracts"][0]["expiry"] = (
+        NOW + time_to_expiry
+    ).isoformat()
+
+    result = evaluate_trend(snapshot)
+
+    assert (result["decision"] == "BUY_CE") is eligible
+    if eligible:
+        assert result["selected_contract"]["time_to_expiry_hours"] == pytest.approx(
+            time_to_expiry.total_seconds() / 3600.0, abs=1e-4
+        )
+    else:
+        assert "EXPIRY_RESTRICTION" in result["reason_codes"]
+
+
+def test_same_day_contract_exit_is_capped_before_settlement_buffer():
+    snapshot = _snapshot(1)
+    snapshot["option_contracts"][0]["expiry"] = (
+        NOW + timedelta(hours=1, minutes=30)
+    ).isoformat()
+
+    result = evaluate_trend(snapshot)
+
+    assert result["decision"] == "BUY_CE"
+    assert result["order_plan"]["time_exit"] == (
+        NOW + timedelta(hours=1)
+    ).isoformat().replace("+00:00", "Z")
+    assert result["audit"]["scenario"]["effective_holding_hours"] == pytest.approx(1)
+
+
+def test_default_time_exit_is_anchored_to_closed_signal_not_wall_clock():
+    first_snapshot = _snapshot(1)
+    first = evaluate_trend(first_snapshot)
+    second_snapshot = deepcopy(first_snapshot)
+    second_now = NOW + timedelta(seconds=1)
+    fresh_quote = (second_now - timedelta(seconds=5)).isoformat()
+    second_snapshot["timestamp"] = second_now.isoformat()
+    for key in (
+        "market_data_timestamp", "spot_timestamp", "futures_timestamp",
+        "option_chain_timestamp",
+    ):
+        second_snapshot["market"][key] = fresh_quote
+    for contract in second_snapshot["option_contracts"]:
+        contract["quote_timestamp"] = fresh_quote
+
+    second = evaluate_trend(second_snapshot)
+
+    assert first["decision"] == second["decision"] == "BUY_CE"
+    assert first["order_plan"]["time_exit"] == second["order_plan"]["time_exit"]
+    assert first["selected_contract"]["time_to_expiry_hours"] != second[
+        "selected_contract"
+    ]["time_to_expiry_hours"]
+
+
+def test_explicit_exit_inside_settlement_buffer_is_capped_safely():
+    snapshot = _snapshot(1)
+    expiry = NOW + timedelta(hours=4)
+    snapshot["option_contracts"][0]["expiry"] = expiry.isoformat()
+    snapshot["forecast"]["time_exit"] = (
+        expiry - timedelta(minutes=29)
+    ).isoformat()
+
+    result = evaluate_trend(snapshot)
+
+    assert result["decision"] == "BUY_CE"
+    assert result["order_plan"]["time_exit"] == (
+        expiry - timedelta(minutes=30)
+    ).isoformat().replace("+00:00", "Z")
+    assert result["hard_gates"]["expiry_pass"] is True
+
+
+def test_no_window_before_configured_settlement_buffer_fails_expiry_gate():
+    snapshot = _snapshot(1)
+    snapshot["option_contracts"][0]["expiry"] = (
+        NOW + timedelta(hours=1, minutes=30)
+    ).isoformat()
+
+    result = evaluate_trend(snapshot, {
+        "settlement_exit_buffer_minutes": 120,
+    })
+
+    assert result["decision"] == "NO_TRADE"
+    assert "EXPIRY_RESTRICTION" in result["reason_codes"]
+    assert result["hard_gates"]["expiry_pass"] is False
+
+
+def test_expiry_and_scenario_configuration_boundaries_fail_closed():
+    snapshot = _snapshot(1)
+    for overrides in (
+        {"min_time_to_expiry_hours": 1.49},
+        {"settlement_exit_buffer_minutes": 0},
+        {"scenario_lower_quantile": 0.5},
+    ):
+        result = evaluate_trend(snapshot, overrides)
+        assert result["decision"] == "NO_TRADE"
+        assert result["reason_codes"] == ["INVALID_OR_STALE_DATA"]
+
+
+def test_nondefault_scenario_quantile_has_generic_audit_fields():
+    snapshot = _snapshot(1)
+    snapshot["forecast"] = {
+        "target_underlying": snapshot["market"]["spot"] + 700,
+        "invalidation_level": snapshot["market"]["spot"] - 300,
+        "holding_days": 1,
+        "cost_adjusted_required_move": 10,
+    }
+    snapshot["option_contracts"][0].update(bid=49.5, ask=50)
+    snapshot["forecast_history_5m"] = _forecast_history_5m(favourable=True)
+
+    result = evaluate_trend(snapshot, {"scenario_lower_quantile": 0.3})
+
+    scenario = result["audit"]["scenario"]
+    assert scenario["scenario_lower_quantile"] == 0.3
+    assert scenario["net_edge_lower_quantile"] is not None
+    assert scenario["net_edge_median"] is not None
+    assert scenario["net_edge_upper_quantile"] is not None
+
+
+def test_replay_gap_loss_drives_sizing_and_reported_maximum_loss():
+    snapshot = _snapshot(1)
+    spot = snapshot["market"]["spot"]
+    snapshot["forecast"] = {
+        "target_underlying": spot + 700,
+        "invalidation_level": spot - 300,
+        "holding_days": 1,
+        "cost_adjusted_required_move": 10,
+    }
+    contract = snapshot["option_contracts"][0]
+    contract.update({
+        "strike": round(spot / 100) * 100 - 1_000,
+        "bid": 1_095,
+        "ask": 1_100,
+        "expiry": (NOW + timedelta(hours=1, minutes=30)).isoformat(),
+    })
+    history = _forecast_history_5m(favourable=True)
+    # One path per UTC day opens through invalidation on its second bar; the
+    # other 23 one-hour paths hit target.  The lower-day edge stays positive,
+    # while worst-path loss is larger than an at-invalidation fill.
+    for row in history["candles"]:
+        stamp = datetime.fromisoformat(row["timestamp"])
+        bar_of_day = (stamp.hour * 60 + stamp.minute) // 5
+        if bar_of_day == 0:
+            row.update(open=20_000, high=20_200, low=19_800, close=20_000)
+        elif bar_of_day == 1:
+            row.update(open=18_000, high=18_100, low=17_900, close=18_000)
+    snapshot["forecast_history_5m"] = history
+
+    result = evaluate_trend(snapshot, {"min_reward_risk": 0})
+
+    scenario = result["audit"]["scenario"]
+    assert scenario["expected_value_pass"] is True
+    assert scenario["maximum_loss_basis"] == "worst_historical_replay_path"
+    stop_fill_loss = (
+        (scenario["entry"] - scenario["scenario_evidence"][
+            "invalidation_option_intrinsic"
+        ]) * contract["contract_value"]
+        + scenario["costs_per_lot"]
+    )
+    assert scenario["net_loss_per_lot"] > stop_fill_loss
+    assert result["order_plan"]["maximum_estimated_loss"] == pytest.approx(
+        scenario["net_loss_per_lot"] * result["order_plan"]["quantity_lots"]
+    )
 
 
 def test_daily_loss_and_kill_switch_are_hard_portfolio_gates():
@@ -378,6 +766,67 @@ def test_existing_position_hold_and_mandatory_exit_are_independent_of_entry():
     exited = evaluate_trend(snapshot)
     assert exited["decision"] == "EXIT"
     assert "EMERGENCY_OPTION_STOP_REACHED" in exited["reason_codes"]
+
+
+def test_phase1_position_recalculates_remaining_edge_from_current_bid():
+    snapshot = _snapshot(1)
+    spot = snapshot["market"]["spot"]
+    snapshot["option_contracts"][0].update(bid=49.5, ask=50)
+    snapshot["forecast_history_5m"] = _forecast_history_5m(favourable=True)
+    snapshot["positions"] = [{
+        "symbol": "C-BTC-ATM",
+        "option_type": "CE",
+        "side": "long",
+        "quantity_lots": 100,
+        "entry_price": 45,
+        "current_price": 49.5,
+        "underlying_invalidation": spot - 300,
+        "underlying_target": spot + 700,
+        "stop_option_price": 1,
+        "target_option_price": 500,
+        "time_exit": (NOW + timedelta(hours=6)).isoformat(),
+        "remaining_expected_value": 0,
+        "entry_trigger": "trend_engine_phase1_confirmed",
+    }]
+
+    result = evaluate_trend(snapshot)
+
+    assert result["decision"] == "HOLD"
+    recalculation = result["audit"]["remaining_edge_recalculation"]
+    assert recalculation["valid"] is True
+    assert recalculation["net_expected_value_per_lot"] > 0
+    assert recalculation["probability_win"] is None
+    assert "from_current_bid" in recalculation["edge_semantics"]
+
+
+def test_phase1_position_exits_when_recalculated_remaining_edge_is_negative():
+    snapshot = _snapshot(1)
+    spot = snapshot["market"]["spot"]
+    snapshot["option_contracts"][0].update(bid=49.5, ask=50)
+    snapshot["forecast_history_5m"] = _forecast_history_5m(favourable=False)
+    snapshot["positions"] = [{
+        "symbol": "C-BTC-ATM",
+        "option_type": "CE",
+        "side": "long",
+        "quantity_lots": 100,
+        "entry_price": 45,
+        "current_price": 49.5,
+        "underlying_invalidation": spot - 300,
+        "underlying_target": spot + 700,
+        "stop_option_price": 1,
+        "target_option_price": 500,
+        "time_exit": (NOW + timedelta(hours=6)).isoformat(),
+        "remaining_expected_value": 25,
+        "entry_trigger": "trend_engine_phase1_confirmed",
+    }]
+
+    result = evaluate_trend(snapshot)
+
+    assert result["decision"] == "EXIT"
+    assert "NEGATIVE_EXPECTED_VALUE" in result["reason_codes"]
+    assert result["audit"]["remaining_edge_recalculation"][
+        "net_expected_value_per_lot"
+    ] < 0
 
 
 def test_incomplete_existing_position_explains_exact_missing_trade_plan_fields():
@@ -479,4 +928,4 @@ def test_decision_and_json_are_reproducible_and_machine_readable():
     assert json.loads(encoded) == first
     assert first["decision_id"].startswith("trend-")
     assert first["schema_version"] == "1.0"
-    assert first["model_version"] == "trend-engine-1.0.0"
+    assert first["model_version"] == "trend-engine-1.1.0"

@@ -20,6 +20,8 @@ from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Mapping, Sequence
 
+from trend_scenario import conservative_intrinsic_scenario, prepare_scenario_history
+
 
 DECISIONS = {"BUY_CE", "BUY_PE", "HOLD", "EXIT", "NO_TRADE"}
 TIMEFRAMES = ("60m", "15m", "5m")
@@ -41,17 +43,21 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "min_trade_score": 65,
     "min_reward_risk": 1.5,
     "max_bid_ask_spread_pct": 3.0,
-    "min_days_to_expiry": 7,
-    "max_days_to_expiry": 21,
+    # BTC options have daily expiries.  Eligibility is therefore based on the
+    # precise settlement timestamp, not a calendar-day DTE band.
+    "min_time_to_expiry_hours": 1.5,
+    "settlement_exit_buffer_minutes": 30.0,
     "preferred_abs_delta_min": 0.40,
     "preferred_abs_delta_max": 0.65,
     "max_portfolio_positions": 1,
     "allow_event_trading": False,
-    "allow_expiry_day_trading": False,
+    # An unavailable calendar remains explicit in the audit trail.  Phase 1
+    # may approve that unknown risk for DRY RUN; a known blackout still blocks.
+    "allow_unknown_event_risk": False,
     "allow_averaging_down": False,
     # Operational limits intentionally have conservative fixed defaults.  They
     # may be overridden only before evaluation, never learned during trading.
-    "model_version": "trend-engine-1.0.0",
+    "model_version": "trend-engine-1.1.0",
     "max_data_latency_seconds": 120,
     "max_timestamp_alignment_seconds": 30,
     "max_candle_age_intervals": 2,
@@ -69,6 +75,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "stop_atr_multiple": 1.0,
     "max_order_lots": 1_000_000,
     "max_exposure_pct": 100.0,
+    "scenario_min_complete_days": 7,
+    "scenario_lower_quantile": 0.20,
 }
 
 _NUMERIC_CONFIG = {
@@ -185,7 +193,8 @@ def _decision_id(snapshot: Any, config: Any) -> str:
 def _null_contract() -> dict[str, Any]:
     return {
         "symbol": None, "option_type": None, "strike": None,
-        "expiry": None, "days_to_expiry": None, "bid": None,
+        "expiry": None, "days_to_expiry": None,
+        "time_to_expiry_hours": None, "bid": None,
         "ask": None, "mid": None, "spread_pct": None, "volume": None,
         "open_interest": None, "implied_volatility": None, "delta": None,
         "theta": None, "contract_score": None,
@@ -290,14 +299,21 @@ def _load_config(overrides: Mapping[str, Any] | None) -> dict[str, Any]:
         minimum = 0
         _finite(config[key], f"config.{key}", minimum=minimum)
     for key in ("min_candles_per_timeframe", "max_consecutive_losses",
-                "max_portfolio_positions", "max_order_lots"):
+                "max_portfolio_positions", "max_order_lots",
+                "scenario_min_complete_days"):
         _integer(config[key], f"config.{key}", minimum=1)
     for key in ("max_risk_per_trade_pct", "max_daily_loss_pct",
                 "max_bid_ask_spread_pct", "max_entry_slippage_pct",
                 "max_exposure_pct"):
         _finite(config[key], f"config.{key}", minimum=0, maximum=100)
-    if config["min_days_to_expiry"] > config["max_days_to_expiry"]:
-        raise TrendInputError("minimum expiry cannot exceed maximum expiry")
+    if float(config["min_time_to_expiry_hours"]) < 1.5:
+        raise TrendInputError("minimum time to expiry cannot be below 1.5 hours")
+    if float(config["settlement_exit_buffer_minutes"]) <= 0:
+        raise TrendInputError("settlement exit buffer must be positive")
+    if not 0 < float(config["scenario_lower_quantile"]) < 0.5:
+        raise TrendInputError(
+            "scenario lower quantile must be between zero and 0.5"
+        )
     if config["preferred_abs_delta_min"] > config["preferred_abs_delta_max"]:
         raise TrendInputError("minimum preferred delta cannot exceed maximum")
     if config["entry_timeframe"] != "5m" or config["setup_timeframe"] != "15m" \
@@ -670,6 +686,73 @@ def _normalise_snapshot(snapshot: Any, config: Mapping[str, Any]) -> dict[str, A
         forecast_normalised["time_exit"] = _parse_time(
             forecast["time_exit"], "forecast.time_exit")
 
+    history_raw = root.get("forecast_history_5m")
+    forecast_history: dict[str, Any] | None = None
+    if history_raw is not None:
+        history_block = _mapping(history_raw, "forecast_history_5m")
+        source = _mapping(
+            history_block.get("source"), "forecast_history_5m.source"
+        )
+        required_source = {
+            "provider": "delta_exchange",
+            "transport": "public_rest",
+            "endpoint": "/v2/history/candles",
+            "symbol": "BTCUSD",
+            "resolution": "5m",
+            "interval_seconds": 300,
+            "completed_only": True,
+        }
+        for key, expected in required_source.items():
+            if source.get(key) != expected:
+                raise TrendInputError(
+                    f"forecast_history_5m.source.{key} is not approved"
+                )
+        history_rows = _list(
+            history_block.get("candles"), "forecast_history_5m.candles"
+        )
+        returned_count = _integer(
+            history_block.get("returned_count"),
+            "forecast_history_5m.returned_count",
+        )
+        if returned_count != len(history_rows):
+            raise TrendInputError(
+                "forecast_history_5m.returned_count does not match candles"
+            )
+        normalised_history_rows: list[dict[str, Any]] = []
+        for index, item in enumerate(history_rows):
+            row = _mapping(item, f"forecast_history_5m.candles[{index}]")
+            if row.get("complete") is not True:
+                raise TrendInputError(
+                    f"forecast_history_5m.candles[{index}] is not complete"
+                )
+            normalised_history_rows.append(dict(row))
+        if normalised_history_rows:
+            if history_block.get("first_timestamp") != normalised_history_rows[0].get(
+                    "timestamp"):
+                raise TrendInputError(
+                    "forecast_history_5m.first_timestamp does not match candles"
+                )
+            if history_block.get("last_timestamp") != normalised_history_rows[-1].get(
+                    "timestamp"):
+                raise TrendInputError(
+                    "forecast_history_5m.last_timestamp does not match candles"
+                )
+        requested_limit = _integer(
+            history_block.get("requested_limit"),
+            "forecast_history_5m.requested_limit",
+            minimum=1,
+        )
+        if requested_limit < returned_count:
+            raise TrendInputError(
+                "forecast_history_5m.requested_limit is below returned_count"
+            )
+        forecast_history = {
+            "source": dict(source),
+            "candles": normalised_history_rows,
+            "returned_count": returned_count,
+            "requested_limit": requested_limit,
+        }
+
     return {
         "now": now, "symbol": symbol, "market": dict(market), "spot": spot,
         "market_timestamp": market_ts, "candles": candles,
@@ -683,6 +766,7 @@ def _normalise_snapshot(snapshot: Any, config: Mapping[str, Any]) -> dict[str, A
         "pending_orders": pending_orders, "events": event_rows,
         "event_data_available": event_data_available,
         "forecast": forecast_normalised,
+        "forecast_history_5m": forecast_history,
     }
 
 
@@ -1102,16 +1186,21 @@ def _volatility_score(market: Mapping[str, Any], underlying_sign: int
     return _clamp(score, -10, 10), {"available": True, **dict(data)}
 
 
-def _event_pass(context: Mapping[str, Any], config: Mapping[str, Any]) -> bool:
-    if not context["event_data_available"]:
-        return False
-    if config["allow_event_trading"]:
-        return True
+def _known_event_blackout(context: Mapping[str, Any],
+                          config: Mapping[str, Any]) -> bool:
     now = context["now"]
     blackout = timedelta(minutes=float(config["event_blackout_minutes"]))
-    return not any(event["prohibited"] and
-                   abs(event["timestamp"] - now) <= blackout
-                   for event in context["events"])
+    return any(event["prohibited"] and
+               abs(event["timestamp"] - now) <= blackout
+               for event in context["events"])
+
+
+def _event_pass(context: Mapping[str, Any], config: Mapping[str, Any]) -> bool:
+    if not context["event_data_available"]:
+        return bool(config["allow_unknown_event_risk"])
+    if config["allow_event_trading"]:
+        return True
+    return not _known_event_blackout(context, config)
 
 
 def _risk_reasons(context: Mapping[str, Any], config: Mapping[str, Any]
@@ -1242,11 +1331,15 @@ def _contract_hard_filter(contract: Mapping[str, Any], option_type: str,
     mid = (contract["bid"] + contract["ask"]) / 2.0
     spread_pct = ((contract["ask"] - contract["bid"]) / mid * 100.0
                   if mid > 0 else math.inf)
-    dte = (contract["expiry"] - now).total_seconds() / 86400.0
+    seconds_to_expiry = (contract["expiry"] - now).total_seconds()
+    dte = seconds_to_expiry / 86400.0
+    time_to_expiry_hours = seconds_to_expiry / 3600.0
     if contract["option_type"] != option_type:
         return False, ["WRONG_OPTION_TYPE"], {"mid": mid,
                                               "spread_pct": spread_pct,
-                                              "days_to_expiry": dte}
+                                              "days_to_expiry": dte,
+                                              "time_to_expiry_hours":
+                                                  time_to_expiry_hours}
     if contract["bid"] <= 0 or contract["ask"] <= 0 or mid <= 0:
         reasons.append("INSUFFICIENT_LIQUIDITY")
     if spread_pct > float(config["max_bid_ask_spread_pct"]):
@@ -1255,10 +1348,7 @@ def _contract_hard_filter(contract: Mapping[str, Any], option_type: str,
             contract["open_interest"] < float(config["min_option_open_interest"]) or \
             contract["bid_quantity"] <= 0 or contract["ask_quantity"] <= 0:
         reasons.append("INSUFFICIENT_LIQUIDITY")
-    if dte < float(config["min_days_to_expiry"]) or \
-            dte > float(config["max_days_to_expiry"]):
-        reasons.append("EXPIRY_RESTRICTION")
-    if dte < 1 and not config["allow_expiry_day_trading"]:
+    if time_to_expiry_hours < float(config["min_time_to_expiry_hours"]):
         reasons.append("EXPIRY_RESTRICTION")
     evaluated_ask = contract.get("evaluated_ask")
     if evaluated_ask is not None:
@@ -1269,6 +1359,7 @@ def _contract_hard_filter(contract: Mapping[str, Any], option_type: str,
             reasons.append("ENTRY_PRICE_DEVIATION")
     return not reasons, list(dict.fromkeys(reasons)), {
         "mid": mid, "spread_pct": spread_pct, "days_to_expiry": dte,
+        "time_to_expiry_hours": time_to_expiry_hours,
     }
 
 
@@ -1292,12 +1383,9 @@ def _contract_components(contract: Mapping[str, Any], metrics: Mapping[str, floa
         delta_score = 15 * max(0.0, (delta - 0.10) / max(low - 0.10, 1e-12))
     else:
         delta_score = 15 * max(0.0, (0.95 - delta) / max(0.95 - high, 1e-12))
-    min_dte = float(config["min_days_to_expiry"])
-    max_dte = float(config["max_days_to_expiry"])
-    centre = (min_dte + max_dte) / 2.0
-    half = max((max_dte - min_dte) / 2.0, 1.0)
-    expiry_score = 12.0 + 3.0 * max(0.0, 1.0 - abs(
-        metrics["days_to_expiry"] - centre) / half)
+    # Once the precise TTE gate passes, expiry contributes equally.  Daily BTC
+    # contracts must not be quietly penalised by the removed 14-DTE preference.
+    expiry_score = 15.0
     if contract["iv_percentile"] is not None:
         iv_score = 15.0 * (1.0 - 0.65 * contract["iv_percentile"] / 100.0)
     else:
@@ -1338,10 +1426,35 @@ def _scenario_and_order(contract: Mapping[str, Any], context: Mapping[str, Any],
                         config: Mapping[str, Any]) -> dict[str, Any]:
     forecast = context["forecast"]
     spot = context["spot"]
-    holding_days = float(forecast.get("holding_days",
-                                      config["forecast_holding_days"]))
-    if holding_days <= 0 or holding_days > float(config["max_holding_days"]):
+    requested_holding_days = float(forecast.get(
+        "holding_days", config["forecast_holding_days"]
+    ))
+    if requested_holding_days <= 0 or requested_holding_days > float(
+            config["max_holding_days"]):
         return {"valid": False, "reason": "RISK_CALCULATION_FAILED"}
+    settlement_deadline = contract["expiry"] - timedelta(
+        minutes=float(config["settlement_exit_buffer_minutes"])
+    )
+    signal_anchor = (
+        context["candles"]["5m"][-1]["timestamp"]
+        + timedelta(minutes=TIMEFRAME_MINUTES["5m"])
+    )
+    requested_time_exit = forecast.get("time_exit")
+    if requested_time_exit is not None:
+        if requested_time_exit <= context["now"]:
+            return {"valid": False, "reason": "RISK_CALCULATION_FAILED"}
+        time_exit = min(requested_time_exit, settlement_deadline)
+    else:
+        time_exit = min(
+            signal_anchor + timedelta(days=requested_holding_days),
+            settlement_deadline,
+        )
+    if time_exit <= context["now"]:
+        return {"valid": False, "reason": "EXPIRY_RESTRICTION"}
+    if time_exit > context["now"] + timedelta(
+            days=float(config["max_holding_days"])):
+        return {"valid": False, "reason": "RISK_CALCULATION_FAILED"}
+    holding_days = (time_exit - context["now"]).total_seconds() / 86400.0
     target = forecast.get("target_underlying")
     if target is None:
         # Target is a transparent ATR projection, not fabricated market input.
@@ -1356,19 +1469,38 @@ def _scenario_and_order(contract: Mapping[str, Any], context: Mapping[str, Any],
         return {"valid": False, "reason": "BREAKEVEN_UNREALISTIC"}
     entry = contract["ask"]
     tick = contract["tick_size"]
+    costs_per_lot_raw = contract.get("estimated_costs_per_lot")
+    if costs_per_lot_raw is None:
+        costs_per_lot = (context["risk"]["estimated_costs_per_lot"] +
+                         context["risk"]["estimated_slippage_per_lot"])
+    else:
+        costs_per_lot = _finite(costs_per_lot_raw,
+                                "contract.estimated_costs_per_lot", minimum=0)
+    multiplier = contract["contract_value"]
     expected_exit_raw = contract.get("expected_exit_price")
     stop_raw = contract.get("stop_option_price")
     neutral_raw = contract.get("neutral_exit_price")
-    if expected_exit_raw is not None and stop_raw is not None:
+    replay_edge: dict[str, Any] | None = None
+    scenario_evidence: dict[str, Any] | None = None
+    history = context.get("forecast_history_5m")
+    validated_probability_available = bool(
+        forecast.get("probability_validated") is True
+        and forecast.get("probability_win") is not None
+    )
+    use_historical_replay = bool(
+        isinstance(history, Mapping) and not validated_probability_available
+    )
+    if (not use_historical_replay and expected_exit_raw is not None
+            and stop_raw is not None):
         expected_exit = _finite(expected_exit_raw, "contract.expected_exit_price",
                                 minimum=0)
         stop_option = _finite(stop_raw, "contract.stop_option_price", minimum=0)
         neutral_exit = (_finite(neutral_raw, "contract.neutral_exit_price", minimum=0)
                         if neutral_raw is not None else None)
+        risk_expected_exit = expected_exit
+        risk_stop_option = stop_option
         pricing_method = "provided_scenarios"
-    else:
-        if "expected_iv_change" not in forecast:
-            return {"valid": False, "reason": "EXPECTED_VALUE_UNAVAILABLE"}
+    elif not use_historical_replay and "expected_iv_change" in forecast:
         iv_change = float(forecast["expected_iv_change"])
         if iv_change and contract["vega"] is None:
             return {"valid": False, "reason": "EXPECTED_VALUE_UNAVAILABLE"}
@@ -1382,23 +1514,73 @@ def _scenario_and_order(contract: Mapping[str, Any], context: Mapping[str, Any],
                           + decay + iv_effect)
         neutral_exit = max(tick, (contract["bid"] + contract["ask"]) / 2.0
                            + decay + iv_effect)
+        risk_expected_exit = expected_exit
+        risk_stop_option = stop_option
         pricing_method = "delta_theta_vega_scenario"
-    costs_per_lot_raw = contract.get("estimated_costs_per_lot")
-    if costs_per_lot_raw is None:
-        costs_per_lot = (context["risk"]["estimated_costs_per_lot"] +
-                         context["risk"]["estimated_slippage_per_lot"])
     else:
-        costs_per_lot = _finite(costs_per_lot_raw,
-                                "contract.estimated_costs_per_lot", minimum=0)
-    multiplier = contract["contract_value"]
-    net_win = (expected_exit - entry) * multiplier - costs_per_lot
-    net_loss = (entry - stop_option) * multiplier + costs_per_lot
+        if not isinstance(history, Mapping):
+            return {"valid": False, "reason": "EXPECTED_VALUE_UNAVAILABLE"}
+        replay_edge = conservative_intrinsic_scenario(
+            history.get("candles", []),
+            spot=spot,
+            target_price=float(target),
+            invalidation_price=float(invalidation),
+            option_type=contract["option_type"],
+            strike=contract["strike"],
+            entry_price=entry,
+            contract_value=multiplier,
+            costs_per_lot=costs_per_lot,
+            time_exit=time_exit,
+            now=context["now"],
+            min_complete_days=int(config["scenario_min_complete_days"]),
+            lower_quantile=float(config["scenario_lower_quantile"]),
+            prepared_history=context.get("prepared_scenario_history"),
+        )
+        scenario_evidence = dict(replay_edge.get("audit") or {})
+        scenario_evidence["source"] = dict(history.get("source") or {})
+        if replay_edge.get("valid") is not True:
+            return {
+                "valid": False,
+                "reason": "EXPECTED_VALUE_UNAVAILABLE",
+                "pricing_method": "historical_replay_intrinsic_floor",
+                "expected_value_method": scenario_evidence.get("method"),
+                "scenario_validation_reason": replay_edge.get("reason"),
+                "probability_win": None,
+                "probability_validated": False,
+                "scenario_evidence": scenario_evidence,
+            }
+        raw_target_option = float(replay_edge["target_option_price"])
+        raw_stop_option = float(replay_edge["stop_option_price"])
+        raw_neutral_option = float(replay_edge["neutral_option_price"])
+        # Tick-sized plan prices remain valid exchange values.  Risk and EV
+        # continue to use the lower, uncapped intrinsic values.
+        expected_exit = max(tick, raw_target_option)
+        stop_option = max(tick, raw_stop_option)
+        neutral_exit = max(tick, raw_neutral_option)
+        risk_expected_exit = raw_target_option
+        risk_stop_option = raw_stop_option
+        pricing_method = "historical_replay_intrinsic_floor"
+    net_win = (risk_expected_exit - entry) * multiplier - costs_per_lot
+    net_loss = (entry - risk_stop_option) * multiplier + costs_per_lot
+    loss_basis = "invalidation_intrinsic_and_costs"
+    if scenario_evidence is not None:
+        worst_replay = scenario_evidence.get("worst_net_pnl_per_lot")
+        if worst_replay is not None:
+            replay_loss = max(0.0, -float(worst_replay))
+            if replay_loss > net_loss:
+                net_loss = replay_loss
+                loss_basis = "worst_historical_replay_path"
     if net_loss <= 0:
         return {"valid": False, "reason": "RISK_CALCULATION_FAILED"}
     reward_risk = net_win / net_loss
     probability = forecast.get("probability_win")
     calibrated = forecast.get("probability_validated") is True
-    if probability is None or not calibrated:
+    if replay_edge is not None:
+        net_ev = float(replay_edge["net_expected_value_per_lot"])
+        expected_value_pass = replay_edge["expected_value_pass"] is True
+        probability = None
+        calibrated = False
+    elif probability is None or not calibrated:
         net_ev = None
         expected_value_pass = False
     else:
@@ -1431,23 +1613,22 @@ def _scenario_and_order(contract: Mapping[str, Any], context: Mapping[str, Any],
                int(contract["max_order_lots"]))
     increment = contract["lot_size"]
     lots = (lots // increment) * increment
-    time_exit = forecast.get("time_exit") or (
-        context["now"] + timedelta(days=holding_days))
-    if time_exit <= context["now"]:
-        return {"valid": False, "reason": "RISK_CALCULATION_FAILED"}
-    if time_exit > contract["expiry"]:
-        return {"valid": False, "reason": "EXPIRY_RESTRICTION"}
-    if time_exit > context["now"] + timedelta(
-            days=float(config["max_holding_days"])):
-        return {"valid": False, "reason": "RISK_CALCULATION_FAILED"}
     max_entry = entry * (1.0 + float(config["max_entry_slippage_pct"]) / 100.0)
+    replay_quantiles = (
+        scenario_evidence.get("net_ev_quantiles_per_lot") or {}
+        if scenario_evidence else {}
+    )
+    lower_percentile = int(round(float(config["scenario_lower_quantile"]) * 100))
+    upper_percentile = 100 - lower_percentile
     return {
         "valid": True, "target": float(target), "invalidation": float(invalidation),
         "entry": entry, "maximum_entry": max_entry,
         "expected_exit": expected_exit, "stop_option": stop_option,
         "neutral_exit": neutral_exit, "net_win_per_lot": net_win,
         "net_loss_per_lot": net_loss, "reward_risk": reward_risk,
+        "maximum_loss_basis": loss_basis,
         "probability_win": probability if calibrated else None,
+        "probability_validated": calibrated,
         "net_expected_value_per_lot": net_ev,
         "expected_value_pass": expected_value_pass,
         "forecast_move_pass": forecast_move_pass,
@@ -1456,10 +1637,51 @@ def _scenario_and_order(contract: Mapping[str, Any], context: Mapping[str, Any],
         "lots_by_funds": lots_by_funds,
         "lots_by_exposure": lots_by_exposure,
         "lots_by_depth": lots_by_depth, "time_exit": time_exit,
+        "requested_holding_days": requested_holding_days,
+        "signal_anchor": signal_anchor,
+        "effective_holding_hours": holding_days * 24.0,
+        "settlement_exit_buffer_minutes": float(
+            config["settlement_exit_buffer_minutes"]
+        ),
         "costs_per_lot": costs_per_lot,
         "total_costs": costs_per_lot * lots,
         "maximum_loss": estimated_loss_per_lot * lots,
         "pricing_method": pricing_method,
+        "expected_value_method": (
+            scenario_evidence.get("method") if scenario_evidence else
+            "calibrated_probability" if calibrated else None
+        ),
+        "history_hash": (
+            scenario_evidence.get("history_sha256") if scenario_evidence else None
+        ),
+        "history_start": (
+            scenario_evidence.get("history_window_start")
+            if scenario_evidence else None
+        ),
+        "history_end": (
+            scenario_evidence.get("history_window_end")
+            if scenario_evidence else None
+        ),
+        "complete_day_count": (
+            scenario_evidence.get("complete_day_count")
+            if scenario_evidence else None
+        ),
+        "path_count": (
+            scenario_evidence.get("total_path_count")
+            if scenario_evidence else None
+        ),
+        "scenario_lower_quantile": (
+            float(config["scenario_lower_quantile"])
+            if scenario_evidence else None
+        ),
+        "net_edge_lower_quantile": replay_quantiles.get(
+            f"p{lower_percentile:02d}"
+        ),
+        "net_edge_median": replay_quantiles.get("p50"),
+        "net_edge_upper_quantile": replay_quantiles.get(
+            f"p{upper_percentile:02d}"
+        ),
+        "scenario_evidence": scenario_evidence,
     }
 
 
@@ -1469,6 +1691,7 @@ def _populate_contract(contract: Mapping[str, Any], metrics: Mapping[str, float]
         "symbol": contract["symbol"], "option_type": contract["option_type"],
         "strike": contract["strike"], "expiry": _iso(contract["expiry"]),
         "days_to_expiry": round(metrics["days_to_expiry"], 4),
+        "time_to_expiry_hours": round(metrics["time_to_expiry_hours"], 4),
         "bid": contract["bid"], "ask": contract["ask"], "mid": metrics["mid"],
         "spread_pct": round(metrics["spread_pct"], 4),
         "volume": contract["volume"], "open_interest": contract["open_interest"],
@@ -1477,6 +1700,95 @@ def _populate_contract(contract: Mapping[str, Any], metrics: Mapping[str, float]
         "contract_score": _round_score(score),
         "contract_components": {key: _round_score(value)
                                 for key, value in components.items()},
+    }
+
+
+def _remaining_position_scenario(
+    position: Mapping[str, Any],
+    context: Mapping[str, Any],
+    *,
+    option_type: str,
+    current_price: float,
+    invalidation: float,
+    time_exit: datetime,
+    config: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Recalculate Phase-1 remaining edge from current executable value."""
+
+    if str(position.get("entry_trigger") or "") != (
+            "trend_engine_phase1_confirmed"):
+        return None
+    history = context.get("forecast_history_5m")
+    if not isinstance(history, Mapping):
+        return {
+            "valid": False,
+            "reason": "EXPECTED_VALUE_UNAVAILABLE",
+            "scenario_validation_reason": "HISTORY_UNAVAILABLE",
+        }
+    symbol = str(position.get("symbol") or "")
+    matches = [
+        contract for contract in context["contracts"]
+        if contract["symbol"] == symbol
+    ]
+    if len(matches) != 1:
+        return {
+            "valid": False,
+            "reason": "EXPECTED_VALUE_UNAVAILABLE",
+            "scenario_validation_reason": "CURRENT_CONTRACT_UNAVAILABLE",
+        }
+    try:
+        underlying_target = _finite(
+            position.get("underlying_target"),
+            "positions[0].underlying_target",
+            minimum=0.00000001,
+        )
+    except TrendInputError as exc:
+        return {
+            "valid": False,
+            "reason": "EXPECTED_VALUE_UNAVAILABLE",
+            "scenario_validation_reason": "TARGET_UNAVAILABLE",
+            "validation_error": str(exc),
+        }
+    contract = matches[0]
+    costs_per_lot = contract.get("estimated_costs_per_lot")
+    if costs_per_lot is None:
+        costs_per_lot = (
+            context["risk"]["estimated_costs_per_lot"]
+            + context["risk"]["estimated_slippage_per_lot"]
+        )
+    replay = conservative_intrinsic_scenario(
+        history.get("candles", []),
+        spot=context["spot"],
+        target_price=underlying_target,
+        invalidation_price=invalidation,
+        option_type=option_type,
+        strike=contract["strike"],
+        entry_price=current_price,
+        contract_value=contract["contract_value"],
+        # The normalized contract estimate is round-trip, so using it for the
+        # remaining exit is deliberately conservative.
+        costs_per_lot=costs_per_lot,
+        time_exit=time_exit,
+        now=context["now"],
+        min_complete_days=int(config["scenario_min_complete_days"]),
+        lower_quantile=float(config["scenario_lower_quantile"]),
+        prepared_history=context.get("prepared_scenario_history"),
+    )
+    evidence = dict(replay.get("audit") or {})
+    evidence["source"] = dict(history.get("source") or {})
+    return {
+        **replay,
+        "reason": (
+            replay.get("reason") if replay.get("valid") is True
+            else "EXPECTED_VALUE_UNAVAILABLE"
+        ),
+        "scenario_validation_reason": (
+            None if replay.get("valid") is True else replay.get("reason")
+        ),
+        "scenario_evidence": evidence,
+        "edge_semantics": (
+            "equal_weighted_historical_scenario_lower_quantile_from_current_bid"
+        ),
     }
 
 
@@ -1562,6 +1874,23 @@ def _manage_existing(result: dict[str, Any], context: Mapping[str, Any],
         )
         return result
     reasons = list(risk_reasons)
+    remaining_scenario = _remaining_position_scenario(
+        raw,
+        context,
+        option_type=option_type,
+        current_price=current,
+        invalidation=invalidation,
+        time_exit=time_exit,
+        config=config,
+    )
+    if remaining_scenario is not None:
+        result["audit"]["remaining_edge_recalculation"] = remaining_scenario
+        if remaining_scenario.get("valid") is True:
+            remaining_ev = float(
+                remaining_scenario["net_expected_value_per_lot"]
+            )
+        else:
+            reasons.append("EXPECTED_VALUE_UNAVAILABLE")
     spot = context["spot"]
     if (option_type == "CE" and spot <= invalidation) or \
             (option_type == "PE" and spot >= invalidation):
@@ -1579,7 +1908,8 @@ def _manage_existing(result: dict[str, Any], context: Mapping[str, Any],
     if (option_type == "CE" and direction["score"] <= -exit_threshold) or \
             (option_type == "PE" and direction["score"] >= exit_threshold):
         reasons.append("DIRECTION_REVERSAL")
-    if remaining_ev <= 0:
+    if (remaining_scenario is None or remaining_scenario.get("valid") is True) \
+            and remaining_ev <= 0:
         reasons.append("NEGATIVE_EXPECTED_VALUE")
     result["detected_setup"]["invalidation_level"] = invalidation
     if reasons:
@@ -1647,10 +1977,33 @@ def evaluate_trend(snapshot: Mapping[str, Any],
     }
     event_pass = _event_pass(context, config)
     result["hard_gates"]["event_pass"] = event_pass
+    known_blackout = bool(
+        context["event_data_available"]
+        and _known_event_blackout(context, config)
+    )
+    event_policy = {
+        "event_data_available": bool(context["event_data_available"]),
+        "unknown_risk_override_applied": bool(
+            not context["event_data_available"]
+            and config["allow_unknown_event_risk"]
+        ),
+        "known_blackout_detected": known_blackout,
+        "known_blackout_override_applied": bool(
+            known_blackout and event_pass and config["allow_event_trading"]
+        ),
+    }
     risk_reasons = _risk_reasons(context, config)
     portfolio_pass = not risk_reasons and len(context["positions"]) <= int(
         config["max_portfolio_positions"])
     result["hard_gates"]["portfolio_risk_pass"] = portfolio_pass
+
+    history = context.get("forecast_history_5m")
+    if isinstance(history, Mapping):
+        context["prepared_scenario_history"] = prepare_scenario_history(
+            history.get("candles", []),
+            now=context["now"],
+            min_complete_days=int(config["scenario_min_complete_days"]),
+        )
 
     score = direction["score"]
     threshold = float(config["min_direction_score"])
@@ -1672,6 +2025,7 @@ def evaluate_trend(snapshot: Mapping[str, Any],
             **management_audit,
             "underlying_core_score": _round_score(direction["underlying_core"]),
             "features": direction["features"], "config": dict(config),
+            "event_policy": event_policy,
         }
         return managed
 
@@ -1712,6 +2066,7 @@ def evaluate_trend(snapshot: Mapping[str, Any],
         result["audit"] = {
             "underlying_core_score": _round_score(direction["underlying_core"]),
             "features": direction["features"], "config": dict(config),
+            "event_policy": event_policy,
             "contract_rankings": [],
         }
         return result
@@ -1737,6 +2092,7 @@ def evaluate_trend(snapshot: Mapping[str, Any],
         result["audit"] = {
             "underlying_core_score": _round_score(direction["underlying_core"]),
             "features": direction["features"], "config": dict(config),
+            "event_policy": event_policy,
             "contract_rankings": filter_results,
         }
         return result
@@ -1744,13 +2100,21 @@ def evaluate_trend(snapshot: Mapping[str, Any],
     universe = [item[0] for item in eligible]
     ranked: list[dict[str, Any]] = []
     direction_sign = 1 if option_type == "CE" else -1
+    resolved_forecast = dict(context["forecast"])
+    if resolved_forecast.get("target_underlying") is None:
+        resolved_forecast["target_underlying"] = (
+            context["spot"]
+            + direction_sign * float(config["target_atr_multiple"])
+            * _atr(context["candles"]["60m"])
+        )
+    selection_context = {**context, "forecast": resolved_forecast}
     for contract, metrics in eligible:
         components = _contract_components(
-            contract, metrics, universe, context["forecast"], context["spot"],
+            contract, metrics, universe, resolved_forecast, context["spot"],
             direction_sign, config)
         contract_score = sum(components.values())
         scenario = _scenario_and_order(
-            contract, context, direction_sign, direction["setup"], config)
+            contract, selection_context, direction_sign, direction["setup"], config)
         ranked.append({
             "contract": contract, "metrics": metrics,
             "components": components, "score": contract_score,
@@ -1795,13 +2159,16 @@ def evaluate_trend(snapshot: Mapping[str, Any],
     contract_pass = selected["score"] >= float(config["min_contract_score"])
     result["hard_gates"]["contract_pass"] = contract_pass
     result["hard_gates"]["spread_pass"] = True
-    result["hard_gates"]["expiry_pass"] = True
+    scenario = selected["scenario"]
+    result["hard_gates"]["expiry_pass"] = not (
+        scenario.get("valid") is False
+        and scenario.get("reason") == "EXPIRY_RESTRICTION"
+    )
     result["selected_contract"] = _populate_contract(
         selected["contract"], selected["metrics"], selected["components"],
         selected["score"])
     trade_score = selected["trade_score"]
     result["trade_score"] = _round_score(trade_score)
-    scenario = selected["scenario"]
     reasons = list(selected["entry_reasons"])
     if scenario.get("valid"):
         result["hard_gates"]["expected_value_pass"] = bool(
@@ -1838,6 +2205,7 @@ def evaluate_trend(snapshot: Mapping[str, Any],
     result["audit"] = {
         "underlying_core_score": _round_score(direction["underlying_core"]),
         "features": direction["features"], "config": dict(config),
+        "event_policy": event_policy,
         "selected_contract_value": selected["contract"]["contract_value"],
         "scenario": scenario,
         "contract_rankings": [{

@@ -226,6 +226,15 @@ def test_confirmed_buy_opens_complete_dry_state_without_exchange_post(phase1):
         phase1["dry_dir"] / "trend_engine_consumed_signals.json"
     ).read_text(encoding="utf-8"))
     assert state["engine_signal_fingerprint"] in ledger["signals"]
+    ev_as_of = datetime.fromisoformat(
+        state["remaining_expected_value_as_of_utc"].replace("Z", "+00:00")
+    )
+    ev_valid_until = datetime.fromisoformat(
+        state["remaining_expected_value_valid_until_utc"].replace("Z", "+00:00")
+    )
+    assert (ev_valid_until - ev_as_of).total_seconds() == (
+        dashboard.TREND_ENGINE_REMAINING_EV_TTL_SECONDS
+    )
     dashboard.req.post.assert_not_called()
     dashboard.req.delete.assert_not_called()
     dashboard._sign.assert_not_called()
@@ -278,7 +287,10 @@ def test_browser_cannot_supply_symbol_lots_or_other_trade_controls(phase1):
 
 @pytest.mark.parametrize(
     "drift",
-    ["quantity", "stop", "earlier_candle", "symbol", "price_ceiling"],
+    [
+        "quantity", "stop", "earlier_candle", "symbol", "price_ceiling",
+        "scenario_history",
+    ],
 )
 def test_apply_rejects_any_signal_contract_quantity_or_risk_plan_drift(
     phase1, drift,
@@ -298,6 +310,8 @@ def test_apply_rejects_any_signal_contract_quantity_or_risk_plan_drift(
         snapshot["option_contracts"][0]["symbol"] = new_symbol
     elif drift == "price_ceiling":
         decision["order_plan"]["maximum_entry_price"] += 1
+    elif drift == "scenario_history":
+        decision["audit"]["scenario"]["history_hash"] = "changed-history"
 
     status, result = _apply(preview)
 
@@ -305,6 +319,65 @@ def test_apply_rejects_any_signal_contract_quantity_or_risk_plan_drift(
     assert result["ok"] is False
     assert not phase1["state_file"].exists()
     assert not (phase1["dry_dir"] / "trend_engine_consumed_signals.json").exists()
+
+
+def test_confirmation_rechecks_exact_tte_boundary_and_settlement_buffer():
+    decision, snapshot = _decision_and_snapshot()
+    now = datetime.now(timezone.utc)
+    expiry = now + timedelta(hours=1, minutes=30)
+    safe_exit = expiry - timedelta(minutes=30)
+    decision["timestamp"] = now.isoformat()
+    decision["market_data_timestamp"] = now.isoformat()
+    decision["selected_contract"]["expiry"] = expiry.isoformat()
+    decision["selected_contract"]["time_to_expiry_hours"] = 1.5
+    decision["order_plan"]["time_exit"] = safe_exit.isoformat()
+    decision["audit"]["config"].update({
+        "min_time_to_expiry_hours": 1.5,
+        "settlement_exit_buffer_minutes": 30,
+    })
+    raw_contract = snapshot["option_contracts"][0]
+    raw_contract["expiry"] = expiry.isoformat()
+
+    plan = dashboard._trend_engine_actionable_plan(
+        decision, raw_contract, now=now,
+    )
+    assert plan["expiry"] == expiry
+    assert plan["time_exit"] == safe_exit
+
+    with pytest.raises(ValueError, match="less than 1.5 hours"):
+        dashboard._trend_engine_actionable_plan(
+            decision, raw_contract, now=now + timedelta(seconds=1),
+        )
+
+    decision["order_plan"]["time_exit"] = (
+        expiry - timedelta(minutes=29, seconds=59)
+    ).isoformat()
+    with pytest.raises(ValueError, match="not safely before expiry"):
+        dashboard._trend_engine_actionable_plan(
+            decision, raw_contract, now=now,
+        )
+
+
+def test_risk_fingerprint_uses_absolute_expiry_not_counting_down_tte():
+    decision, snapshot = _decision_and_snapshot()
+    raw_contract = snapshot["option_contracts"][0]
+    decision["selected_contract"]["time_to_expiry_hours"] = 48.0
+    first = dashboard._trend_engine_risk_plan_fingerprint(
+        decision, raw_contract,
+    )
+
+    decision["selected_contract"]["time_to_expiry_hours"] = 47.9997
+    second = dashboard._trend_engine_risk_plan_fingerprint(
+        decision, raw_contract,
+    )
+
+    assert first == second
+    decision["order_plan"]["time_exit"] = (
+        datetime.now(timezone.utc) + timedelta(minutes=30)
+    ).isoformat()
+    assert dashboard._trend_engine_risk_plan_fingerprint(
+        decision, raw_contract,
+    ) != second
 
 
 def test_open_pending_and_unreconciled_state_block_entry(phase1):

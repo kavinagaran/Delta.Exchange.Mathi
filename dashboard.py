@@ -5372,6 +5372,12 @@ def _collect_fresh_trend_engine_decision(
     bridge bind a preview to closed candles and the selected contract without
     accepting any symbol, side, price, or quantity from the browser.
     """
+    effective_engine_config = dict(engine_config)
+    if mode.get("dry_run_mode") is True:
+        # Phase 1 is simulation-only.  BTC calendar coverage may be unknown,
+        # but that state remains visible in the decision audit and a known
+        # blackout still blocks.  An explicit account setting can opt out.
+        effective_engine_config.setdefault("allow_unknown_event_risk", True)
     try:
         snapshot = collect_delta_trend_snapshot(
             http_get=req.get,
@@ -5382,7 +5388,7 @@ def _collect_fresh_trend_engine_decision(
             mode_revision=mode["mode_revision"],
             strategy_config=strategy_config,
         )
-        decision = evaluate_trend(snapshot, engine_config)
+        decision = evaluate_trend(snapshot, effective_engine_config)
         final_snapshot = snapshot
         if decision.get("decision") in {"BUY_CE", "BUY_PE"}:
             initial = decision
@@ -5395,7 +5401,7 @@ def _collect_fresh_trend_engine_decision(
                 mode_revision=mode["mode_revision"],
                 strategy_config=strategy_config,
             )
-            rechecked = evaluate_trend(recheck_snapshot, engine_config)
+            rechecked = evaluate_trend(recheck_snapshot, effective_engine_config)
             initial_symbol = (initial.get("selected_contract") or {}).get("symbol")
             rechecked_symbol = (rechecked.get("selected_contract") or {}).get("symbol")
             try:
@@ -5449,7 +5455,7 @@ def _collect_fresh_trend_engine_decision(
         # A bad feed or account snapshot is a successful NO_TRADE decision,
         # never permission to fall back to guessed values.
         print(f"Trend Engine collection warning for {_active_user()}: {exc}")
-        return _trend_engine_invalid_decision(exc, engine_config), None
+        return _trend_engine_invalid_decision(exc, effective_engine_config), None
 
 
 @app.route("/api/trend-engine")
@@ -5612,6 +5618,26 @@ def _trend_engine_risk_plan_fingerprint(
         "remaining_expected_value": scenario.get(
             "net_expected_value_per_lot"
         ),
+        "edge_evidence": {
+            key: scenario.get(key)
+            for key in (
+                "pricing_method", "expected_value_method", "history_hash",
+                "history_start", "history_end", "complete_day_count",
+                "path_count", "scenario_lower_quantile",
+                "net_edge_lower_quantile", "net_edge_median",
+                "net_edge_upper_quantile",
+                "probability_win", "probability_validated",
+            )
+        },
+        "expiry_policy": {
+            key: ((audit.get("config") or {}).get(key))
+            for key in (
+                "min_time_to_expiry_hours",
+                "settlement_exit_buffer_minutes",
+            )
+        } if isinstance(audit, dict) and isinstance(
+            audit.get("config"), dict
+        ) else {},
     }
     canonical = json.dumps(
         basis, sort_keys=True, separators=(",", ":"), default=str,
@@ -5716,7 +5742,36 @@ def _trend_engine_actionable_plan(
         expiry = expiry.astimezone(timezone.utc)
     except (TypeError, ValueError, OverflowError) as exc:
         raise ValueError("The engine exit time or contract expiry is invalid") from exc
-    if time_exit <= now or expiry <= time_exit:
+    config = (
+        audit.get("config")
+        if isinstance(audit, dict) and isinstance(audit.get("config"), dict)
+        else {}
+    )
+    try:
+        minimum_tte_hours = float(config.get(
+            "min_time_to_expiry_hours",
+            TREND_ENGINE_DEFAULT_CONFIG["min_time_to_expiry_hours"],
+        ))
+        settlement_buffer_minutes = float(config.get(
+            "settlement_exit_buffer_minutes",
+            TREND_ENGINE_DEFAULT_CONFIG["settlement_exit_buffer_minutes"],
+        ))
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("The engine expiry policy is invalid") from exc
+    if (
+        not math.isfinite(minimum_tte_hours) or minimum_tte_hours < 1.5
+        or not math.isfinite(settlement_buffer_minutes)
+        or settlement_buffer_minutes <= 0
+    ):
+        raise ValueError("The engine expiry policy is invalid")
+    if (expiry - now).total_seconds() < minimum_tte_hours * 3600.0:
+        raise ValueError(
+            "The selected BTC contract has less than 1.5 hours to expiry"
+        )
+    settlement_deadline = expiry - timedelta(
+        minutes=settlement_buffer_minutes
+    )
+    if time_exit <= now or time_exit > settlement_deadline:
         raise ValueError("The engine exit time is not safely before expiry")
     try:
         market_timestamp = datetime.fromisoformat(
@@ -6091,7 +6146,7 @@ def _trend_engine_idempotent_dry_state(state: dict, token: dict) -> bool:
         return False
     return all(state.get(key) not in (None, "") for key in (
         "entry_decision_id", "model_version", "schema_version",
-        "underlying_invalidation", "stop_option_price",
+        "underlying_invalidation", "underlying_target", "stop_option_price",
         "target_option_price", "time_exit", "remaining_expected_value",
         "remaining_expected_value_as_of_utc",
         "remaining_expected_value_valid_until_utc",
@@ -6133,8 +6188,12 @@ def _trend_engine_dry_state_from_decision(
     lots = plan["quantity_lots"]
     remaining_ev = plan["remaining_expected_value"]
     now_iso = now.isoformat().replace("+00:00", "Z")
+    remaining_ev_as_of = datetime.fromisoformat(
+        plan["market_data_timestamp"].replace("Z", "+00:00")
+    ).astimezone(timezone.utc)
     remaining_ev_valid_until = (
-        now + timedelta(seconds=TREND_ENGINE_REMAINING_EV_TTL_SECONDS)
+        remaining_ev_as_of
+        + timedelta(seconds=TREND_ENGINE_REMAINING_EV_TTL_SECONDS)
     ).isoformat().replace("+00:00", "Z")
     entry_fee = _option_fee_per_lot(entry_price, contract_value, strike) * lots
     fingerprint = str(token["signal_fingerprint"])
@@ -6242,7 +6301,8 @@ def _trend_engine_dry_state_from_decision(
     }
     required_thesis = (
         "entry_decision_id", "model_version", "schema_version",
-        "underlying_invalidation", "stop_option_price", "target_option_price",
+        "underlying_invalidation", "underlying_target", "stop_option_price",
+        "target_option_price",
         "time_exit", "remaining_expected_value",
     )
     if any(state.get(key) in (None, "") for key in required_thesis):

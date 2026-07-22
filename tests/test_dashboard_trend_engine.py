@@ -315,6 +315,34 @@ def test_cache_is_isolated_by_user_execution_mode_and_revision(
     assert len(calls) == 4
 
 
+def test_unknown_event_risk_override_is_scoped_to_phase1_dry_run(
+    isolated_trend_endpoint, monkeypatch,
+):
+    state, _ = isolated_trend_endpoint
+    seen_configs = []
+    monkeypatch.setattr(
+        dashboard, "collect_delta_trend_snapshot", lambda **kwargs: {"token": "x"}
+    )
+
+    def evaluate(snapshot, config):
+        seen_configs.append(dict(config))
+        return _cacheable_decision(snapshot, config)
+
+    monkeypatch.setattr(dashboard, "evaluate_trend", evaluate)
+
+    _get_trend_engine("/api/trend-engine?refresh=1")
+    assert "allow_unknown_event_risk" not in seen_configs[-1]
+
+    state["mode"] = {
+        "dry_run_mode": True,
+        "trading_mode": "DRY RUN",
+        "execution_mode": "dry_run",
+        "mode_revision": "rev-dry-event-policy",
+    }
+    _get_trend_engine("/api/trend-engine?refresh=1")
+    assert seen_configs[-1]["allow_unknown_event_risk"] is True
+
+
 def test_cache_is_invalidated_when_kill_switch_configuration_changes(
     isolated_trend_endpoint, monkeypatch
 ):

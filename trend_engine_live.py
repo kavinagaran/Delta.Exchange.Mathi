@@ -20,6 +20,10 @@ TIMEFRAMES = {
     "15m": ("15m", 900),
     "60m": ("1h", 3600),
 }
+INDICATOR_CANDLE_LIMIT = 320
+FORECAST_HISTORY_5M_LIMIT = 4_000
+DELTA_CANDLE_RESPONSE_LIMIT = 2_000
+OPTION_QUOTE_ALIGNMENT_SECONDS = 30
 STATE_FILES = ("morning_state.json", "straddle_state.json", "trend_state.json")
 
 
@@ -147,6 +151,39 @@ def _private_list_pages(
     raise SnapshotCollectionError(f"{label} exceeded the pagination limit")
 
 
+def _public_list_pages(
+    http_get: Callable[..., Any],
+    api_base: str,
+    path: str,
+    base_params: Mapping[str, Any],
+    label: str,
+    *,
+    timeout: int = 12,
+) -> list[Any]:
+    """Read every page from a public cursor-paginated Delta endpoint."""
+    rows: list[Any] = []
+    cursor: str | None = None
+    seen: set[str] = set()
+    for _ in range(100):
+        params = dict(base_params)
+        if cursor is not None:
+            params["after"] = cursor
+        page, after = _strict_list_page(
+            http_get(f"{api_base}{path}", params=params, timeout=timeout),
+            label,
+        )
+        rows.extend(page)
+        if after is None:
+            return rows
+        if after in seen:
+            raise SnapshotCollectionError(
+                f"{label} repeated its pagination cursor"
+            )
+        seen.add(after)
+        cursor = after
+    raise SnapshotCollectionError(f"{label} exceeded the pagination limit")
+
+
 def _strict_json_file(path: Path, default: Any) -> Any:
     if not path.exists():
         return default
@@ -166,39 +203,73 @@ def _closed_candles(
     label: str,
     resolution: str,
     seconds: int,
+    *,
+    limit: int = INDICATOR_CANDLE_LIMIT,
 ) -> list[dict[str, Any]]:
+    if limit <= 0:
+        raise ValueError("candle limit must be positive")
     end = int(now.timestamp())
-    response = http_get(
-        f"{api_base}/v2/history/candles",
-        params={
-            "resolution": resolution,
-            "symbol": "BTCUSD",
-            "start": end - seconds * 320,
-            "end": end,
-        },
-        timeout=10,
-    )
-    rows = _strict_json_response(response, f"{label} candles", list)
     current_bucket = end - end % seconds
-    normalized = []
-    for raw in rows:
-        if not isinstance(raw, dict):
-            raise SnapshotCollectionError(f"{label} candles contain a malformed row")
-        epoch = _integer(raw.get("time"))
-        # The decision prompt forbids an unfinished candle on every timeframe.
-        if epoch is None or epoch >= current_bucket:
-            continue
-        normalized.append({
-            "timestamp": datetime.fromtimestamp(epoch, tz=timezone.utc).isoformat(),
-            "open": raw.get("open"),
-            "high": raw.get("high"),
-            "low": raw.get("low"),
-            "close": raw.get("close"),
-            "volume": raw.get("volume"),
-            "complete": True,
-        })
-    normalized.sort(key=lambda row: row["timestamp"])
-    return normalized
+    history_start = current_bucket - seconds * limit
+    normalized_by_epoch: dict[int, dict[str, Any]] = {}
+
+    # Delta documents a maximum of 2,000 candles per response.  Adjacent,
+    # end-exclusive windows keep this bounded and avoid relying on any
+    # undocumented ordering or truncation behavior.
+    window_start = history_start
+    while window_start < current_bucket:
+        window_end = min(
+            window_start + seconds * DELTA_CANDLE_RESPONSE_LIMIT,
+            current_bucket,
+        )
+        response = http_get(
+            f"{api_base}/v2/history/candles",
+            params={
+                "resolution": resolution,
+                "symbol": "BTCUSD",
+                "start": window_start,
+                # Ending one second before the next bucket makes adjacent
+                # request ranges unambiguously disjoint.
+                "end": window_end - 1,
+            },
+            timeout=10,
+        )
+        rows = _strict_json_response(response, f"{label} candles", list)
+        for raw in rows:
+            if not isinstance(raw, dict):
+                raise SnapshotCollectionError(
+                    f"{label} candles contain a malformed row"
+                )
+            epoch = _integer(raw.get("time"))
+            # The decision prompt forbids unfinished candles.  Also discard
+            # any upstream row outside the explicitly requested history range.
+            if (
+                epoch is None
+                or epoch < window_start
+                or epoch >= window_end
+            ):
+                continue
+            normalized = {
+                "timestamp": datetime.fromtimestamp(
+                    epoch, tz=timezone.utc
+                ).isoformat(),
+                "open": raw.get("open"),
+                "high": raw.get("high"),
+                "low": raw.get("low"),
+                "close": raw.get("close"),
+                "volume": raw.get("volume"),
+                "complete": True,
+            }
+            previous = normalized_by_epoch.get(epoch)
+            if previous is not None and previous != normalized:
+                raise SnapshotCollectionError(
+                    f"{label} candles contain conflicting duplicate rows"
+                )
+            normalized_by_epoch[epoch] = normalized
+        window_start = window_end
+
+    epochs = sorted(normalized_by_epoch)
+    return [normalized_by_epoch[epoch] for epoch in epochs[-limit:]]
 
 
 def _option_contracts(
@@ -214,14 +285,12 @@ def _option_contracts(
         "contract_types": "call_options,put_options",
         "underlying_asset_symbols": "BTC",
     }
-    products = _strict_json_response(
-        http_get(
-            f"{api_base}/v2/products",
-            params={**filters, "states": "live", "page_size": 1000},
-            timeout=12,
-        ),
+    products = _public_list_pages(
+        http_get,
+        api_base,
+        "/v2/products",
+        {**filters, "states": "live", "page_size": 1000},
         "option products",
-        list,
     )
     tickers = _strict_json_response(
         http_get(f"{api_base}/v2/tickers", params=filters, timeout=12),
@@ -327,7 +396,16 @@ def _option_contracts(
                 round_trip_fee + round_trip_slippage, 12
             ),
         })
-    return contracts, max(quote_times) if quote_times else None, ticker_by_symbol
+    option_timestamp = max(quote_times) if quote_times else None
+    if option_timestamp is not None:
+        latest = datetime.fromisoformat(option_timestamp.replace("Z", "+00:00"))
+        contracts = [
+            contract for contract in contracts
+            if abs((latest - datetime.fromisoformat(
+                str(contract["quote_timestamp"]).replace("Z", "+00:00")
+            )).total_seconds()) <= OPTION_QUOTE_ALIGNMENT_SECONDS
+        ]
+    return contracts, option_timestamp, ticker_by_symbol
 
 
 def _persisted_remaining_expected_value(
@@ -412,6 +490,9 @@ def _state_positions(
                 "time_exit": state.get("time_exit"),
                 "stop_option_price": state.get("stop_option_price"),
                 "target_option_price": state.get("target_option_price"),
+                "underlying_target": state.get("underlying_target"),
+                "entry_trigger": state.get("entry_trigger"),
+                "ownership": state.get("ownership"),
                 "remaining_expected_value": remaining_ev,
                 "remaining_expected_value_status": remaining_ev_status,
                 "remaining_expected_value_as_of_utc": state.get(
@@ -559,9 +640,49 @@ def collect_delta_trend_snapshot(
     if underlying_timestamp is None or _finite(spot) is None or _finite(futures_mark) is None:
         raise SnapshotCollectionError("BTCUSD ticker is missing price or timestamp")
 
+    forecast_history_error: str | None = None
+    try:
+        forecast_history_5m = _closed_candles(
+            http_get,
+            api_base,
+            now,
+            "forecast history 5m",
+            "5m",
+            TIMEFRAMES["5m"][1],
+            limit=FORECAST_HISTORY_5M_LIMIT,
+        )
+    except Exception as exc:
+        # Extended history is optional edge evidence.  Current indicators and
+        # open-position safety management must remain available when this
+        # larger public request fails.
+        forecast_history_5m = []
+        forecast_history_error = f"{type(exc).__name__}: {exc}"[:500]
     candles = {
-        label: _closed_candles(http_get, api_base, now, label, resolution, seconds)
-        for label, (resolution, seconds) in TIMEFRAMES.items()
+        "5m": (
+            forecast_history_5m[-INDICATOR_CANDLE_LIMIT:]
+            if forecast_history_5m else _closed_candles(
+                http_get,
+                api_base,
+                now,
+                "5m",
+                TIMEFRAMES["5m"][0],
+                TIMEFRAMES["5m"][1],
+                limit=INDICATOR_CANDLE_LIMIT,
+            )
+        ),
+        **{
+            label: _closed_candles(
+                http_get,
+                api_base,
+                now,
+                label,
+                resolution,
+                seconds,
+                limit=INDICATOR_CANDLE_LIMIT,
+            )
+            for label, (resolution, seconds) in TIMEFRAMES.items()
+            if label != "5m"
+        },
     }
     fee_rate = _finite(strategy_config.get("OPTION_FEE_RATE"))
     if fee_rate is None:
@@ -678,6 +799,7 @@ def collect_delta_trend_snapshot(
                 "remaining_expected_value_as_of_utc",
                 "remaining_expected_value_valid_until_utc",
                 "remaining_expected_value_source",
+                "underlying_target", "entry_trigger", "ownership",
             ):
                 position[key] = local.get(key)
         if unmatched_local:
@@ -756,8 +878,32 @@ def collect_delta_trend_snapshot(
             ),
             "breadth_available": False,
             "breadth_provenance": "not_applicable_to_btc",
+            "forecast_history_available": forecast_history_error is None,
+            "forecast_history_error": forecast_history_error,
         },
         "candles": candles,
+        "forecast_history_5m": ({
+            "source": {
+                "provider": "delta_exchange",
+                "transport": "public_rest",
+                "endpoint": "/v2/history/candles",
+                "symbol": "BTCUSD",
+                "resolution": "5m",
+                "interval_seconds": TIMEFRAMES["5m"][1],
+                "completed_only": True,
+            },
+            "requested_limit": FORECAST_HISTORY_5M_LIMIT,
+            "returned_count": len(forecast_history_5m),
+            "first_timestamp": (
+                forecast_history_5m[0]["timestamp"]
+                if forecast_history_5m else None
+            ),
+            "last_timestamp": (
+                forecast_history_5m[-1]["timestamp"]
+                if forecast_history_5m else None
+            ),
+            "candles": forecast_history_5m,
+        } if forecast_history_error is None else None),
         "option_contracts": contracts,
         "account": {
             "equity": equity,

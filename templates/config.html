@@ -171,7 +171,7 @@
     <div class="form-sec">
       <div class="form-sec-title">Contract and liquidity gates</div>
       <div class="form-grid">
-        <label class="fld"><span>Minimum time to expiry hrs</span><input id="c-TREND_MIN_TTE_HOURS" type="number" min="1" max="168" step="0.5"></label>
+        <label class="fld"><span>Legacy Trend worker minimum TTE hrs</span><input id="c-TREND_MIN_TTE_HOURS" type="number" min="1" max="168" step="0.5"><em class="fld-hint">Legacy worker only; the new Trend Engine uses the 1.5-hour BTC rule</em></label>
         <label class="fld"><span>Target absolute delta</span><input id="c-TREND_TARGET_DELTA" type="number" min="0.05" max="0.99" step="0.05"></label>
         <label class="fld"><span>Maximum spread %</span><input id="c-TREND_MAX_SPREAD_PCT" type="number" min="0.1" max="100" step="0.1"></label>
         <label class="fld"><span>Minimum ask depth lots</span><input id="c-TREND_MIN_BOOK_DEPTH_LOTS" type="number" min="0" step="1"></label>

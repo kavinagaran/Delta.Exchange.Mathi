@@ -156,7 +156,10 @@
           <div><dt>Implied volatility</dt><dd id="te-contract-iv">—</dd></div>
         </dl>
         <div class="te-quality-list" id="te-contract-components"></div>
-        <p class="te-empty-copy" id="te-contract-empty">A contract appears only after direction and every eligibility gate pass.</p>
+        <p class="te-empty-copy" id="te-contract-empty">A contract appears only after direction and every eligibility gate pass. For BTC daily expiries, contracts with less than 1 hour 30 minutes remaining are excluded.</p>
+        <p class="te-empty-copy" id="te-expiry-policy"><strong>Daily BTC expiry rule:</strong> the current expiry can be evaluated while at least 1h 30m remains. Every approved plan uses a configured safety buffer before settlement.</p>
+        <p class="te-empty-copy" id="te-edge-evidence">Edge evidence will appear after a contract is evaluated.</p>
+        <p class="te-empty-copy" id="te-event-policy">Event-risk policy will appear after the market snapshot is checked.</p>
       </div>
     </section>
 
@@ -270,9 +273,9 @@
     ['price_action_pass', 'Price action'],
     ['contract_pass', 'Contract quality'],
     ['spread_pass', 'Bid–ask spread'],
-    ['expiry_pass', 'Expiry'],
+    ['expiry_pass', 'Time to expiry'],
     ['event_pass', 'Event window'],
-    ['expected_value_pass', 'Expected value'],
+    ['expected_value_pass', 'Conservative edge'],
     ['reward_risk_pass', 'Reward / risk'],
     ['portfolio_risk_pass', 'Portfolio risk'],
   ];
@@ -414,9 +417,9 @@
       action: 'Wait for a tighter spread or evaluate another contract.',
     },
     EXPIRY_RESTRICTION: {
-      title: 'The expiry is outside the permitted range',
-      explanation: 'The contract expiry or planned exit time does not fit the configured holding window.',
-      action: 'Choose an eligible expiry or wait for a new setup.',
+      title: 'There is not enough time before settlement',
+      explanation: 'BTC options with less than 1 hour 30 minutes remaining are excluded. This reason also appears when no usable holding window remains before the configured settlement buffer.',
+      action: 'Let the engine evaluate the next daily expiry; do not use a contract whose planned exit reaches the settlement buffer.',
     },
     ENTRY_PRICE_DEVIATION: {
       title: 'The entry price moved too far',
@@ -430,7 +433,7 @@
     },
     CONTRACT_SCORE_TOO_LOW: {
       title: 'Contract quality is below the minimum',
-      explanation: 'The combined liquidity, spread, delta, expiry, volatility and cost score is not high enough.',
+      explanation: 'The combined liquidity, spread, delta, expiry eligibility, volatility and cost score is not high enough.',
       action: 'Choose a stronger contract or wait for market quality to improve.',
     },
     TRADE_SCORE_TOO_LOW: {
@@ -450,12 +453,12 @@
     },
     EXPECTED_VALUE_UNAVAILABLE: {
       title: 'Expected value could not be verified',
-      explanation: 'Reliable probability or option-scenario inputs are missing, so the expected edge cannot be calculated.',
-      action: 'Restore validated forecast inputs or wait.',
+      explanation: 'The configured edge method could not be completed from verified current inputs, so the engine did not estimate a value.',
+      action: 'Refresh the analysis. If this persists, restore the required market or scenario inputs rather than estimating an edge.',
     },
     NEGATIVE_EXPECTED_VALUE: {
       title: 'The estimated edge is not positive',
-      explanation: 'Expected gains do not currently outweigh likely losses and trading costs.',
+      explanation: 'The selected edge method is not positive after the option premium, multiplier and estimated trading costs.',
       action: 'Skip a new entry, or review the open position for exit if one is held.',
     },
     REWARD_RISK_TOO_LOW: {
@@ -551,13 +554,44 @@
       ? String(value)
       : parsed.toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'medium' });
   };
-  const displayDate = value => {
+  const displayExpiryTimestamp = value => {
     if (!hasValue(value)) return '—';
-    const dateOnly = /^\d{4}-\d{2}-\d{2}$/.test(String(value));
-    const parsed = new Date(dateOnly ? `${value}T12:00:00Z` : value);
+    const parsed = new Date(value);
     return Number.isNaN(parsed.getTime())
       ? String(value)
-      : parsed.toLocaleDateString('en-IN', { dateStyle: 'medium' });
+      : parsed.toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' });
+  };
+  const contractTimeToExpiryHours = (contract, decision) => {
+    const expiryMs = hasValue(contract?.expiry)
+      ? new Date(contract.expiry).getTime()
+      : Number.NaN;
+    const reference = decision?.timestamp || decision?.market_data_timestamp;
+    const referenceMs = hasValue(reference) ? new Date(reference).getTime() : Number.NaN;
+    if (Number.isFinite(expiryMs) && Number.isFinite(referenceMs)) {
+      return (expiryMs - referenceMs) / 3_600_000;
+    }
+    if (finite(contract?.time_to_expiry_hours)) {
+      return Number(contract.time_to_expiry_hours);
+    }
+    if (finite(contract?.days_to_expiry)) return Number(contract.days_to_expiry) * 24;
+    return null;
+  };
+  const formatTimeToExpiry = value => {
+    if (!finite(value)) return 'Time remaining unavailable';
+    const totalMinutes = Math.floor(Number(value) * 60 + 1e-9);
+    if (totalMinutes < 0) return 'Expired';
+    if (totalMinutes === 0) return 'Less than 1m remaining';
+    const hours = Math.floor(totalMinutes / 60);
+    const minutes = totalMinutes % 60;
+    if (!hours) return `${minutes}m remaining`;
+    return `${hours}h ${minutes}m remaining`;
+  };
+  const contractExpiryLabel = (contract, decision) => {
+    const settlement = displayExpiryTimestamp(contract?.expiry);
+    const remaining = formatTimeToExpiry(
+      contractTimeToExpiryHours(contract || {}, decision || {})
+    );
+    return settlement === '—' ? remaining : `${settlement} · ${remaining}`;
   };
   const joinValues = (first, second, formatter = number, separator = ' / ') => {
     const left = formatter(first);
@@ -755,7 +789,7 @@
     byId('te-contract-symbol').textContent = selected ? contract.symbol : 'No eligible contract selected';
     byId('te-contract-type').textContent = selected ? humanize(contract.option_type) : 'NO CONTRACT';
     byId('te-contract-expiry').textContent = selected
-      ? `${displayDate(contract.expiry)}${finite(contract.days_to_expiry) ? ` · ${number(contract.days_to_expiry)} DTE` : ''}`
+      ? contractExpiryLabel(contract, decision)
       : '—';
     byId('te-contract-score').textContent = `Score ${number(contract.contract_score, 1)}`;
     byId('te-contract-strike').textContent = number(contract.strike, 2);
@@ -768,8 +802,39 @@
     byId('te-contract-iv').textContent = impliedVolatility(contract.implied_volatility);
     byId('te-contract-empty').hidden = selected;
 
+    const audit = decision.audit && typeof decision.audit === 'object' ? decision.audit : {};
+    const scenario = audit.scenario && typeof audit.scenario === 'object' ? audit.scenario : {};
+    const evidence = scenario.scenario_evidence && typeof scenario.scenario_evidence === 'object'
+      ? scenario.scenario_evidence
+      : {};
+    const historicalReplay = scenario.expected_value_method === 'btc_historical_replay_intrinsic_floor_v1';
+    if (historicalReplay) {
+      const days = Number(evidence.complete_day_count ?? scenario.complete_day_count);
+      const paths = Number(evidence.total_path_count ?? scenario.path_count);
+      const ev = scenario.net_expected_value_per_lot;
+      byId('te-edge-evidence').textContent = `Conservative scenario check: ${Number.isFinite(days) ? number(days) : '—'} complete UTC days · ${Number.isFinite(paths) ? number(paths) : '—'} equal-weighted replay paths · lower-day result ${finite(ev) ? money(ev, 4) : 'unavailable'} per lot. This is not a calibrated win probability.`;
+    } else if (hasValue(scenario.pricing_method)) {
+      byId('te-edge-evidence').textContent = `Edge method: ${humanize(scenario.pricing_method)}.`;
+    } else {
+      byId('te-edge-evidence').textContent = 'Edge evidence will appear after a contract is evaluated.';
+    }
+    const eventPolicy = audit.event_policy && typeof audit.event_policy === 'object'
+      ? audit.event_policy
+      : {};
+    if (eventPolicy.unknown_risk_override_applied === true) {
+      byId('te-event-policy').textContent = 'Event calendar status: unavailable. DRY RUN records this as unknown risk and continues; it does not label the window clear. Any known blackout still blocks.';
+    } else if (eventPolicy.event_data_available === true) {
+      byId('te-event-policy').textContent = eventPolicy.known_blackout_detected === true
+        ? (eventPolicy.known_blackout_override_applied === true
+          ? 'Event calendar status: a known blackout is active and the configured event-trading override is recorded.'
+          : 'Event calendar status: a known blackout is active, so entry is blocked.')
+        : 'Event calendar status: checked; no configured blackout is active.';
+    } else {
+      byId('te-event-policy').textContent = 'Event calendar status: unavailable; this mode blocks entry.';
+    }
+
     const labels = {
-      liquidity: 'Liquidity', spread: 'Spread', delta: 'Delta', expiry: 'Expiry',
+      liquidity: 'Liquidity', spread: 'Spread', delta: 'Delta', expiry: 'Expiry eligibility',
       iv_value: 'IV value', breakeven: 'Breakeven', theta_efficiency: 'Theta efficiency',
     };
     const quality = contract.contract_components || {};
