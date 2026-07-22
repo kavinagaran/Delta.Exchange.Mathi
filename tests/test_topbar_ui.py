@@ -17,6 +17,8 @@ def test_android_embedded_pages_hide_web_chrome_and_accept_native_theme():
 
     assert "request.args.get('app') == '1'" in template
     assert "new URLSearchParams(window.location.search).get('theme')" in template
+    assert 'theme-red" aria-hidden="true">Red<' in template
+    assert 'theme-blue" aria-hidden="true">Blue<' in template
     assert "body.native-app .sidebar" in styles
     assert "body.native-app .topbar" in styles
     assert "body.native-app .content" in styles
@@ -115,19 +117,22 @@ global.CustomEvent = function(type, init) { this.type = type; this.detail = init
 vm.runInThisContext(fs.readFileSync('static/js/app.js', 'utf8'));
 
 initThemeToggle();
-if (attributes['aria-pressed'] !== 'false' || !attributes['aria-label'].includes('dark')) {
-  throw new Error('light toggle state was not initialized');
+if (attributes['aria-pressed'] !== 'false' || !attributes['aria-label'].includes('Blue')) {
+  throw new Error('Red theme toggle state was not initialized');
 }
 toggle.click();
 if (root.dataset.theme !== 'dark' || storage.get('nithi-theme') !== 'dark') {
-  throw new Error('dark theme was not persisted');
+  throw new Error('Blue theme preference was not persisted');
 }
-if (attributes['aria-pressed'] !== 'true' || !attributes['aria-label'].includes('light')) {
-  throw new Error('dark toggle accessibility state was not updated');
+if (attributes['aria-pressed'] !== 'true' || !attributes['aria-label'].includes('Red')) {
+  throw new Error('Blue theme toggle accessibility state was not updated');
 }
 toggle.click();
 if ('theme' in root.dataset || storage.get('nithi-theme') !== 'light') {
-  throw new Error('light theme was not restored');
+  throw new Error('Red theme preference was not restored');
+}
+if (attributes['aria-pressed'] !== 'false' || !attributes['aria-label'].includes('Blue')) {
+  throw new Error('Red theme toggle accessibility state was not restored');
 }
 """
     result = subprocess.run(

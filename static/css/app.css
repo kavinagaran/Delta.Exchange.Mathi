@@ -36,29 +36,29 @@
 
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --sidebar-bg:     #0d1420;
-  --sidebar-border: #273246;
-  --sidebar-text:   #9bacc4;
-  --sidebar-active: #f5f8ff;
-  --bg:      #101722;
-  --surface: #182231;
-  --surface-subtle: #1d293a;
-  --surface-hover: #223046;
-  --border:  #2c3a50;
-  --text:    #edf3fc;
-  --muted:   #a0afc3;
-  --accent:      #70a5ff;
-  --accent-soft: #19345f;
-  --accent-dark: #a8c7ff;
-  --pos:      #46d59a;
-  --pos-soft: #113b30;
-  --neg:      #ff7b72;
-  --neg-soft: #482525;
-  --warn:     #f3bb61;
-  --warn-soft:#453519;
-  --shadow: 0 1px 2px rgba(0, 0, 0, .22), 0 10px 26px rgba(0, 0, 0, .16);
-  --chart-grid: rgba(160, 175, 195, .18);
-  --chart-zero: rgba(237, 243, 252, .5);
+  --sidebar-bg:     linear-gradient(165deg, rgba(3, 7, 14, .98), rgba(3, 20, 43, .97) 58%, rgba(2, 6, 12, .99));
+  --sidebar-border: rgba(64, 166, 255, .36);
+  --sidebar-text:   #adc4df;
+  --sidebar-active: #f5faff;
+  --bg:      #030914;
+  --surface: rgba(7, 18, 35, .88);
+  --surface-subtle: rgba(8, 29, 57, .76);
+  --surface-hover: rgba(11, 54, 101, .58);
+  --border:  rgba(91, 180, 255, .23);
+  --text:    #f3f9ff;
+  --muted:   #a7bdd6;
+  --accent:      #39a7ff;
+  --accent-soft: rgba(57, 167, 255, .17);
+  --accent-dark: #8bd0ff;
+  --pos:      #38d99a;
+  --pos-soft: rgba(56, 217, 154, .14);
+  --neg:      #ff7180;
+  --neg-soft: rgba(255, 78, 96, .16);
+  --warn:     #ffc267;
+  --warn-soft:rgba(255, 173, 56, .14);
+  --shadow: 0 12px 34px rgba(0, 0, 0, .3), 0 0 0 1px rgba(75, 173, 255, .04), inset 0 1px 0 rgba(255, 255, 255, .04);
+  --chart-grid: rgba(150, 207, 255, .13);
+  --chart-zero: rgba(238, 248, 255, .5);
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -76,6 +76,17 @@ body {
   background-image:
     linear-gradient(180deg, rgba(8, 4, 6, .18), rgba(8, 3, 5, .58)),
     url('/static/img/crimson-dashboard-bg.png');
+  background-position: center;
+  background-size: cover;
+  background-repeat: no-repeat;
+  background-attachment: fixed;
+}
+
+:root[data-theme="dark"] body {
+  background-color: var(--bg);
+  background-image:
+    linear-gradient(180deg, rgba(2, 6, 13, .16), rgba(1, 6, 14, .58)),
+    url('/static/img/sparkling-blue-dashboard-bg.png');
   background-position: center;
   background-size: cover;
   background-repeat: no-repeat;
@@ -148,7 +159,7 @@ body.native-app .toast { left: 12px; right: 12px; bottom: 16px; max-width: none;
 .topbar h1 { font-size: 17px; font-weight: 650; }
 .topbar-spacer { margin-right: auto; }
 .theme-toggle {
-  width: 58px; height: 30px; padding: 3px; flex: 0 0 auto;
+  width: 100px; height: 30px; padding: 3px; flex: 0 0 auto;
   display: inline-flex; align-items: center; justify-content: space-between;
   border: 1px solid var(--border); border-radius: 999px;
   background: var(--surface-subtle); color: var(--muted); cursor: pointer;
@@ -157,15 +168,19 @@ body.native-app .toast { left: 12px; right: 12px; bottom: 16px; max-width: none;
 }
 .theme-toggle:hover { border-color: var(--accent); color: var(--accent); }
 .theme-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.theme-icon { z-index: 1; width: 22px; text-align: center; font-size: 14px; line-height: 22px; }
-.theme-sun { color: var(--warn); }
-.theme-moon { color: var(--accent); }
+.theme-icon {
+  z-index: 1; width: 44px; text-align: center; font-size: 10px; font-weight: 800;
+  letter-spacing: .055em; line-height: 22px; text-transform: uppercase;
+  transition: color .18s ease, filter .18s ease;
+}
+.theme-red { color: #ff6679; }
+.theme-blue { color: #6bbcff; }
 .theme-knob {
-  position: absolute; left: 3px; top: 3px; width: 22px; height: 22px; border-radius: 50%;
+  position: absolute; left: 3px; top: 3px; width: 44px; height: 22px; border-radius: 999px;
   background: var(--surface); border: 1px solid var(--border); box-shadow: var(--shadow);
   transform: translateX(0); transition: transform .2s ease, background .18s ease;
 }
-:root[data-theme="dark"] .theme-knob { transform: translateX(26px); }
+:root[data-theme="dark"] .theme-knob { transform: translateX(50px); }
 .trading-mode-pill {
   min-height: 30px; padding: 4px 10px; flex: 0 0 auto;
   display: inline-flex; align-items: center; gap: 6px;
@@ -616,8 +631,8 @@ input.mono { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; fon
 @media (max-width: 720px) {
   .topbar { gap: 9px; padding: 12px 16px; }
   .topbar h1 { font-size: 16px; }
-  .theme-toggle { width: 52px; }
-  :root[data-theme="dark"] .theme-knob { transform: translateX(20px); }
+  .theme-toggle { width: 100px; }
+  :root[data-theme="dark"] .theme-knob { transform: translateX(50px); }
   .trading-mode-pill { padding-inline: 8px; }
   .trading-mode-pill .mode-label { display: none; }
   .dry-run-hero { align-items: flex-start; flex-direction: column; padding: 15px 16px; }
@@ -699,9 +714,8 @@ body.login-body {
 .mono { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; }
 .hint { color: var(--muted); font-size: 12px; }
 
-/* ── Crimson light-theme finish ──────────────────────────
-   The default/light toggle is intentionally a vibrant crimson-and-obsidian
-   visual mode. Dark mode keeps the restrained slate palette above. */
+/* ── Polished Red theme finish ───────────────────────────
+   The default/light preference is presented to people as the Red theme. */
 :root:not([data-theme="dark"]) .layout {
   background:
     radial-gradient(circle at 82% 9%, rgba(255, 45, 70, .11), transparent 28%),
@@ -779,11 +793,11 @@ body.login-body {
   background: radial-gradient(circle at 32% 28%, #ff7d8e, #f21f43 48%, #8d071e 100%);
   box-shadow: 0 0 15px rgba(255, 47, 75, .58), inset 0 1px 1px rgba(255, 255, 255, .36);
 }
-:root:not([data-theme="dark"]) .theme-sun {
+:root:not([data-theme="dark"]) .theme-red {
   color: #fff3f4;
   filter: drop-shadow(0 0 5px rgba(255, 91, 109, .75));
 }
-:root:not([data-theme="dark"]) .theme-moon { color: #a9878d; }
+:root:not([data-theme="dark"]) .theme-blue { color: #a9878d; }
 
 :root:not([data-theme="dark"]) .chip,
 :root:not([data-theme="dark"]) .trading-mode-pill {
@@ -860,12 +874,178 @@ body.login-body {
   backdrop-filter: blur(18px);
 }
 
+/* ── Polished sparkling Blue theme finish ────────────────
+   The dark preference is presented to people as the Blue theme and mirrors
+   the Red treatment exactly, with only its luminous color family changed. */
+:root[data-theme="dark"] .layout {
+  background:
+    radial-gradient(circle at 82% 9%, rgba(45, 157, 255, .12), transparent 28%),
+    linear-gradient(115deg, rgba(2, 7, 15, .26), rgba(2, 8, 17, .05));
+}
+
+:root[data-theme="dark"] .sidebar {
+  border-right: 1px solid var(--sidebar-border);
+  box-shadow: 16px 0 44px rgba(0, 0, 0, .34), 1px 0 18px rgba(33, 142, 255, .09);
+  isolation: isolate;
+  overflow: hidden;
+}
+:root[data-theme="dark"] .sidebar::after {
+  content: "";
+  position: absolute; inset: 0; z-index: -1; pointer-events: none;
+  background:
+    radial-gradient(circle at -10% 12%, rgba(54, 164, 255, .35), transparent 28%),
+    linear-gradient(120deg, transparent 42%, rgba(255, 255, 255, .04) 50%, transparent 58%);
+}
+:root[data-theme="dark"] .brand {
+  border-bottom-color: rgba(81, 176, 255, .26);
+  background: linear-gradient(135deg, rgba(52, 160, 255, .11), transparent 60%);
+}
+:root[data-theme="dark"] .brand img.logo {
+  border: 1px solid rgba(125, 198, 255, .5);
+  box-shadow: 0 0 0 3px rgba(44, 155, 255, .1), 0 8px 24px rgba(24, 128, 255, .24);
+}
+:root[data-theme="dark"] .brand .name {
+  text-shadow: 0 0 16px rgba(67, 173, 255, .42);
+}
+:root[data-theme="dark"] .nav a {
+  border: 1px solid transparent;
+  transition: color .18s ease, background .18s ease, border-color .18s ease, transform .18s ease, box-shadow .18s ease;
+}
+:root[data-theme="dark"] .nav a:hover {
+  color: #f4faff;
+  background: rgba(54, 164, 255, .1);
+  border-color: rgba(87, 181, 255, .17);
+  transform: translateX(2px);
+}
+:root[data-theme="dark"] .nav a.active {
+  color: #fff;
+  background: linear-gradient(110deg, rgba(51, 160, 255, .86), rgba(5, 56, 136, .62));
+  border-color: rgba(139, 210, 255, .42);
+  box-shadow: 0 9px 24px rgba(8, 101, 198, .27), inset 0 1px 0 rgba(255, 255, 255, .22);
+}
+:root[data-theme="dark"] .sidebar-foot {
+  border-top-color: rgba(81, 176, 255, .21);
+  background: rgba(0, 0, 0, .14);
+}
+
+:root[data-theme="dark"] .topbar {
+  background: rgba(3, 9, 18, .82);
+  border-bottom-color: rgba(85, 181, 255, .24);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, .22), inset 0 -1px 0 rgba(51, 160, 255, .06);
+  -webkit-backdrop-filter: blur(18px) saturate(135%);
+  backdrop-filter: blur(18px) saturate(135%);
+}
+:root[data-theme="dark"] .topbar h1,
+:root[data-theme="dark"] .greeting h2 {
+  color: #f7fbff;
+  text-shadow: 0 2px 14px rgba(41, 157, 255, .18);
+}
+:root[data-theme="dark"] .theme-toggle {
+  border-color: rgba(91, 184, 255, .42);
+  background: linear-gradient(145deg, rgba(14, 40, 68, .94), rgba(2, 7, 14, .96));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .1), 0 6px 18px rgba(0, 0, 0, .32);
+}
+:root[data-theme="dark"] .theme-toggle:hover {
+  border-color: #59baff;
+  box-shadow: 0 0 0 3px rgba(47, 157, 255, .11), 0 8px 22px rgba(22, 129, 255, .22);
+}
+:root[data-theme="dark"] .theme-knob {
+  border-color: rgba(129, 205, 255, .65);
+  background: radial-gradient(circle at 32% 28%, #84d4ff, #1f9cf2 48%, #075294 100%);
+  box-shadow: 0 0 16px rgba(47, 165, 255, .64), inset 0 1px 1px rgba(255, 255, 255, .4);
+}
+:root[data-theme="dark"] .theme-red { color: #8393a5; filter: none; }
+:root[data-theme="dark"] .theme-blue {
+  color: #f1f9ff;
+  filter: drop-shadow(0 0 5px rgba(91, 190, 255, .82));
+}
+
+:root[data-theme="dark"] .chip,
+:root[data-theme="dark"] .trading-mode-pill {
+  background: rgba(7, 24, 44, .69);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .04);
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+}
+:root[data-theme="dark"] .card,
+:root[data-theme="dark"] .stat,
+:root[data-theme="dark"] .dry-run-hero {
+  background: linear-gradient(145deg, rgba(7, 29, 55, .93), rgba(3, 9, 17, .83));
+  border-color: rgba(91, 181, 255, .25);
+  box-shadow: var(--shadow);
+  -webkit-backdrop-filter: blur(16px) saturate(120%);
+  backdrop-filter: blur(16px) saturate(120%);
+}
+:root[data-theme="dark"] .card,
+:root[data-theme="dark"] .stat {
+  transition: border-color .18s ease, box-shadow .18s ease, transform .18s ease;
+}
+:root[data-theme="dark"] .card:hover,
+:root[data-theme="dark"] .stat:hover {
+  border-color: rgba(106, 193, 255, .42);
+  box-shadow: 0 16px 42px rgba(0, 0, 0, .36), 0 0 28px rgba(27, 145, 255, .08);
+}
+:root[data-theme="dark"] .stat:hover { transform: translateY(-2px); }
+:root[data-theme="dark"] .card-hd {
+  background: linear-gradient(90deg, rgba(47, 160, 255, .09), transparent 52%);
+}
+:root[data-theme="dark"] th { background: rgba(8, 36, 68, .72); }
+:root[data-theme="dark"] input,
+:root[data-theme="dark"] select {
+  background: rgba(2, 8, 15, .72);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .03);
+}
+:root[data-theme="dark"] input:focus,
+:root[data-theme="dark"] select:focus {
+  box-shadow: 0 0 0 3px rgba(47, 160, 255, .11), inset 0 1px 0 rgba(255, 255, 255, .04);
+}
+:root[data-theme="dark"] .btn {
+  transition: filter .16s ease, transform .16s ease, box-shadow .16s ease;
+}
+:root[data-theme="dark"] .btn:not(.secondary):not(.danger):not(.success):not(.warn) {
+  background: linear-gradient(135deg, #49b7ff, #0a6fc2 72%, #06498f);
+  border-color: rgba(139, 211, 255, .3);
+  box-shadow: 0 8px 20px rgba(8, 107, 199, .27), inset 0 1px 0 rgba(255, 255, 255, .24);
+}
+:root[data-theme="dark"] .btn.secondary {
+  background: linear-gradient(145deg, rgba(8, 38, 70, .88), rgba(2, 9, 17, .92));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .05);
+}
+:root[data-theme="dark"] .btn:hover:not(:disabled) {
+  filter: brightness(1.12);
+  transform: translateY(-1px);
+}
+:root[data-theme="dark"] .btn:disabled { transform: none; }
+:root[data-theme="dark"] .modal {
+  border: 1px solid rgba(93, 187, 255, .28);
+  background: linear-gradient(145deg, rgba(7, 30, 57, .98), rgba(2, 8, 16, .98));
+}
+:root[data-theme="dark"] body.login-body {
+  background-color: #020812;
+  background-image:
+    linear-gradient(135deg, rgba(2, 7, 15, .38), rgba(2, 13, 28, .62)),
+    url('/static/img/sparkling-blue-dashboard-bg.png');
+  background-position: center;
+  background-size: cover;
+}
+:root[data-theme="dark"] .login-card {
+  border: 1px solid rgba(104, 196, 255, .28);
+  background: linear-gradient(145deg, rgba(7, 28, 52, .95), rgba(2, 8, 15, .92));
+  -webkit-backdrop-filter: blur(18px);
+  backdrop-filter: blur(18px);
+}
+
 @media (max-width: 720px) {
-  :root:not([data-theme="dark"]) body { background-attachment: scroll; }
+  :root:not([data-theme="dark"]) body,
+  :root[data-theme="dark"] body { background-attachment: scroll; }
 }
 @media (prefers-reduced-motion: reduce) {
   :root:not([data-theme="dark"]) .nav a,
   :root:not([data-theme="dark"]) .card,
   :root:not([data-theme="dark"]) .stat,
-  :root:not([data-theme="dark"]) .btn { transition: none; }
+  :root:not([data-theme="dark"]) .btn,
+  :root[data-theme="dark"] .nav a,
+  :root[data-theme="dark"] .card,
+  :root[data-theme="dark"] .stat,
+  :root[data-theme="dark"] .btn { transition: none; }
 }

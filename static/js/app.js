@@ -40,8 +40,8 @@ function initThemeToggle() {
   const sync = () => {
     const dark = currentTheme() === 'dark';
     toggle.setAttribute('aria-pressed', String(dark));
-    toggle.setAttribute('aria-label', `Switch to ${dark ? 'light' : 'dark'} theme`);
-    toggle.title = `Switch to ${dark ? 'light' : 'dark'} theme`;
+    toggle.setAttribute('aria-label', `Switch to ${dark ? 'Red' : 'Blue'} theme`);
+    toggle.title = `Switch to ${dark ? 'Red' : 'Blue'} theme`;
   };
   sync();
   toggle.addEventListener('click', () => {
