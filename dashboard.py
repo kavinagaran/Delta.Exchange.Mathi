@@ -5,6 +5,7 @@ Open : http://localhost:5001
 """
 
 import base64
+import copy
 import hashlib
 import hmac
 import json
@@ -30,6 +31,19 @@ from risk_controls import (account_entry_lock, account_file_lock, audit_event,
                            decision_dict, evaluate_entry, risk_based_lots)
 from trend_engine import DEFAULT_CONFIG as TREND_ENGINE_DEFAULT_CONFIG, evaluate_trend
 from trend_engine_live import collect_delta_trend_snapshot
+from trend_score_auto import (
+    AUTO_TRADE_LOTS as TREND_SCORE_AUTO_LOTS,
+    CE_2_ITM as TREND_SCORE_CE_ZONE,
+    PE_3_ITM as TREND_SCORE_PE_ZONE,
+    SHORT_MOVE as TREND_SCORE_MOVE_ZONE,
+    TrendScoreAutoInputError,
+    completed_candle_signal_key,
+    plan_score_transition,
+    position_score_zone,
+    score_zone,
+    select_directional_option,
+    select_move_contract,
+)
 
 # Force IPv4 — Delta's whitelist holds our IPv4; IPv6 rotates and gets rejected
 import socket as _socket
@@ -90,8 +104,14 @@ _trend_auto_health: dict[str, dict] = {}
 _trend_debounce: dict[str, dict] = {}
 _trend_shadow_seen: dict[str, str] = {}
 _trend_engine_cache: dict[tuple[str, str, str, str], dict] = {}
+_trend_score_auto_cycle_locks: dict[str, threading.Lock] = {}
+_trend_score_auto_health: dict[str, dict] = {}
 TREND_ENGINE_DRY_PREVIEW_TTL_SECONDS = 120
 TREND_ENGINE_REMAINING_EV_TTL_SECONDS = 300
+TREND_SCORE_AUTO_LEDGER_FILE = "trend_score_auto_ledger.json"
+TREND_SCORE_AUTO_OWNERSHIP = "trend_score_auto_dry_run"
+TREND_SCORE_AUTO_TRIGGER = "trend_engine_score_zone_auto"
+TREND_SCORE_AUTO_LEDGER_SIGNAL_LIMIT = 576
 _external_options: dict[str, list] = {}
 TREND_SIGNAL_SNAPSHOT_FILE = "trend_signal_snapshot.json"
 
@@ -376,6 +396,7 @@ CONFIG_KEYS = [
     "TREND_MAX_SLIPPAGE_PCT", "TREND_ORDER_CHUNK_LOTS",
     "TREND_MARKET_FALLBACK_ENABLED", "TREND_REENTRY_COOLDOWN_MIN",
     "TREND_ALLOW_MISSING_BOOK",
+    "TREND_ENGINE_SCORE_AUTO_MODE",
     "MAX_TRADES_PER_DAY", "MAX_TRADES_PER_DAY_GLOBAL",
     "MAX_DAILY_LOSS_USD", "MAX_OPEN_RISK_USD", "MAX_CONSECUTIVE_LOSSES",
     "LOSS_COOLDOWN_MINUTES", "MAX_ACCOUNT_PREMIUM_AT_RISK_USD",
@@ -479,6 +500,8 @@ CONFIG_PAGE_DEFAULTS = {
     "TREND_MAX_SLIPPAGE_PCT": "1",
     "TREND_ORDER_CHUNK_LOTS": "1000",
     "TREND_MARKET_FALLBACK_ENABLED": "false",
+    # Independent rules-based paper controller. This mode can never be LIVE.
+    "TREND_ENGINE_SCORE_AUTO_MODE": "disabled",
     "OPTION_FEE_RATE": "0.00010",
     "OPTION_FEE_CAP_PCT": "0.035",
     # Alert behavior resets, but its account-specific credentials do not.
@@ -958,6 +981,18 @@ def _saved_user_cfg() -> tuple[dict, bool]:
         raise AccountConfigError("Account MOVE auto-entry mode is invalid")
     if raw_move_mode:
         saved = {**saved, "MOVE_AUTO_ENTRY_MODE": raw_move_mode}
+    raw_score_mode = str(
+        saved.get("TREND_ENGINE_SCORE_AUTO_MODE") or ""
+    ).strip().lower()
+    if raw_score_mode and raw_score_mode not in {"disabled", "dry_run"}:
+        raise AccountConfigError(
+            "Account Trend Engine score-auto mode is invalid"
+        )
+    if raw_score_mode:
+        saved = {
+            **saved,
+            "TREND_ENGINE_SCORE_AUTO_MODE": raw_score_mode,
+        }
     return saved, True
 
 
@@ -965,9 +1000,9 @@ def _user_cfg() -> dict:
     """The active account's strategy config: .env values as global defaults,
     overridden key by key by users/<name>/config.json.
 
-    Trend and MOVE auto-live are exceptions: each must be explicitly
-    persisted for the active account and is never inherited from the process
-    environment.
+    Trend, MOVE, and score-driven automation are exceptions: each must be
+    explicitly persisted for the active account and is never inherited from
+    the process environment.
     """
     cfg = {k: os.getenv(k, "") for k in CONFIG_KEYS}
     saved, _ = _saved_user_cfg()
@@ -980,6 +1015,10 @@ def _user_cfg() -> dict:
     move_mode = str(
         saved.get("MOVE_AUTO_ENTRY_MODE") or "").strip().lower()
     cfg["MOVE_AUTO_ENTRY_MODE"] = move_mode or "shadow"
+    score_mode = str(
+        saved.get("TREND_ENGINE_SCORE_AUTO_MODE") or ""
+    ).strip().lower()
+    cfg["TREND_ENGINE_SCORE_AUTO_MODE"] = score_mode or "disabled"
     return cfg
 
 
@@ -991,6 +1030,65 @@ def _cfg(key: str, default: str = "") -> str:
 def _cfg_bool(key: str, default: bool = False) -> bool:
     v = _cfg(key)
     return v.lower() in ("1", "true", "yes") if v else default
+
+
+def _config_truthy(value, default: bool = False) -> bool:
+    raw = str(value if value is not None else "").strip().lower()
+    if not raw:
+        return default
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _trend_score_auto_mode(config: dict | None = None) -> str:
+    cfg = config if isinstance(config, dict) else _user_cfg()
+    return str(
+        cfg.get("TREND_ENGINE_SCORE_AUTO_MODE") or "disabled"
+    ).strip().lower()
+
+
+def _trend_score_auto_config_error(config: dict | None = None) -> str | None:
+    """Return why the DRY-only score controller cannot safely run."""
+    cfg = config if isinstance(config, dict) else _user_cfg()
+    mode = _trend_score_auto_mode(cfg)
+    if mode == "disabled":
+        return None
+    if mode != "dry_run":
+        return "Trend Engine score automation accepts only disabled or dry_run"
+    if not _config_truthy(cfg.get("DRY_RUN"), False):
+        return "Trend Engine score automation is DRY RUN only"
+    if str(cfg.get("TREND_AUTO_ENTRY_MODE") or "shadow").lower() != "disabled":
+        return "Disable the legacy Trend auto-entry mode before enabling score automation"
+    if str(cfg.get("MOVE_AUTO_ENTRY_MODE") or "shadow").lower() != "disabled":
+        return "Disable the legacy MOVE auto-entry mode before enabling score automation"
+    if _config_truthy(cfg.get("MORNING_ENABLED"), False):
+        return "Disable the scheduled Morning strategy before enabling score automation"
+    if _config_truthy(cfg.get("EVENING_ENABLED"), False):
+        return "Disable the scheduled Evening strategy before enabling score automation"
+    try:
+        if int(float(cfg.get("MAX_ORDER_LOTS") or TREND_SCORE_AUTO_LOTS)) \
+                < TREND_SCORE_AUTO_LOTS:
+            return "Maximum order lots must allow the fixed 1,000-lot score order"
+    except (TypeError, ValueError, OverflowError):
+        return "Maximum order lots is invalid"
+
+    def number(key: str, default: float) -> float:
+        try:
+            value = float(cfg.get(key) if cfg.get(key) not in (None, "") else default)
+        except (TypeError, ValueError, OverflowError):
+            return float("nan")
+        return value
+
+    tp = number("TP_TARGET_PNL_TREND", 100)
+    sl = abs(number("SL_TARGET_PNL_TREND", 50))
+    legacy_tsl = abs(number("TSL_TARGET_PNL_TREND", 50))
+    arm = abs(number("TSL_ARM_PNL_TREND", legacy_tsl))
+    trail = abs(number("TSL_TRAIL_PNL_TREND", legacy_tsl))
+    if not all(math.isfinite(value) and value > 0 for value in (tp, sl, arm, trail)):
+        return (
+            "Trend score automation requires positive Trend TP, SL, "
+            "TSL arm, and TSL trail values"
+        )
+    return None
 
 
 def _trading_mode() -> tuple[bool, str]:
@@ -5996,6 +6094,32 @@ def _trend_engine_dry_preview_payload() -> dict:
             "signal_fingerprint": None,
             "signal_closed_candles": {},
         }
+    if _trend_score_auto_mode() == "dry_run":
+        reason = (
+            "Automatic score trading is enabled. The controller opens, exits, "
+            "and switches this DRY RUN Trend position without manual confirmation"
+        )
+        decision = _trend_engine_invalid_decision(RuntimeError(reason))
+        decision["audit"] = {
+            **(decision.get("audit") or {}),
+            "execution_mode": "dry_run",
+            "mode_revision": mode["mode_revision"],
+            "order_submitted": False,
+            "phase1_dry_run_bridge": False,
+            "score_auto_controller_active": True,
+        }
+        return {
+            **decision,
+            "ok": True,
+            "dry_run": True,
+            "can_apply": False,
+            "confirmation_token": None,
+            "confirmation_expires_at": None,
+            "mode_revision": mode["mode_revision"],
+            "apply_reason": reason,
+            "signal_fingerprint": None,
+            "signal_closed_candles": {},
+        }
     try:
         engine_config = _trend_engine_config_overrides()
         strategy_config = _trend_engine_strategy_config()
@@ -6313,6 +6437,14 @@ def _trend_engine_dry_state_from_decision(
 @app.route("/api/trend-engine/dry-run-entry", methods=["POST"])
 def api_trend_engine_dry_run_entry():
     """Confirm one BUY_CE/BUY_PE simulation; never call an exchange POST."""
+    if _trend_score_auto_mode() == "dry_run":
+        return jsonify({
+            "ok": False,
+            "error": (
+                "Automatic score trading is enabled; manual Phase 1 Trend "
+                "entries are disabled"
+            ),
+        }), 409
     data = request.get_json(silent=True)
     if not isinstance(data, dict):
         return jsonify({"ok": False, "error": "A JSON confirmation is required"}), 400
@@ -7847,6 +7979,1026 @@ def api_trend_auto_status():
                     **_trend_auto_health.get(user, {})})
 
 
+def _trend_score_auto_ledger_path(data_dir: Path | None = None) -> Path:
+    return Path(data_dir or _mode_data_dir(True)) / TREND_SCORE_AUTO_LEDGER_FILE
+
+
+def _trend_score_auto_strict_json(path: Path, default):
+    """Read controller state without silently accepting a corrupt primary."""
+    if not path.exists():
+        return copy.deepcopy(default)
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError) as exc:
+        raise RuntimeError(f"{path.name} is unreadable") from exc
+    if not isinstance(value, type(default)):
+        raise RuntimeError(f"{path.name} has an invalid structure")
+    return value
+
+
+def _trend_score_auto_ledger(data_dir: Path) -> dict:
+    ledger = _trend_score_auto_strict_json(
+        _trend_score_auto_ledger_path(data_dir), {},
+    )
+    if not ledger:
+        return {
+            "schema_version": 1,
+            "signals": {},
+            "notifications": {},
+            "current_transition": None,
+        }
+    if ledger.get("schema_version") != 1:
+        raise RuntimeError("Trend score-auto ledger schema is unsupported")
+    if not isinstance(ledger.get("signals"), dict):
+        raise RuntimeError("Trend score-auto signal ledger is invalid")
+    if not isinstance(ledger.get("notifications", {}), dict):
+        raise RuntimeError("Trend score-auto notification ledger is invalid")
+    transition = ledger.get("current_transition")
+    if transition is not None and not isinstance(transition, dict):
+        raise RuntimeError("Trend score-auto transition journal is invalid")
+    ledger.setdefault("notifications", {})
+    ledger.setdefault("current_transition", None)
+    return ledger
+
+
+def _trend_score_auto_trim_ledger(ledger: dict) -> None:
+    for key in ("signals", "notifications"):
+        rows = ledger.get(key)
+        if not isinstance(rows, dict) or len(rows) <= TREND_SCORE_AUTO_LEDGER_SIGNAL_LIMIT:
+            continue
+        ordered = sorted(
+            rows.items(),
+            key=lambda item: str((item[1] or {}).get("recorded_at_utc") or ""),
+        )
+        ledger[key] = dict(ordered[-TREND_SCORE_AUTO_LEDGER_SIGNAL_LIMIT:])
+
+
+def _trend_score_auto_write_ledger(data_dir: Path, ledger: dict) -> None:
+    ledger["schema_version"] = 1
+    ledger["updated_at_utc"] = datetime.now(timezone.utc).isoformat()
+    _trend_score_auto_trim_ledger(ledger)
+    _atomic_write_json(_trend_score_auto_ledger_path(data_dir), ledger)
+
+
+def _trend_score_auto_market_decision(snapshot: dict, engine_config: dict) -> dict:
+    """Evaluate direction only, excluding any existing strategy position."""
+    market_only = copy.deepcopy(snapshot)
+    market_only["positions"] = []
+    market_only["pending_orders"] = []
+    account = market_only.get("account")
+    if isinstance(account, dict):
+        account["open_risk"] = 0
+        account["current_exposure"] = 0
+    risk = market_only.get("risk")
+    if isinstance(risk, dict):
+        risk["position_state_consistent"] = True
+        risk["orders_state_known"] = True
+        risk["max_open_positions"] = 1
+    approved = dict(engine_config)
+    approved.setdefault("allow_unknown_event_risk", True)
+    decision = evaluate_trend(market_only, approved)
+    gates = decision.get("hard_gates")
+    if not isinstance(gates, dict) or gates.get("data_valid") is not True:
+        detail = ((decision.get("audit") or {}).get("validation_error")
+                  if isinstance(decision.get("audit"), dict) else None)
+        raise RuntimeError(
+            "Trend Engine market data is invalid or stale"
+            + (f": {detail}" if detail else "")
+        )
+    score = float(decision.get("direction_score"))
+    score_zone(score)  # validates finite range and exact policy boundaries
+    return decision
+
+
+def _collect_trend_score_auto_signal() -> dict:
+    """Collect one public-data-only completed-5m score event."""
+    mode = _trading_mode_payload()
+    if not mode.get("dry_run_mode"):
+        raise RuntimeError("Trend score automation is DRY RUN only")
+    engine_config = _trend_engine_config_overrides()
+    strategy_config = _trend_engine_strategy_config()
+    snapshot = collect_delta_trend_snapshot(
+        http_get=req.get,
+        api_base=API_BASE,
+        sign=_sign,  # not invoked by the collector in DRY RUN mode
+        user_dir=_user_dir(),
+        dry_run=True,
+        mode_revision=mode["mode_revision"],
+        strategy_config=strategy_config,
+    )
+    decision = _trend_score_auto_market_decision(snapshot, engine_config)
+    score = float(decision["direction_score"])
+    zone = score_zone(score)
+    signal_key = completed_candle_signal_key(snapshot)
+    complete_rows = [
+        row for row in ((snapshot.get("candles") or {}).get("5m") or [])
+        if isinstance(row, dict) and row.get("complete") is True
+        and row.get("timestamp")
+    ]
+    if not complete_rows:
+        raise RuntimeError("Trend Engine has no completed 5-minute signal")
+    terminal = max(
+        complete_rows, key=lambda row: str(row.get("timestamp") or "")
+    )
+    opened_at = datetime.fromisoformat(
+        str(terminal["timestamp"]).replace("Z", "+00:00")
+    )
+    if opened_at.tzinfo is None:
+        opened_at = opened_at.replace(tzinfo=timezone.utc)
+    bar_close = (opened_at.astimezone(timezone.utc) + timedelta(minutes=5))
+    return {
+        "mode": mode,
+        "snapshot": snapshot,
+        "decision": decision,
+        "score": score,
+        "zone": zone,
+        "signal_key": signal_key,
+        "signal_bar_close_utc": bar_close.isoformat().replace("+00:00", "Z"),
+        "market_regime": str(decision.get("market_regime") or "UNCLEAR"),
+    }
+
+
+def _fetch_live_vanilla_products() -> list:
+    """Fetch the authoritative listed strike ladder from public endpoints."""
+    products = []
+    after = None
+    seen_cursors = set()
+    for _ in range(100):
+        params = {
+            "contract_types": "call_options,put_options",
+            "underlying_asset_symbols": "BTC",
+            "states": "live",
+            "page_size": 1000,
+        }
+        if after:
+            params["after"] = after
+        payload = req.get(
+            f"{API_BASE}/v2/products", params=params, timeout=12,
+        ).json()
+        page = payload.get("result") if isinstance(payload, dict) else None
+        if not isinstance(page, list):
+            raise RuntimeError("invalid vanilla option products response")
+        products.extend(page)
+        meta = payload.get("meta") or {}
+        next_after = meta.get("after") if isinstance(meta, dict) else None
+        if not next_after:
+            return products
+        if not isinstance(next_after, str) or next_after in seen_cursors:
+            raise RuntimeError("vanilla option product pagination did not advance")
+        seen_cursors.add(next_after)
+        after = next_after
+    raise RuntimeError("vanilla option product pagination did not terminate")
+
+
+def _trend_score_auto_number(value, label: str, *, positive: bool = False) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise RuntimeError(f"{label} is invalid") from exc
+    if not math.isfinite(number) or (positive and number <= 0):
+        raise RuntimeError(f"{label} is invalid")
+    return number
+
+
+def _trend_score_auto_quote_age(timestamp, now: datetime) -> float:
+    raw = str(timestamp or "").strip()
+    if not raw:
+        raise RuntimeError("entry quote timestamp is unavailable")
+    try:
+        quoted = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise RuntimeError("entry quote timestamp is invalid") from exc
+    if quoted.tzinfo is None:
+        quoted = quoted.replace(tzinfo=timezone.utc)
+    age = (now - quoted.astimezone(timezone.utc)).total_seconds()
+    if age < -5:
+        raise RuntimeError("entry quote timestamp is in the future")
+    return max(age, 0)
+
+
+def _trend_score_auto_move_quote(symbol: str) -> dict:
+    """Validate a public, executable 1,000-lot MOVE sell quote."""
+    payload = req.get(f"{API_BASE}/v2/tickers/{symbol}", timeout=8).json()
+    ticker = payload.get("result") if isinstance(payload, dict) else None
+    if not isinstance(ticker, dict) or not ticker:
+        raise RuntimeError("fresh MOVE ticker is unavailable")
+    quote = _trend_quote_snapshot(ticker)
+    bid = _trend_score_auto_number(quote.get("bid"), "MOVE bid", positive=True)
+    ask = _trend_score_auto_number(quote.get("ask"), "MOVE ask", positive=True)
+    if ask < bid:
+        raise RuntimeError("MOVE quote is crossed")
+    max_age = max(_as_float(_cfg("MAX_QUOTE_AGE_SEC", "20"), 20), 1)
+    age = quote.get("quote_age_secs")
+    if age is None or not math.isfinite(float(age)) or float(age) > max_age:
+        raise RuntimeError("MOVE quote is stale")
+    max_spread = max(_as_float(_cfg("MAX_SPREAD_PCT", "3"), 3), 0)
+    spread = quote.get("spread_pct")
+    if spread is None or not math.isfinite(float(spread)) or float(spread) > max_spread:
+        raise RuntimeError("MOVE spread exceeds the configured cap")
+    if quote.get("trading_status") not in ("", "operational"):
+        raise RuntimeError("MOVE contract is not operational")
+    depth = _trend_score_auto_number(
+        quote.get("bid_size"), "MOVE bid depth", positive=True,
+    )
+    if depth < TREND_SCORE_AUTO_LOTS:
+        raise RuntimeError("MOVE bid depth cannot fill the exact 1,000-lot paper order")
+    return {
+        **quote,
+        "entry_price": bid,
+        "entry_depth": depth,
+        "side": "sell",
+    }
+
+
+def _prepare_trend_score_auto_entry(signal: dict) -> dict:
+    """Resolve and validate the exact public contract for a score zone."""
+    zone = signal["zone"]
+    snapshot = signal["snapshot"]
+    spot = _trend_score_auto_number(
+        (snapshot.get("market") or {}).get("spot"), "BTC spot", positive=True,
+    )
+    now = datetime.now(timezone.utc)
+    if zone in {TREND_SCORE_CE_ZONE, TREND_SCORE_PE_ZONE}:
+        selection = select_directional_option(
+            _fetch_live_vanilla_products(),
+            snapshot.get("option_contracts") or [],
+            spot=spot,
+            zone=zone,
+            now=now,
+        )
+        if not selection:
+            label = "2-step ITM CALL" if zone == TREND_SCORE_CE_ZONE \
+                else "3-step ITM PUT"
+            raise RuntimeError(
+                f"No exact executable {label} contract is available"
+            )
+        contract = selection["executable_contract"]
+        max_age = max(_as_float(_cfg("TREND_QUOTE_MAX_AGE_SECS", "20"), 20), 1)
+        age = _trend_score_auto_quote_age(contract.get("quote_timestamp"), now)
+        if age > max_age:
+            raise RuntimeError("selected option quote is stale")
+        depth = _trend_score_auto_number(
+            contract.get("ask_size") or contract.get("ask_quantity"),
+            "option ask depth", positive=True,
+        )
+        if depth < TREND_SCORE_AUTO_LOTS:
+            raise RuntimeError(
+                "option ask depth cannot fill the exact 1,000-lot paper order"
+            )
+        return {
+            **selection,
+            "side": "long",
+            "instrument_kind": "BTC_OPTION",
+            "contract_value": _trend_score_auto_number(
+                contract.get("contract_value"), "option contract value",
+                positive=True,
+            ),
+            "settlement": selection["expiry"],
+            "quote_timestamp": contract.get("quote_timestamp"),
+            "entry_depth": depth,
+            "quote_snapshot": copy.deepcopy(contract),
+        }
+
+    if zone != TREND_SCORE_MOVE_ZONE:
+        raise RuntimeError("unsupported Trend score zone")
+    selection = select_move_contract(
+        _fetch_live_mv_products(), spot=spot, now=now,
+    )
+    if not selection:
+        raise RuntimeError(
+            "No operational ATM MOVE contract with at least 90 minutes remains"
+        )
+    quote = _trend_score_auto_move_quote(selection["symbol"])
+    return {
+        **selection,
+        "side": "short",
+        "option_type": "MOVE",
+        "instrument_kind": "BTC_MOVE",
+        "entry_price": quote["entry_price"],
+        "settlement": selection["expiry"],
+        "quote_timestamp": datetime.now(timezone.utc).isoformat(),
+        "entry_depth": quote["entry_depth"],
+        "quote_snapshot": quote,
+    }
+
+
+def _trend_score_auto_transition_id(user: str, signal_key: str, zone: str) -> str:
+    digest = hashlib.sha256(
+        f"{user}|{signal_key}|{zone}".encode("utf-8")
+    ).hexdigest()[:24]
+    return f"trend-score-{digest}"
+
+
+def _trend_score_auto_open_state(
+    signal: dict,
+    prepared: dict,
+    transition_id: str,
+) -> dict:
+    """Create the isolated paper record; never submit an order."""
+    if int(prepared.get("lots") or 0) != TREND_SCORE_AUTO_LOTS:
+        raise RuntimeError("Trend score automation requires exactly 1,000 lots")
+    now = datetime.now(timezone.utc)
+    price = _trend_score_auto_number(
+        prepared.get("entry_price"), "entry price", positive=True,
+    )
+    contract_value = _trend_score_auto_number(
+        prepared.get("contract_value"), "contract value", positive=True,
+    )
+    strike = _trend_score_auto_number(
+        prepared.get("strike"), "strike", positive=True,
+    )
+    product_id = int(_trend_score_auto_number(
+        prepared.get("product_id"), "product id", positive=True,
+    ))
+    policy = _tp_policy("trend")
+    if not all(float(policy.get(key) or 0) > 0 for key in (
+        "tp_target_pnl", "sl_target_pnl", "tsl_arm_pnl", "tsl_trail_pnl",
+    )):
+        raise RuntimeError("Trend TP, SL, and TSL protection must all be enabled")
+    lots = TREND_SCORE_AUTO_LOTS
+    fee = _option_fee_per_lot(price, contract_value, strike) * lots
+    zone = signal["zone"]
+    direction = (
+        "up" if zone == TREND_SCORE_CE_ZONE
+        else "down" if zone == TREND_SCORE_PE_ZONE
+        else "neutral"
+    )
+    policy_decision = (
+        "BUY_CE" if zone == TREND_SCORE_CE_ZONE
+        else "BUY_PE" if zone == TREND_SCORE_PE_ZONE
+        else "SELL_MOVE"
+    )
+    simulation_id = f"sim-{transition_id}"
+    state = {
+        "slot": "trend",
+        "status": "OPEN",
+        "side": prepared["side"],
+        "option_type": prepared["option_type"],
+        "instrument_kind": prepared["instrument_kind"],
+        "trend_signal": direction,
+        "entry_date": now.strftime("%Y-%m-%d"),
+        "entry_time_utc": now.strftime("%H:%M:%S"),
+        "entry_at_utc": now.isoformat().replace("+00:00", "Z"),
+        "symbol": prepared["symbol"],
+        "product_id": product_id,
+        "strike": strike,
+        "settlement": prepared["settlement"],
+        "contract_value": contract_value,
+        "lots": lots,
+        "entry_mark": round(price, 8),
+        "owned_entry_lots": lots,
+        "original_owned_entry_lots": lots,
+        "protection_lots": lots,
+        "max_protected_lots": lots,
+        "original_bot_entry_mark": round(price, 8),
+        "total_cost_usd": round(price * contract_value * lots, 8),
+        "entry_fees_usd": round(fee, 8),
+        "entry_fee_usd": round(fee, 8),
+        "fees_usd": round(fee, 8),
+        "entry_fee_source": "configured_simulation",
+        "original_bot_entry_fee_usd": round(fee, 8),
+        "original_bot_entry_fee_source": "configured_simulation",
+        "pnl_includes_fees": False,
+        "order_id": 0,
+        "order_ids": [],
+        "client_order_id": None,
+        "client_order_ids": [],
+        "ownership": TREND_SCORE_AUTO_OWNERSHIP,
+        "entry_trigger": TREND_SCORE_AUTO_TRIGGER,
+        "entry_classification": "rules_based_score_auto",
+        "strategy": "trend_engine_score_zone",
+        "dry_run": True,
+        "execution_mode": "dry_run",
+        "simulation_id": simulation_id,
+        "position_cycle_id": transition_id,
+        "transition_id": transition_id,
+        "trend_score_zone": zone,
+        "engine_zone": zone,
+        "score_auto_signal_key": signal["signal_key"],
+        "signal_bar_close_utc": signal["signal_bar_close_utc"],
+        "engine_signal_fingerprint": signal["signal_key"],
+        "engine_policy_decision": policy_decision,
+        "engine_entry_decision": policy_decision,
+        "entry_decision_id": signal["decision"].get("decision_id"),
+        "model_version": signal["decision"].get("model_version"),
+        "schema_version": signal["decision"].get("schema_version"),
+        "direction_score_at_entry": signal["score"],
+        "market_regime_at_entry": signal["market_regime"],
+        "btc_at_entry": (signal["snapshot"].get("market") or {}).get("spot"),
+        "risk_at_entry_usd": float(policy["sl_target_pnl"]),
+        "protection_config": policy,
+        "protection_revision": 0,
+        "continuity_revision": 0,
+        "continuity_anchor_utc": now.isoformat(),
+        "continuity_verified": True,
+        "continuity_status": "dry_run_simulation",
+        "cycle_entry_lots_total": lots,
+        "cycle_exit_lots_total": 0,
+        "partial_exit_accounting_status": "complete",
+        "position_composition": "simulated_only",
+        "selected_contract_snapshot": copy.deepcopy(prepared),
+        "quote_snapshot": copy.deepcopy(prepared.get("quote_snapshot") or {}),
+        "entry_decision_snapshot": copy.deepcopy(signal["decision"]),
+        "signal_snapshot": {
+            "signal_key": signal["signal_key"],
+            "signal_bar_close_utc": signal["signal_bar_close_utc"],
+            "direction_score": signal["score"],
+            "market_regime": signal["market_regime"],
+            "zone": zone,
+        },
+        "execution_snapshot": {
+            "kind": "dry_run_public_quote",
+            "requested": lots,
+            "filled": lots,
+            "average_fill_price": price,
+            "observed_entry_depth": prepared.get("entry_depth"),
+            "order_submitted": False,
+            "exchange_api_called": False,
+        },
+    }
+    return state
+
+
+_TREND_SCORE_AUTO_PENDING_FIELDS = (
+    "pending_entry_client_order_id", "pending_entry_order_id",
+    "pending_entry_submission_state", "pending_close_client_order_id",
+    "pending_close_order_id", "pending_close_submission_state",
+)
+
+
+def _trend_score_auto_pending_identity(state: dict) -> bool:
+    return any(state.get(key) not in (None, "", False) for key in
+               _TREND_SCORE_AUTO_PENDING_FIELDS)
+
+
+def _trend_score_auto_owned_position(state: dict) -> dict | None:
+    status = str(state.get("status") or "").strip().upper()
+    if status != "OPEN":
+        if status not in {"", "IDLE", "CLOSED"}:
+            raise RuntimeError(
+                f"DRY RUN Trend state is unresolved ({status or 'unknown'})"
+            )
+        if _trend_score_auto_pending_identity(state):
+            raise RuntimeError("DRY RUN Trend state has a pending order identity")
+        return None
+    if not _is_dry_record(state):
+        raise RuntimeError("Trend score automation will not manage a non-DRY state")
+    if (
+        state.get("ownership") != TREND_SCORE_AUTO_OWNERSHIP
+        or state.get("entry_trigger") != TREND_SCORE_AUTO_TRIGGER
+    ):
+        raise RuntimeError(
+            "A non-controller DRY RUN Trend position is already open"
+        )
+    if _trend_score_auto_pending_identity(state):
+        raise RuntimeError("The controller-owned Trend state has a pending order identity")
+    try:
+        lots = int(float(state.get("lots") or 0))
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise RuntimeError("The controller-owned Trend lot count is invalid") from exc
+    if lots != TREND_SCORE_AUTO_LOTS:
+        raise RuntimeError("The controller-owned Trend position is not exactly 1,000 lots")
+    position_score_zone(state)
+    return dict(state)
+
+
+def _trend_score_auto_other_slot_blocker(slot: str, state: dict) -> str | None:
+    status = str(state.get("status") or "").strip().upper()
+    if status not in {"", "IDLE", "CLOSED"}:
+        return f"DRY RUN {slot.title()} state is unresolved ({status})"
+    if _trend_score_auto_pending_identity(state):
+        return f"DRY RUN {slot.title()} has a pending order identity"
+    return None
+
+
+def _trend_score_auto_repair_closed_history(state: dict) -> dict:
+    if (
+        str(state.get("status") or "").upper() != "CLOSED"
+        or not state.get("history_pending")
+    ):
+        return state
+    if not _is_dry_record(state):
+        raise RuntimeError("A non-DRY closed Trend record has pending history")
+    if not _append_trade_history(
+        state, "trend-score-auto-history-recovery", dry_run=True,
+    ):
+        raise RuntimeError("Previous DRY RUN Trend history is still pending")
+    repaired = dict(state)
+    repaired["history_pending"] = False
+    repaired["history_logged"] = True
+    repaired["history_logged_at_utc"] = datetime.now(timezone.utc).isoformat()
+    _atomic_write_json(_slot_file("trend", dry_run=True), repaired)
+    return repaired
+
+
+def _trend_score_auto_signal_record(
+    signal: dict,
+    *,
+    action: str,
+    state: dict | None,
+) -> dict:
+    return {
+        "recorded_at_utc": datetime.now(timezone.utc).isoformat(),
+        "signal_bar_close_utc": signal["signal_bar_close_utc"],
+        "direction_score": signal["score"],
+        "market_regime": signal["market_regime"],
+        "target_zone": signal["zone"],
+        "action": action,
+        "symbol": (state or {}).get("symbol"),
+        "lots": (state or {}).get("lots"),
+        "simulation_id": (state or {}).get("simulation_id"),
+        "decision_id": signal["decision"].get("decision_id"),
+    }
+
+
+def _trend_score_auto_register_notification(
+    ledger: dict,
+    event_id: str,
+    *,
+    action: str,
+    signal: dict,
+) -> bool:
+    notifications = ledger.setdefault("notifications", {})
+    if event_id in notifications:
+        return False
+    notifications[event_id] = {
+        "recorded_at_utc": datetime.now(timezone.utc).isoformat(),
+        "action": action,
+        "signal_key": signal["signal_key"],
+        "target_zone": signal["zone"],
+    }
+    return True
+
+
+def _trend_score_auto_notify(text: str) -> None:
+    if _cfg_bool("TELEGRAM_ALERTS", True):
+        _send_telegram(text)
+
+
+def _trend_score_auto_health_update(user: str, **fields) -> dict:
+    health = _trend_score_auto_health.setdefault(user, {})
+    health.update(fields)
+    try:
+        mode = _trend_score_auto_mode()
+    except Exception:
+        mode = str(health.get("mode") or "invalid")
+    health.update({
+        "user": user,
+        "mode": mode,
+        "enabled": mode == "dry_run",
+        "dry_run_only": True,
+        "fixed_lots": TREND_SCORE_AUTO_LOTS,
+    })
+    return health
+
+
+def _maybe_auto_trend_score_cycle() -> bool:
+    """Apply one completed-5m score event to the isolated Trend paper slot."""
+    user = _active_user()
+    cycle_at = datetime.now(timezone.utc).isoformat()
+    try:
+        cfg = _user_cfg()
+        controller_mode = _trend_score_auto_mode(cfg)
+    except Exception as exc:
+        _trend_score_auto_health_update(
+            user, status="error", last_cycle_utc=cycle_at,
+            last_action="configuration could not be read", last_error=str(exc),
+        )
+        return False
+    if controller_mode == "disabled":
+        _trend_score_auto_health_update(
+            user, status="disabled", last_cycle_utc=cycle_at,
+            last_action="score automation is disabled", last_error=None,
+        )
+        return False
+    config_error = _trend_score_auto_config_error(cfg)
+    if config_error:
+        _trend_score_auto_health_update(
+            user, status="blocked", last_cycle_utc=cycle_at,
+            last_action=config_error, last_error=config_error,
+        )
+        return False
+
+    cycle_lock = _trend_score_auto_cycle_locks.setdefault(
+        user, threading.Lock(),
+    )
+    if not cycle_lock.acquire(blocking=False):
+        _trend_score_auto_health_update(
+            user, status="busy", last_cycle_utc=cycle_at,
+            last_action="another score cycle is running", last_error=None,
+        )
+        return False
+
+    try:
+        signal = _collect_trend_score_auto_signal()
+        _trend_score_auto_health_update(
+            user,
+            status="evaluating",
+            last_cycle_utc=cycle_at,
+            last_action="validated a completed 5-minute score",
+            last_error=None,
+            direction_score=signal["score"],
+            market_regime=signal["market_regime"],
+            engine_zone=signal["zone"],
+            signal_key=signal["signal_key"],
+            signal_bar_close_utc=signal["signal_bar_close_utc"],
+        )
+
+        # Contract resolution is intentionally outside account/state locks.
+        # If a switch is required but this fails, the old zone is still exited
+        # under lock and the exact new contract is retried while flat.
+        prepared = None
+        preparation_error = None
+        try:
+            guess_state = _trend_score_auto_strict_json(
+                _slot_file("trend", dry_run=True), {},
+            )
+            guess_owned = _trend_score_auto_owned_position(guess_state)
+            guess_ledger = _trend_score_auto_ledger(_mode_data_dir(True))
+            already = signal["signal_key"] in guess_ledger["signals"]
+            if (
+                str(guess_state.get("status") or "").upper() == "CLOSED"
+                and guess_state.get("ownership") == TREND_SCORE_AUTO_OWNERSHIP
+                and guess_state.get("score_auto_signal_key") == signal["signal_key"]
+            ):
+                already = True
+            same_zone = bool(
+                guess_owned
+                and position_score_zone(guess_owned) == signal["zone"]
+            )
+            if not already and not same_zone:
+                prepared = _prepare_trend_score_auto_entry(signal)
+        except Exception as exc:
+            preparation_error = str(exc)
+
+        initial_revision = signal["mode"]["mode_revision"]
+        data_dir = _mode_data_dir(True)
+        root_dir = _user_dir()
+        owner = f"trend-score-auto:{user}:{os.getpid()}:{time.time_ns()}"
+        with account_entry_lock(root_dir, owner) as exposure_lock:
+            if not exposure_lock:
+                _trend_score_auto_health_update(
+                    user, status="busy", last_action="account exposure lock is busy",
+                    last_error=None,
+                )
+                return False
+            with ExitStack() as state_locks:
+                for slot in SLOTS:
+                    acquired = state_locks.enter_context(account_file_lock(
+                        data_dir,
+                        f"close-{slot}",
+                        owner,
+                        stale_after_sec=30,
+                        wait_sec=0,
+                    ))
+                    if not acquired:
+                        _trend_score_auto_health_update(
+                            user, status="busy",
+                            last_action=f"DRY RUN {slot} state is busy",
+                            last_error=None,
+                        )
+                        return False
+                config_lock = state_locks.enter_context(account_file_lock(
+                    root_dir, "config", owner,
+                    stale_after_sec=30, wait_sec=5,
+                ))
+                if not config_lock:
+                    _trend_score_auto_health_update(
+                        user, status="busy", last_action="account configuration is busy",
+                        last_error=None,
+                    )
+                    return False
+
+                boundary_mode = _trading_mode_payload()
+                boundary_cfg = _user_cfg()
+                boundary_error = _trend_score_auto_config_error(boundary_cfg)
+                if (
+                    not boundary_mode.get("dry_run_mode")
+                    or boundary_mode.get("mode_revision") != initial_revision
+                    or _trend_score_auto_mode(boundary_cfg) != "dry_run"
+                    or boundary_error
+                ):
+                    raise RuntimeError(
+                        boundary_error
+                        or "Configuration changed during the score cycle; no mutation was made"
+                    )
+
+                states = {
+                    slot: _trend_score_auto_strict_json(
+                        _slot_file(slot, dry_run=True), {},
+                    )
+                    for slot in SLOTS
+                }
+                for slot in MOVE_SLOTS:
+                    blocker = _trend_score_auto_other_slot_blocker(
+                        slot, states[slot],
+                    )
+                    if blocker:
+                        raise RuntimeError(blocker)
+                states["trend"] = _trend_score_auto_repair_closed_history(
+                    states["trend"],
+                )
+                owned = _trend_score_auto_owned_position(states["trend"])
+                ledger = _trend_score_auto_ledger(data_dir)
+                consumed = set(ledger["signals"])
+                if (
+                    str(states["trend"].get("status") or "").upper() == "CLOSED"
+                    and states["trend"].get("ownership") == TREND_SCORE_AUTO_OWNERSHIP
+                    and states["trend"].get("score_auto_signal_key")
+                    == signal["signal_key"]
+                ):
+                    consumed.add(signal["signal_key"])
+                plan = plan_score_transition(
+                    score=signal["score"],
+                    signal_key=signal["signal_key"],
+                    owned_positions=[owned] if owned else [],
+                    consumed_signal_keys=consumed,
+                )
+
+                if plan["action"] == "NOOP":
+                    _trend_score_auto_health_update(
+                        user, status="signal_consumed",
+                        last_action=(
+                            "this completed 5-minute signal was already handled; "
+                            "waiting for the next one"
+                        ),
+                        last_error=None,
+                        current_zone=plan.get("current_zone"),
+                        symbol=(owned or {}).get("symbol"),
+                        lots=(owned or {}).get("lots"),
+                    )
+                    return False
+
+                if plan["action"] == "HOLD":
+                    ledger["signals"][signal["signal_key"]] = (
+                        _trend_score_auto_signal_record(
+                            signal, action="HOLD", state=owned,
+                        )
+                    )
+                    ledger["current_transition"] = {
+                        "signal_key": signal["signal_key"],
+                        "target_zone": signal["zone"],
+                        "phase": "COMPLETE",
+                        "action": "HOLD",
+                        "updated_at_utc": datetime.now(timezone.utc).isoformat(),
+                    }
+                    _trend_score_auto_write_ledger(data_dir, ledger)
+                    _trend_score_auto_health_update(
+                        user, status="holding",
+                        last_action="open position already matches the score zone",
+                        last_error=None,
+                        current_zone=plan["current_zone"],
+                        symbol=owned.get("symbol"),
+                        lots=owned.get("lots"),
+                    )
+                    return False
+
+                transition_id = _trend_score_auto_transition_id(
+                    user, signal["signal_key"], signal["zone"],
+                )
+                transition = {
+                    "transition_id": transition_id,
+                    "signal_key": signal["signal_key"],
+                    "signal_bar_close_utc": signal["signal_bar_close_utc"],
+                    "direction_score": signal["score"],
+                    "market_regime": signal["market_regime"],
+                    "target_zone": signal["zone"],
+                    "previous_zone": plan.get("current_zone"),
+                    "previous_simulation_id": (owned or {}).get("simulation_id"),
+                    "phase": "PREPARED",
+                    "prepared_at_utc": datetime.now(timezone.utc).isoformat(),
+                }
+                ledger["current_transition"] = transition
+                _trend_score_auto_write_ledger(data_dir, ledger)
+
+                closed = None
+                if plan["action"] == "CLOSE_THEN_OPEN":
+                    # The config lock remains held across the close and open;
+                    # a DRY/LIVE or controller toggle cannot split the switch.
+                    if _trading_mode_payload()["mode_revision"] != initial_revision:
+                        raise RuntimeError("Configuration changed before score-zone exit")
+                    closed = _close_dry_simulation_locked(
+                        "trend", owned,
+                        trigger="trend_engine_score_zone_switch",
+                    )
+                    transition.update({
+                        "phase": "EXIT_COMMITTED",
+                        "exit_committed_at_utc": datetime.now(timezone.utc).isoformat(),
+                        "closed_simulation_id": closed.get("simulation_id"),
+                        "closed_symbol": closed.get("symbol"),
+                        "closed_pnl_usd": closed.get("pnl_usd"),
+                    })
+                    ledger["current_transition"] = transition
+                    _trend_score_auto_write_ledger(data_dir, ledger)
+                    _trend_audit("trend_score_auto_zone_exit", {
+                        "transition_id": transition_id,
+                        "signal_key": signal["signal_key"],
+                        "from_zone": plan.get("current_zone"),
+                        "to_zone": signal["zone"],
+                        "symbol": closed.get("symbol"),
+                        "pnl_usd": closed.get("pnl_usd"),
+                        "order_submitted": False,
+                        "exchange_api_called": False,
+                    })
+
+                if prepared is None:
+                    if plan["action"] == "CLOSE_THEN_OPEN":
+                        event_id = f"{transition_id}:exit-awaiting-contract"
+                        should_notify = _trend_score_auto_register_notification(
+                            ledger, event_id, action="EXIT_AWAITING_CONTRACT",
+                            signal=signal,
+                        )
+                        transition["entry_blocked_reason"] = (
+                            preparation_error
+                            or "the exact target contract requires fresh revalidation"
+                        )
+                        ledger["current_transition"] = transition
+                        _trend_score_auto_write_ledger(data_dir, ledger)
+                        _trend_score_auto_health_update(
+                            user, status="flat_waiting_contract",
+                            last_action=(
+                                "previous score zone exited; waiting for the exact "
+                                "1,000-lot target contract"
+                            ),
+                            last_error=transition["entry_blocked_reason"],
+                            current_zone=None,
+                            symbol=None,
+                            lots=0,
+                        )
+                        if should_notify:
+                            _trend_score_auto_notify(
+                                f"🤖 <b>TREND ENGINE DRY RUN — {user.upper()}</b>\n"
+                                f"Exited <code>{closed.get('symbol', '')}</code> after the "
+                                f"score moved to <code>{signal['zone']}</code>.\n"
+                                "The exact new 1,000-lot contract is not executable yet; "
+                                "the paper account remains flat and will retry this signal."
+                            )
+                        return True
+                    _trend_score_auto_health_update(
+                        user, status="blocked",
+                        last_action="waiting for the exact 1,000-lot target contract",
+                        last_error=(preparation_error or
+                                    "contract will be revalidated next cycle"),
+                        current_zone=None,
+                        symbol=None,
+                        lots=0,
+                    )
+                    return False
+
+                if prepared.get("zone") != signal["zone"]:
+                    raise RuntimeError("prepared contract no longer matches the score zone")
+                quote_age = _trend_score_auto_quote_age(
+                    prepared.get("quote_timestamp"), datetime.now(timezone.utc),
+                )
+                quote_limit = max(
+                    _as_float(
+                        _cfg(
+                            "TREND_QUOTE_MAX_AGE_SECS"
+                            if signal["zone"] != TREND_SCORE_MOVE_ZONE
+                            else "MAX_QUOTE_AGE_SEC",
+                            "20",
+                        ),
+                        20,
+                    ),
+                    1,
+                )
+                if quote_age > quote_limit:
+                    raise RuntimeError("prepared entry quote became stale before mutation")
+                final_mode = _trading_mode_payload()
+                if (
+                    not final_mode.get("dry_run_mode")
+                    or final_mode.get("mode_revision") != initial_revision
+                    or _trend_score_auto_mode() != "dry_run"
+                ):
+                    raise RuntimeError("Controller mode changed before paper entry")
+                opened = _trend_score_auto_open_state(
+                    signal, prepared, transition_id,
+                )
+                _atomic_write_json(
+                    _slot_file("trend", dry_run=True), opened,
+                )
+                transition.update({
+                    "phase": "ENTRY_COMMITTED",
+                    "entry_committed_at_utc": datetime.now(timezone.utc).isoformat(),
+                    "opened_simulation_id": opened["simulation_id"],
+                    "opened_symbol": opened["symbol"],
+                })
+                ledger["current_transition"] = transition
+                _trend_score_auto_write_ledger(data_dir, ledger)
+
+                action = (
+                    "SWITCH" if plan["action"] == "CLOSE_THEN_OPEN" else "OPEN"
+                )
+                ledger["signals"][signal["signal_key"]] = (
+                    _trend_score_auto_signal_record(
+                        signal, action=action, state=opened,
+                    )
+                )
+                transition.update({
+                    "phase": "COMPLETE",
+                    "action": action,
+                    "completed_at_utc": datetime.now(timezone.utc).isoformat(),
+                })
+                ledger["current_transition"] = transition
+                event_id = f"{transition_id}:{action.lower()}-complete"
+                should_notify = _trend_score_auto_register_notification(
+                    ledger, event_id, action=action, signal=signal,
+                )
+                _trend_score_auto_write_ledger(data_dir, ledger)
+                _trend_audit("trend_score_auto_entry_opened", {
+                    "transition_id": transition_id,
+                    "action": action,
+                    "signal_key": signal["signal_key"],
+                    "signal_bar_close_utc": signal["signal_bar_close_utc"],
+                    "direction_score": signal["score"],
+                    "market_regime": signal["market_regime"],
+                    "zone": signal["zone"],
+                    "symbol": opened["symbol"],
+                    "lots": opened["lots"],
+                    "entry_mark": opened["entry_mark"],
+                    "simulation_id": opened["simulation_id"],
+                    "order_submitted": False,
+                    "exchange_api_called": False,
+                })
+                _trend_score_auto_health_update(
+                    user, status="position_open",
+                    last_action=(
+                        "switched the paper position to the new score zone"
+                        if action == "SWITCH"
+                        else "opened the score-directed paper position"
+                    ),
+                    last_error=None,
+                    current_zone=signal["zone"],
+                    symbol=opened["symbol"],
+                    lots=opened["lots"],
+                    last_transition_id=transition_id,
+                    last_entry_utc=opened["entry_at_utc"],
+                )
+                if should_notify:
+                    verb = "Switched to" if action == "SWITCH" else "Opened"
+                    _trend_score_auto_notify(
+                        f"🤖 <b>TREND ENGINE DRY RUN — {user.upper()}</b>\n"
+                        f"{verb} <code>{opened['symbol']}</code>\n"
+                        f"Score » <code>{signal['score']:+.1f}</code> · "
+                        f"Regime » <code>{signal['market_regime']}</code>\n"
+                        f"Rule  » <code>{signal['zone']}</code> · "
+                        f"Lots » <code>{opened['lots']:,}</code>\n"
+                        "No exchange order was submitted."
+                    )
+                return True
+    except Exception as exc:
+        previous_error = _trend_score_auto_health.get(user, {}).get("last_error")
+        _trend_score_auto_health_update(
+            user, status="error", last_cycle_utc=cycle_at,
+            last_action="score cycle failed closed", last_error=str(exc)[:500],
+        )
+        if previous_error != str(exc)[:500]:
+            _trend_audit("trend_score_auto_error", {
+                "error": str(exc)[:500],
+                "order_submitted": False,
+                "exchange_api_called": False,
+            })
+        return False
+    finally:
+        cycle_lock.release()
+
+
+@app.route("/api/trend-engine/score-auto/status")
+def api_trend_engine_score_auto_status():
+    user = _active_user()
+    try:
+        cfg = _user_cfg()
+        mode = _trend_score_auto_mode(cfg)
+        error = _trend_score_auto_config_error(cfg)
+    except Exception as exc:
+        mode, error = "invalid", str(exc)
+    state = _load_json(_slot_file("trend", dry_run=True), {})
+    payload = {
+        **_trend_score_auto_health.get(user, {}),
+        "user": user,
+        "mode": mode,
+        "enabled": mode == "dry_run" and not error,
+        "dry_run_only": True,
+        "fixed_lots": TREND_SCORE_AUTO_LOTS,
+        "config_error": error,
+    }
+    if (
+        str(state.get("status") or "").upper() == "OPEN"
+        and state.get("ownership") == TREND_SCORE_AUTO_OWNERSHIP
+    ):
+        payload.update({
+            "current_zone": state.get("trend_score_zone"),
+            "engine_zone": payload.get("engine_zone")
+            or state.get("trend_score_zone"),
+            "symbol": state.get("symbol"),
+            "lots": state.get("lots"),
+            "position_status": "OPEN",
+        })
+    else:
+        payload.setdefault("position_status", str(state.get("status") or "IDLE"))
+    return jsonify(payload)
+
+
 def _trend_auto_loop() -> None:
     """Background per-account trigger; works even when no browser is open."""
     while True:
@@ -7862,10 +9014,31 @@ def _trend_auto_loop() -> None:
                         # Publish the displayed 5M/15M/live-1H state for the
                         # Morning MOVE rule even when Trend auto-entry itself
                         # is disabled. The 15-second cache limits API traffic.
-                        _trend_snapshot()
-                        _maybe_auto_trend_entry()
+                        try:
+                            _trend_snapshot()
+                        except Exception as snapshot_exc:
+                            # The score controller owns its own strict public
+                            # snapshot. A legacy dashboard-cache failure must
+                            # not suppress that completed-candle cycle.
+                            if _trend_score_auto_mode() != "dry_run":
+                                raise snapshot_exc
+                        if _trend_score_auto_mode() == "dry_run":
+                            _maybe_auto_trend_score_cycle()
+                        else:
+                            _maybe_auto_trend_entry()
                 except Exception as exc:
-                    _trend_auto_health.setdefault(user, {}).update(
+                    try:
+                        score_controller_active = (
+                            _trend_score_auto_mode() == "dry_run"
+                        )
+                    except Exception:
+                        score_controller_active = False
+                    target_health = (
+                        _trend_score_auto_health
+                        if score_controller_active
+                        else _trend_auto_health
+                    )
+                    target_health.setdefault(user, {}).update(
                         status="error", last_error=str(exc),
                         last_cycle_utc=datetime.now(timezone.utc).isoformat())
                     try:
@@ -8085,6 +9258,12 @@ def _validate_config_update(data: dict, current: dict) -> str | None:
     ) or "shadow").lower()
     if move_mode not in {"disabled", "shadow", "live"}:
         return "MOVE_AUTO_ENTRY_MODE must be disabled, shadow, or live"
+    score_auto_mode = str(data.get(
+        "TREND_ENGINE_SCORE_AUTO_MODE",
+        current.get("TREND_ENGINE_SCORE_AUTO_MODE") or "disabled",
+    ) or "disabled").lower()
+    if score_auto_mode not in {"disabled", "dry_run"}:
+        return "TREND_ENGINE_SCORE_AUTO_MODE must be disabled or dry_run"
     for key in (
         "MOVE_ALLOW_LONG", "MOVE_REQUIRE_NO_OPEN_ORDERS", "MOVE_REQUIRE_FLAT",
     ):
@@ -8103,6 +9282,10 @@ def _validate_config_update(data: dict, current: dict) -> str | None:
         if not math.isfinite(value) or not low <= value <= high:
             return f"{key} must be between {low} and {high}"
     merged = {**current, **data}
+    if score_auto_mode == "dry_run":
+        score_auto_error = _trend_score_auto_config_error(merged)
+        if score_auto_error:
+            return score_auto_error
     try:
         if float(merged.get("TREND_RSI_DOWN") or 45) >= float(merged.get("TREND_RSI_UP") or 55):
             return "TREND_RSI_DOWN must be below TREND_RSI_UP"

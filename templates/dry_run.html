@@ -9,7 +9,7 @@
   <div class="dry-run-hero-copy">
     <span class="strategy-kicker">ISOLATED SIMULATION WORKSPACE</span>
     <h2 id="dry-run-title">Dry Run Dashboard</h2>
-    <p>MOVE and Trend simulations are collected here, completely separate from real positions and real P&amp;L.</p>
+    <p>MOVE and Trend Engine simulations are collected here, completely separate from real positions and real P&amp;L.</p>
   </div>
   <div class="dry-run-hero-actions">
     <span class="pill idle" id="dry-page-mode" role="status" aria-live="polite">
@@ -29,7 +29,7 @@
 
 <div class="section-title">
   <span>Simulated strategies</span>
-  <small>Independent paper state for Morning MOVE, Evening MOVE and Trend options</small>
+  <small>Independent paper state for Morning MOVE, Evening MOVE and Trend Engine positions</small>
 </div>
 
 <div class="dry-slot-grid">
@@ -58,7 +58,7 @@
   <article class="card dry-slot-card">
     <div class="card-hd slot-hd">
       <span aria-hidden="true">📈</span>
-      <span>Trend CE / PE</span>
+      <span>Trend Engine position (CE / PE / MOVE)</span>
       <span class="when" id="dry-trend-decision">Engine —</span>
     </div>
     <div class="card-bd dry-slot-body" id="dry-slot-trend" aria-live="polite">
@@ -138,6 +138,8 @@ let dryModeActive = false;
 let dryStatus = {};
 let dryTrendEnginePreview = null;
 let dryTrendApplying = false;
+let dryTrendScoreAutoStatus = null;
+let dryTrendScoreAutoReachable = false;
 let dryRunChart = null;
 let dryHistory = [];
 let dryStatusRefreshPending = false;
@@ -147,9 +149,9 @@ const dryProtectionSaving = new Set();
 function drySlotLabel(slot, symbol = '') {
   if (slot === 'morning') return 'Morning MOVE';
   if (slot === 'evening') return 'Evening MOVE';
-  if (slot === 'trend') return 'Trend option';
+  if (slot === 'trend') return 'Trend Engine position';
   return String(symbol).startsWith('C-BTC') || String(symbol).startsWith('P-BTC')
-    ? 'Trend option' : 'MOVE';
+    ? 'Trend Engine position' : 'MOVE';
 }
 
 function dryKnownNumber(value) {
@@ -357,6 +359,97 @@ function dryEngineDecisionLabel(value) {
   return String(value || 'UNAVAILABLE').replace(/_/g, ' ');
 }
 
+function dryTrendScoreAutoEnabled() {
+  const status = typeof dryTrendScoreAutoStatus === 'undefined'
+    ? null : dryTrendScoreAutoStatus;
+  return status?.enabled === true &&
+    String(status?.mode || '').toLowerCase() === 'dry_run';
+}
+
+function dryTrendScoreTarget(status) {
+  if (dryKnownNumber(status?.direction_score)) {
+    const score = Number(status.direction_score);
+    if (score <= -40) return 'Buy 3-step ITM PUT';
+    if (score >= 40) return 'Buy 2-step ITM CALL';
+    return 'Sell MOVE';
+  }
+  const zone = String(status?.engine_zone || '').trim();
+  return zone ? dryEngineDecisionLabel(zone) : 'Waiting for a valid closed-bar score';
+}
+
+function dryTrendScoreTimestamp(value) {
+  if (!value) return '—';
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime())
+    ? String(value)
+    : parsed.toLocaleString('en-IN', {
+        timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short',
+      });
+}
+
+function dryTrendScoreAutoHtml() {
+  if (!dryTrendScoreAutoStatus) return '';
+
+  const active = dryTrendScoreAutoEnabled();
+  if (!active) {
+    return `<section class="dry-engine-panel dry-slot-footer-panel is-unavailable"
+                     aria-label="Trend Engine score automation status">
+      <div class="dry-engine-hd">
+        <div><span>TREND SCORE AUTOMATION · DRY RUN</span><strong>Automatic score trading is off</strong></div>
+        <span class="dry-engine-decision">DISABLED</span>
+      </div>
+      <p>The Phase-1 decision preview remains available below for manual paper simulation.</p>
+    </section>`;
+  }
+
+  const statusText = dryEngineDecisionLabel(dryTrendScoreAutoStatus.status || 'active').toUpperCase();
+  const score = dryKnownNumber(dryTrendScoreAutoStatus.direction_score)
+    ? fN(dryTrendScoreAutoStatus.direction_score, 1) : 'Waiting';
+  const regime = dryTrendScoreAutoStatus.market_regime
+    ? dryEngineDecisionLabel(dryTrendScoreAutoStatus.market_regime) : 'Waiting';
+  const zone = dryTrendScoreAutoStatus.engine_zone
+    ? dryEngineDecisionLabel(dryTrendScoreAutoStatus.engine_zone) : 'Waiting';
+  const symbol = dryTrendScoreAutoStatus.symbol || 'Waiting for an eligible contract';
+  const lots = dryKnownNumber(dryTrendScoreAutoStatus.lots)
+    ? fN(dryTrendScoreAutoStatus.lots) : '—';
+  const lastAction = dryTrendScoreAutoStatus.last_action
+    ? dryEngineDecisionLabel(dryTrendScoreAutoStatus.last_action) : 'No automatic transition yet';
+  const reachability = dryTrendScoreAutoReachable
+    ? ''
+    : `<p class="dry-engine-action-copy">Live automation status is temporarily unavailable. Showing the last known state; manual start remains disabled.</p>`;
+  const error = dryTrendScoreAutoStatus.last_error
+    ? `<p class="dry-engine-action-copy c-neg">Latest controller error: ${esc(dryTrendScoreAutoStatus.last_error)}</p>`
+    : '';
+
+  return `<section class="dry-engine-panel dry-slot-footer-panel is-hold"
+                   aria-label="Automatic Trend Engine DRY RUN status">
+    <div class="dry-engine-hd">
+      <div>
+        <span>TREND SCORE AUTOMATION · DRY RUN ONLY</span>
+        <strong>Entries, exits and score-zone switches happen automatically</strong>
+      </div>
+      <span class="dry-engine-decision">${esc(statusText)}</span>
+    </div>
+    <dl class="dry-engine-metrics">
+      <div class="wide"><dt>Current automatic action</dt><dd>${esc(dryTrendScoreTarget(dryTrendScoreAutoStatus))}</dd></div>
+      <div><dt>Direction score</dt><dd>${esc(score)}</dd></div>
+      <div><dt>Market regime</dt><dd>${esc(regime)}</dd></div>
+      <div><dt>Score zone</dt><dd>${esc(zone)}</dd></div>
+      <div><dt>Lots</dt><dd>${esc(lots)}</dd></div>
+      <div class="wide"><dt>Selected / open contract</dt><dd>${esc(symbol)}</dd></div>
+      <div class="wide"><dt>Last automatic action</dt><dd>${esc(lastAction)}</dd></div>
+      <div><dt>Signal bar closed</dt><dd>${esc(dryTrendScoreTimestamp(dryTrendScoreAutoStatus.signal_bar_close_utc))}</dd></div>
+      <div><dt>Last controller cycle</dt><dd>${esc(dryTrendScoreTimestamp(dryTrendScoreAutoStatus.last_cycle_utc))}</dd></div>
+    </dl>
+    ${reachability}${error}
+    <p class="dry-engine-action-copy">No confirmation is required. The older Phase-1 manual “Start simulation” control is disabled while this controller is active.</p>
+    <div class="dry-engine-actions">
+      <a href="/trend-engine" class="btn secondary sm">View full analysis</a>
+    </div>
+    <small>Simulation only — no exchange order will be placed and no real balance will be affected.</small>
+  </section>`;
+}
+
 function dryEngineDateTime(value) {
   if (!value) return 'Not proposed for this decision';
   const parsed = new Date(value);
@@ -408,7 +501,7 @@ function dryTrendEngineHtml(preview) {
   const buyDecision = decision === 'BUY_CE' || decision === 'BUY_PE';
   const canStart = buyDecision && preview.can_apply === true &&
     Boolean(preview.confirmation_token) && Boolean(preview.mode_revision) &&
-    !trendOpen && !dryTrendApplying;
+    !trendOpen && !dryTrendApplying && !dryTrendScoreAutoEnabled();
   const tone = decision === 'BUY_CE' ? 'is-buy-ce'
     : decision === 'BUY_PE' ? 'is-buy-pe'
     : decision === 'HOLD' ? 'is-hold'
@@ -487,6 +580,23 @@ function renderDryMode(status) {
     : 'Historical results remain available, and an already-open simulation may still be ended here. Switch Trading Mode to DRY RUN to start new simulations.';
 }
 
+async function loadDryTrendScoreAutoStatus() {
+  try {
+    const status = await jget('/api/trend-engine/score-auto/status');
+    if (status && typeof status === 'object' &&
+        typeof status.enabled === 'boolean' && typeof status.mode === 'string') {
+      dryTrendScoreAutoStatus = status;
+      dryTrendScoreAutoReachable = true;
+    } else {
+      dryTrendScoreAutoReachable = false;
+    }
+  } catch (_) {
+    // Keep a previously known active state so a transient status failure cannot
+    // accidentally expose the legacy manual-start action alongside automation.
+    dryTrendScoreAutoReachable = false;
+  }
+}
+
 async function loadDryStatus(refreshTrend = true) {
   if (dryStatusRefreshPending) {
     dryStatusRefreshQueued = dryStatusRefreshQueued || refreshTrend;
@@ -507,13 +617,16 @@ async function loadDryStatus(refreshTrend = true) {
   try {
     dryStatus = status || {};
     renderDryMode(dryStatus);
+    await loadDryTrendScoreAutoStatus();
     if (!dryModeActive) dryTrendEnginePreview = null;
     document.getElementById('dry-when-morning').textContent =
       'Scheduled ' + (dryStatus.morning_entry_ist || '—') +
       ' · SIDEWAYS SELL immediate';
     document.getElementById('dry-when-evening').textContent =
       'Entry ' + (dryStatus.evening_entry_ist || dryStatus.entry_ist || '—');
-    if (refreshTrend) {
+    if (dryTrendScoreAutoEnabled()) {
+      dryTrendEnginePreview = null;
+    } else if (refreshTrend) {
       dryTrendEnginePreview = null;
       if (dryModeActive) {
         try {
@@ -529,7 +642,9 @@ async function loadDryStatus(refreshTrend = true) {
     const engineDecision = dryTrendEnginePreview?.decision
       ? dryEngineDecisionLabel(dryTrendEnginePreview.decision)
       : '—';
-    document.getElementById('dry-trend-decision').textContent = `Engine ${engineDecision}`;
+    document.getElementById('dry-trend-decision').textContent = dryTrendScoreAutoEnabled()
+      ? `AUTO · ${dryTrendScoreTarget(dryTrendScoreAutoStatus)}`
+      : `Engine ${engineDecision}`;
 
     if (!drySlotIsEditing('morning')) {
       document.getElementById('dry-slot-morning').innerHTML =
@@ -542,7 +657,8 @@ async function loadDryStatus(refreshTrend = true) {
     if (!drySlotIsEditing('trend')) {
       document.getElementById('dry-slot-trend').innerHTML =
         dryPositionDetails(dryStatus.trend || {}, 'trend') +
-        dryTrendEngineHtml(dryTrendEnginePreview);
+        dryTrendScoreAutoHtml() +
+        (dryTrendScoreAutoEnabled() ? '' : dryTrendEngineHtml(dryTrendEnginePreview));
     }
   } finally {
     dryStatusRefreshPending = false;
@@ -554,6 +670,10 @@ async function loadDryStatus(refreshTrend = true) {
 }
 
 async function startDryTrendEngineSimulation() {
+  if (typeof dryTrendScoreAutoEnabled === 'function' && dryTrendScoreAutoEnabled()) {
+    toast('Trend Engine score automation is active; entries and switches happen automatically', 'err');
+    return;
+  }
   const preview = dryTrendEnginePreview;
   const decision = String(preview?.decision || '').toUpperCase();
   const contract = preview?.selected_contract || {};

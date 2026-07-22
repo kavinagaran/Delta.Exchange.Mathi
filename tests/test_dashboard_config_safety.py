@@ -231,7 +231,7 @@ def test_config_reset_profile_covers_every_page_field_and_is_fail_safe():
         "ENTRY_H_UTC", "ENTRY_M_UTC", "EXIT_H_UTC", "EXIT_M_UTC",
     }
 
-    assert len(page_keys) == 65
+    assert len(page_keys) == 66
     assert preserved == {"TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"}
     assert page_keys - preserved == set(dashboard.CONFIG_PAGE_DEFAULTS) - time_keys
     assert time_keys <= set(dashboard.CONFIG_PAGE_DEFAULTS)
