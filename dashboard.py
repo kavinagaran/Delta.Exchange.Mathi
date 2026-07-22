@@ -4,6 +4,7 @@ Run  : python dashboard.py
 Open : http://localhost:5001
 """
 
+import base64
 import hashlib
 import hmac
 import json
@@ -83,11 +84,14 @@ SLOT_STATE_FILES = {
 
 _tp_procs: dict = {}   # "<user>:<slot>" -> subprocess.Popen
 _trend_entry_lock = threading.Lock()
+_trend_engine_dry_entry_lock = threading.Lock()
 _trend_auto_last_attempt: dict[str, float] = {}
 _trend_auto_health: dict[str, dict] = {}
 _trend_debounce: dict[str, dict] = {}
 _trend_shadow_seen: dict[str, str] = {}
 _trend_engine_cache: dict[tuple[str, str, str, str], dict] = {}
+TREND_ENGINE_DRY_PREVIEW_TTL_SECONDS = 120
+TREND_ENGINE_REMAINING_EV_TTL_SECONDS = 300
 _external_options: dict[str, list] = {}
 TREND_SIGNAL_SNAPSHOT_FILE = "trend_signal_snapshot.json"
 
@@ -5355,37 +5359,19 @@ def _trend_engine_invalid_decision(error: Exception, config: dict | None = None)
     return decision
 
 
-@app.route("/api/trend-engine")
-def api_trend_engine():
-    """Read-only, account-scoped rules engine; this endpoint cannot trade."""
-    user = _active_user()
-    try:
-        mode = _trading_mode_payload()
-        engine_config = _trend_engine_config_overrides()
-        strategy_config = _trend_engine_strategy_config()
-    except Exception as exc:
-        decision = _trend_engine_invalid_decision(exc)
-        decision["audit"] = {
-            **decision.get("audit", {}), "order_submitted": False,
-        }
-        return jsonify(decision)
+def _collect_fresh_trend_engine_decision(
+    *,
+    mode: dict,
+    engine_config: dict,
+    strategy_config: dict,
+) -> tuple[dict, dict | None]:
+    """Collect and evaluate a decision, including mandatory BUY revalidation.
 
-    config_fingerprint = hashlib.sha256(json.dumps(
-        {"engine": engine_config, "adapter": strategy_config},
-        sort_keys=True, separators=(",", ":"), default=str,
-    ).encode("utf-8")).hexdigest()[:16]
-    cache_key = (
-        user, mode["execution_mode"], mode["mode_revision"], config_fingerprint,
-    )
-    cached = _trend_engine_cache.get(cache_key, {})
-    force = str(request.args.get("refresh") or "").lower() in {
-        "1", "true", "yes", "on",
-    }
-    if (not force and isinstance(cached.get("decision"), dict)
-            and cached["decision"].get("decision") == "NO_TRADE"
-            and time.time() - float(cached.get("at", 0)) < 15):
-        return jsonify(cached["decision"])
-
+    The returned snapshot is the snapshot that produced the final decision.
+    Keeping that snapshot private to the server lets the DRY RUN confirmation
+    bridge bind a preview to closed candles and the selected contract without
+    accepting any symbol, side, price, or quantity from the browser.
+    """
     try:
         snapshot = collect_delta_trend_snapshot(
             http_get=req.get,
@@ -5397,6 +5383,7 @@ def api_trend_engine():
             strategy_config=strategy_config,
         )
         decision = evaluate_trend(snapshot, engine_config)
+        final_snapshot = snapshot
         if decision.get("decision") in {"BUY_CE", "BUY_PE"}:
             initial = decision
             recheck_snapshot = collect_delta_trend_snapshot(
@@ -5431,6 +5418,7 @@ def api_trend_engine():
                 and price_stable
             )
             decision = rechecked
+            final_snapshot = recheck_snapshot
             recheck_audit = (
                 decision.get("audit")
                 if isinstance(decision.get("audit"), dict) else {}
@@ -5456,11 +5444,50 @@ def api_trend_engine():
                     "No trade: the contract or entry quote changed during "
                     "mandatory revalidation."
                 )
+        return decision, final_snapshot
     except Exception as exc:
         # A bad feed or account snapshot is a successful NO_TRADE decision,
-        # not an HTTP error and never a reason to fall back to guessed values.
-        print(f"Trend Engine collection warning for {user}: {exc}")
-        decision = _trend_engine_invalid_decision(exc, engine_config)
+        # never permission to fall back to guessed values.
+        print(f"Trend Engine collection warning for {_active_user()}: {exc}")
+        return _trend_engine_invalid_decision(exc, engine_config), None
+
+
+@app.route("/api/trend-engine")
+def api_trend_engine():
+    """Read-only, account-scoped rules engine; this endpoint cannot trade."""
+    user = _active_user()
+    try:
+        mode = _trading_mode_payload()
+        engine_config = _trend_engine_config_overrides()
+        strategy_config = _trend_engine_strategy_config()
+    except Exception as exc:
+        decision = _trend_engine_invalid_decision(exc)
+        decision["audit"] = {
+            **decision.get("audit", {}), "order_submitted": False,
+        }
+        return jsonify(decision)
+
+    config_fingerprint = hashlib.sha256(json.dumps(
+        {"engine": engine_config, "adapter": strategy_config},
+        sort_keys=True, separators=(",", ":"), default=str,
+    ).encode("utf-8")).hexdigest()[:16]
+    cache_key = (
+        user, mode["execution_mode"], mode["mode_revision"], config_fingerprint,
+    )
+    cached = _trend_engine_cache.get(cache_key, {})
+    force = str(request.args.get("refresh") or "").lower() in {
+        "1", "true", "yes", "on",
+    }
+    if (not force and isinstance(cached.get("decision"), dict)
+            and cached["decision"].get("decision") == "NO_TRADE"
+            and time.time() - float(cached.get("at", 0)) < 15):
+        return jsonify(cached["decision"])
+
+    decision, _ = _collect_fresh_trend_engine_decision(
+        mode=mode,
+        engine_config=engine_config,
+        strategy_config=strategy_config,
+    )
 
     audit = decision.get("audit") if isinstance(decision.get("audit"), dict) else {}
     decision["audit"] = {
@@ -5484,6 +5511,1086 @@ def api_trend_engine():
     except Exception as exc:
         print(f"Trend Engine audit warning for {user}: {exc}")
     return jsonify(decision)
+
+
+def _trend_engine_signal_fingerprint(
+    snapshot: dict | None,
+    decision: dict,
+) -> tuple[str | None, dict]:
+    """Fingerprint the exact closed candles behind an actionable decision."""
+    if not isinstance(snapshot, dict):
+        return None, {}
+    raw_candles = snapshot.get("candles")
+    if not isinstance(raw_candles, dict):
+        return None, {}
+    closed = {}
+    for timeframe in ("5m", "15m", "60m"):
+        rows = raw_candles.get(timeframe)
+        if not isinstance(rows, list):
+            return None, {}
+        complete = [
+            row for row in rows
+            if isinstance(row, dict) and row.get("complete") is True
+            and str(row.get("timestamp") or "").strip()
+        ]
+        if not complete:
+            return None, {}
+        complete.sort(key=lambda row: str(row.get("timestamp") or ""))
+        # Hash the complete evaluated history, not only the terminal candle.
+        # A venue correction to an earlier closed bar can change indicators
+        # even when the most recent candle timestamp has not moved.
+        closed[timeframe] = [{
+            key: row.get(key)
+            for key in ("timestamp", "open", "high", "low", "close", "volume")
+        } for row in complete]
+    basis = {
+        "underlying": decision.get("underlying"),
+        "decision": decision.get("decision"),
+        "symbol": (decision.get("selected_contract") or {}).get("symbol"),
+        "closed_candles": closed,
+    }
+    canonical = json.dumps(
+        basis, sort_keys=True, separators=(",", ":"), default=str,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest(), basis
+
+
+def _trend_engine_snapshot_contract(snapshot: dict | None, symbol: str) -> dict | None:
+    if not isinstance(snapshot, dict):
+        return None
+    contracts = snapshot.get("option_contracts")
+    if not isinstance(contracts, list):
+        return None
+    matches = [
+        dict(row) for row in contracts
+        if isinstance(row, dict) and str(row.get("symbol") or "") == symbol
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _trend_engine_risk_plan_fingerprint(
+    decision: dict,
+    raw_contract: dict | None,
+) -> str | None:
+    """Bind confirmation to every non-price part of the approved thesis."""
+    if not isinstance(raw_contract, dict):
+        return None
+    selected = decision.get("selected_contract")
+    order_plan = decision.get("order_plan")
+    audit = decision.get("audit")
+    if not isinstance(selected, dict) or not isinstance(order_plan, dict):
+        return None
+    scenario = audit.get("scenario") if isinstance(audit, dict) else None
+    scenario = scenario if isinstance(scenario, dict) else {}
+    basis = {
+        "decision": decision.get("decision"),
+        "directional_bias": decision.get("directional_bias"),
+        "direction_score": decision.get("direction_score"),
+        "trade_score": decision.get("trade_score"),
+        "model_version": decision.get("model_version"),
+        "schema_version": decision.get("schema_version"),
+        "contract": {
+            key: selected.get(key)
+            for key in (
+                "symbol", "option_type", "strike", "expiry", "delta",
+                "contract_score", "contract_components",
+            )
+        },
+        "product_id": raw_contract.get("product_id"),
+        "contract_value": raw_contract.get("contract_value"),
+        # Entry may improve after confirmation. Every risk boundary, score,
+        # and quantity must remain byte-for-byte equivalent.
+        "order_plan": {
+            key: order_plan.get(key)
+            for key in (
+                "quantity_lots", "lot_size", "stop_option_price",
+                "underlying_invalidation", "target_option_price",
+                "underlying_target", "time_exit", "estimated_total_costs",
+                "maximum_estimated_loss", "reward_risk",
+            )
+        },
+        "remaining_expected_value": scenario.get(
+            "net_expected_value_per_lot"
+        ),
+    }
+    canonical = json.dumps(
+        basis, sort_keys=True, separators=(",", ":"), default=str,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _trend_engine_actionable_plan(
+    decision: dict,
+    raw_contract: dict | None,
+    *,
+    now: datetime | None = None,
+) -> dict:
+    """Validate every numeric and temporal field before confirmation/write."""
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    selected = decision.get("selected_contract")
+    order_plan = decision.get("order_plan")
+    audit = decision.get("audit")
+    hard_gates = decision.get("hard_gates")
+    if (
+        decision.get("decision") not in {"BUY_CE", "BUY_PE"}
+        or not isinstance(selected, dict)
+        or not isinstance(order_plan, dict)
+        or not isinstance(raw_contract, dict)
+        or not isinstance(hard_gates, dict)
+        or not hard_gates
+        or not all(value is True for value in hard_gates.values())
+    ):
+        raise ValueError("The engine decision did not pass every mandatory gate")
+
+    expected_type = "CE" if decision["decision"] == "BUY_CE" else "PE"
+    symbol = str(selected.get("symbol") or "")
+    if (
+        selected.get("option_type") != expected_type
+        or not symbol.startswith("C-BTC-" if expected_type == "CE" else "P-BTC-")
+        or str(raw_contract.get("symbol") or "") != symbol
+    ):
+        raise ValueError("The engine decision and selected option type do not match")
+
+    def finite(key: str, source: dict, *, positive: bool = False,
+               nonnegative: bool = False) -> float:
+        try:
+            value = float(source.get(key))
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(f"The engine {key} is unavailable") from exc
+        if not math.isfinite(value):
+            raise ValueError(f"The engine {key} is not finite")
+        if positive and value <= 0:
+            raise ValueError(f"The engine {key} must be positive")
+        if nonnegative and value < 0:
+            raise ValueError(f"The engine {key} must not be negative")
+        return value
+
+    product_id = int(raw_contract.get("product_id"))
+    if product_id <= 0:
+        raise ValueError("The selected product id is invalid")
+    contract_value = finite("contract_value", raw_contract, positive=True)
+    strike = finite("strike", selected, positive=True)
+    entry = finite("entry_price", order_plan, positive=True)
+    maximum_entry = finite("maximum_entry_price", order_plan, positive=True)
+    stop = finite("stop_option_price", order_plan, positive=True)
+    target = finite("target_option_price", order_plan, positive=True)
+    invalidation = finite("underlying_invalidation", order_plan, positive=True)
+    underlying_target = finite("underlying_target", order_plan, positive=True)
+    costs = finite("estimated_total_costs", order_plan, nonnegative=True)
+    maximum_loss = finite("maximum_estimated_loss", order_plan, positive=True)
+    reward_risk = finite("reward_risk", order_plan, positive=True)
+    direction_score = finite("direction_score", decision)
+    contract_score = finite("contract_score", selected, positive=True)
+    trade_score = finite("trade_score", decision, positive=True)
+    try:
+        raw_quantity = float(order_plan.get("quantity_lots"))
+        quantity = int(raw_quantity)
+        raw_increment = float(order_plan.get("lot_size"))
+        increment = int(raw_increment)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("The engine quantity or lot increment is invalid") from exc
+    if (
+        not math.isfinite(raw_quantity) or not math.isfinite(raw_increment)
+        or raw_quantity != quantity or raw_increment != increment
+        or quantity <= 0 or increment <= 0 or quantity % increment
+    ):
+        raise ValueError("The engine quantity does not match its lot increment")
+    if maximum_entry < entry or stop >= entry or target <= entry:
+        raise ValueError("The option entry, stop, target, or price ceiling is invalid")
+    if expected_type == "CE" and direction_score <= 0:
+        raise ValueError("BUY_CE requires a positive direction score")
+    if expected_type == "PE" and direction_score >= 0:
+        raise ValueError("BUY_PE requires a negative direction score")
+    try:
+        time_exit = datetime.fromisoformat(
+            str(order_plan.get("time_exit") or "").replace("Z", "+00:00")
+        )
+        expiry = datetime.fromisoformat(
+            str(selected.get("expiry") or "").replace("Z", "+00:00")
+        )
+        if time_exit.tzinfo is None:
+            time_exit = time_exit.replace(tzinfo=timezone.utc)
+        if expiry.tzinfo is None:
+            expiry = expiry.replace(tzinfo=timezone.utc)
+        time_exit = time_exit.astimezone(timezone.utc)
+        expiry = expiry.astimezone(timezone.utc)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("The engine exit time or contract expiry is invalid") from exc
+    if time_exit <= now or expiry <= time_exit:
+        raise ValueError("The engine exit time is not safely before expiry")
+    try:
+        market_timestamp = datetime.fromisoformat(
+            str(decision.get("market_data_timestamp") or "").replace(
+                "Z", "+00:00"
+            )
+        )
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("The engine market-data timestamp is invalid") from exc
+    if market_timestamp.tzinfo is None:
+        raise ValueError("The engine market-data timestamp must be timezone-aware")
+    market_timestamp = market_timestamp.astimezone(timezone.utc)
+    configured_latency = (
+        (audit.get("config") or {}).get("max_data_latency_seconds")
+        if isinstance(audit, dict) and isinstance(audit.get("config"), dict)
+        else TREND_ENGINE_DEFAULT_CONFIG.get("max_data_latency_seconds", 30)
+    )
+    try:
+        maximum_latency = float(configured_latency)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("The engine data-latency allowance is invalid") from exc
+    if not math.isfinite(maximum_latency) or maximum_latency < 0:
+        raise ValueError("The engine data-latency allowance is invalid")
+    market_age = (now - market_timestamp).total_seconds()
+    if market_age < -5 or market_age > maximum_latency:
+        raise ValueError("The engine market-data timestamp is outside its allowance")
+    scenario = audit.get("scenario") if isinstance(audit, dict) else None
+    scenario = scenario if isinstance(scenario, dict) else {}
+    remaining_ev = finite(
+        "net_expected_value_per_lot", scenario, positive=True,
+    )
+    return {
+        "symbol": symbol,
+        "option_type": expected_type,
+        "product_id": product_id,
+        "contract_value": contract_value,
+        "strike": strike,
+        "entry_price": entry,
+        "maximum_entry_price": maximum_entry,
+        "stop_option_price": stop,
+        "target_option_price": target,
+        "underlying_invalidation": invalidation,
+        "underlying_target": underlying_target,
+        "estimated_total_costs": costs,
+        "maximum_estimated_loss": maximum_loss,
+        "reward_risk": reward_risk,
+        "direction_score": direction_score,
+        "contract_score": contract_score,
+        "trade_score": trade_score,
+        "quantity_lots": quantity,
+        "lot_size": increment,
+        "time_exit": time_exit,
+        "expiry": expiry,
+        "market_data_timestamp": market_timestamp.isoformat().replace(
+            "+00:00", "Z"
+        ),
+        "remaining_expected_value": remaining_ev,
+    }
+
+
+def _trend_engine_preview_secret() -> bytes:
+    return (str(app.secret_key) + "|trend-engine-dry-run-entry-v1").encode("utf-8")
+
+
+def _trend_engine_encode_preview_token(payload: dict) -> str:
+    raw = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), default=str,
+    ).encode("utf-8")
+    encoded = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+    signature = hmac.new(
+        _trend_engine_preview_secret(), encoded.encode("ascii"), hashlib.sha256,
+    ).hexdigest()
+    return f"{encoded}.{signature}"
+
+
+def _trend_engine_decode_preview_token(token: str) -> dict:
+    try:
+        encoded, supplied_signature = str(token or "").split(".", 1)
+    except ValueError as exc:
+        raise ValueError("Invalid or incomplete DRY RUN confirmation token") from exc
+    expected_signature = hmac.new(
+        _trend_engine_preview_secret(), encoded.encode("ascii"), hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(supplied_signature, expected_signature):
+        raise ValueError("Invalid or incomplete DRY RUN confirmation token")
+    try:
+        padded = encoded + "=" * (-len(encoded) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")))
+    except (ValueError, TypeError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError("Invalid or incomplete DRY RUN confirmation token") from exc
+    if not isinstance(payload, dict) or payload.get("version") != 1:
+        raise ValueError("Unsupported DRY RUN confirmation token")
+    now = int(time.time())
+    try:
+        issued_at = int(payload.get("issued_at"))
+        expires_at = int(payload.get("expires_at"))
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("Invalid DRY RUN confirmation token lifetime") from exc
+    if issued_at > now + 5:
+        raise ValueError("DRY RUN confirmation token is not active yet")
+    if expires_at < now or expires_at <= issued_at:
+        raise ValueError("DRY RUN confirmation expired; refresh and review again")
+    return payload
+
+
+def _trend_engine_dry_state_blocker(state: dict, data_dir: Path) -> str | None:
+    """Reject every OPEN, pending, corrupt, or unreconciled Trend generation."""
+    if not isinstance(state, dict):
+        return "The existing DRY RUN Trend state is unreadable"
+    status = str(state.get("status") or "").strip().upper()
+    if status == "OPEN":
+        return "A DRY RUN Trend CE / PE position is already open"
+    if status not in {"", "IDLE", "CLOSED"}:
+        return f"The previous DRY RUN Trend state is still {status or 'unresolved'}"
+    previous_blocker = _trend_previous_state_blocker(state)
+    if previous_blocker:
+        return previous_blocker
+    if any(
+        state.get(key) not in (None, "")
+        for key in (
+            "pending_entry_client_order_id", "pending_entry_order_id",
+            "pending_close_client_order_id", "pending_close_order_id",
+        )
+    ):
+        return "The previous DRY RUN Trend action has a pending order identity"
+    pending_journals = [
+        *Path(data_dir).glob("pending_*_entry.json"),
+        *Path(data_dir).glob("pending_trend_order_*.json"),
+    ]
+    if pending_journals:
+        return "A pending DRY RUN Trend journal must be reconciled before entry"
+    return None
+
+
+def _trend_engine_consumed_signal_path(data_dir: Path) -> Path:
+    return Path(data_dir) / "trend_engine_consumed_signals.json"
+
+
+def _trend_engine_consumed_signals(data_dir: Path) -> dict:
+    path = _trend_engine_consumed_signal_path(data_dir)
+    if not path.exists():
+        return {"schema_version": 1, "signals": {}}
+    try:
+        ledger = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError) as exc:
+        raise RuntimeError(
+            "The DRY RUN Trend signal ledger is unreadable; entry fails closed"
+        ) from exc
+    if (
+        not isinstance(ledger, dict)
+        or ledger.get("schema_version") != 1
+        or not isinstance(ledger.get("signals"), dict)
+    ):
+        raise RuntimeError(
+            "The DRY RUN Trend signal ledger is invalid; entry fails closed"
+        )
+    return ledger
+
+
+def _trend_engine_signal_was_consumed(data_dir: Path, fingerprint: str | None) -> bool:
+    if not fingerprint:
+        return False
+    return fingerprint in _trend_engine_consumed_signals(data_dir)["signals"]
+
+
+def _trend_engine_apply_reason(
+    decision: dict,
+    *,
+    mode: dict,
+    state_blocker: str | None,
+) -> str:
+    if not mode.get("dry_run_mode"):
+        return "Switch Trading Mode to DRY RUN before starting this simulation"
+    if state_blocker:
+        return state_blocker
+    current = str(decision.get("decision") or "NO_TRADE")
+    if current == "EXIT":
+        return (
+            "EXIT is advisory in Phase 1. Review and close the existing DRY RUN "
+            "position manually; the Trend Engine will not close it automatically"
+        )
+    if current == "HOLD":
+        return "HOLD keeps the existing simulation unchanged and never adds lots"
+    if current == "NO_TRADE":
+        return str(decision.get("decision_summary") or "No new Trend entry is allowed")
+    if current not in {"BUY_CE", "BUY_PE"}:
+        return "The Trend Engine did not return a supported Phase 1 entry decision"
+    return "The fresh BUY decision could not be bound to a safe confirmation"
+
+
+def _trend_engine_dry_preview_payload() -> dict:
+    """Build a fresh, server-derived Phase 1 DRY RUN confirmation preview."""
+    mode = _trading_mode_payload()
+    if not mode.get("dry_run_mode"):
+        # This explicitly DRY-only route must not collect a LIVE wallet,
+        # position, or order snapshot merely to explain that mode is blocked.
+        decision = _trend_engine_invalid_decision(RuntimeError(
+            "Trend Engine simulation preview is available only in DRY RUN mode"
+        ))
+        audit = (
+            decision.get("audit")
+            if isinstance(decision.get("audit"), dict) else {}
+        )
+        decision["audit"] = {
+            **audit,
+            "execution_mode": mode["execution_mode"],
+            "mode_revision": mode["mode_revision"],
+            "order_submitted": False,
+            "phase1_dry_run_bridge": True,
+        }
+        return {
+            **decision,
+            "ok": True,
+            "dry_run": False,
+            "can_apply": False,
+            "confirmation_token": None,
+            "confirmation_expires_at": None,
+            "mode_revision": mode["mode_revision"],
+            "apply_reason": (
+                "Switch Trading Mode to DRY RUN before starting this simulation"
+            ),
+            "signal_fingerprint": None,
+            "signal_closed_candles": {},
+        }
+    try:
+        engine_config = _trend_engine_config_overrides()
+        strategy_config = _trend_engine_strategy_config()
+    except Exception as exc:
+        decision = _trend_engine_invalid_decision(exc)
+        snapshot = None
+    else:
+        decision, snapshot = _collect_fresh_trend_engine_decision(
+            mode=mode,
+            engine_config=engine_config,
+            strategy_config=strategy_config,
+        )
+    audit = decision.get("audit") if isinstance(decision.get("audit"), dict) else {}
+    decision["audit"] = {
+        **audit,
+        "execution_mode": mode["execution_mode"],
+        "mode_revision": mode["mode_revision"],
+        "order_submitted": False,
+        "phase1_dry_run_bridge": True,
+    }
+    data_dir = _mode_data_dir(True)
+    state = _load_json(_slot_file("trend", dry_run=True), {})
+    state_blocker = _trend_engine_dry_state_blocker(state, data_dir)
+    fingerprint, fingerprint_basis = _trend_engine_signal_fingerprint(
+        snapshot, decision,
+    )
+    try:
+        signal_consumed = _trend_engine_signal_was_consumed(
+            data_dir, fingerprint,
+        )
+    except RuntimeError as exc:
+        signal_consumed = False
+        state_blocker = str(exc)
+    if signal_consumed:
+        state_blocker = (
+            "This Trend Engine signal was already simulated; wait for a new "
+            "closed-candle signal"
+        )
+    selected = decision.get("selected_contract") or {}
+    order_plan = decision.get("order_plan") or {}
+    symbol = str(selected.get("symbol") or "")
+    raw_contract = _trend_engine_snapshot_contract(snapshot, symbol)
+    risk_plan_fingerprint = _trend_engine_risk_plan_fingerprint(
+        decision, raw_contract,
+    )
+    if (
+        str(state.get("status") or "").upper() == "CLOSED"
+        and state.get("entry_trigger") == "trend_engine_phase1_confirmed"
+        and fingerprint
+        and state.get("engine_signal_fingerprint") == fingerprint
+    ):
+        state_blocker = (
+            "This Trend Engine signal was already simulated and closed; "
+            "wait for a new closed-candle signal"
+        )
+    try:
+        plan = _trend_engine_actionable_plan(decision, raw_contract)
+    except (TypeError, ValueError, OverflowError):
+        plan = None
+    can_apply = (
+        mode.get("dry_run_mode") is True
+        and not state_blocker
+        and decision.get("decision") in {"BUY_CE", "BUY_PE"}
+        and decision.get("reason_codes") == ["ALL_ENTRY_GATES_PASSED"]
+        and decision["audit"].get("quote_revalidated") is True
+        and bool(fingerprint)
+        and bool(risk_plan_fingerprint)
+        and isinstance(raw_contract, dict)
+        and isinstance(plan, dict)
+    )
+    token = None
+    expires_at = None
+    if can_apply:
+        try:
+            entry_price = plan["entry_price"]
+            maximum_entry = plan["maximum_entry_price"]
+            quantity_lots = plan["quantity_lots"]
+            product_id = plan["product_id"]
+            issued_at = int(time.time())
+            expires_epoch = issued_at + TREND_ENGINE_DRY_PREVIEW_TTL_SECONDS
+            token = _trend_engine_encode_preview_token({
+                "version": 1,
+                "user": _active_user(),
+                "execution_mode": "dry_run",
+                "mode_revision": mode["mode_revision"],
+                "decision": decision["decision"],
+                "symbol": symbol,
+                "product_id": product_id,
+                "maximum_entry_price": maximum_entry,
+                "quantity_lots": quantity_lots,
+                "model_version": decision.get("model_version"),
+                "schema_version": decision.get("schema_version"),
+                "signal_fingerprint": fingerprint,
+                "risk_plan_fingerprint": risk_plan_fingerprint,
+                "issued_at": issued_at,
+                "expires_at": expires_epoch,
+            })
+            expires_at = datetime.fromtimestamp(
+                expires_epoch, tz=timezone.utc,
+            ).isoformat().replace("+00:00", "Z")
+        except (TypeError, ValueError, OverflowError):
+            can_apply = False
+            token = None
+    apply_reason = None if can_apply else _trend_engine_apply_reason(
+        decision, mode=mode, state_blocker=state_blocker,
+    )
+    return {
+        **decision,
+        "ok": True,
+        "dry_run": bool(mode.get("dry_run_mode")),
+        "can_apply": can_apply,
+        "confirmation_token": token,
+        "confirmation_expires_at": expires_at,
+        "mode_revision": mode["mode_revision"],
+        "apply_reason": apply_reason,
+        "signal_fingerprint": fingerprint if can_apply else None,
+        "signal_closed_candles": (
+            {
+                timeframe: rows[-1].get("timestamp")
+                for timeframe, rows in (
+                    fingerprint_basis.get("closed_candles", {}) or {}
+                ).items()
+                if isinstance(rows, list) and rows
+            } if can_apply else {}
+        ),
+    }
+
+
+@app.route("/api/trend-engine/dry-run-preview")
+def api_trend_engine_dry_run_preview():
+    """Preview only; no exchange order or simulated position is created."""
+    return jsonify(_trend_engine_dry_preview_payload())
+
+
+def _trend_engine_idempotent_dry_state(state: dict, token: dict) -> bool:
+    if not (
+        isinstance(state, dict)
+        and state.get("status") == "OPEN"
+        and _is_dry_record(state)
+        and state.get("entry_trigger") == "trend_engine_phase1_confirmed"
+        and state.get("engine_signal_fingerprint") == token.get("signal_fingerprint")
+        and state.get("engine_risk_plan_fingerprint") == token.get(
+            "risk_plan_fingerprint"
+        )
+        and state.get("symbol") == token.get("symbol")
+        and state.get("engine_entry_decision") == token.get("decision")
+    ):
+        return False
+    return all(state.get(key) not in (None, "") for key in (
+        "entry_decision_id", "model_version", "schema_version",
+        "underlying_invalidation", "stop_option_price",
+        "target_option_price", "time_exit", "remaining_expected_value",
+        "remaining_expected_value_as_of_utc",
+        "remaining_expected_value_valid_until_utc",
+        "remaining_expected_value_source", "entry_decision_snapshot",
+    ))
+
+
+def _trend_engine_closed_signal_replay(state: dict, token: dict) -> bool:
+    return bool(
+        isinstance(state, dict)
+        and str(state.get("status") or "").upper() == "CLOSED"
+        and state.get("entry_trigger") == "trend_engine_phase1_confirmed"
+        and state.get("engine_signal_fingerprint")
+        == token.get("signal_fingerprint")
+    )
+
+
+def _trend_engine_dry_state_from_decision(
+    decision: dict,
+    snapshot: dict,
+    token: dict,
+    signal_basis: dict,
+) -> dict:
+    selected = decision.get("selected_contract") or {}
+    order_plan = decision.get("order_plan") or {}
+    raw_contract = _trend_engine_snapshot_contract(snapshot, token["symbol"])
+    if not isinstance(raw_contract, dict):
+        raise ValueError("The selected contract disappeared during revalidation")
+    now = datetime.now(timezone.utc)
+    plan = _trend_engine_actionable_plan(
+        decision, raw_contract, now=now,
+    )
+    if plan["quantity_lots"] != int(token.get("quantity_lots") or 0):
+        raise ValueError("The confirmed quantity changed during revalidation")
+    product_id = plan["product_id"]
+    contract_value = plan["contract_value"]
+    strike = plan["strike"]
+    entry_price = plan["entry_price"]
+    lots = plan["quantity_lots"]
+    remaining_ev = plan["remaining_expected_value"]
+    now_iso = now.isoformat().replace("+00:00", "Z")
+    remaining_ev_valid_until = (
+        now + timedelta(seconds=TREND_ENGINE_REMAINING_EV_TTL_SECONDS)
+    ).isoformat().replace("+00:00", "Z")
+    entry_fee = _option_fee_per_lot(entry_price, contract_value, strike) * lots
+    fingerprint = str(token["signal_fingerprint"])
+    simulation_id = "sim-trend-engine-" + hashlib.sha256(
+        f"{_active_user()}|{fingerprint}".encode("utf-8")
+    ).hexdigest()[:20]
+    position_cycle_id = "trend-dry-engine-" + fingerprint[:20]
+    direction = "up" if decision.get("decision") == "BUY_CE" else "down"
+    state = {
+        "slot": "trend",
+        "status": "OPEN",
+        "side": "long",
+        "option_type": "CE" if decision.get("decision") == "BUY_CE" else "PE",
+        "trend_signal": direction,
+        "entry_date": now.strftime("%Y-%m-%d"),
+        "entry_time_utc": now.strftime("%H:%M:%S"),
+        "entry_at_utc": now_iso,
+        "symbol": token["symbol"],
+        "product_id": product_id,
+        "strike": strike,
+        "settlement": selected.get("expiry"),
+        "contract_value": contract_value,
+        "lots": lots,
+        "entry_mark": round(entry_price, 8),
+        "owned_entry_lots": lots,
+        "original_owned_entry_lots": lots,
+        "protection_lots": lots,
+        "max_protected_lots": lots,
+        "original_bot_entry_mark": round(entry_price, 8),
+        "total_cost_usd": round(entry_price * contract_value * lots, 8),
+        "entry_fees_usd": round(entry_fee, 8),
+        "entry_fee_usd": round(entry_fee, 8),
+        "fees_usd": round(entry_fee, 8),
+        "entry_fee_source": "configured_simulation",
+        "original_bot_entry_fee_usd": round(entry_fee, 8),
+        "original_bot_entry_fee_source": "configured_simulation",
+        "order_id": 0,
+        "order_ids": [],
+        "client_order_id": None,
+        "client_order_ids": [],
+        "ownership": "trend_engine_dry_run",
+        "entry_trigger": "trend_engine_phase1_confirmed",
+        "dry_run": True,
+        "execution_mode": "dry_run",
+        "simulation_id": simulation_id,
+        "position_cycle_id": position_cycle_id,
+        "engine_signal_fingerprint": fingerprint,
+        "engine_risk_plan_fingerprint": token["risk_plan_fingerprint"],
+        "engine_entry_decision": decision["decision"],
+        "entry_decision_id": decision.get("decision_id"),
+        "model_version": decision.get("model_version"),
+        "schema_version": decision.get("schema_version"),
+        "direction_score_at_entry": decision.get("direction_score"),
+        "contract_score_at_entry": selected.get("contract_score"),
+        "trade_score_at_entry": decision.get("trade_score"),
+        "underlying_invalidation": order_plan.get("underlying_invalidation"),
+        "stop_option_price": order_plan.get("stop_option_price"),
+        "target_option_price": order_plan.get("target_option_price"),
+        "underlying_target": order_plan.get("underlying_target"),
+        "time_exit": order_plan.get("time_exit"),
+        "remaining_expected_value": remaining_ev,
+        "remaining_expected_value_as_of_utc": plan["market_data_timestamp"],
+        "remaining_expected_value_valid_until_utc": remaining_ev_valid_until,
+        "remaining_expected_value_source": (
+            "entry_decision.audit.scenario.net_expected_value_per_lot"
+        ),
+        "order_plan_snapshot": json.loads(json.dumps(order_plan, default=str)),
+        "selected_contract_snapshot": json.loads(json.dumps(selected, default=str)),
+        "entry_decision_snapshot": json.loads(json.dumps(decision, default=str)),
+        "entry_decision_audit": json.loads(json.dumps(
+            decision.get("audit") or {}, default=str,
+        )),
+        "signal_snapshot": json.loads(json.dumps(signal_basis, default=str)),
+        "quote_snapshot": json.loads(json.dumps(raw_contract, default=str)),
+        "risk_decision": {
+            "risk_state": decision.get("risk_state"),
+            "hard_gates": decision.get("hard_gates"),
+            "maximum_estimated_loss": order_plan.get("maximum_estimated_loss"),
+        },
+        "risk_at_entry_usd": order_plan.get("maximum_estimated_loss"),
+        "btc_at_entry": (snapshot.get("market") or {}).get("spot"),
+        "last_entry_15m_candle": (
+            ((signal_basis.get("closed_candles") or {}).get("15m") or [{}])[-1]
+        ).get("timestamp"),
+        "last_entry_direction": direction,
+        "trend_rearmed": False,
+        "protection_config": _tp_policy("trend"),
+        "protection_revision": 0,
+        "continuity_revision": 0,
+        "continuity_anchor_utc": now_iso,
+        "continuity_verified": True,
+        "continuity_status": "dry_run_simulation",
+        "cycle_entry_lots_total": lots,
+        "cycle_exit_lots_total": 0,
+        "partial_exit_accounting_status": "complete",
+        "position_composition": "simulated_only",
+        "execution_snapshot": {
+            "kind": "dry_run",
+            "requested": lots,
+            "filled": lots,
+            "average_fill_price": entry_price,
+            "order_submitted": False,
+            "exchange_api_called": False,
+        },
+    }
+    required_thesis = (
+        "entry_decision_id", "model_version", "schema_version",
+        "underlying_invalidation", "stop_option_price", "target_option_price",
+        "time_exit", "remaining_expected_value",
+    )
+    if any(state.get(key) in (None, "") for key in required_thesis):
+        raise ValueError("The engine decision does not contain a complete trade thesis")
+    return state
+
+
+@app.route("/api/trend-engine/dry-run-entry", methods=["POST"])
+def api_trend_engine_dry_run_entry():
+    """Confirm one BUY_CE/BUY_PE simulation; never call an exchange POST."""
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"ok": False, "error": "A JSON confirmation is required"}), 400
+    allowed = {"confirmation_token", "expected_mode", "mode_revision"}
+    extras = sorted(set(data) - allowed)
+    if extras:
+        return jsonify({
+            "ok": False,
+            "error": (
+                "Contract, direction, price, and lots are server-controlled; "
+                f"unsupported confirmation fields: {', '.join(extras)}"
+            ),
+        }), 400
+    if str(data.get("expected_mode") or "").strip().lower().replace(" ", "_") != "dry_run":
+        return jsonify({"ok": False, "error": "expected_mode must be dry_run"}), 400
+    try:
+        token = _trend_engine_decode_preview_token(data.get("confirmation_token"))
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    if not _trend_engine_dry_entry_lock.acquire(blocking=False):
+        return jsonify({
+            "ok": False, "error": "Another Trend Engine DRY RUN entry is in progress",
+        }), 409
+    try:
+        user = _active_user()
+        with account_entry_lock(
+            _user_dir(), f"trend-engine-dry-entry:{user}",
+        ) as account_lock:
+            if not account_lock:
+                return jsonify({
+                    "ok": False, "error": "Another account exposure change is in progress",
+                }), 409
+            mode = _trading_mode_payload()
+            submitted_revision = str(data.get("mode_revision") or "")
+            if (
+                not mode.get("dry_run_mode")
+                or token.get("execution_mode") != "dry_run"
+                or token.get("user") != user
+                or not submitted_revision
+                or submitted_revision != token.get("mode_revision")
+                or mode.get("mode_revision") != token.get("mode_revision")
+            ):
+                return jsonify({
+                    "ok": False,
+                    "error": (
+                        "Trading Mode, account, or configuration changed after preview. "
+                        "Refresh and review the DRY RUN entry again"
+                    ),
+                }), 409
+            data_dir = _mode_data_dir(True)
+            with account_file_lock(
+                data_dir, "close-trend",
+                f"dashboard-trend-engine-dry-entry:{os.getpid()}",
+                stale_after_sec=30, wait_sec=5,
+            ) as state_lock:
+                if not state_lock:
+                    return jsonify({
+                        "ok": False,
+                        "error": "DRY RUN Trend protection or close state is busy",
+                    }), 409
+                state_file = _slot_file("trend", dry_run=True)
+                previous = _load_json(state_file, {})
+                if _trend_engine_idempotent_dry_state(previous, token):
+                    stored_decision = previous.get("entry_decision_snapshot") or {}
+                    return jsonify({
+                        "ok": True,
+                        "idempotent": True,
+                        "dry_run": True,
+                        "order_submitted": False,
+                        "slot": "trend",
+                        "decision": previous.get("engine_entry_decision"),
+                        "option_type": previous.get("option_type"),
+                        "symbol": previous.get("symbol"),
+                        "lots": previous.get("lots"),
+                        "fill": previous.get("entry_mark"),
+                        "simulation_id": previous.get("simulation_id"),
+                        "entry_decision_id": previous.get("entry_decision_id"),
+                        "engine_decision": stored_decision,
+                    })
+                if _trend_engine_closed_signal_replay(previous, token):
+                    return jsonify({
+                        "ok": False,
+                        "error": (
+                            "This Trend Engine signal was already simulated and "
+                            "closed; wait for a new closed-candle signal"
+                        ),
+                    }), 409
+                try:
+                    already_consumed = _trend_engine_signal_was_consumed(
+                        data_dir, token.get("signal_fingerprint"),
+                    )
+                except RuntimeError as exc:
+                    return jsonify({"ok": False, "error": str(exc)}), 409
+                if already_consumed:
+                    return jsonify({
+                        "ok": False,
+                        "error": (
+                            "This Trend Engine signal was already simulated; "
+                            "wait for a new closed-candle signal"
+                        ),
+                    }), 409
+                state_blocker = _trend_engine_dry_state_blocker(previous, data_dir)
+                if state_blocker:
+                    return jsonify({"ok": False, "error": state_blocker}), 409
+
+                engine_config = _trend_engine_config_overrides()
+                strategy_config = _trend_engine_strategy_config()
+                decision, snapshot = _collect_fresh_trend_engine_decision(
+                    mode=mode,
+                    engine_config=engine_config,
+                    strategy_config=strategy_config,
+                )
+                audit = (
+                    decision.get("audit")
+                    if isinstance(decision.get("audit"), dict) else {}
+                )
+                decision["audit"] = {
+                    **audit,
+                    "execution_mode": "dry_run",
+                    "mode_revision": mode["mode_revision"],
+                    "order_submitted": False,
+                    "phase1_dry_run_bridge": True,
+                }
+                latest_mode = _trading_mode_payload()
+                if (
+                    not latest_mode.get("dry_run_mode")
+                    or latest_mode.get("mode_revision") != mode.get("mode_revision")
+                ):
+                    return jsonify({
+                        "ok": False,
+                        "error": "Trading Mode or configuration changed during revalidation",
+                    }), 409
+                if decision.get("decision") not in {"BUY_CE", "BUY_PE"}:
+                    return jsonify({
+                        "ok": False,
+                        "error": _trend_engine_apply_reason(
+                            decision, mode=mode, state_blocker=None,
+                        ),
+                        "decision": decision,
+                    }), 409
+                selected = decision.get("selected_contract") or {}
+                order_plan = decision.get("order_plan") or {}
+                fresh_fingerprint, signal_basis = _trend_engine_signal_fingerprint(
+                    snapshot, decision,
+                )
+                raw_contract = _trend_engine_snapshot_contract(
+                    snapshot, str(selected.get("symbol") or ""),
+                )
+                try:
+                    fresh_plan = _trend_engine_actionable_plan(
+                        decision, raw_contract,
+                    )
+                    fresh_entry = fresh_plan["entry_price"]
+                    fresh_maximum = fresh_plan["maximum_entry_price"]
+                    preview_maximum = float(token.get("maximum_entry_price"))
+                    product_id = fresh_plan["product_id"]
+                    fresh_risk_plan_fingerprint = (
+                        _trend_engine_risk_plan_fingerprint(
+                            decision, raw_contract,
+                        )
+                    )
+                    price_allowed = (
+                        math.isfinite(fresh_entry)
+                        and math.isfinite(fresh_maximum)
+                        and math.isfinite(preview_maximum)
+                        and fresh_entry > 0
+                        and fresh_entry <= fresh_maximum
+                        and fresh_entry <= preview_maximum
+                        and fresh_maximum <= preview_maximum
+                    )
+                except (TypeError, ValueError, OverflowError):
+                    product_id = 0
+                    fresh_plan = None
+                    fresh_risk_plan_fingerprint = None
+                    price_allowed = False
+                stable = (
+                    decision.get("decision") == token.get("decision")
+                    and selected.get("symbol") == token.get("symbol")
+                    and product_id == int(token.get("product_id") or 0)
+                    and decision.get("model_version") == token.get("model_version")
+                    and decision.get("schema_version") == token.get("schema_version")
+                    and fresh_fingerprint == token.get("signal_fingerprint")
+                    and fresh_risk_plan_fingerprint
+                    == token.get("risk_plan_fingerprint")
+                    and isinstance(fresh_plan, dict)
+                    and fresh_plan.get("quantity_lots")
+                    == int(token.get("quantity_lots") or 0)
+                    and decision.get("reason_codes") == ["ALL_ENTRY_GATES_PASSED"]
+                    and decision["audit"].get("quote_revalidated") is True
+                    and price_allowed
+                )
+                if not stable:
+                    return jsonify({
+                        "ok": False,
+                        "error": (
+                            "The Trend Engine signal, contract, or entry price changed. "
+                            "No simulation was opened; refresh and confirm again"
+                        ),
+                        "decision": decision,
+                    }), 409
+                # Hold the same config lock used by /api/config across the
+                # final revision check, signal consumption, and state write.
+                # This closes the race where a non-mode config save could
+                # change sizing or gates after collection but before mutation.
+                with account_file_lock(
+                    _user_dir(), "config",
+                    f"dashboard-trend-engine-config:{os.getpid()}",
+                    stale_after_sec=30, wait_sec=5,
+                ) as config_lock:
+                    if not config_lock:
+                        return jsonify({
+                            "ok": False,
+                            "error": "Account configuration is busy; refresh and confirm again",
+                        }), 409
+                    boundary_mode = _trading_mode_payload()
+                    if (
+                        not boundary_mode.get("dry_run_mode")
+                        or boundary_mode.get("mode_revision")
+                        != token.get("mode_revision")
+                    ):
+                        return jsonify({
+                            "ok": False,
+                            "error": (
+                                "Trading Mode or configuration changed before the "
+                                "simulation could be opened"
+                            ),
+                        }), 409
+                    # Reload at the final mutation boundary so a stale
+                    # collector can never overwrite OPEN/reconciliation state.
+                    latest_previous = _load_json(state_file, {})
+                    if _trend_engine_idempotent_dry_state(latest_previous, token):
+                        return jsonify({
+                            "ok": True, "idempotent": True, "dry_run": True,
+                            "order_submitted": False, "slot": "trend",
+                            "decision": latest_previous.get("engine_entry_decision"),
+                            "option_type": latest_previous.get("option_type"),
+                            "symbol": latest_previous.get("symbol"),
+                            "lots": latest_previous.get("lots"),
+                            "fill": latest_previous.get("entry_mark"),
+                            "simulation_id": latest_previous.get("simulation_id"),
+                            "entry_decision_id": latest_previous.get("entry_decision_id"),
+                            "engine_decision": latest_previous.get(
+                                "entry_decision_snapshot"
+                            ),
+                        })
+                    if _trend_engine_closed_signal_replay(latest_previous, token):
+                        return jsonify({
+                            "ok": False,
+                            "error": (
+                                "This Trend Engine signal was already simulated and "
+                                "closed; wait for a new closed-candle signal"
+                            ),
+                        }), 409
+                    latest_blocker = _trend_engine_dry_state_blocker(
+                        latest_previous, data_dir,
+                    )
+                    if latest_blocker:
+                        return jsonify({"ok": False, "error": latest_blocker}), 409
+                    ledger = _trend_engine_consumed_signals(data_dir)
+                    if fresh_fingerprint in ledger["signals"]:
+                        return jsonify({
+                            "ok": False,
+                            "error": (
+                                "This Trend Engine signal was already simulated; "
+                                "wait for a new closed-candle signal"
+                            ),
+                        }), 409
+                    opened = _trend_engine_dry_state_from_decision(
+                        decision, snapshot, token, signal_basis,
+                    )
+                    # Re-read under the still-held config lock immediately
+                    # before mutation. In production this must be identical;
+                    # the second check also makes the invariant testable.
+                    final_mode = _trading_mode_payload()
+                    if (
+                        not final_mode.get("dry_run_mode")
+                        or final_mode.get("mode_revision")
+                        != token.get("mode_revision")
+                    ):
+                        return jsonify({
+                            "ok": False,
+                            "error": (
+                                "Trading Mode or configuration changed at the final "
+                                "DRY RUN entry boundary"
+                            ),
+                        }), 409
+                    ledger["signals"][fresh_fingerprint] = {
+                        "consumed_at_utc": datetime.now(timezone.utc).isoformat(),
+                        "user": user,
+                        "decision": decision.get("decision"),
+                        "symbol": opened["symbol"],
+                        "quantity_lots": opened["lots"],
+                        "decision_id": decision.get("decision_id"),
+                        "simulation_id": opened["simulation_id"],
+                        "risk_plan_fingerprint": fresh_risk_plan_fingerprint,
+                    }
+                    # Ledger first is deliberate: if the following state write
+                    # fails, retry remains fail-closed instead of duplicating
+                    # the same signal.
+                    _atomic_write_json(
+                        _trend_engine_consumed_signal_path(data_dir), ledger,
+                    )
+                    _atomic_write_json(state_file, opened)
+                    _trend_audit("trend_engine_dry_run_entry_opened", {
+                        "decision_id": decision.get("decision_id"),
+                        "model_version": decision.get("model_version"),
+                        "signal_fingerprint": fresh_fingerprint,
+                        "decision": decision.get("decision"),
+                        "symbol": opened["symbol"],
+                        "lots": opened["lots"],
+                        "entry_mark": opened["entry_mark"],
+                        "simulation_id": opened["simulation_id"],
+                        "order_submitted": False,
+                        "exchange_api_called": False,
+                    })
+                    return jsonify({
+                        "ok": True,
+                        "idempotent": False,
+                        "dry_run": True,
+                        "order_submitted": False,
+                        "slot": "trend",
+                        "decision": decision.get("decision"),
+                        "option_type": opened["option_type"],
+                        "symbol": opened["symbol"],
+                        "lots": opened["lots"],
+                        "fill": opened["entry_mark"],
+                        "simulation_id": opened["simulation_id"],
+                        "entry_decision_id": opened["entry_decision_id"],
+                        "engine_decision": decision,
+                    })
+    except Exception as exc:
+        _trend_audit("trend_engine_dry_run_entry_failed", {
+            "error": str(exc)[:500], "order_submitted": False,
+            "exchange_api_called": False,
+        })
+        return jsonify({"ok": False, "error": str(exc)}), 409
+    finally:
+        _trend_engine_dry_entry_lock.release()
 
 
 def _pick_two_step_itm(products: list, spot: float, option_type: str,

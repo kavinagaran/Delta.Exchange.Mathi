@@ -278,6 +278,15 @@ def test_matching_live_position_carries_only_persisted_engine_thesis(tmp_path):
         "target_option_price": 1200,
         "time_exit": (now + timedelta(hours=6)).isoformat(),
         "remaining_expected_value": 12.5,
+        "remaining_expected_value_as_of_utc": (
+            now - timedelta(seconds=5)
+        ).isoformat(),
+        "remaining_expected_value_valid_until_utc": (
+            now + timedelta(minutes=5)
+        ).isoformat(),
+        "remaining_expected_value_source": (
+            "entry_decision.audit.scenario.net_expected_value_per_lot"
+        ),
     }), encoding="utf-8")
     public_get = _market_router(now, [])
 
@@ -314,3 +323,6 @@ def test_matching_live_position_carries_only_persisted_engine_thesis(tmp_path):
     assert snapshot["risk"]["position_state_consistent"] is True
     assert snapshot["positions"][0]["entry_decision_id"] == "trend-entry-1"
     assert snapshot["positions"][0]["remaining_expected_value"] == 12.5
+    assert snapshot["positions"][0]["remaining_expected_value_status"] == (
+        "valid_persisted_value"
+    )

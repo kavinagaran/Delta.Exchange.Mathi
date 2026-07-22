@@ -330,7 +330,51 @@ def _option_contracts(
     return contracts, max(quote_times) if quote_times else None, ticker_by_symbol
 
 
-def _state_positions(data_dir: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+def _persisted_remaining_expected_value(
+    state: Mapping[str, Any],
+    now: datetime,
+) -> tuple[float, str]:
+    """Reuse a persisted EV only inside its explicit server-issued lifetime.
+
+    An entry EV is not a live valuation.  Once its short validity window has
+    elapsed (or legacy/manual state lacks provenance), returning zero makes
+    the core recommend advisory EXIT instead of pretending the old edge is
+    current.  This adapter never fabricates a refreshed expected value.
+    """
+    value = _finite(state.get("remaining_expected_value"))
+    source = str(state.get("remaining_expected_value_source") or "").strip()
+    as_of_raw = str(
+        state.get("remaining_expected_value_as_of_utc") or ""
+    ).strip()
+    valid_until_raw = str(
+        state.get("remaining_expected_value_valid_until_utc") or ""
+    ).strip()
+    if value is None or not source or not as_of_raw or not valid_until_raw:
+        return 0.0, "unverified_persisted_value"
+    try:
+        as_of = datetime.fromisoformat(as_of_raw.replace("Z", "+00:00"))
+        valid_until = datetime.fromisoformat(
+            valid_until_raw.replace("Z", "+00:00")
+        )
+        if as_of.tzinfo is None:
+            as_of = as_of.replace(tzinfo=timezone.utc)
+        if valid_until.tzinfo is None:
+            valid_until = valid_until.replace(tzinfo=timezone.utc)
+        as_of = as_of.astimezone(timezone.utc)
+        valid_until = valid_until.astimezone(timezone.utc)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0, "invalid_persisted_value_lifetime"
+    if as_of > now + timedelta(seconds=5) or valid_until <= as_of:
+        return 0.0, "invalid_persisted_value_lifetime"
+    if now >= valid_until:
+        return 0.0, "stale_persisted_value"
+    return value, "valid_persisted_value"
+
+
+def _state_positions(
+    data_dir: Path,
+    now: datetime,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     positions = []
     pending = []
     states = []
@@ -342,6 +386,9 @@ def _state_positions(data_dir: Path) -> tuple[list[dict[str, Any]], list[dict[st
         status = str(state.get("status") or "").upper()
         if status == "OPEN":
             symbol = str(state.get("symbol") or "")
+            remaining_ev, remaining_ev_status = (
+                _persisted_remaining_expected_value(state, now)
+            )
             positions.append({
                 "source": "dry_run",
                 "slot": state.get("slot") or ("evening" if name == "straddle_state.json" else name.removesuffix("_state.json")),
@@ -365,7 +412,17 @@ def _state_positions(data_dir: Path) -> tuple[list[dict[str, Any]], list[dict[st
                 "time_exit": state.get("time_exit"),
                 "stop_option_price": state.get("stop_option_price"),
                 "target_option_price": state.get("target_option_price"),
-                "remaining_expected_value": state.get("remaining_expected_value"),
+                "remaining_expected_value": remaining_ev,
+                "remaining_expected_value_status": remaining_ev_status,
+                "remaining_expected_value_as_of_utc": state.get(
+                    "remaining_expected_value_as_of_utc"
+                ),
+                "remaining_expected_value_valid_until_utc": state.get(
+                    "remaining_expected_value_valid_until_utc"
+                ),
+                "remaining_expected_value_source": state.get(
+                    "remaining_expected_value_source"
+                ),
             })
         if status not in {"", "IDLE", "OPEN", "CLOSED"} or any(
             state.get(key) not in (None, "")
@@ -523,7 +580,7 @@ def collect_delta_trend_snapshot(
     )
 
     data_dir = user_dir / "dry_run" if dry_run else user_dir
-    local_positions, local_pending, states = _state_positions(data_dir)
+    local_positions, local_pending, states = _state_positions(data_dir, now)
     positions = list(local_positions)
     position_state_consistent = not bool(local_pending)
     if dry_run:
@@ -617,7 +674,10 @@ def collect_delta_trend_snapshot(
             for key in (
                 "model_version", "entry_decision_id", "underlying_invalidation",
                 "time_exit", "stop_option_price", "target_option_price",
-                "remaining_expected_value",
+                "remaining_expected_value", "remaining_expected_value_status",
+                "remaining_expected_value_as_of_utc",
+                "remaining_expected_value_valid_until_utc",
+                "remaining_expected_value_source",
             ):
                 position[key] = local.get(key)
         if unmatched_local:

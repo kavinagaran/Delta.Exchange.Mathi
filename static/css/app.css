@@ -319,6 +319,64 @@ body.native-app .toast { left: 12px; right: 12px; bottom: 16px; max-width: none;
 .dry-entry-gate.ready.up { background: var(--pos-soft); border-color: color-mix(in srgb, var(--pos) 28%, var(--border)); }
 .dry-entry-gate.ready.down { background: var(--neg-soft); border-color: color-mix(in srgb, var(--neg) 28%, var(--border)); }
 .dry-entry-gate.muted { color: var(--muted); }
+.dry-engine-panel {
+  --dry-engine-tone: var(--accent);
+  display: grid; gap: 11px; margin-top: 14px; padding: 13px;
+  border: 1px solid color-mix(in srgb, var(--dry-engine-tone) 30%, var(--border));
+  border-radius: 10px;
+  background:
+    radial-gradient(circle at 100% 0%, color-mix(in srgb, var(--dry-engine-tone) 13%, transparent), transparent 48%),
+    linear-gradient(145deg, color-mix(in srgb, var(--dry-engine-tone) 7%, var(--surface-subtle)), var(--surface-subtle));
+  box-shadow: inset 0 1px color-mix(in srgb, var(--dry-engine-tone) 14%, transparent);
+}
+.dry-engine-panel.is-buy-ce { --dry-engine-tone: var(--pos); }
+.dry-engine-panel.is-buy-pe,
+.dry-engine-panel.is-exit { --dry-engine-tone: var(--neg); }
+.dry-engine-panel.is-hold { --dry-engine-tone: var(--warn); }
+.dry-engine-panel.is-waiting,
+.dry-engine-panel.is-unavailable { --dry-engine-tone: var(--muted); }
+.dry-engine-hd {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  gap: 10px; min-width: 0;
+}
+.dry-engine-hd > div { display: grid; gap: 3px; min-width: 0; }
+.dry-engine-hd > div > span {
+  color: var(--dry-engine-tone); font-size: 9px; font-weight: 850;
+  letter-spacing: .09em;
+}
+.dry-engine-hd strong { font-size: 12px; line-height: 1.42; overflow-wrap: anywhere; }
+.dry-engine-decision {
+  flex: 0 0 auto; padding: 4px 7px;
+  border: 1px solid color-mix(in srgb, var(--dry-engine-tone) 38%, var(--border));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--dry-engine-tone) 12%, var(--surface));
+  color: var(--dry-engine-tone); font-size: 9px; font-weight: 850;
+  letter-spacing: .04em;
+}
+.dry-engine-metrics {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px;
+}
+.dry-engine-metrics > div {
+  display: grid; gap: 2px; min-width: 0; padding: 7px 8px;
+  border: 1px solid color-mix(in srgb, var(--dry-engine-tone) 14%, var(--border));
+  border-radius: 7px; background: color-mix(in srgb, var(--surface) 72%, transparent);
+}
+.dry-engine-metrics > .wide { grid-column: 1 / -1; }
+.dry-engine-metrics dt {
+  color: var(--muted); font-size: 8.5px; font-weight: 750;
+  letter-spacing: .045em; text-transform: uppercase;
+}
+.dry-engine-metrics dd {
+  margin: 0; font-size: 10.5px; font-weight: 700; line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+.dry-engine-action-copy,
+.dry-engine-panel > p { margin: 0; color: var(--muted); font-size: 10.5px; line-height: 1.45; }
+.dry-engine-action-copy {
+  padding-left: 9px; border-left: 2px solid var(--dry-engine-tone); color: var(--text);
+}
+.dry-engine-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.dry-engine-panel > small { color: var(--muted); font-size: 9px; line-height: 1.4; }
 .dry-protection-box {
   display: grid; gap: 10px; margin-top: 14px; padding: 12px;
   border: 1px solid color-mix(in srgb, var(--warn) 24%, var(--border));
@@ -638,6 +696,12 @@ input.mono { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; fon
   .dry-run-hero { align-items: flex-start; flex-direction: column; padding: 15px 16px; }
   .dry-run-hero-actions { width: 100%; justify-content: space-between; }
   .dry-entry-gate.ready { align-items: stretch; flex-direction: column; }
+  .dry-engine-hd { align-items: stretch; flex-direction: column; }
+  .dry-engine-decision { align-self: flex-start; }
+  .dry-engine-metrics { grid-template-columns: 1fr; }
+  .dry-engine-metrics > .wide { grid-column: auto; }
+  .dry-engine-actions { align-items: stretch; flex-direction: column; }
+  .dry-engine-actions .btn { width: 100%; }
   .dry-protection-actions { align-items: stretch; flex-direction: column; }
   .dry-protection-actions .btn { width: 100%; }
   .move-decision-metrics { grid-template-columns: 1fr; }

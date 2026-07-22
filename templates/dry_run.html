@@ -59,7 +59,7 @@
     <div class="card-hd slot-hd">
       <span aria-hidden="true">📈</span>
       <span>Trend CE / PE</span>
-      <span class="when" id="dry-trend-auto">Auto —</span>
+      <span class="when" id="dry-trend-decision">Engine —</span>
     </div>
     <div class="card-bd dry-slot-body" id="dry-slot-trend" aria-live="polite">
       <div class="no-pos">Loading simulation…</div>
@@ -136,7 +136,8 @@
 <script>
 let dryModeActive = false;
 let dryStatus = {};
-let dryTrendPreview = null;
+let dryTrendEnginePreview = null;
+let dryTrendApplying = false;
 let dryRunChart = null;
 let dryHistory = [];
 let dryStatusRefreshPending = false;
@@ -352,34 +353,120 @@ function dryPositionDetails(state, slot, decision = null) {
   return `<div class="no-pos"><span class="icon">◇</span>${esc(state.status)}</div>${decisionHtml}`;
 }
 
-function dryTrendActionHtml(preview) {
+function dryEngineDecisionLabel(value) {
+  return String(value || 'UNAVAILABLE').replace(/_/g, ' ');
+}
+
+function dryEngineDateTime(value) {
+  if (!value) return 'Not proposed for this decision';
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime())
+    ? String(value)
+    : parsed.toLocaleString('en-IN', {
+        timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short',
+      });
+}
+
+function dryEnginePair(first, second, digits = 4) {
+  if (!dryKnownNumber(first) && !dryKnownNumber(second)) {
+    return 'Not proposed for this decision';
+  }
+  const left = dryKnownNumber(first) ? `$${fN(first, digits)}` : '—';
+  const right = dryKnownNumber(second) ? `$${fN(second, digits)}` : '—';
+  return `${left} / ${right}`;
+}
+
+function dryTrendEngineHtml(preview) {
   if (!dryModeActive) {
-    return `<div class="dry-entry-gate dry-slot-footer-panel muted">
-      <strong>Dry Run is not active</strong>
-      <span>Historical results remain available. Enable DRY RUN in Bot Config to start simulations.</span>
-    </div>`;
-  }
-  if (dryStatus.trend && dryStatus.trend.status === 'OPEN') return '';
-  if (!preview || !preview.can_enter || preview.dry_run !== true) {
-    const reason = preview?.reason || preview?.error ||
-      (preview && preview.dry_run !== true
-        ? 'Trading Mode is no longer DRY RUN'
-        : 'Trend entry is currently unavailable');
-    return `<div class="dry-entry-gate dry-slot-footer-panel">
-      <strong>Trend entry waiting</strong>
-      <span>${esc(reason)}</span>
-    </div>`;
-  }
-  const up = preview.direction === 'up';
-  return `<div class="dry-entry-gate dry-slot-footer-panel ready ${up ? 'up' : 'down'}">
-      <div>
-        <strong>All trends ${up ? 'UP' : 'DOWN'} · Simulate ${esc(preview.option_type)}</strong>
-        <span>${esc(preview.symbol)} · ${fN(preview.lots)} lots · paper value ~$${fN(preview.est_value)}</span>
+    return `<section class="dry-engine-panel dry-slot-footer-panel is-unavailable">
+      <div class="dry-engine-hd">
+        <div><span>TREND ENGINE · PAPER ONLY</span><strong>Dry Run is not active</strong></div>
+        <span class="dry-engine-decision">UNAVAILABLE</span>
       </div>
-      <button class="btn ${up ? 'success' : 'danger'} sm" type="button" onclick="dryTrendEntry()">
-        ${up ? '▲' : '▼'} Simulate ${esc(preview.option_type)}
-      </button>
-    </div>`;
+      <p>Historical results remain available. Enable DRY RUN in Bot Config to evaluate a new paper simulation.</p>
+      <small>Simulation only — no exchange order will be placed and no real balance will be affected.</small>
+    </section>`;
+  }
+  if (!preview || preview.ok !== true || preview.dry_run !== true) {
+    const unavailable = preview?.apply_reason || preview?.error ||
+      'The latest Trend Engine decision could not be loaded.';
+    return `<section class="dry-engine-panel dry-slot-footer-panel is-unavailable">
+      <div class="dry-engine-hd">
+        <div><span>TREND ENGINE · DRY RUN</span><strong>Decision unavailable</strong></div>
+        <span class="dry-engine-decision">UNAVAILABLE</span>
+      </div>
+      <p>${esc(unavailable)} No simulation can be started.</p>
+      <small>Simulation only — no exchange order will be placed and no real balance will be affected.</small>
+    </section>`;
+  }
+
+  const decision = String(preview.decision || 'NO_TRADE').toUpperCase();
+  const label = dryEngineDecisionLabel(decision);
+  const contract = preview.selected_contract || {};
+  const plan = preview.order_plan || {};
+  const trendOpen = dryStatus.trend && dryStatus.trend.status === 'OPEN';
+  const buyDecision = decision === 'BUY_CE' || decision === 'BUY_PE';
+  const canStart = buyDecision && preview.can_apply === true &&
+    Boolean(preview.confirmation_token) && Boolean(preview.mode_revision) &&
+    !trendOpen && !dryTrendApplying;
+  const tone = decision === 'BUY_CE' ? 'is-buy-ce'
+    : decision === 'BUY_PE' ? 'is-buy-pe'
+    : decision === 'HOLD' ? 'is-hold'
+    : decision === 'EXIT' ? 'is-exit' : 'is-waiting';
+  const contractName = contract.symbol || 'No entry contract selected';
+  const tradeScore = dryKnownNumber(preview.trade_score)
+    ? fN(preview.trade_score, 1)
+    : 'Not calculated — this decision did not reach entry scoring.';
+  const lots = dryKnownNumber(plan.quantity_lots) && Number(plan.quantity_lots) > 0
+    ? fN(plan.quantity_lots)
+    : 'Not proposed for this decision';
+  let actionCopy = '';
+  if (trendOpen && buyDecision) {
+    actionCopy = 'A Trend simulation is already open. New entries remain blocked until it is manually closed.';
+  } else if (buyDecision && preview.can_apply === true) {
+    actionCopy = 'Ready for confirmation. Starting this creates one paper position from this exact engine decision.';
+  } else if (buyDecision) {
+    actionCopy = `This BUY decision cannot be applied: ${preview.apply_reason ||
+      'its confirmation expired or required entry details are incomplete.'}`;
+  } else if (decision === 'NO_TRADE') {
+    actionCopy = 'No simulation will be started. Wait for a BUY CE or BUY PE decision that passes every entry check.';
+  } else if (decision === 'HOLD') {
+    actionCopy = trendOpen
+      ? 'Keep the current simulated Trend position open and continue monitoring its saved stop, target and time limit.'
+      : 'HOLD does not create a new simulation.';
+  } else if (decision === 'EXIT') {
+    actionCopy = trendOpen
+      ? 'Review the open simulated position now. Use the Exit button above to close it manually; the engine will not close it automatically in Phase 1.'
+      : 'EXIT is advisory in Phase 1. No simulated position will be changed automatically.';
+  } else {
+    actionCopy = 'This decision cannot create a simulation.';
+  }
+
+  return `<section class="dry-engine-panel dry-slot-footer-panel ${tone}" aria-label="Trend Engine DRY RUN decision">
+    <div class="dry-engine-hd">
+      <div><span>TREND ENGINE · DRY RUN</span><strong>${esc(preview.decision_summary || actionCopy)}</strong></div>
+      <span class="dry-engine-decision">${esc(label)}</span>
+    </div>
+    <dl class="dry-engine-metrics">
+      <div><dt>Contract</dt><dd>${esc(contractName)}</dd></div>
+      <div><dt>Lots</dt><dd>${esc(lots)}</dd></div>
+      <div><dt>Direction score</dt><dd>${dryKnownNumber(preview.direction_score) ? fN(preview.direction_score, 1) : 'Not available'}</dd></div>
+      <div><dt>Contract score</dt><dd>${dryKnownNumber(contract.contract_score) ? fN(contract.contract_score, 1) : 'Not calculated'}</dd></div>
+      <div class="wide"><dt>Combined trade score</dt><dd>${esc(tradeScore)}</dd></div>
+      <div class="wide"><dt>Entry / maximum</dt><dd>${esc(dryEnginePair(plan.entry_price, plan.maximum_entry_price))}</dd></div>
+      <div class="wide"><dt>Stop / target</dt><dd>${esc(dryEnginePair(plan.stop_option_price, plan.target_option_price))}</dd></div>
+      <div class="wide"><dt>Planned exit</dt><dd>${esc(dryEngineDateTime(plan.time_exit))}</dd></div>
+    </dl>
+    <p class="dry-engine-action-copy">${esc(actionCopy)}</p>
+    <div class="dry-engine-actions">
+      <a href="/trend-engine" class="btn secondary sm">View full analysis</a>
+      ${canStart ? `<button class="btn ${decision === 'BUY_CE' ? 'success' : 'danger'} sm"
+        id="dry-trend-engine-start" type="button" onclick="startDryTrendEngineSimulation()">
+        Start ${decision === 'BUY_CE' ? 'CE' : 'PE'} simulation
+      </button>` : ''}
+    </div>
+    <small>Simulation only — no exchange order will be placed and no real balance will be affected.</small>
+  </section>`;
 }
 
 function renderDryMode(status) {
@@ -398,13 +485,6 @@ function renderDryMode(status) {
   notice.querySelector('p').textContent = dryModeActive
     ? 'Values are paper outcomes calculated from market prices. They never affect real balances, positions, risk totals, or Trades & P&L.'
     : 'Historical results remain available, and an already-open simulation may still be ended here. Switch Trading Mode to DRY RUN to start new simulations.';
-}
-
-function dryAutoLabel(mode) {
-  const value = String(mode || 'disabled').toLowerCase();
-  if (value === 'live') return dryModeActive ? 'Auto simulating' : 'Auto enabled';
-  if (value === 'shadow') return 'Auto shadow';
-  return 'Auto disabled';
 }
 
 async function loadDryStatus(refreshTrend = true) {
@@ -427,19 +507,29 @@ async function loadDryStatus(refreshTrend = true) {
   try {
     dryStatus = status || {};
     renderDryMode(dryStatus);
+    if (!dryModeActive) dryTrendEnginePreview = null;
     document.getElementById('dry-when-morning').textContent =
       'Scheduled ' + (dryStatus.morning_entry_ist || '—') +
       ' · SIDEWAYS SELL immediate';
     document.getElementById('dry-when-evening').textContent =
       'Entry ' + (dryStatus.evening_entry_ist || dryStatus.entry_ist || '—');
-    document.getElementById('dry-trend-auto').textContent = dryAutoLabel(dryStatus.auto_mode);
-
     if (refreshTrend) {
-      dryTrendPreview = null;
-      if (dryModeActive && !(dryStatus.trend && dryStatus.trend.status === 'OPEN')) {
-        try { dryTrendPreview = await jget('/api/trend-entry/preview'); } catch (_) {}
+      dryTrendEnginePreview = null;
+      if (dryModeActive) {
+        try {
+          dryTrendEnginePreview = await jget('/api/trend-engine/dry-run-preview');
+        } catch (error) {
+          dryTrendEnginePreview = {
+            ok: false, dry_run: true,
+            error: error?.message || 'Trend Engine preview is unavailable',
+          };
+        }
       }
     }
+    const engineDecision = dryTrendEnginePreview?.decision
+      ? dryEngineDecisionLabel(dryTrendEnginePreview.decision)
+      : '—';
+    document.getElementById('dry-trend-decision').textContent = `Engine ${engineDecision}`;
 
     if (!drySlotIsEditing('morning')) {
       document.getElementById('dry-slot-morning').innerHTML =
@@ -452,7 +542,7 @@ async function loadDryStatus(refreshTrend = true) {
     if (!drySlotIsEditing('trend')) {
       document.getElementById('dry-slot-trend').innerHTML =
         dryPositionDetails(dryStatus.trend || {}, 'trend') +
-        dryTrendActionHtml(dryTrendPreview);
+        dryTrendEngineHtml(dryTrendEnginePreview);
     }
   } finally {
     dryStatusRefreshPending = false;
@@ -463,30 +553,69 @@ async function loadDryStatus(refreshTrend = true) {
   }
 }
 
-async function dryTrendEntry() {
-  const preview = dryTrendPreview;
-  if (!dryModeActive || !preview?.can_enter || preview.dry_run !== true) {
-    toast('Trend simulation is no longer available', 'err');
+async function startDryTrendEngineSimulation() {
+  const preview = dryTrendEnginePreview;
+  const decision = String(preview?.decision || '').toUpperCase();
+  const contract = preview?.selected_contract || {};
+  const plan = preview?.order_plan || {};
+  const trendOpen = dryStatus.trend && dryStatus.trend.status === 'OPEN';
+  if (dryTrendApplying || !dryModeActive || preview?.ok !== true ||
+      preview?.dry_run !== true || preview?.can_apply !== true ||
+      !['BUY_CE', 'BUY_PE'].includes(decision) ||
+      !preview?.confirmation_token || !preview?.mode_revision || trendOpen) {
+    toast('This Trend Engine decision is no longer eligible for a new simulation', 'err');
     return;
   }
-  const message = `SIMULATE TREND ${preview.option_type} — ALL TRENDS ${String(preview.direction).toUpperCase()}\n\n` +
-    `Contract: ${preview.symbol}\nStrike:   $${fN(preview.strike)}\n` +
-    `Ask:      $${fN(preview.ask, 4)}\nLots:     ${fN(preview.lots)}\n` +
-    `Paper value: ~$${fN(preview.est_value, 2)}\n\n` +
-    'No exchange order will be placed. Start this simulation?';
+  const optionType = decision === 'BUY_CE' ? 'CE' : 'PE';
+  const message = `START DRY RUN TREND ${optionType} SIMULATION?\n\n` +
+    `Decision:             ${dryEngineDecisionLabel(decision)}\n` +
+    `Contract:             ${contract.symbol || '—'}\n` +
+    `Direction score:      ${fN(preview.direction_score, 1)}\n` +
+    `Contract score:       ${fN(contract.contract_score, 1)}\n` +
+    `Combined trade score: ${fN(preview.trade_score, 1)}\n` +
+    `Lots:                 ${fN(plan.quantity_lots)}\n` +
+    `Entry / maximum:      ${dryEnginePair(plan.entry_price, plan.maximum_entry_price)}\n` +
+    `Stop / target:        ${dryEnginePair(plan.stop_option_price, plan.target_option_price)}\n` +
+    `Planned exit:         ${dryEngineDateTime(plan.time_exit)}\n\n` +
+    'This creates a simulated paper position only.\n' +
+    'No exchange order will be placed and no real balance will be affected.';
   if (!confirm(message)) return;
-  const result = await jpost('/api/trend-entry', {
-    expected_mode: 'dry_run',
-    mode_revision: preview.mode_revision ?? dryStatus.mode_revision,
-  });
-  if (result.ok && result.dry_run) {
-    toast(`Trend ${result.option_type} simulation started: ${fN(result.lots)} lots`, 'ok');
-    dryTrendPreview = null;
-    await loadDryStatus();
-    await loadDryToday();
-  } else {
-    toast('Trend simulation failed: ' + (result.error || result.reason ||
-      'Trading Mode is no longer DRY RUN'), 'err');
+  dryTrendApplying = true;
+  const button = document.getElementById('dry-trend-engine-start');
+  if (button) {
+    button.disabled = true;
+    button.textContent = 'Starting paper simulation…';
+  }
+  let started = false;
+  try {
+    const result = await jpost('/api/trend-engine/dry-run-entry', {
+      confirmation_token: preview.confirmation_token,
+      expected_mode: 'dry_run',
+      mode_revision: preview.mode_revision,
+    });
+    if (result.ok && result.dry_run) {
+      started = true;
+      toast(`Trend ${result.option_type || optionType} paper simulation started: ${fN(result.lots)} lots`, 'ok');
+      dryTrendEnginePreview = null;
+    } else {
+      toast('Trend simulation was not started: ' + (result.error || result.apply_reason ||
+        'the decision changed during confirmation'), 'err');
+    }
+  } catch (error) {
+    toast('Trend simulation was not started: ' + (error?.message || 'request failed'), 'err');
+  } finally {
+    dryTrendApplying = false;
+    try {
+      if (started) {
+        await Promise.all([loadDryStatus(true), loadDryToday()]);
+      } else {
+        await loadDryStatus(true);
+      }
+    } catch (error) {
+      if (started) {
+        toast('Paper simulation started, but the page could not refresh. Reload to see it.', 'err');
+      }
+    }
   }
 }
 
