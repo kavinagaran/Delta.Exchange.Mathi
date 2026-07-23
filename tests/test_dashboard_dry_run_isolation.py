@@ -207,6 +207,87 @@ def test_dry_status_trades_and_summary_publish_only_simulations(
     assert summary["losses"] == 1
 
 
+@pytest.mark.parametrize(
+    ("entry_time_utc", "expected_slot"),
+    [
+        ("05:29:59", "morning"),  # 10:59:59 AM IST
+        ("05:30:00", "evening"),  # 11:00:00 AM IST
+        ("01:50:00", "morning"),  # screenshot example: 7:20 AM IST
+    ],
+)
+def test_dry_status_displays_trend_owned_move_by_actual_ist_trade_time(
+        isolated_dashboard, monkeypatch, entry_time_utc, expected_slot):
+    account = isolated_dashboard
+    state = _dry_state(
+        "trend",
+        entry_time_utc=entry_time_utc,
+        symbol="MV-BTC-65800-230726",
+        option_type="MOVE",
+        instrument_kind="BTC_MOVE",
+        side="short",
+        ownership=dashboard.TREND_SCORE_AUTO_OWNERSHIP,
+    )
+    state_path = account / "dry_run" / "trend_state.json"
+    _write(state_path, state)
+    monkeypatch.setattr(
+        dashboard, "_enrich_dry_state", lambda value: dict(value),
+    )
+
+    with dashboard.app.test_request_context("/api/dry-run/status"):
+        payload = dashboard.api_dry_run_status().get_json()
+
+    displayed = payload["display_slots"]
+    other_slot = "evening" if expected_slot == "morning" else "morning"
+    assert displayed[expected_slot]["symbol"] == state["symbol"]
+    assert displayed[expected_slot]["display_slot"] == expected_slot
+    assert displayed[expected_slot]["source_slot"] == "trend"
+    assert displayed[expected_slot]["control_slot"] == "trend"
+    assert displayed[expected_slot]["display_instrument_group"] == "move"
+    assert displayed[other_slot]["status"] == "IDLE"
+    assert displayed["trend"]["status"] == "IDLE"
+
+    # Presentation routing must not move controller ownership on disk.
+    assert json.loads(state_path.read_text(encoding="utf-8")) == state
+    assert not (account / "dry_run" / "morning_state.json").exists()
+    assert not (account / "dry_run" / "straddle_state.json").exists()
+    assert payload["trend"]["symbol"] == state["symbol"]
+
+
+@pytest.mark.parametrize(
+    ("option_type", "symbol"),
+    [
+        ("CE", "C-BTC-65400-230726"),
+        ("PE", "P-BTC-66400-230726"),
+        ("CE", "B-BTC-64400_210726"),
+    ],
+)
+def test_dry_status_keeps_trend_ce_pe_in_third_frame(
+        isolated_dashboard, monkeypatch, option_type, symbol):
+    account = isolated_dashboard
+    state = _dry_state(
+        "trend",
+        entry_time_utc="01:50:00",
+        symbol=symbol,
+        option_type=option_type,
+        instrument_kind="BTC_OPTION",
+        ownership="manual_trend_simulation",
+    )
+    _write(account / "dry_run" / "trend_state.json", state)
+    monkeypatch.setattr(
+        dashboard, "_enrich_dry_state", lambda value: dict(value),
+    )
+
+    with dashboard.app.test_request_context("/api/dry-run/status"):
+        payload = dashboard.api_dry_run_status().get_json()
+
+    displayed = payload["display_slots"]
+    assert displayed["trend"]["symbol"] == symbol
+    assert displayed["trend"]["control_slot"] == "trend"
+    assert displayed["trend"]["display_instrument_group"] == "trend_option"
+    assert displayed["morning"]["status"] == "IDLE"
+    assert displayed["evening"]["status"] == "IDLE"
+
+
 def test_open_dry_pnl_refreshes_from_mark_price_while_close_uses_book(
         isolated_dashboard, monkeypatch):
     state = _dry_state(
@@ -661,15 +742,21 @@ def test_dry_run_cards_are_equal_sized_and_every_open_slot_has_manual_exit():
     assert "min-height: 86px" in styles
     assert "\n          Exit\n" in template
     assert ">Exit</button>" in overview
-    assert "endDrySimulation('${slot}')" in template
-    assert "function dryProtectionHtml(state, slot)" in template
+    assert "endDrySimulation('${controlSlot}', '${slot}')" in template
+    assert (
+        "function dryProtectionHtml(state, displaySlot, controlSlot = displaySlot)"
+        in template
+    )
     assert "TP / SL / TSL Monitor" in template
-    assert "function saveDryProtection(slot)" in template
+    assert (
+        "function saveDryProtection(displaySlot, controlSlot = displaySlot)"
+        in template
+    )
     assert "dryProtectionSaving.has(slot)" in template
     assert ".dry-protection-grid {" in styles
     assert "Paper-only monitor · always active" in template
     for slot in ("morning", "evening", "trend"):
-        assert f"dryPositionDetails(dryStatus.{slot} || {{}}, '{slot}'" in template
+        assert f"dryPositionDetails(displaySlots.{slot} || {{}}, '{slot}'" in template
 
     assert "squareOff('${slot}', 'dry_run')" in overview
     assert "squareOff('${slot}', 'live')" in overview

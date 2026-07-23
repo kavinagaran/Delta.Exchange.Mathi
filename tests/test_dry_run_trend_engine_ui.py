@@ -12,6 +12,9 @@ NODE = shutil.which("node")
 def test_dry_run_trend_ui_uses_only_the_signed_engine_confirmation_flow():
     template = (ROOT / "templates" / "dry_run.html").read_text(encoding="utf-8")
 
+    assert "Trend-based position (CE / PE)" in template
+    assert "Trend Engine position (CE / PE / MOVE)" not in template
+    assert "dryStatus.display_slots || dryStatus" in template
     assert "/api/trend-engine/dry-run-preview" in template
     assert "/api/trend-engine/dry-run-entry" in template
     assert "/api/trend-entry/preview" not in template
@@ -47,6 +50,101 @@ def test_dry_run_trend_ui_uses_only_the_signed_engine_confirmation_flow():
         "EXIT is advisory in Phase 1",
     ):
         assert visible_copy in template
+
+
+@pytest.mark.skipif(NODE is None, reason="Node.js is required for frontend JavaScript tests")
+def test_dry_run_cards_route_actions_to_source_slot_and_show_trade_time_first():
+    script = r"""
+const fs = require('fs');
+const vm = require('vm');
+const source = fs.readFileSync('templates/dry_run.html', 'utf8');
+const start = source.indexOf('function dryMoveDisplaySlotFromUtc');
+const end = source.indexOf('function dryEngineDecisionLabel');
+if (start < 0 || end <= start) throw new Error('DRY RUN card functions not found');
+
+global.dryModeActive = true;
+global.fN = value => String(value ?? '—');
+global.f$ = value => String(value ?? '—');
+global.pnlCls = () => 'c-pos';
+global.esc = value => String(value ?? '').replace(/&/g, '&amp;')
+  .replace(/</g, '&lt;').replace(/>/g, '&gt;');
+global.utcToIst = value => {
+  const [h, m] = String(value || '').split(':').map(Number);
+  if (!Number.isFinite(h) || !Number.isFinite(m)) return '';
+  const total = (h * 60 + m + 330) % 1440;
+  const hh = Math.floor(total / 60);
+  const mm = total % 60;
+  const ap = hh >= 12 ? 'PM' : 'AM';
+  return `${((hh + 11) % 12) + 1}:${String(mm).padStart(2, '0')} ${ap} IST`;
+};
+vm.runInThisContext(source.slice(start, end));
+
+if (dryMoveDisplaySlotFromUtc('05:29:59') !== 'morning') {
+  throw new Error('10:59:59 AM IST did not route to Morning');
+}
+if (dryMoveDisplaySlotFromUtc('05:30:00') !== 'evening') {
+  throw new Error('11:00 AM IST did not route to Evening');
+}
+
+const state = {
+  status: 'OPEN',
+  source_slot: 'trend',
+  control_slot: 'trend',
+  display_slot: 'morning',
+  entry_time_utc: '01:50:00',
+  symbol: 'MV-BTC-65800-230726',
+  side: 'short',
+  lots: 1000,
+  entry_mark: 445,
+  current_mark: 414,
+  live_pnl: 17.45,
+  dry_protection: {
+    status: 'running',
+    tp_target_pnl: 500,
+    sl_target_pnl: 300,
+    tsl_arm_pnl: 125,
+    tsl_trail_pnl: 125,
+    tsl_lock_min_pnl: 0,
+    poll_secs: 30,
+  },
+};
+const html = dryPositionDetails(state, 'morning');
+const tradeTime = html.indexOf('<dt>Time of trade</dt>');
+const contract = html.indexOf('<dt>Contract</dt>');
+if (tradeTime < 0 || contract < 0 || tradeTime > contract) {
+  throw new Error(`trade time is not the first detail row: ${html}`);
+}
+if (!html.includes('7:20 AM IST')) {
+  throw new Error(`actual IST trade time is missing: ${html}`);
+}
+if (html.includes('<dt>Started</dt>')) {
+  throw new Error('obsolete Started row remains');
+}
+if (!html.includes("endDrySimulation('trend', 'morning')")) {
+  throw new Error(`Exit no longer targets source trend slot: ${html}`);
+}
+if (!html.includes("saveDryProtection('morning', 'trend')")) {
+  throw new Error(`Protection save no longer targets source trend slot: ${html}`);
+}
+if (html.includes('Automatic MOVE Forecast')) {
+  throw new Error(`routed score position inherited an unrelated scheduled forecast: ${html}`);
+}
+
+const closed = dryPositionDetails({
+  ...state,
+  status: 'CLOSED',
+  pnl_usd: 10,
+  exit_mark: 400,
+  exit_time_utc: '02:50:00',
+}, 'morning');
+if (closed.indexOf('<dt>Time of trade</dt>') > closed.indexOf('<dt>Contract</dt>')) {
+  throw new Error(`closed trade time is not first: ${closed}`);
+}
+"""
+    result = subprocess.run(
+        [NODE, "-e", script], cwd=ROOT, text=True, capture_output=True, check=False
+    )
+    assert result.returncode == 0, result.stderr
 
 
 @pytest.mark.skipif(NODE is None, reason="Node.js is required for frontend JavaScript tests")

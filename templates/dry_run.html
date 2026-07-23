@@ -29,7 +29,7 @@
 
 <div class="section-title">
   <span>Simulated strategies</span>
-  <small>Independent paper state for Morning MOVE, Evening MOVE and Trend Engine positions</small>
+  <small>MOVE positions are grouped by actual IST trade time; Trend-based CE/PE positions remain separate</small>
 </div>
 
 <div class="dry-slot-grid">
@@ -58,7 +58,7 @@
   <article class="card dry-slot-card">
     <div class="card-hd slot-hd">
       <span aria-hidden="true">📈</span>
-      <span>Trend Engine position (CE / PE / MOVE)</span>
+      <span>Trend-based position (CE / PE)</span>
       <span class="when" id="dry-trend-decision">Engine —</span>
     </div>
     <div class="card-bd dry-slot-body" id="dry-slot-trend" aria-live="polite">
@@ -146,12 +146,59 @@ let dryStatusRefreshPending = false;
 let dryStatusRefreshQueued = false;
 const dryProtectionSaving = new Set();
 
-function drySlotLabel(slot, symbol = '') {
+function dryMoveDisplaySlotFromUtc(entryTimeUtc, fallback = 'evening') {
+  const raw = String(entryTimeUtc || '').trim();
+  let hour;
+  let minute;
+  if (raw.includes('T') || raw.includes(' ')) {
+    const parsed = new Date(raw.endsWith('Z') || /[+-]\d\d:\d\d$/.test(raw)
+      ? raw : raw + 'Z');
+    if (Number.isFinite(parsed.getTime())) {
+      hour = parsed.getUTCHours();
+      minute = parsed.getUTCMinutes();
+    }
+  } else {
+    const parts = raw.split(':').map(Number);
+    if (parts.length >= 2 && parts.every(Number.isFinite)) {
+      [hour, minute] = parts;
+    }
+  }
+  if (!Number.isFinite(hour) || !Number.isFinite(minute)) {
+    return fallback === 'morning' ? 'morning' : 'evening';
+  }
+  const istMinutes = (hour * 60 + minute + 330) % 1440;
+  return istMinutes < 11 * 60 ? 'morning' : 'evening';
+}
+
+function dryEntryUtcClock(state) {
+  const clock = String(state?.entry_time_utc || state?.entry_time || '').trim();
+  if (clock && !clock.includes('T') && !clock.includes(' ')) return clock;
+  const stamp = String(state?.entry_at_utc || clock || '').trim();
+  if (!stamp) return '';
+  const parsed = new Date(stamp.endsWith('Z') || /[+-]\d\d:\d\d$/.test(stamp)
+    ? stamp : stamp + 'Z');
+  if (!Number.isFinite(parsed.getTime())) return '';
+  return [parsed.getUTCHours(), parsed.getUTCMinutes(), parsed.getUTCSeconds()]
+    .map(value => String(value).padStart(2, '0')).join(':');
+}
+
+function dryTradeTimeIst(state) {
+  return utcToIst(dryEntryUtcClock(state)) || '—';
+}
+
+function drySlotLabel(slot, symbol = '', entryTimeUtc = '') {
+  const contract = String(symbol || '').toUpperCase();
+  if (contract.startsWith('C-BTC') || contract.startsWith('P-BTC')) {
+    return 'Trend CE / PE';
+  }
+  if (contract.startsWith('MV-BTC')) {
+    const displaySlot = dryMoveDisplaySlotFromUtc(entryTimeUtc, slot);
+    return displaySlot === 'morning' ? 'Morning MOVE' : 'Evening MOVE';
+  }
   if (slot === 'morning') return 'Morning MOVE';
   if (slot === 'evening') return 'Evening MOVE';
-  if (slot === 'trend') return 'Trend Engine position';
-  return String(symbol).startsWith('C-BTC') || String(symbol).startsWith('P-BTC')
-    ? 'Trend Engine position' : 'MOVE';
+  if (slot === 'trend') return 'Trend CE / PE';
+  return 'MOVE';
 }
 
 function dryKnownNumber(value) {
@@ -237,7 +284,7 @@ function dryProtectionTiming(protection) {
   return parts.join(' · ');
 }
 
-function dryProtectionHtml(state, slot) {
+function dryProtectionHtml(state, displaySlot, controlSlot = displaySlot) {
   const p = state?.dry_protection || {};
   const status = String(p.status || 'starting');
   const statusLabel = status === 'tsl_armed' ? 'TSL ARMED'
@@ -265,22 +312,22 @@ function dryProtectionHtml(state, slot) {
     </div>
     <div class="dry-protection-grid">
       <label class="fld"><span>Take profit $</span>
-        <input id="dry-tp-${slot}" type="number" step="1" min="1"
+        <input id="dry-tp-${displaySlot}" type="number" step="1" min="1"
                value="${value(p.tp_target_pnl)}"></label>
       <label class="fld"><span>Stop loss $</span>
-        <input id="dry-sl-${slot}" type="number" step="1" min="0"
+        <input id="dry-sl-${displaySlot}" type="number" step="1" min="0"
                value="${value(p.sl_target_pnl)}" placeholder="0 = off"></label>
       <label class="fld"><span>TSL arm P&amp;L $</span>
-        <input id="dry-tsl-arm-${slot}" type="number" step="1" min="0"
+        <input id="dry-tsl-arm-${displaySlot}" type="number" step="1" min="0"
                value="${value(p.tsl_arm_pnl)}" placeholder="0 = off"></label>
       <label class="fld"><span>TSL trail $</span>
-        <input id="dry-tsl-trail-${slot}" type="number" step="1" min="0"
+        <input id="dry-tsl-trail-${displaySlot}" type="number" step="1" min="0"
                value="${value(p.tsl_trail_pnl)}" placeholder="0 = off"></label>
       <label class="fld"><span>Minimum locked $</span>
-        <input id="dry-tsl-lock-${slot}" type="number" step="1" min="0"
+        <input id="dry-tsl-lock-${displaySlot}" type="number" step="1" min="0"
                value="${value(p.tsl_lock_min_pnl)}"></label>
       <label class="fld"><span>Poll secs</span>
-        <input id="dry-poll-${slot}" type="number" step="1" min="10"
+        <input id="dry-poll-${displaySlot}" type="number" step="1" min="10"
                value="${value(p.poll_secs, 30)}"></label>
     </div>
     <div class="dry-protection-actions">
@@ -288,8 +335,9 @@ function dryProtectionHtml(state, slot) {
         <span>${esc(dryProtectionTiming(p))}</span>
         <span>${esc(peak)} · ${esc(floor)}</span>
       </div>
-      <button class="btn secondary sm" id="dry-protection-save-${slot}"
-              type="button" onclick="saveDryProtection('${slot}')">Save</button>
+      <button class="btn secondary sm" id="dry-protection-save-${displaySlot}"
+              type="button"
+              onclick="saveDryProtection('${displaySlot}', '${controlSlot}')">Save</button>
     </div>
     ${error}
     <p>Paper-only monitor · always active while this simulation is open. Zero disables SL or TSL.</p>
@@ -304,7 +352,10 @@ function drySlotIsEditing(slot) {
 }
 
 function dryPositionDetails(state, slot, decision = null) {
-  const decisionHtml = slot === 'trend' ? '' : dryMoveDecisionHtml(decision);
+  const controlSlot = ['morning', 'evening', 'trend'].includes(state?.control_slot)
+    ? state.control_slot : slot;
+  const decisionHtml = slot === 'trend' || controlSlot !== slot
+    ? '' : dryMoveDecisionHtml(decision);
   if (!dryStateIsVisible(state)) {
     const copy = dryModeActive ? 'No active simulation' : 'No saved simulation';
     return `<div class="no-pos"><span class="icon">◇</span>${copy}</div>${decisionHtml}`;
@@ -319,21 +370,21 @@ function dryPositionDetails(state, slot, decision = null) {
       </div>
       <div class="big-pnl ${pnlCls(pnl)}">${f$(pnl)}<small>Simulated live P&amp;L</small></div>
       <dl class="kv">
+        <dt>Time of trade</dt><dd>${esc(dryTradeTimeIst(state))}</dd>
         <dt>Contract</dt><dd>${esc(state.symbol || '—')}</dd>
         <dt>Side</dt><dd><span class="badge ${state.side === 'short' ? 'short' : 'long'}">${esc(String(state.side || 'long').toUpperCase())}</span></dd>
         <dt>Lots</dt><dd>${fN(state.lots)}</dd>
         <dt>Entry</dt><dd>$${fN(state.entry_mark, 4)}</dd>
         <dt>Current mark</dt><dd>$${fN(mark, 4)}</dd>
-        <dt>Started</dt><dd>${esc(utcToIst(state.entry_time_utc) || '—')}</dd>
       </dl>
       <div class="btn-row center">
         <button class="btn danger sm" type="button"
                 aria-label="Manual exit ${esc(drySlotLabel(slot))}"
-                onclick="endDrySimulation('${slot}')">
+                onclick="endDrySimulation('${controlSlot}', '${slot}')">
           Exit
         </button>
       </div>
-      ${dryProtectionHtml(state, slot)}
+      ${dryProtectionHtml(state, slot, controlSlot)}
       ${decisionHtml}`;
   }
 
@@ -345,6 +396,7 @@ function dryPositionDetails(state, slot, decision = null) {
       </div>
       <div class="big-pnl ${pnlCls(pnl)}">${f$(pnl)}<small>Simulated close ${esc(utcToIst(state.exit_time_utc) || '')}</small></div>
       <dl class="kv">
+        <dt>Time of trade</dt><dd>${esc(dryTradeTimeIst(state))}</dd>
         <dt>Contract</dt><dd>${esc(state.symbol || '—')}</dd>
         <dt>Lots</dt><dd>${fN(state.lots)}</dd>
         <dt>Entry → Exit</dt><dd>$${fN(state.entry_mark, 4)} → $${fN(state.exit_mark, 4)}</dd>
@@ -616,6 +668,7 @@ async function loadDryStatus(refreshTrend = true) {
   }
   try {
     dryStatus = status || {};
+    const displaySlots = dryStatus.display_slots || dryStatus;
     renderDryMode(dryStatus);
     await loadDryTrendScoreAutoStatus();
     if (!dryModeActive) dryTrendEnginePreview = null;
@@ -648,15 +701,15 @@ async function loadDryStatus(refreshTrend = true) {
 
     if (!drySlotIsEditing('morning')) {
       document.getElementById('dry-slot-morning').innerHTML =
-        dryPositionDetails(dryStatus.morning || {}, 'morning', dryStatus.move_decisions?.morning);
+        dryPositionDetails(displaySlots.morning || {}, 'morning', dryStatus.move_decisions?.morning);
     }
     if (!drySlotIsEditing('evening')) {
       document.getElementById('dry-slot-evening').innerHTML =
-        dryPositionDetails(dryStatus.evening || {}, 'evening', dryStatus.move_decisions?.evening);
+        dryPositionDetails(displaySlots.evening || {}, 'evening', dryStatus.move_decisions?.evening);
     }
     if (!drySlotIsEditing('trend')) {
       document.getElementById('dry-slot-trend').innerHTML =
-        dryPositionDetails(dryStatus.trend || {}, 'trend') +
+        dryPositionDetails(displaySlots.trend || {}, 'trend') +
         dryTrendScoreAutoHtml() +
         (dryTrendScoreAutoEnabled() ? '' : dryTrendEngineHtml(dryTrendEnginePreview));
     }
@@ -739,9 +792,9 @@ async function startDryTrendEngineSimulation() {
   }
 }
 
-async function endDrySimulation(slot) {
-  if (!confirm(`Manually exit the ${drySlotLabel(slot).toUpperCase()} simulation at the current mark?\n\nNo exchange order will be placed.`)) return;
-  const result = await jpost('/api/square-off?slot=' + encodeURIComponent(slot), {
+async function endDrySimulation(controlSlot, displaySlot = controlSlot) {
+  if (!confirm(`Manually exit the ${drySlotLabel(displaySlot).toUpperCase()} simulation at the current mark?\n\nNo exchange order will be placed.`)) return;
+  const result = await jpost('/api/square-off?slot=' + encodeURIComponent(controlSlot), {
     target_mode: 'dry_run',
   });
   if (result.ok && result.dry_run) {
@@ -752,12 +805,12 @@ async function endDrySimulation(slot) {
   }
 }
 
-async function saveDryProtection(slot) {
-  const keys = slot === 'morning'
+async function saveDryProtection(displaySlot, controlSlot = displaySlot) {
+  const keys = controlSlot === 'morning'
     ? { tp: 'TP_TARGET_PNL_MORNING', sl: 'SL_TARGET_PNL_MORNING',
         arm: 'TSL_ARM_PNL_MORNING', trail: 'TSL_TRAIL_PNL_MORNING',
         lock: 'TSL_LOCK_MIN_PNL_MORNING', poll: 'TP_POLL_SECS_MORNING' }
-    : slot === 'trend'
+    : controlSlot === 'trend'
       ? { tp: 'TP_TARGET_PNL_TREND', sl: 'SL_TARGET_PNL_TREND',
           arm: 'TSL_ARM_PNL_TREND', trail: 'TSL_TRAIL_PNL_TREND',
           lock: 'TSL_LOCK_MIN_PNL_TREND', poll: 'TP_POLL_SECS_TREND' }
@@ -766,12 +819,12 @@ async function saveDryProtection(slot) {
           lock: 'TSL_LOCK_MIN_PNL', poll: 'TP_POLL_SECS' };
   const read = id => Number(document.getElementById(id)?.value);
   const values = {
-    tp: read(`dry-tp-${slot}`),
-    sl: read(`dry-sl-${slot}`),
-    arm: read(`dry-tsl-arm-${slot}`),
-    trail: read(`dry-tsl-trail-${slot}`),
-    lock: read(`dry-tsl-lock-${slot}`),
-    poll: read(`dry-poll-${slot}`),
+    tp: read(`dry-tp-${displaySlot}`),
+    sl: read(`dry-sl-${displaySlot}`),
+    arm: read(`dry-tsl-arm-${displaySlot}`),
+    trail: read(`dry-tsl-trail-${displaySlot}`),
+    lock: read(`dry-tsl-lock-${displaySlot}`),
+    poll: read(`dry-poll-${displaySlot}`),
   };
   if (!Number.isFinite(values.tp) || values.tp < 1 ||
       !Number.isFinite(values.poll) || values.poll < 10 ||
@@ -788,8 +841,8 @@ async function saveDryProtection(slot) {
     [keys.lock]: values.lock,
     [keys.poll]: values.poll,
   };
-  const button = document.getElementById(`dry-protection-save-${slot}`);
-  dryProtectionSaving.add(slot);
+  const button = document.getElementById(`dry-protection-save-${displaySlot}`);
+  dryProtectionSaving.add(displaySlot);
   if (button) {
     button.disabled = true;
     button.textContent = 'Saving…';
@@ -800,11 +853,11 @@ async function saveDryProtection(slot) {
       toast('Protection save failed: ' + (result.error || 'unknown error'), 'err');
       return;
     }
-    toast(`${drySlotLabel(slot)} simulated protection updated`, 'ok');
+    toast(`${drySlotLabel(displaySlot)} simulated protection updated`, 'ok');
   } catch (error) {
     toast('Protection save failed: ' + (error?.message || 'request error'), 'err');
   } finally {
-    dryProtectionSaving.delete(slot);
+    dryProtectionSaving.delete(displaySlot);
     await loadDryStatus(false);
   }
 }
@@ -858,7 +911,10 @@ function renderDryHistory(trades) {
       : '<span class="badge sim">FLAT</span>';
     return `<tr>
       <td>${esc(trade.date || trade.entry_date || '—')}</td>
-      <td>${esc(drySlotLabel(trade.slot, trade.symbol))}</td>
+      <td>${esc(drySlotLabel(
+        trade.slot, trade.symbol,
+        trade.entry_at_utc || trade.entry_time_utc || trade.entry_time
+      ))}</td>
       <td>${esc(trade.symbol || '—')}</td>
       <td>${trade.side ? `<span class="badge ${String(trade.side).toLowerCase() === 'short' ? 'short' : 'long'}">${esc(String(trade.side).toUpperCase())}</span>` : '—'}</td>
       <td>${fN(trade.lots)}</td>
@@ -975,7 +1031,10 @@ function renderDryToday(rows) {
       : Number(pnl) < 0 ? '<span class="badge loss">LOSS</span>'
       : '<span class="badge sim">FLAT</span>';
     return `<tr>
-      <td>${esc(drySlotLabel(trade.slot, trade.symbol))}</td>
+      <td>${esc(drySlotLabel(
+        trade.slot, trade.symbol,
+        trade.entry_at_utc || trade.entry_time_utc || trade.entry_time
+      ))}</td>
       <td>${esc(trade.symbol || '—')}</td>
       <td>${trade.side ? `<span class="badge ${String(trade.side).toLowerCase() === 'short' ? 'short' : 'long'}">${esc(String(trade.side).toUpperCase())}</span>` : '—'}</td>
       <td>${fN(trade.lots)}</td>

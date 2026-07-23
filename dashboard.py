@@ -5046,6 +5046,171 @@ def _enrich_dry_state(state: dict) -> dict:
     return view
 
 
+def _utc_trade_entry_at(record: dict) -> datetime | None:
+    """Return a position's complete UTC entry timestamp when available."""
+    stamp = str(record.get("entry_at_utc") or "").strip()
+    if stamp:
+        try:
+            entered = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+            if entered.tzinfo is None:
+                entered = entered.replace(tzinfo=timezone.utc)
+            return entered.astimezone(timezone.utc)
+        except (TypeError, ValueError):
+            pass
+
+    clock = str(
+        record.get("entry_time_utc") or record.get("entry_time") or ""
+    ).strip()
+    if not clock:
+        return None
+    try:
+        entered = datetime.fromisoformat(clock.replace("Z", "+00:00"))
+        if "T" in clock or " " in clock:
+            if entered.tzinfo is None:
+                entered = entered.replace(tzinfo=timezone.utc)
+            return entered.astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        pass
+
+    date = str(record.get("entry_date") or record.get("date") or "").strip()
+    if not date:
+        return None
+    try:
+        entered = datetime.fromisoformat(
+            f"{date}T{clock}".replace("Z", "+00:00")
+        )
+        if entered.tzinfo is None:
+            entered = entered.replace(tzinfo=timezone.utc)
+        return entered.astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
+def _dry_run_instrument_group(state: dict) -> str:
+    """Classify a paper position for the three-card presentation."""
+    instrument = str(state.get("instrument_kind") or "").strip().upper()
+    option_type = str(state.get("option_type") or "").strip().upper()
+    score_zone_value = str(
+        state.get("trend_score_zone") or state.get("engine_zone") or ""
+    ).strip().upper()
+    symbol = str(state.get("symbol") or "").strip().upper()
+    ownership = str(state.get("ownership") or "").strip().lower()
+
+    if (
+        instrument == "BTC_MOVE"
+        or option_type == "MOVE"
+        or score_zone_value == TREND_SCORE_MOVE_ZONE
+        or symbol.startswith("MV-BTC")
+        or "move" in ownership
+    ):
+        return "move"
+    if (
+        instrument == "BTC_OPTION"
+        or option_type in {"CE", "PE", "CALL", "PUT"}
+        or symbol.startswith(("C-BTC", "P-BTC"))
+    ):
+        return "trend_option"
+    return "unknown"
+
+
+def _dry_run_move_display_slot(state: dict) -> str:
+    """Bucket MOVE cards by the established 11:00 AM IST boundary."""
+    entered = _utc_trade_entry_at(state)
+    if entered is not None:
+        return (
+            "morning"
+            if entered.astimezone(_IST_TIMEZONE).hour < 11
+            else "evening"
+        )
+    source_slot = str(
+        state.get("source_slot") or state.get("slot") or ""
+    ).strip().lower()
+    return source_slot if source_slot in MOVE_SLOTS else "evening"
+
+
+def _dry_run_display_slots(
+    slots: dict[str, dict],
+) -> tuple[dict[str, dict], dict[str, list[dict]]]:
+    """Project storage-owned states into instrument/time-based dashboard cards.
+
+    Persistence and automation keep using the original source slot.  The
+    presentation copy carries ``control_slot`` so manual exit and protection
+    changes cannot accidentally target the card's visual slot.
+    """
+    buckets: dict[str, list[dict]] = {slot: [] for slot in SLOTS}
+    for source_slot in SLOTS:
+        raw = slots.get(source_slot)
+        if not isinstance(raw, dict):
+            continue
+        status = str(raw.get("status") or "").strip().upper()
+        visible = bool(status and status != "IDLE")
+        if status == "CLOSED" and raw.get("dashboard_visible") is False:
+            visible = False
+        if not visible:
+            continue
+
+        view = dict(raw)
+        group = _dry_run_instrument_group(view)
+        if group == "trend_option":
+            display_slot = "trend"
+        elif group == "move":
+            display_slot = _dry_run_move_display_slot({
+                **view,
+                "source_slot": source_slot,
+            })
+        else:
+            display_slot = source_slot
+        view.update({
+            "source_slot": source_slot,
+            "control_slot": source_slot,
+            "display_slot": display_slot,
+            "display_instrument_group": group,
+        })
+        buckets[display_slot].append(view)
+
+    display: dict[str, dict] = {}
+    conflicts: dict[str, list[dict]] = {}
+    for display_slot in SLOTS:
+        candidates = buckets[display_slot]
+        if not candidates:
+            display[display_slot] = {
+                "slot": display_slot,
+                "source_slot": display_slot,
+                "control_slot": display_slot,
+                "display_slot": display_slot,
+                "status": "IDLE",
+                "dashboard_visible": False,
+            }
+            continue
+
+        def priority(candidate: dict) -> tuple[int, datetime]:
+            status = str(candidate.get("status") or "").upper()
+            status_rank = 2 if status == "OPEN" else 1
+            entered = _utc_trade_entry_at(candidate)
+            return (
+                status_rank,
+                entered or datetime.min.replace(tzinfo=timezone.utc),
+            )
+
+        selected = max(candidates, key=priority)
+        display[display_slot] = selected
+        if len(candidates) > 1:
+            conflicts[display_slot] = [
+                {
+                    "source_slot": candidate.get("source_slot"),
+                    "status": candidate.get("status"),
+                    "symbol": candidate.get("symbol"),
+                    "entry_at_utc": (
+                        candidate.get("entry_at_utc")
+                        or candidate.get("entry_time_utc")
+                    ),
+                }
+                for candidate in candidates
+                if candidate is not selected
+            ]
+    return display, conflicts
+
+
 @app.route("/api/dry-run/status")
 def api_dry_run_status():
     try:
@@ -5061,6 +5226,7 @@ def api_dry_run_status():
             # must never be rendered as a paper position.
             state = {"slot": slot, "status": "MODE_MISMATCH"}
         slots[slot] = _dashboard_slot_view(_enrich_dry_state(state), now)
+    display_slots, display_conflicts = _dry_run_display_slots(slots)
     cfg = _user_cfg()
     mode = _trading_mode_payload()
     return jsonify({
@@ -5069,6 +5235,8 @@ def api_dry_run_status():
         "morning": slots["morning"],
         "evening": slots["evening"],
         "trend": slots["trend"],
+        "display_slots": display_slots,
+        "display_conflicts": display_conflicts,
         "move_auto_mode": str(
             cfg.get("MOVE_AUTO_ENTRY_MODE") or "shadow").lower(),
         "move_decisions": {
