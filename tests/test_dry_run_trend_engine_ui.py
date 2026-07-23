@@ -14,7 +14,18 @@ def test_dry_run_trend_ui_uses_only_the_signed_engine_confirmation_flow():
 
     assert "Trend-based position (CE / PE)" in template
     assert "Trend Engine position (CE / PE / MOVE)" not in template
+    assert "Trend Engine entries only · MOVE positions are grouped by actual IST trade time" in template
     assert "dryStatus.display_slots || dryStatus" in template
+    for obsolete in (
+        "dry-when-morning",
+        "dry-when-evening",
+        "dry-trend-decision",
+        "Automatic MOVE Forecast",
+        "Waiting for the next scheduled decision cycle",
+        "SIDEWAYS SELL immediate",
+        "dryStatus.move_decisions",
+    ):
+        assert obsolete not in template
     assert "/api/trend-engine/dry-run-preview" in template
     assert "/api/trend-engine/dry-run-entry" in template
     assert "/api/trend-entry/preview" not in template

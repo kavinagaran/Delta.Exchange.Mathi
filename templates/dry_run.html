@@ -9,7 +9,7 @@
   <div class="dry-run-hero-copy">
     <span class="strategy-kicker">ISOLATED SIMULATION WORKSPACE</span>
     <h2 id="dry-run-title">Dry Run Dashboard</h2>
-    <p>MOVE and Trend Engine simulations are collected here, completely separate from real positions and real P&amp;L.</p>
+    <p>Trend Engine-driven MOVE and CE/PE simulations are collected here, completely separate from real positions and real P&amp;L.</p>
   </div>
   <div class="dry-run-hero-actions">
     <span class="pill idle" id="dry-page-mode" role="status" aria-live="polite">
@@ -29,7 +29,7 @@
 
 <div class="section-title">
   <span>Simulated strategies</span>
-  <small>MOVE positions are grouped by actual IST trade time; Trend-based CE/PE positions remain separate</small>
+  <small>Trend Engine entries only · MOVE positions are grouped by actual IST trade time</small>
 </div>
 
 <div class="dry-slot-grid">
@@ -37,7 +37,6 @@
     <div class="card-hd slot-hd">
       <span aria-hidden="true">🌅</span>
       <span>Morning MOVE</span>
-      <span class="when" id="dry-when-morning">Entry —</span>
     </div>
     <div class="card-bd dry-slot-body" id="dry-slot-morning" aria-live="polite">
       <div class="no-pos">Loading simulation…</div>
@@ -48,7 +47,6 @@
     <div class="card-hd slot-hd">
       <span aria-hidden="true">🌇</span>
       <span>Evening MOVE</span>
-      <span class="when" id="dry-when-evening">Entry —</span>
     </div>
     <div class="card-bd dry-slot-body" id="dry-slot-evening" aria-live="polite">
       <div class="no-pos">Loading simulation…</div>
@@ -59,7 +57,6 @@
     <div class="card-hd slot-hd">
       <span aria-hidden="true">📈</span>
       <span>Trend-based position (CE / PE)</span>
-      <span class="when" id="dry-trend-decision">Engine —</span>
     </div>
     <div class="card-bd dry-slot-body" id="dry-slot-trend" aria-live="polite">
       <div class="no-pos">Loading simulation…</div>
@@ -206,61 +203,6 @@ function dryKnownNumber(value) {
     Number.isFinite(Number(value));
 }
 
-function dryMoveDecisionHtml(view) {
-  if (!view || !view.action) {
-    return `<div class="move-decision dry-slot-footer-panel muted">
-      <div class="move-decision-hd">
-        <div class="move-decision-title">
-          <span>MOVE strategy</span>
-          <strong>Automatic MOVE Forecast</strong>
-        </div>
-        <span class="badge sim">WAITING</span>
-      </div>
-      <p class="move-decision-copy">Waiting for the next scheduled decision cycle.</p>
-    </div>`;
-  }
-  const forecast = view.forecast || {};
-  const metrics = view.metrics || {};
-  const action = String(view.action || 'NO_TRADE');
-  const actionLabel = action === 'LONG_MOVE' ? 'LONG MOVE'
-    : action === 'SHORT_MOVE' ? 'SHORT MOVE'
-    : action === 'MANAGE_EXISTING_POSITION' ? 'MANAGE EXISTING' : 'NO TRADE';
-  const cls = action === 'LONG_MOVE' ? 'up' : action === 'SHORT_MOVE' ? 'down' : 'muted';
-  const sidewaysShort = view.strategy_override?.kind === 'morning_all_sideways_short'
-    && view.strategy_override?.applied === true;
-  const eventCopy = sidewaysShort
-    ? '5M, 15M and 1H SIDEWAYS · Morning SELL rule'
-    : forecast.event_score_available
-      ? `Event risk ${fN(forecast.jump_event_score, 2)}`
-      : 'Event risk UNKNOWN / HIGH · SHORT blocked';
-  const directional = action === 'LONG_MOVE'
-    ? (view.failed_gates?.long || [])
-    : action === 'SHORT_MOVE'
-      ? (view.failed_gates?.short || [])
-      : [...(view.failed_gates?.long || []).map(v => `LONG ${v}`),
-         ...(view.failed_gates?.short || []).map(v => `SHORT ${v}`)];
-  const failed = [
-    ...(view.failed_gates?.common || []),
-    ...directional,
-  ].slice(0, 6);
-  return `<div class="move-decision dry-slot-footer-panel ${cls}">
-    <div class="move-decision-hd">
-      <div class="move-decision-title">
-        <span>Automatic MOVE Forecast</span>
-        <strong>${esc(actionLabel)}</strong>
-      </div>
-      <span class="badge sim">${esc(String(view.auto_mode || 'disabled').toUpperCase())}</span>
-    </div>
-    <div class="move-decision-metrics">
-      <span>Fair P20 / P50 / P80: <b>$${fN(forecast.expected_payoff_low, 2)} / $${fN(forecast.expected_payoff_mid, 2)} / $${fN(forecast.expected_payoff_high, 2)}</b></span>
-      <span>Payoff p99: <b>$${fN(forecast.payoff_p99, 2)}</b></span>
-      <span>Edge / lot · LONG <b>${f$(metrics.long_edge_per_contract)}</b> · SHORT <b>${f$(metrics.short_edge_per_contract)}</b></span>
-      <span>${esc(eventCopy)}</span>
-    </div>
-    ${failed.length ? `<small>Blocked gates: ${esc(failed.join(', '))}</small>` : '<small>All required gates passed.</small>'}
-  </div>`;
-}
-
 function dryStateIsVisible(state) {
   return state && state.status && state.status !== 'IDLE' &&
     !(state.status === 'CLOSED' && state.dashboard_visible === false);
@@ -351,14 +293,12 @@ function drySlotIsEditing(slot) {
      document.activeElement.matches('.dry-protection-box input'));
 }
 
-function dryPositionDetails(state, slot, decision = null) {
+function dryPositionDetails(state, slot) {
   const controlSlot = ['morning', 'evening', 'trend'].includes(state?.control_slot)
     ? state.control_slot : slot;
-  const decisionHtml = slot === 'trend' || controlSlot !== slot
-    ? '' : dryMoveDecisionHtml(decision);
   if (!dryStateIsVisible(state)) {
     const copy = dryModeActive ? 'No active simulation' : 'No saved simulation';
-    return `<div class="no-pos"><span class="icon">◇</span>${copy}</div>${decisionHtml}`;
+    return `<div class="no-pos"><span class="icon">◇</span>${copy}</div>`;
   }
 
   if (state.status === 'OPEN') {
@@ -384,8 +324,7 @@ function dryPositionDetails(state, slot, decision = null) {
           Exit
         </button>
       </div>
-      ${dryProtectionHtml(state, slot, controlSlot)}
-      ${decisionHtml}`;
+      ${dryProtectionHtml(state, slot, controlSlot)}`;
   }
 
   if (state.status === 'CLOSED') {
@@ -401,10 +340,10 @@ function dryPositionDetails(state, slot, decision = null) {
         <dt>Lots</dt><dd>${fN(state.lots)}</dd>
         <dt>Entry → Exit</dt><dd>$${fN(state.entry_mark, 4)} → $${fN(state.exit_mark, 4)}</dd>
         <dt>Trigger</dt><dd>${esc(state.exit_trigger || 'simulation ended')}</dd>
-      </dl>${decisionHtml}`;
+      </dl>`;
   }
 
-  return `<div class="no-pos"><span class="icon">◇</span>${esc(state.status)}</div>${decisionHtml}`;
+  return `<div class="no-pos"><span class="icon">◇</span>${esc(state.status)}</div>`;
 }
 
 function dryEngineDecisionLabel(value) {
@@ -672,11 +611,6 @@ async function loadDryStatus(refreshTrend = true) {
     renderDryMode(dryStatus);
     await loadDryTrendScoreAutoStatus();
     if (!dryModeActive) dryTrendEnginePreview = null;
-    document.getElementById('dry-when-morning').textContent =
-      'Scheduled ' + (dryStatus.morning_entry_ist || '—') +
-      ' · SIDEWAYS SELL immediate';
-    document.getElementById('dry-when-evening').textContent =
-      'Entry ' + (dryStatus.evening_entry_ist || dryStatus.entry_ist || '—');
     if (dryTrendScoreAutoEnabled()) {
       dryTrendEnginePreview = null;
     } else if (refreshTrend) {
@@ -692,20 +626,13 @@ async function loadDryStatus(refreshTrend = true) {
         }
       }
     }
-    const engineDecision = dryTrendEnginePreview?.decision
-      ? dryEngineDecisionLabel(dryTrendEnginePreview.decision)
-      : '—';
-    document.getElementById('dry-trend-decision').textContent = dryTrendScoreAutoEnabled()
-      ? `AUTO · ${dryTrendScoreTarget(dryTrendScoreAutoStatus)}`
-      : `Engine ${engineDecision}`;
-
     if (!drySlotIsEditing('morning')) {
       document.getElementById('dry-slot-morning').innerHTML =
-        dryPositionDetails(displaySlots.morning || {}, 'morning', dryStatus.move_decisions?.morning);
+        dryPositionDetails(displaySlots.morning || {}, 'morning');
     }
     if (!drySlotIsEditing('evening')) {
       document.getElementById('dry-slot-evening').innerHTML =
-        dryPositionDetails(displaySlots.evening || {}, 'evening', dryStatus.move_decisions?.evening);
+        dryPositionDetails(displaySlots.evening || {}, 'evening');
     }
     if (!drySlotIsEditing('trend')) {
       document.getElementById('dry-slot-trend').innerHTML =
