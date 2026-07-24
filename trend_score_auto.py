@@ -1,4 +1,4 @@
-"""Pure policy helpers for score-driven DRY RUN automation.
+"""Pure policy helpers shared by DRY RUN and LIVE score automation.
 
 This module deliberately performs no network, filesystem, Flask, or exchange
 work.  It turns a validated Trend Engine score into one of the three approved

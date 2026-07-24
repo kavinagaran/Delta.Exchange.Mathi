@@ -3,6 +3,7 @@ import signal
 import tempfile
 import unittest
 from contextlib import nullcontext
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -194,6 +195,63 @@ class TpMonitorSafetyTests(unittest.TestCase):
         self.assertEqual(health["unprotected_same_product_lots"], 0)
         self.assertEqual(health["protection_revision"], 1)
         self.assertTrue(health["continuity_verified"])
+
+    def test_live_score_position_never_adopts_same_product_growth(self):
+        self.write_state(
+            lots=3,
+            owned_entry_lots=3,
+            original_owned_entry_lots=3,
+            ownership="trend_score_auto_live",
+            entry_trigger="trend_engine_score_zone_auto",
+            position_cycle_id="trend-cycle-test",
+            entry_mark=1.0,
+            entry_fees_usd=0.10,
+            protection_config={
+                "tp_target_pnl": 100,
+                "sl_target_pnl": 50,
+                "tsl_arm_pnl": 25,
+                "tsl_trail_pnl": 10,
+                "poll_secs": 10,
+            },
+        )
+        with patch.object(tp_monitor, "SLOT", "trend"), \
+             patch.object(tp_monitor, "REMOVE_PROTECTION", False), \
+             patch.object(tp_monitor, "install_signal_handlers"), \
+             patch.object(tp_monitor, "get_exchange_size", return_value=6), \
+             patch.object(tp_monitor, "get_exchange_position", return_value={
+                 "product_id": 101, "size": 6, "entry_price": "1.5",
+             }), \
+             patch.object(
+                 tp_monitor,
+                 "_trend_cycle_continuity",
+                 return_value=self.continuity(),
+             ), \
+             patch.object(tp_monitor, "get_order") as get_order, \
+             patch.object(tp_monitor, "place_stop_order") as place, \
+             patch.object(tp_monitor, "edit_stop_price") as edit, \
+             patch.object(tp_monitor, "send_telegram") as telegram, \
+             patch.object(tp_monitor.time, "sleep", side_effect=_StopLoop):
+            with self.assertRaises(_StopLoop):
+                tp_monitor.main()
+
+        state = self.read_state()
+        self.assertEqual(state["lots"], 3)
+        self.assertEqual(state["owned_entry_lots"], 3)
+        self.assertNotIn("externally_added_lots_adopted", state)
+        get_order.assert_not_called()
+        place.assert_not_called()
+        edit.assert_not_called()
+        self.assertTrue(any(
+            "fixed-size LIVE score ownership" in call.args[0]
+            for call in telegram.call_args_list
+        ))
+        health = json.loads(self.health_file.read_text(encoding="utf-8"))
+        self.assertEqual(health["status"], "degraded")
+        self.assertEqual(health["adoption_status"], "blocked_score_fixed_size")
+        self.assertEqual(health["exchange_position_size"], 6)
+        self.assertEqual(health["protected_lots"], 3)
+        self.assertEqual(health["unprotected_same_product_lots"], 3)
+        self.assertFalse(health["protection_established"])
 
     def test_failed_resize_keeps_old_orders_and_reports_partial_coverage(self):
         self.write_state(
@@ -914,8 +972,17 @@ class TpMonitorSafetyTests(unittest.TestCase):
         self.assertEqual(history[0]["accounting_status"], "complete")
 
     def test_external_flat_unknown_accounting_stays_null_and_pending(self):
-        self.write_state()
+        self.write_state(
+            pending_close_order_id="unresolved-close",
+            pending_close_client_order_id="unresolved-client",
+            pending_close_submission_state="submission_unknown",
+            pending_close_post_boundary=True,
+            pending_close_attempts=1,
+        )
         with patch.object(tp_monitor, "get_exchange_size", return_value=0), \
+             patch.object(
+                 tp_monitor, "_lookup_pending_close",
+                 return_value=({}, False)), \
              patch.object(tp_monitor, "_resolve_external_close_order", return_value=(
                  {}, False, "order history unavailable",
              )):
@@ -931,6 +998,12 @@ class TpMonitorSafetyTests(unittest.TestCase):
         self.assertTrue(state["history_pending"])
         self.assertFalse(state["history_logged"])
         self.assertEqual(state["exit_reconciliation_status"], "pending_order_history")
+        self.assertEqual(state["exit_order_id"], "unresolved-close")
+        self.assertEqual(state["exit_client_order_id"], "unresolved-client")
+        self.assertIsNone(state["pending_close_submission_state"])
+        self.assertIsNone(state["pending_close_client_order_id"])
+        self.assertIsNone(state["pending_close_order_id"])
+        self.assertFalse(state["pending_close_post_boundary"])
         history = json.loads(self.history_file.read_text(encoding="utf-8"))
         self.assertIsNone(history[0]["pnl_usd"])
         self.assertEqual(history[0]["accounting_status"], "pending")
@@ -1046,6 +1119,55 @@ class TpMonitorSafetyTests(unittest.TestCase):
             ledger.call_args.args[0]["exit_trigger"], "take_profit_trend",
         )
         telegram.assert_not_called()
+
+    def test_complete_trend_fill_ledger_clears_consumed_close_journal(self):
+        state = self.write_state(
+            original_bot_entry_fee_usd=0.10,
+            original_bot_entry_fee_source="exchange",
+            continuity_anchor_utc="2026-07-15T01:02:03+00:00",
+            pending_close_order_id="ledger-close",
+            pending_close_client_order_id="ledger-close-client",
+            pending_close_submission_state="acknowledged",
+            pending_close_post_boundary=True,
+            pending_close_attempts=1,
+        )
+        continuity = {
+            "verified": True,
+            "status": "closed",
+            "verified_at_utc": "2026-07-15T01:03:00+00:00",
+            "fill_ids": ["entry-fill", "exit-fill"],
+            "last_fill_id": "exit-fill",
+            "cycle_entry_lots_total": 10,
+            "cycle_exit_lots_total": 10,
+            "partial_exit_gross_pnl_usd": 2.0,
+            "partial_exit_fees_usd": 0.20,
+            "exit_mark": 1.20,
+            "exit_order_ids": ["ledger-close"],
+            "added_entry_fees_usd": 0.0,
+            "fill_fees_complete": True,
+        }
+        with patch.object(tp_monitor, "SLOT", "trend"), \
+             patch.object(
+                 tp_monitor, "get_exchange_position",
+                 return_value={"product_id": 101, "size": 0}), \
+             patch.object(
+                 tp_monitor, "_trend_cycle_continuity",
+                 return_value=continuity):
+            attempted, complete, error = (
+                tp_monitor._finalize_trend_flat_fill_ledger(
+                    state, datetime.now(timezone.utc),
+                )
+            )
+
+        self.assertTrue(attempted)
+        self.assertTrue(complete)
+        self.assertEqual(error, "")
+        closed = self.read_state()
+        self.assertEqual(closed["status"], "CLOSED")
+        self.assertIsNone(closed["pending_close_submission_state"])
+        self.assertIsNone(closed["pending_close_client_order_id"])
+        self.assertIsNone(closed["pending_close_order_id"])
+        self.assertFalse(closed["pending_close_post_boundary"])
 
     def test_closed_pending_worker_retries_once_then_repairs_on_later_run(self):
         self.write_state(
@@ -1172,6 +1294,11 @@ class TpMonitorSafetyTests(unittest.TestCase):
         self.write_state(
             status="CLOSED", history_pending=True, history_logged=False,
             exit_trigger="closed_externally", exit_mark=None, pnl_usd=None,
+            pending_close_order_id="stale-close",
+            pending_close_client_order_id="stale-client",
+            pending_close_submission_state="submission_unknown",
+            pending_close_post_boundary=True,
+            pending_close_attempts=1,
         )
         self.history_file.write_text(json.dumps([{
             "slot": "evening", "symbol": "C-BTC-TEST",
@@ -1193,6 +1320,10 @@ class TpMonitorSafetyTests(unittest.TestCase):
         self.assertTrue(hydrated["history_logged"])
         self.assertEqual(hydrated["exit_order_id"], "history-close")
         self.assertEqual(hydrated["pnl_usd"], -5.3)
+        self.assertIsNone(hydrated["pending_close_submission_state"])
+        self.assertIsNone(hydrated["pending_close_client_order_id"])
+        self.assertIsNone(hydrated["pending_close_order_id"])
+        self.assertFalse(hydrated["pending_close_post_boundary"])
 
     def test_legacy_non_fee_and_dry_run_history_do_not_remain_pending(self):
         for dry_run in (False, True):
@@ -1218,6 +1349,10 @@ class TpMonitorSafetyTests(unittest.TestCase):
             client_id = kwargs["client_order_id"]
             self.assertEqual(persisted["pending_close_client_order_id"], client_id)
             self.assertEqual(persisted["pending_close_state"], "intent_persisted")
+            self.assertEqual(
+                persisted["pending_close_submission_state"], "submitting",
+            )
+            self.assertTrue(persisted["pending_close_post_boundary"])
             self.assertEqual(persisted["pending_close_lots"], 10)
             return {"success": True, "result": {"id": "close-1"}}
 
@@ -1295,12 +1430,59 @@ class TpMonitorSafetyTests(unittest.TestCase):
         self.assertEqual(state["pending_close_client_order_id"], first_identity)
         self.assertEqual(state["tp_stop_order_id"], "tp-1")
 
-    def test_conclusive_not_found_retries_same_client_identity(self):
+    def test_conclusive_visibility_lag_after_response_loss_never_reposts(self):
+        self.write_state(tp_stop_order_id="tp-1")
+        with patch.object(tp_monitor, "get_exchange_size", side_effect=[10, 10]), \
+             patch.object(
+                 tp_monitor, "place_order",
+                 side_effect=tp_monitor.requests.Timeout("response lost"),
+             ) as first_place, \
+             patch.object(
+                 tp_monitor, "_lookup_pending_close", return_value=({}, True),
+             ):
+            first_closed = tp_monitor.close_position(
+                self.read_state(), 2.0, 10.0,
+            )
+
+        self.assertFalse(first_closed)
+        first_place.assert_called_once()
+        pending = self.read_state()
+        identity = pending["pending_close_client_order_id"]
+        self.assertTrue(identity)
+        self.assertEqual(
+            pending["pending_close_submission_state"], "submission_unknown",
+        )
+        self.assertTrue(pending["pending_close_post_boundary"])
+        self.assertEqual(
+            pending["pending_close_state"], "post_boundary_unresolved",
+        )
+
+        with patch.object(tp_monitor, "get_exchange_size", return_value=10), \
+             patch.object(
+                 tp_monitor, "_lookup_pending_close", return_value=({}, True),
+             ), \
+             patch.object(tp_monitor, "place_order") as duplicate:
+            second_closed = tp_monitor.close_position(
+                self.read_state(), 2.0, 10.0,
+            )
+
+        self.assertFalse(second_closed)
+        duplicate.assert_not_called()
+        self.assertEqual(
+            self.read_state()["pending_close_client_order_id"], identity,
+        )
+
+    def test_conclusive_not_found_submits_only_proven_pre_post_identity(self):
         self.write_state(
             pending_close_client_order_id="close-client-1",
             pending_close_reason="take_profit",
-            pending_close_state="not_found_retryable",
-            pending_close_attempts=1,
+            pending_close_side="sell",
+            pending_close_requested_lots=10,
+            pending_close_start_size=10,
+            pending_close_submission_state="prepared",
+            pending_close_post_boundary=False,
+            pending_close_state="intent_persisted",
+            pending_close_attempts=0,
             pending_close_created_utc="2026-07-15T01:00:00+00:00",
         )
         response = {"success": True, "result": {"id": "close-2"}}
@@ -1316,8 +1498,88 @@ class TpMonitorSafetyTests(unittest.TestCase):
         self.assertEqual(place.call_args.kwargs["client_order_id"], "close-client-1")
         state = self.read_state()
         self.assertEqual(state["pending_close_client_order_id"], "close-client-1")
-        self.assertEqual(state["pending_close_attempts"], 2)
+        self.assertEqual(state["pending_close_attempts"], 1)
         self.assertEqual(state["pending_close_created_utc"], "2026-07-15T01:00:00+00:00")
+        self.assertEqual(state["pending_close_submission_state"], "acknowledged")
+        self.assertTrue(state["pending_close_post_boundary"])
+
+    def test_dashboard_post_boundary_close_is_never_reposted_during_visibility_lag(self):
+        """A dashboard response-loss journal is authoritative in TP recovery."""
+        self.write_state(
+            pending_close_client_order_id="dashboard-close-1",
+            pending_close_reason="trend_score_zone_change",
+            pending_close_side="sell",
+            pending_close_requested_lots=10,
+            pending_close_start_size=10,
+            pending_close_submission_state="submitting",
+            pending_close_post_boundary=True,
+            pending_close_started_at_utc="2026-07-15T01:00:00+00:00",
+            pending_close_last_attempt_at_utc="2026-07-15T01:00:01+00:00",
+        )
+        with patch.object(tp_monitor, "get_exchange_size", return_value=10), \
+             patch.object(tp_monitor, "_lookup_pending_close",
+                          return_value=({}, True)) as lookup, \
+             patch.object(tp_monitor, "place_order") as place:
+            closed = tp_monitor.close_position(self.read_state(), 2.0, 10.0)
+
+        self.assertFalse(closed)
+        lookup.assert_called_once()
+        place.assert_not_called()
+        state = self.read_state()
+        self.assertEqual(
+            state["pending_close_client_order_id"], "dashboard-close-1",
+        )
+        self.assertEqual(state["pending_close_submission_state"], "submitting")
+        self.assertTrue(state["pending_close_post_boundary"])
+        self.assertEqual(state["pending_close_state"], "post_boundary_unresolved")
+
+    def test_dashboard_acknowledged_close_is_never_reposted_when_lookup_lags(self):
+        self.write_state(
+            pending_close_client_order_id="dashboard-close-2",
+            pending_close_order_id=88,
+            pending_close_reason="trend_score_zone_change",
+            pending_close_side="sell",
+            pending_close_requested_lots=10,
+            pending_close_start_size=10,
+            pending_close_submission_state="acknowledged",
+            pending_close_post_boundary=True,
+            pending_close_started_at_utc="2026-07-15T01:00:00+00:00",
+        )
+        with patch.object(tp_monitor, "get_exchange_size", return_value=10), \
+             patch.object(tp_monitor, "_lookup_pending_close",
+                          return_value=({}, True)), \
+             patch.object(tp_monitor, "place_order") as place:
+            closed = tp_monitor.close_position(self.read_state(), 2.0, 10.0)
+
+        self.assertFalse(closed)
+        place.assert_not_called()
+        self.assertEqual(
+            self.read_state()["pending_close_client_order_id"],
+            "dashboard-close-2",
+        )
+
+    def test_prepared_label_without_explicit_boundary_proof_is_not_submittable(self):
+        self.write_state(
+            pending_close_client_order_id="dashboard-close-ambiguous",
+            pending_close_reason="trend_score_zone_change",
+            pending_close_side="sell",
+            pending_close_requested_lots=10,
+            pending_close_start_size=10,
+            pending_close_submission_state="prepared",
+            pending_close_started_at_utc="2026-07-15T01:00:00+00:00",
+        )
+        with patch.object(tp_monitor, "get_exchange_size", return_value=10), \
+             patch.object(tp_monitor, "_lookup_pending_close",
+                          return_value=({}, True)), \
+             patch.object(tp_monitor, "place_order") as place:
+            closed = tp_monitor.close_position(self.read_state(), 2.0, 10.0)
+
+        self.assertFalse(closed)
+        place.assert_not_called()
+        self.assertIn(
+            "does not explicitly prove a pre-POST boundary",
+            self.read_state()["pending_close_error"],
+        )
 
     def test_main_reconciles_residual_pending_close_instead_of_gating_forever(self):
         self.write_state(

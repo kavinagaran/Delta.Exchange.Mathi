@@ -7,6 +7,7 @@ from unittest.mock import Mock, patch
 import pytest
 
 import dashboard
+import tp_monitor
 from risk_controls import account_entry_lock
 
 
@@ -231,7 +232,7 @@ def test_manual_entry_never_revalidates_or_submits_old_preview(isolated_user):
     submit.assert_not_called()
 
 
-def test_overview_has_no_manual_move_controls_and_shows_auto_diagnostics():
+def test_overview_has_no_manual_or_scheduled_move_controls():
     source = (Path(__file__).resolve().parents[1] / "templates" / "overview.html").read_text(
         encoding="utf-8")
     mobile = (
@@ -240,8 +241,12 @@ def test_overview_has_no_manual_move_controls_and_shows_auto_diagnostics():
     ).read_text(encoding="utf-8")
     assert "manualEntry(" not in source
     assert "manualBtns(" not in source
-    assert "Scheduled forecast-driven entries only" in source
-    assert "function moveDecisionHtml(view)" in source
+    assert "Scheduled forecast-driven entries only" not in source
+    assert "function moveDecisionHtml(view)" not in source
+    assert "Automatic MOVE Forecast" not in source
+    assert "SIDEWAYS SELL immediate" not in source
+    assert "Trend-based position (CE / PE)" in source
+    assert "st.display_slots ||" in source
     assert "/api/manual-entry" not in mobile
     assert "MORNING_SIDE" not in mobile
     assert "EVENING_SIDE" not in mobile
@@ -512,6 +517,21 @@ def _open_state(**updates):
     }
     state.update(updates)
     return state
+
+
+@pytest.mark.parametrize(
+    "order",
+    (
+        {"state": "closed", "filled_size": "9.5"},
+        {"state": "closed", "filled_size": -1},
+        {"state": "closed", "filled_size": 11},
+        {"state": "closed", "unfilled_size": "0.5"},
+        {"state": "closed", "unfilled_size": -1},
+        {"state": "closed", "unfilled_size": 11},
+    ),
+)
+def test_dashboard_terminal_fill_rejects_malformed_or_out_of_range_lots(order):
+    assert dashboard._terminal_fill(order, 10) is None
 
 
 def test_squareoff_persists_reduce_only_identity_and_cancels_only_after_flat(
@@ -1017,6 +1037,151 @@ def test_prepared_trend_close_with_fresh_generation_reuses_client_id(
         submit.call_args.args[0]["client_order_id"]
         == "close-trend-prepared"
     )
+
+
+def test_trend_close_post_boundary_is_durable_and_restart_never_resubmits(
+        isolated_user):
+    state = _trend_squareoff_state()
+    _write(isolated_user / "trend_state.json", state)
+
+    def crash_after_post_boundary(_payload):
+        durable = json.loads(
+            (isolated_user / "trend_state.json").read_text(encoding="utf-8"))
+        assert durable["pending_close_submission_state"] == "submitting"
+        assert durable["pending_close_post_boundary"] is True
+        raise SystemExit("simulated process death after request boundary")
+
+    with patch.object(dashboard, "_active_user", return_value="alice"), \
+            patch.object(
+                dashboard, "_tp_health",
+                return_value=_trend_continuity_health(state)), \
+            patch.object(
+                dashboard, "_strict_realtime_position",
+                return_value={"product_id": 42, "size": "6"}), \
+            patch.object(dashboard, "_lookup_dashboard_order", return_value=None), \
+            patch.object(
+                dashboard, "_post_dashboard_order",
+                side_effect=crash_after_post_boundary) as first_submit, \
+            patch.object(dashboard, "audit_event"):
+        with pytest.raises(SystemExit, match="simulated process death"):
+            dashboard._close_move_state_locked("trend", state)
+
+    first_submit.assert_called_once()
+    pending = json.loads(
+        (isolated_user / "trend_state.json").read_text(encoding="utf-8"))
+    duplicate = Mock(side_effect=AssertionError("duplicate close submitted"))
+
+    with patch.object(dashboard, "_active_user", return_value="alice"), \
+            patch.object(
+                dashboard, "_strict_realtime_position",
+                return_value={"product_id": 42, "size": "6"}), \
+            patch.object(dashboard, "_lookup_dashboard_order", return_value=None), \
+            patch.object(dashboard, "_post_dashboard_order", duplicate):
+        with pytest.raises(RuntimeError, match="prior close submission remains unresolved"):
+            dashboard._close_move_state_locked("trend", pending)
+
+    duplicate.assert_not_called()
+
+
+def test_dashboard_prepared_close_is_a_clean_tp_recoverable_pre_post_journal(
+        isolated_user):
+    """Exercise the actual dashboard fsync shape through TP recovery."""
+    state = _trend_squareoff_state(
+        # Simulate residue from a prior partial-close generation. Creating a
+        # new identity must replace every field that could imply an old POST.
+        pending_close_submission_state="submission_unknown",
+        pending_close_post_boundary=True,
+        pending_close_last_attempt_at_utc="2026-07-15T01:00:01+00:00",
+        pending_close_last_attempt_utc="2026-07-15T01:00:01+00:00",
+        pending_close_attempts=2,
+        pending_close_order_state="closed",
+        pending_close_exchange_state="closed",
+        pending_close_state="post_boundary_unresolved",
+        pending_close_lookup_conclusive=True,
+        pending_close_last_reconciled_utc="2026-07-15T01:00:02+00:00",
+    )
+    state_file = isolated_user / "trend_state.json"
+    _write(state_file, state)
+
+    def crash_after_dashboard_prepared(_order_id, _client_id, _product_id):
+        prepared = json.loads(state_file.read_text(encoding="utf-8"))
+        assert prepared["pending_close_submission_state"] == "prepared"
+        assert prepared["pending_close_post_boundary"] is False
+        assert prepared["pending_close_last_attempt_at_utc"] is None
+        assert prepared["pending_close_last_attempt_utc"] is None
+        assert prepared["pending_close_attempts"] == 0
+        assert prepared["pending_close_order_state"] is None
+        assert prepared["pending_close_exchange_state"] == ""
+        assert prepared["pending_close_state"] == "prepared"
+        assert prepared["pending_close_lookup_conclusive"] is False
+        raise SystemExit("crash after prepared fsync")
+
+    with patch.object(dashboard, "_move_client_id",
+                      return_value="dashboard-prepared-close"), \
+            patch.object(dashboard, "_active_user", return_value="alice"), \
+            patch.object(
+                dashboard, "_tp_health",
+                return_value=_trend_continuity_health(state)), \
+            patch.object(
+                dashboard, "_strict_realtime_position",
+                return_value={"product_id": 42, "size": "6"}), \
+            patch.object(
+                dashboard, "_lookup_dashboard_order",
+                side_effect=crash_after_dashboard_prepared), \
+            patch.object(dashboard, "audit_event"):
+        with pytest.raises(SystemExit, match="crash after prepared fsync"):
+            dashboard._close_move_state_locked("trend", state)
+
+    prepared = json.loads(state_file.read_text(encoding="utf-8"))
+    recovered_order = {
+        "id": "tp-recovered-close",
+        "client_order_id": "dashboard-prepared-close",
+        "product_id": 42,
+        "side": "sell",
+        "reduce_only": True,
+        "state": "closed",
+        "size": 6,
+        "unfilled_size": 0,
+        "average_fill_price": "9",
+        "commission": "0",
+    }
+    response = {"success": True, "result": recovered_order}
+    with patch.object(tp_monitor, "STATE_FILE", state_file), \
+            patch.object(
+                tp_monitor, "HISTORY_FILE",
+                isolated_user / "trend_history.json"), \
+            patch.object(tp_monitor, "USER_DIR", isolated_user), \
+            patch.object(tp_monitor, "SLOT", "trend"), \
+            patch.object(
+                tp_monitor, "_trend_fill_ledger_required",
+                return_value=False), \
+            patch.object(
+                tp_monitor, "_verify_trend_close_cycle",
+                return_value=(True, "")), \
+            patch.object(
+                tp_monitor, "get_exchange_size",
+                side_effect=[6, 0]), \
+            patch.object(
+                tp_monitor, "_lookup_pending_close",
+                side_effect=[({}, True), (recovered_order, True)]), \
+            patch.object(
+                tp_monitor, "place_order",
+                return_value=response) as submit, \
+            patch.object(tp_monitor, "send_telegram"):
+        assert tp_monitor.close_position(prepared, 9.0, 6.0)
+
+    submit.assert_called_once()
+    assert (
+        submit.call_args.kwargs["client_order_id"]
+        == "dashboard-prepared-close"
+    )
+    closed = json.loads(state_file.read_text(encoding="utf-8"))
+    assert closed["status"] == "CLOSED"
+    assert closed["pending_close_submission_state"] is None
+    assert closed["pending_close_client_order_id"] is None
+    assert closed["pending_close_order_id"] is None
+    assert closed["pending_close_post_boundary"] is False
+    assert not dashboard._trend_score_auto_pending_identity(closed)
 
 
 def test_concurrent_fill_during_trend_squareoff_leaves_accounting_pending(

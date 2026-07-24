@@ -161,7 +161,7 @@ log = logging.getLogger(f"tp_monitor[{USER}/{SLOT}]")
 
 def _slot_label():
     return {"morning": "🌅 MORNING", "evening": "🌇 EVENING",
-            "trend": "📈 TREND OPTION"}[SLOT]
+            "trend": "📈 TREND ENGINE"}[SLOT]
 
 
 def _sign(method, path, query="", body=""):
@@ -493,6 +493,25 @@ def _atomic_write_json(path, value):
     partially-written state/heartbeat document."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
+
+    def write_and_sync(target, text):
+        with target.open("w", encoding="utf-8", newline="\n") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+
+    def sync_directory():
+        if os.name != "posix":
+            return
+        descriptor = os.open(
+            str(path.parent),
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+        )
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
     if path.exists() and path != HEALTH_FILE:
         raw = path.read_text(encoding="utf-8")
         try:
@@ -500,12 +519,16 @@ def _atomic_write_json(path, value):
         except (ValueError, TypeError) as exc:
             raise RuntimeError(f"refusing to overwrite corrupt JSON: {path}") from exc
         backup = path.with_suffix(path.suffix + ".bak")
-        backup_tmp = backup.with_name(f".{backup.name}.{os.getpid()}.tmp")
-        backup_tmp.write_text(raw, encoding="utf-8")
+        backup_tmp = backup.with_name(
+            f".{backup.name}.{os.getpid()}.{time.time_ns()}.tmp"
+        )
+        write_and_sync(backup_tmp, raw)
         os.replace(backup_tmp, backup)
+        sync_directory()
     tmp = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
-    tmp.write_text(json.dumps(value, indent=2), encoding="utf-8")
+    write_and_sync(tmp, json.dumps(value, indent=2))
     os.replace(tmp, path)
+    sync_directory()
 
 
 _CLOSE_LOCK_DEPTH = 0
@@ -1836,13 +1859,14 @@ def _resolve_external_close_order(state):
     known_order_ids = {
         str(value) for value in (
             state.get("tp_stop_order_id"), state.get("tsl_stop_order_id"),
-            state.get("pending_close_order_id"),
+            state.get("pending_close_order_id"), state.get("exit_order_id"),
         ) if value not in (None, "")
     }
     known_client_ids = {
         str(value) for value in (
             state.get("tp_client_order_id"), state.get("stop_client_order_id"),
             state.get("pending_close_client_order_id"),
+            state.get("exit_client_order_id"),
         ) if value not in (None, "")
     }
     candidates = []
@@ -2260,6 +2284,48 @@ def append_history(state):
         return False
 
 
+def _clear_pending_close_journal(state):
+    """Erase a consumed close identity after exchange-flat proof.
+
+    Permanent exit identity/accounting fields are populated before this helper
+    runs.  Pending fields must not survive in a CLOSED state because dashboard
+    automation treats any such identity as an unresolved exchange operation.
+    """
+    pending_order_id = state.get("pending_close_order_id")
+    pending_client_id = state.get("pending_close_client_order_id")
+    if (state.get("exit_order_id") in (None, "")
+            and pending_order_id not in (None, "")):
+        state["exit_order_id"] = pending_order_id
+    if (state.get("exit_client_order_id") in (None, "")
+            and pending_client_id not in (None, "")):
+        state["exit_client_order_id"] = pending_client_id
+    state.update({
+        "pending_close_client_order_id": None,
+        "pending_close_order_id": None,
+        "pending_close_submission_state": None,
+        "pending_close_post_boundary": False,
+        "pending_close_requested_lots": None,
+        "pending_close_lots": None,
+        "pending_close_start_size": None,
+        "pending_close_side": None,
+        "pending_close_started_at_utc": None,
+        "pending_close_created_utc": None,
+        "pending_close_last_attempt_at_utc": None,
+        "pending_close_last_attempt_utc": None,
+        "pending_close_attempts": 0,
+        "pending_close_order_state": None,
+        "pending_close_exchange_state": None,
+        "pending_close_state": None,
+        "pending_close_lookup_conclusive": False,
+        "pending_close_last_reconciled_utc": None,
+        "pending_close_live_size": 0,
+        "pending_close_reason": "",
+        "pending_close_error": "",
+        "pending_close_last_error": "",
+    })
+    return state
+
+
 def _hydrate_complete_history(state):
     """Restore final accounting from the ledger before doing another lookup."""
     try:
@@ -2294,6 +2360,7 @@ def _hydrate_complete_history(state):
         "history_logged": True,
         "history_logged_at_utc": hydrated.get("history_logged_at_utc") or _utc_now(),
     })
+    _clear_pending_close_journal(hydrated)
     _atomic_write_json(STATE_FILE, hydrated)
     return hydrated
 
@@ -2418,6 +2485,7 @@ def _finalize_trend_flat_fill_ledger(state, now):
         "history_pending": True,
         "history_logged": False,
     })
+    _clear_pending_close_journal(state)
     _atomic_write_json(STATE_FILE, state)
     append_history(state)
     log.info(
@@ -2438,6 +2506,8 @@ def _finalize_external_flat_close_locked(state):
     if isinstance(latest, dict):
         state = {**state, **latest}
     if _history_accounting_complete(state):
+        _clear_pending_close_journal(state)
+        _atomic_write_json(STATE_FILE, state)
         append_history(state)
         return True
     hydrated = _hydrate_complete_history(state)
@@ -2503,6 +2573,7 @@ def _finalize_external_flat_close_locked(state):
                 "history_pending": True,
                 "history_logged": False,
             })
+            _clear_pending_close_journal(state)
             _atomic_write_json(STATE_FILE, state)
             append_history(state)
             log.info(
@@ -2540,6 +2611,7 @@ def _finalize_external_flat_close_locked(state):
     state.setdefault("fees_complete", False)
     state.setdefault("fees_estimated", False)
     state.setdefault("pnl_includes_fees", False)
+    _clear_pending_close_journal(state)
     _atomic_write_json(STATE_FILE, state)
     append_history(state)
     log.warning("Externally-flat %s has pending realized accounting: %s",
@@ -2623,6 +2695,7 @@ def _finalize_confirmed_market_close_locked(state, order, mark, lots, reason):
                            or state.get("max_protected_lots")
                            or state.get("protection_lots") or expected_lots),
     })
+    _clear_pending_close_journal(state)
     _atomic_write_json(STATE_FILE, state)
     append_history(state)
 
@@ -2670,6 +2743,73 @@ def _persist_close_fields(state, **fields):
         return False
 
 
+def _proven_pre_post_close_intent(state, live_size, close_side):
+    """Prove a persisted close identity has never crossed the POST boundary.
+
+    Dashboard and monitor recovery share the same state file.  A missing order
+    lookup is therefore permission to submit only when the durable journal
+    explicitly says ``prepared`` and contains no evidence of an earlier
+    request.  Missing/legacy fields are deliberately ambiguous, not pre-POST.
+    """
+    if str(state.get("pending_close_submission_state") or "").lower() != "prepared":
+        return False, "close journal is not explicitly prepared"
+    if state.get("pending_close_post_boundary") is not False:
+        return False, "close journal does not explicitly prove a pre-POST boundary"
+    if state.get("pending_close_order_id") not in (None, ""):
+        return False, "close journal already contains an exchange order id"
+    if not str(state.get("pending_close_client_order_id") or "").strip():
+        return False, "prepared close journal has no client identity"
+    if str(state.get("pending_close_side") or "").lower() != close_side:
+        return False, "prepared close side does not match the owned position"
+
+    # Either component may have created the intent; accept its quantity field,
+    # but require an exact positive integer equal to the current exposure.
+    requested_raw = state.get("pending_close_requested_lots")
+    if requested_raw in (None, ""):
+        requested_raw = state.get("pending_close_lots")
+    requested = _integral_lots(requested_raw)
+    if requested is None or requested != abs(int(live_size)):
+        return False, "prepared close quantity does not match live exposure"
+
+    start_raw = state.get("pending_close_start_size")
+    if start_raw in (None, "") or isinstance(start_raw, bool):
+        return False, "prepared close start size is invalid"
+    try:
+        start_value = Decimal(str(start_raw))
+    except (InvalidOperation, ValueError, TypeError):
+        return False, "prepared close start size is invalid"
+    if (not start_value.is_finite()
+            or start_value != start_value.to_integral_value()
+            or int(start_value) != int(live_size)):
+        return False, "prepared close start size does not match live exposure"
+
+    created = (
+        state.get("pending_close_started_at_utc")
+        or state.get("pending_close_created_utc")
+    )
+    if _parse_utc_datetime(created) is None:
+        return False, "prepared close journal has no valid creation time"
+
+    # These fields are written at or after the irreversible request boundary.
+    # Their presence wins over a contradictory ``prepared`` label.
+    attempts_raw = state.get("pending_close_attempts")
+    attempts = (
+        0 if attempts_raw in (None, "")
+        else _nonnegative_integral_lots(attempts_raw)
+    )
+    if attempts is None:
+        return False, "prepared close journal has an invalid attempt count"
+    if (state.get("pending_close_last_attempt_at_utc")
+            or state.get("pending_close_last_attempt_utc")
+            or attempts > 0
+            or str(state.get("pending_close_exchange_state") or "").strip()):
+        return False, "prepared close journal contains POST-boundary evidence"
+    phase = str(state.get("pending_close_state") or "").strip().lower()
+    if phase not in {"", "prepared", "intent_persisted", "cycle_unverified"}:
+        return False, f"prepared close journal has incompatible phase {phase}"
+    return True, ""
+
+
 def _reconcile_uncertain_close(state, response_order, mark, lots, reason, error):
     """Reconcile a submitted close whose API outcome is not trustworthy.
 
@@ -2713,6 +2853,8 @@ def _reconcile_uncertain_close(state, response_order, mark, lots, reason, error)
         pending_close_order_id=order_id,
         pending_close_client_order_id=client_order_id,
         pending_close_reason=state.get("pending_close_reason") or reason,
+        pending_close_submission_state="submission_unknown",
+        pending_close_post_boundary=True,
         pending_close_exchange_state=order_state,
         pending_close_lookup_conclusive=bool(lookup_conclusive),
         pending_close_error=str(error),
@@ -2736,11 +2878,14 @@ def _reconcile_uncertain_close(state, response_order, mark, lots, reason, error)
         pending_state = "terminal_position_open"
         detail = f"{error}; exact close order is {order_state}, {abs(int(live_after))} lots remain"
     elif lookup_conclusive and not exact_order:
-        # A later cycle may safely retry the *same* client identity.  We do not
-        # retry in this cycle because an just-submitted order can take a moment
-        # to become visible through the read endpoints.
-        pending_state = "not_found_retryable"
-        detail = f"{error}; exact identity not found, {abs(int(live_after))} lots remain"
+        # This function runs only after a request crossed the POST boundary.
+        # A visibility-lagging lookup must never turn that uncertainty back
+        # into permission to submit, even with the same client identity.
+        pending_state = "post_boundary_unresolved"
+        detail = (
+            f"{error}; submitted identity is not yet visible, "
+            f"{abs(int(live_after))} lots remain"
+        )
     else:
         pending_state = "ambiguous"
         detail = f"{error}; close outcome unresolved, {abs(int(live_after))} lots remain"
@@ -2893,13 +3038,34 @@ def _close_position_locked(state, mark, pnl, reason="take_profit"):
             pending_client_id = None
             pending_order_id = None
         else:
-            # Both open/history lookups authoritatively found no such order.
-            # Retrying the same client id is safe; replacing it is not.
+            # Both open/history lookups found no such order.  That is not proof
+            # that a prior request never crossed the boundary: response loss
+            # and order-index visibility lag can produce the same observation.
+            # Reuse is allowed only for an explicit, internally consistent
+            # pre-POST journal written by either dashboard or monitor.
             if not pending_client_id:
                 detail = "legacy close order id is unresolved without a client identity"
                 _persist_close_fields(
                     state, pending_close_state="ambiguous", pending_close_error=detail,
                 )
+                return False
+            prepared, prepared_error = _proven_pre_post_close_intent(
+                state, live_size, close_side,
+            )
+            if not prepared:
+                detail = (
+                    "exact close identity is not visible, but duplicate submission "
+                    f"is blocked: {prepared_error}"
+                )
+                _persist_close_fields(
+                    state,
+                    pending_close_state="post_boundary_unresolved",
+                    pending_close_error=detail,
+                    pending_close_lookup_conclusive=True,
+                    pending_close_last_reconciled_utc=_utc_now(),
+                    pending_close_live_size=int(live_size),
+                )
+                log.warning("%s", detail)
                 return False
             retry_same_identity = True
 
@@ -2925,8 +3091,11 @@ def _close_position_locked(state, mark, pnl, reason="take_profit"):
         state.get("pending_close_created_utc")
         if retry_same_identity else _utc_now()
     ) or _utc_now()
-    previous_attempts = int(state.get("pending_close_attempts") or 0)
-    attempts = previous_attempts + 1 if retry_same_identity else 1
+    previous_attempts = _nonnegative_integral_lots(
+        state.get("pending_close_attempts"),
+    )
+    if previous_attempts is None:
+        previous_attempts = 0
     intent_state = "retrying_same_identity" if retry_same_identity else "intent_persisted"
 
     # This write must complete before the irreversible POST.  If the process
@@ -2943,8 +3112,12 @@ def _close_position_locked(state, mark, pnl, reason="take_profit"):
         pending_close_lots=lots,
         pending_close_side=close_side,
         pending_close_created_utc=created_utc,
-        pending_close_last_attempt_utc=_utc_now(),
-        pending_close_attempts=attempts,
+        pending_close_start_size=int(live_size),
+        pending_close_submission_state="prepared",
+        pending_close_post_boundary=False,
+        pending_close_last_attempt_utc=None,
+        pending_close_last_attempt_at_utc=None,
+        pending_close_attempts=0,
         pending_close_error="",
         pending_close_lookup_conclusive=False,
         pending_close_live_size=int(live_size),
@@ -2970,6 +3143,18 @@ def _close_position_locked(state, mark, pnl, reason="take_profit"):
     )
     log.info("%s HIT — P&L $%.2f  mark $%.4f  %sing %d lots to close (client %s)...",
              tag, pnl, mark, close_side, lots, client_order_id)
+    # Make the irreversible request boundary durable before POST.  From this
+    # point onward recovery may only reconcile this identity; it cannot infer
+    # permission to resubmit from lookup absence.
+    if not _persist_close_fields(
+        state,
+        pending_close_submission_state="submitting",
+        pending_close_post_boundary=True,
+        pending_close_last_attempt_utc=_utc_now(),
+        pending_close_attempts=previous_attempts + 1,
+    ):
+        log.error("Close POST boundary was not durable; refusing to submit an order.")
+        return False
     try:
         result = place_order(
             product_id, symbol, close_side, lots, reduce_only=True,
@@ -3006,6 +3191,8 @@ def _close_position_locked(state, mark, pnl, reason="take_profit"):
         pending_close_order_id=order_id,
         pending_close_client_order_id=client_order_id,
         pending_close_state="submitted",
+        pending_close_submission_state="acknowledged",
+        pending_close_post_boundary=True,
         pending_close_exchange_state=_order_state(order),
         pending_close_error="",
     )
@@ -3831,6 +4018,7 @@ def main():
                                or closed_state.get("max_protected_lots")
                                or closed_state.get("protection_lots") or done),
         })
+        _clear_pending_close_journal(closed_state)
         _atomic_write_json(STATE_FILE, closed_state)
         append_history(closed_state)
         label = _slot_label()
@@ -4249,6 +4437,40 @@ def main():
                     sleep_secs = local_fallback_poll
                     raise _RetryMonitorCycle()
 
+                score_owned_live = (
+                    SLOT == "trend"
+                    and str(state.get("ownership") or "").lower()
+                    == "trend_score_auto_live"
+                    and str(state.get("entry_trigger") or "").lower()
+                    == "trend_engine_score_zone_auto"
+                )
+                if new_lots > lots and score_owned_live:
+                    message = (
+                        "exchange position grew beyond the proven score fill "
+                        f"({new_lots} > {lots}); fixed-size LIVE score ownership "
+                        "never adopts externally added lots"
+                    )
+                    write_monitor_health(
+                        "degraded",
+                        last_error=message,
+                        state_status=state.get("status"),
+                        exchange_position_size=live,
+                        protected_lots=lots,
+                        owned_entry_lots=owned_cap,
+                        unprotected_same_product_lots=max(new_lots - lots, 0),
+                        stop_order_id=stop_id,
+                        tp_order_id=tp_id,
+                        protection_established=False,
+                        adoption_status="blocked_score_fixed_size",
+                        continuity_verified=bool(continuity.get("verified")),
+                        continuity_status=continuity.get("status"),
+                    )
+                    alert_once(
+                        "score_same_product_growth_blocked",
+                        f"{symbol}: {message}",
+                    )
+                    sleep_secs = local_fallback_poll
+                    raise _RetryMonitorCycle()
                 if new_lots > lots and SLOT == "trend":
                     try:
                         previous_lots = lots

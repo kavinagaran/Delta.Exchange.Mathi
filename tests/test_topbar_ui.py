@@ -149,12 +149,12 @@ if (attributes['aria-pressed'] !== 'false' || !attributes['aria-label'].includes
 
 
 @pytest.mark.skipif(NODE is None, reason="Node.js is required for frontend JavaScript tests")
-def test_stale_closed_card_renders_clean_idle_state_without_old_protection_health():
+def test_closed_cards_never_render_inactive_protection_controls():
     script = r"""
 const fs = require('fs');
 const vm = require('vm');
 const source = fs.readFileSync('templates/overview.html', 'utf8');
-const start = source.indexOf('function tpRow');
+const start = source.indexOf('function liveMoveDisplaySlotFromUtc');
 const end = source.indexOf('function renderExternalOptions');
 if (start < 0 || end <= start) throw new Error('Overview card functions not found');
 
@@ -187,7 +187,7 @@ for (const stale of ['OLD-CONTRACT', '-99', 'aggregate lots targeted',
                      'Full-size exchange coverage', 'stale monitor error']) {
   if (html.includes(stale)) throw new Error(`stale detail remained: ${stale}`);
 }
-if (!html.includes('No position') || !html.includes('Auto-starts on entry')) {
+if (!html.includes('No position') || html.includes('Auto-starts on entry')) {
   throw new Error(`clean idle state was not rendered: ${html}`);
 }
 
@@ -207,11 +207,15 @@ const current = slotHtml({
     monitor_error: 'current reconciliation',
   },
 });
-for (const currentDetail of ['TODAY-CONTRACT', 'aggregate lots targeted',
-                             'Full-size exchange coverage',
-                             'current reconciliation']) {
+for (const currentDetail of ['TODAY-CONTRACT', 'Time of trade']) {
   if (!current.includes(currentDetail)) {
     throw new Error(`same-day detail was hidden: ${currentDetail}`);
+  }
+}
+for (const inactive of ['aggregate lots targeted', 'Full-size exchange coverage',
+                        'current reconciliation', 'Auto-starts on entry']) {
+  if (current.includes(inactive)) {
+    throw new Error(`inactive protection remained on closed card: ${inactive}`);
   }
 }
 """

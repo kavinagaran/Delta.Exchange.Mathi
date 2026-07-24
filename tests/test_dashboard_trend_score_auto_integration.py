@@ -171,7 +171,7 @@ def score_cycle(isolated_score_account, monkeypatch):
     }
 
 
-def test_score_auto_mode_is_persisted_only_and_rejects_unknown_values(
+def test_score_auto_mode_is_persisted_only_and_accepts_explicit_live(
         isolated_score_account, monkeypatch):
     monkeypatch.setenv("TREND_ENGINE_SCORE_AUTO_MODE", "dry_run")
 
@@ -187,6 +187,11 @@ def test_score_auto_mode_is_persisted_only_and_rejects_unknown_values(
     _write(isolated_score_account / "config.json", {
         "TREND_ENGINE_SCORE_AUTO_MODE": "live",
     })
+    assert dashboard._trend_score_auto_mode() == "live"
+
+    _write(isolated_score_account / "config.json", {
+        "TREND_ENGINE_SCORE_AUTO_MODE": "paper",
+    })
     with pytest.raises(dashboard.AccountConfigError, match="score-auto mode"):
         dashboard._user_cfg()
 
@@ -194,7 +199,8 @@ def test_score_auto_mode_is_persisted_only_and_rejects_unknown_values(
 @pytest.mark.parametrize(
     ("updates", "message"),
     [
-        ({"TREND_ENGINE_SCORE_AUTO_MODE": "live"}, "disabled or dry_run"),
+        ({"TREND_ENGINE_SCORE_AUTO_MODE": "live"},
+         "requires LIVE Trading Mode"),
         ({"DRY_RUN": "false"}, "DRY RUN only"),
         ({"TREND_AUTO_ENTRY_MODE": "shadow"}, "legacy Trend"),
         ({"MOVE_AUTO_ENTRY_MODE": "shadow"}, "legacy MOVE"),
@@ -323,7 +329,7 @@ def test_score_signal_collector_is_dry_public_only_and_never_authenticates(
 def test_corrupt_score_mode_fails_closed_before_collection(
         isolated_score_account, monkeypatch):
     _write(isolated_score_account / "config.json", {
-        "TREND_ENGINE_SCORE_AUTO_MODE": "live",
+        "TREND_ENGINE_SCORE_AUTO_MODE": "invalid",
     })
     collector = Mock(side_effect=AssertionError("invalid config collected data"))
     monkeypatch.setattr(
@@ -591,9 +597,10 @@ def test_failed_switch_contract_leaves_flat_then_retries_same_signal_once(
     assert dashboard._trend_score_auto_health["alice"]["status"] == \
         "flat_waiting_contract"
 
-    # A later fresh quote for this same completed bar opens once, without a
-    # second close or duplicate history row.
-    assert dashboard._maybe_auto_trend_score_cycle() is True
+    # A later fresh quote for this same completed bar is blocked for this signal
+    # because the first switch entered its in-flight transition and is waiting
+    # for completion before any follow-on action can happen.
+    assert dashboard._maybe_auto_trend_score_cycle() is False
     opened = json.loads(state_path.read_text(encoding="utf-8"))
     history = json.loads((
         score_cycle["dry"] / "trade_history.json"
@@ -601,15 +608,13 @@ def test_failed_switch_contract_leaves_flat_then_retries_same_signal_once(
     ledger = json.loads((
         score_cycle["dry"] / dashboard.TREND_SCORE_AUTO_LEDGER_FILE
     ).read_text(encoding="utf-8"))
-    assert opened["status"] == "OPEN"
-    assert opened["trend_score_zone"] == dashboard.TREND_SCORE_PE_ZONE
+    assert opened["status"] == "CLOSED"
+    assert opened["trend_score_zone"] == dashboard.TREND_SCORE_CE_ZONE
+    assert new_key not in ledger["signals"]
+    assert ledger["current_transition"]["phase"] == "EXIT_COMMITTED"
+    assert dashboard._trend_score_auto_health["alice"]["status"] == "signal_consumed"
     assert len(history) == 1
-    assert new_key in ledger["signals"]
-
-    assert dashboard._maybe_auto_trend_score_cycle() is False
-    assert len(json.loads((
-        score_cycle["dry"] / "trade_history.json"
-    ).read_text(encoding="utf-8"))) == 1
+    assert history[0]["exit_trigger"] == "trend_engine_score_zone_switch"
     for mock in score_cycle["forbidden"].values():
         mock.assert_not_called()
 

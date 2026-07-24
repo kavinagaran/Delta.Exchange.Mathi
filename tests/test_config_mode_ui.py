@@ -9,6 +9,55 @@ ROOT = Path(__file__).resolve().parents[1]
 NODE = shutil.which("node")
 
 
+def test_score_auto_selector_offers_explicit_live_mode_with_warning():
+    source = (ROOT / "templates" / "config.html").read_text(encoding="utf-8")
+
+    assert '<option value="live">LIVE AUTO' in source
+    assert "irreversible exchange orders without manual confirmation" in source
+    assert "exactly 1,000 requested lots" in source
+    assert "only after the previous exit is proven" in source
+
+
+@pytest.mark.skipif(NODE is None, reason="Node.js is required for frontend JavaScript tests")
+def test_score_auto_mode_must_match_account_trading_mode():
+    script = r"""
+const fs = require('fs');
+const vm = require('vm');
+const source = fs.readFileSync('templates/config.html', 'utf8');
+const start = source.indexOf('function scoreAutoModeError(');
+const end = source.indexOf('async function saveConfig()', start);
+if (start < 0 || end <= start) {
+  throw new Error('Score-auto mode validation helper was not found');
+}
+vm.runInThisContext(source.slice(start, end));
+
+const cases = [
+  ['disabled', 'true', ''],
+  ['disabled', 'false', ''],
+  ['dry_run', 'true', ''],
+  ['dry_run', 'false', 'requires DRY RUN'],
+  ['live', 'false', ''],
+  ['live', 'true', 'requires LIVE'],
+];
+for (const [scoreMode, tradingMode, expected] of cases) {
+  const actual = scoreAutoModeError(scoreMode, tradingMode);
+  if (expected ? !actual.includes(expected) : actual !== '') {
+    throw new Error(
+      `${scoreMode}/${tradingMode}: expected ${expected || 'no error'}, got ${actual}`
+    );
+  }
+}
+"""
+    result = subprocess.run(
+        [NODE, "-e", script],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
 @pytest.mark.skipif(NODE is None, reason="Node.js is required for frontend JavaScript tests")
 def test_mode_selector_locks_restores_and_ignores_stale_checks():
     script = r"""

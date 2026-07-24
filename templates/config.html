@@ -139,7 +139,7 @@
 </div>
 
 <div class="card">
-  <div class="card-hd">🧭 Trend Engine Score Automation · DRY RUN only</div>
+  <div class="card-hd">🧭 Trend Engine Score Automation · DRY RUN / LIVE</div>
   <div class="card-bd">
     <div class="form-sec">
       <div class="form-sec-title">Automatic score-to-trade controller</div>
@@ -148,11 +148,12 @@
           <select id="c-TREND_ENGINE_SCORE_AUTO_MODE">
             <option value="disabled">DISABLED — show decisions only</option>
             <option value="dry_run">DRY RUN AUTO — simulate entries, exits and switches</option>
+            <option value="live">LIVE AUTO — place real entries, exits and switches</option>
           </select>
-          <em class="fld-hint">This controller cannot place LIVE orders. Account Trading Mode must remain DRY RUN; legacy Trend/MOVE auto-entry and scheduled Morning/Evening entries must be disabled so only one strategy owns the paper position.</em>
+          <em class="fld-hint">The selected controller mode must match Account Trading Mode. LIVE AUTO can place irreversible exchange orders without manual confirmation. Legacy Trend/MOVE automation and scheduled Morning/Evening entries must remain disabled so exactly one controller owns the position.</em>
         </label>
         <label class="fld"><span>Order size</span>
-          <div class="hint" style="padding-top:9px"><b>Fixed at exactly 1,000 lots</b> for every eligible CALL, PUT or MOVE entry. It never reduces the order size.</div>
+          <div class="hint" style="padding-top:9px"><b>Fixed at exactly 1,000 requested lots</b> for every eligible CALL, PUT or MOVE entry. LIVE execution retains and protects only quantities whose exchange fill is proven.</div>
         </label>
       </div>
     </div>
@@ -173,7 +174,7 @@
     <div class="form-sec">
       <div class="form-sec-title">Position lifecycle</div>
       <div class="hint">
-        The controller holds at most one Trend Engine position. When a new valid score moves to a different range, it closes the current simulated position and opens the new one on the same completed signal. A position can also close when its TP, TSL or SL is hit. After a protection exit, the same completed 5-minute signal is not reused for another entry.
+        The controller holds at most one Trend Engine position. When a new valid score moves to a different range, it closes the current position and opens the new one only after the previous exit is proven. A position can also close when its TP, TSL or SL is hit. After a protection exit, the same completed 5-minute signal is not reused for another entry.
       </div>
     </div>
   </div>
@@ -547,6 +548,16 @@ function resetToDefaults() {
   toast('Recommended defaults loaded — review them, then Save configuration', 'ok');
 }
 
+function scoreAutoModeError(scoreMode, tradingModeDryRun) {
+  if (scoreMode === 'dry_run' && tradingModeDryRun !== 'true') {
+    return 'DRY RUN score automation requires DRY RUN Account Trading Mode.';
+  }
+  if (scoreMode === 'live' && tradingModeDryRun !== 'false') {
+    return 'LIVE score automation requires LIVE Account Trading Mode.';
+  }
+  return '';
+}
+
 async function saveConfig() {
   if (!configReady) {
     toast('Configuration is not verified; Save is locked', 'err');
@@ -556,9 +567,11 @@ async function saveConfig() {
   if (mode === 'live' && window._loadedTrendAutoMode !== 'live' &&
       !confirm('Enable automatic Trend entries? Eligible signals are simulated when Trading Mode is DRY RUN and place real IOC orders only when Trading Mode is LIVE.')) return;
   const scoreAutoMode = document.getElementById('c-TREND_ENGINE_SCORE_AUTO_MODE').value;
-  if (scoreAutoMode === 'dry_run' && document.getElementById('c-DRY_RUN').value !== 'true') {
+  const scoreAutoModeErrorText = scoreAutoModeError(
+    scoreAutoMode, document.getElementById('c-DRY_RUN').value);
+  if (scoreAutoModeErrorText) {
     document.getElementById('c-TREND_ENGINE_SCORE_AUTO_MODE').focus();
-    toast('Trend Engine score automation is DRY RUN only. Select DRY RUN under Trading Mode before enabling it.', 'err');
+    toast(scoreAutoModeErrorText, 'err');
     return;
   }
   if (scoreAutoMode === 'dry_run' && window._loadedScoreAutoMode !== 'dry_run' &&
@@ -566,6 +579,12 @@ async function saveConfig() {
         'Enable automatic DRY RUN trading from Trend Engine scores?\n\n' +
         'Every eligible order uses exactly 1,000 lots. Scores from −100 through −40 buy a 3-step ITM PUT; scores above −40 and below +40 sell MOVE immediately; scores from +40 through +100 buy a 2-step ITM CALL.\n\n' +
         'The controller keeps one simulated position, closes and switches it automatically when the score range changes, and also exits on TP, TSL or SL. No LIVE order can be placed by this controller.')) return;
+  if (scoreAutoMode === 'live' && window._loadedScoreAutoMode !== 'live' &&
+      !confirm(
+        'Enable LIVE automatic trading from Trend Engine scores?\n\n' +
+        'WARNING: this authorizes irreversible exchange orders without manual confirmation. Every completed 5-minute score can close the current bot-owned position and submit a new 1,000-lot CALL, PUT or short MOVE entry.\n\n' +
+        'Orders can fill partially or before a network response is received. The controller will retain only proven fills, start TP / SL / TSL protection, and fail closed while any order identity, position, exit, accounting or protection state is unresolved.\n\n' +
+        'Enable LIVE AUTO only after verifying this account’s API credentials, risk limits and protection settings.')) return;
   const moveMode = document.getElementById('c-MOVE_AUTO_ENTRY_MODE').value;
   if (moveMode === 'live' && window._loadedMoveAutoMode !== 'live' &&
       !confirm('Enable scheduled automatic MOVE entries? At each Morning and Evening entry window, the forecast can choose LONG, SHORT or NO TRADE. Eligible decisions are simulated in DRY RUN and can place real IOC orders only when Trading Mode is LIVE.')) return;

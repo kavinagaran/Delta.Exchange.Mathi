@@ -758,6 +758,6 @@ def test_dry_run_cards_are_equal_sized_and_every_open_slot_has_manual_exit():
     for slot in ("morning", "evening", "trend"):
         assert f"dryPositionDetails(displaySlots.{slot} || {{}}, '{slot}'" in template
 
-    assert "squareOff('${slot}', 'dry_run')" in overview
-    assert "squareOff('${slot}', 'live')" in overview
+    assert "squareOff('${controlSlot}', '${slot}', 'dry_run')" in overview
+    assert "squareOff('${controlSlot}', '${slot}', 'live')" in overview
     assert "target_mode: targetMode" in overview
