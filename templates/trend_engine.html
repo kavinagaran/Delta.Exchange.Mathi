@@ -33,7 +33,6 @@
         <span class="te-decision-dot" aria-hidden="true"></span>
         <span class="te-kicker">DECISION</span>
         <span class="te-freshness is-unknown" id="te-freshness">Checking…</span>
-<span class="te-trend-label" id="te-trend-label">—</span>
       </div>
       <h3 id="te-decision">Evaluating…</h3>
       <p class="te-summary" id="te-summary"></p>
@@ -607,24 +606,16 @@
     byId('te-decision').textContent = label;
     byId('te-summary').textContent = decision.decision_summary || '';
     byId('te-underlying').textContent = decision.underlying || '—';
-    byId('te-bias').textContent = humanize(decision.directional_bias);
+    const rawScore = finite(decision.direction_score) ? clamp(Number(decision.direction_score), -100, 100) : null;
+    const biasLabel = rawScore === null ? '—' : rawScore >= 40 ? 'Bullish' : rawScore <= -40 ? 'Bearish' : 'Sideways';
+    byId('te-bias').textContent = biasLabel;
     byId('te-confidence').textContent = humanize(decision.confidence);
     byId('te-regime').textContent = humanize(decision.market_regime);
-    const rawScore = finite(decision.direction_score) ? clamp(Number(decision.direction_score), -100, 100) : null;
     const magnitude = rawScore === null ? 0 : Math.abs(rawScore);
     const gauge = byId('te-score-gauge');
     gauge.style.setProperty('--te-score-angle', `${magnitude * 3.6}deg`);
     gauge.setAttribute('aria-valuenow', rawScore === null ? '0' : String(rawScore));
     byId('te-direction-score').textContent = signed(rawScore);
-const trendLabelEl = byId('te-trend-label');
-if (trendLabelEl) {
-  const score = decision.direction_score;
-  if (finite(score)) {
-    trendLabelEl.textContent = score >= 40 ? 'Bullish' : score <= -40 ? 'Bearish' : 'Sideways';
-  } else {
-    trendLabelEl.textContent = '—';
-  }
-}
     byId('te-trade-score').textContent = number(decision.trade_score, 1);
     updateFreshness();
   }
