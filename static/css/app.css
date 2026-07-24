@@ -1328,20 +1328,37 @@ body.login-body {
 .te-score-core strong { color: var(--te-tone); font-size: 34px; line-height: 1; letter-spacing: -.04em; font-variant-numeric: tabular-nums; }
 .te-score-core span { margin-top: 5px; color: var(--muted); font-size: 9px; font-weight: 700; letter-spacing: .075em; text-transform: uppercase; }
 .te-score-foot { display: flex; justify-content: space-between; width: 162px; margin-top: 6px; color: var(--muted); font-size: 9px; font-weight: 650; }
-.te-trade-score {
+.te-valid-trades {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 14px;
+  flex-wrap: wrap;
+  gap: 6px;
   width: 100%;
   margin-top: 11px;
-  padding: 8px 10px;
-  border: 1px solid color-mix(in srgb, var(--te-tone) 20%, var(--border));
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--surface-subtle) 88%, transparent);
 }
-.te-trade-score span { color: var(--muted); font-size: 9px; font-weight: 700; text-transform: uppercase; }
-.te-trade-score strong { color: var(--te-tone); font-size: 14px; font-variant-numeric: tabular-nums; }
+.te-trade {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--surface-subtle) 88%, transparent);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+.te-trade-icon { font-size: 12px; }
+.te-trade.valid {
+  border-color: color-mix(in srgb, var(--te-tone) 30%, var(--border));
+  color: var(--te-tone);
+}
+.te-trade.active {
+  border-color: var(--te-tone);
+  background: color-mix(in srgb, var(--te-tone) 12%, transparent);
+  color: var(--te-tone);
+  font-weight: 700;
+}
 
 /* Two-column grid */
 .te-two-col {
@@ -1688,7 +1705,7 @@ body.login-body {
   .te-hero-facts > div:nth-child(odd) { padding-left: 0; border-left: 0; }
   .te-score-wrap { padding-top: 2px; border-top: 1px dashed color-mix(in srgb, var(--te-tone) 22%, var(--border)); }
   .te-score-gauge { margin-top: 16px; }
-  .te-trade-score { max-width: 220px; }
+  .te-valid-trades { max-width: 220px; }
   .te-page .card-hd { align-items: flex-start; min-height: 0; padding: 11px 12px; }
   .te-page .card-bd { padding: 12px; }
   .te-component-grid,

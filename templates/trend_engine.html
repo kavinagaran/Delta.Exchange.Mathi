@@ -51,7 +51,7 @@
         </div>
       </div>
       <div class="te-score-foot"><span>PE −100</span><span>CE +100</span></div>
-      <div class="te-trade-score"><span>Trade score</span><strong id="te-trade-score">—</strong></div>
+      <div class="te-valid-trades" id="te-valid-trades" aria-label="Valid trades"></div>
     </div>
   </section>
 
@@ -608,8 +608,32 @@
       gauge.style.setProperty('--te-tone', `rgb(${r}, ${g}, ${b})`);
     }
     byId('te-direction-score').textContent = signed(rawScore);
-    byId('te-trade-score').textContent = number(decision.trade_score, 1);
+    renderValidTrades(decision);
     updateFreshness();
+  }
+
+  function renderValidTrades(decision) {
+    const el = byId('te-valid-trades');
+    if (!el) return;
+    const score = finite(decision.direction_score) ? Number(decision.direction_score) : 0;
+    const gates = decision.hard_gates || {};
+    const decisionCode = String(decision.decision || '').toUpperCase();
+    const allPass = gates.direction_pass && gates.price_action_pass
+      && gates.event_pass && gates.portfolio_risk_pass;
+    const trades = [
+      { label: 'Buy CE', type: 'CE', side: 'bullish', active: decisionCode === 'BUY_CE', minScore: 40 },
+      { label: 'Buy PE', type: 'PE', side: 'bearish', active: decisionCode === 'BUY_PE', minScore: -40 },
+      { label: 'Short MOVE', type: 'MOVE', side: 'neutral', active: decisionCode === 'NO_TRADE' && !allPass, minScore: null },
+    ];
+    el.innerHTML = trades.map(t => {
+      let valid = false;
+      if (t.type === 'CE') valid = score >= 40 && allPass;
+      else if (t.type === 'PE') valid = score <= -40 && allPass;
+      else valid = score > -40 && score < 40;
+      const cls = t.active ? 'te-trade active' : valid ? 'te-trade valid' : 'te-trade';
+      const icon = t.side === 'bullish' ? '↑' : t.side === 'bearish' ? '↓' : '◆';
+      return `<span class="${cls}"><span class="te-trade-icon">${icon}</span>${safeText(t.label)}</span>`;
+    }).join('');
   }
 
   function renderComponents(decision) {
