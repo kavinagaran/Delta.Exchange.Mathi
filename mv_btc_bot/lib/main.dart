@@ -35,7 +35,7 @@ const kBlueBackgroundAsset = 'assets/sparkling-blue-dashboard-bg.png';
 
 final appTheme = AppThemeController();
 
-const kWebAssetRevision = '3.3.0+6-red-blue-trend-tabs';
+const kWebAssetRevision = '3.4.0+7-red-blue-trend-tabs';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
