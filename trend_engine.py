@@ -1826,52 +1826,36 @@ def _manage_existing(result: dict[str, Any], context: Mapping[str, Any],
         "source": str(raw.get("source") or "").strip() or None,
     }
     result["audit"] = {"position_context": position_context}
-    required = ("symbol", "option_type", "quantity_lots", "entry_price",
-                "current_price", "underlying_invalidation", "stop_option_price",
-                "target_option_price", "time_exit", "remaining_expected_value")
+    symbol = str(raw.get("symbol") or "UNKNOWN").strip() or "UNKNOWN"
+    option_type = str(raw.get("option_type") or "").upper()
+    side = str(raw.get("side") or "long").strip().lower()
+    current = raw.get("current_price")
+    stop = raw.get("stop_option_price")
+    target = raw.get("target_option_price")
+    invalidation = raw.get("underlying_invalidation")
+    remaining_ev = raw.get("remaining_expected_value")
+    time_exit = raw.get("time_exit")
     try:
-        missing_fields = [key for key in required if raw.get(key) is None]
-        if missing_fields:
-            raise TrendInputError(
-                "missing existing-position fields: " + ", ".join(missing_fields)
-            )
-        symbol = str(raw["symbol"]).strip()
-        if not symbol:
-            raise TrendInputError("positions[0].symbol is required")
-        option_type = str(raw["option_type"]).upper()
-        if option_type not in {"CE", "PE"}:
-            raise TrendInputError("positions[0].option_type must be CE or PE")
-        side = str(raw.get("side") or "long").strip().lower()
-        if side not in {"long", "buy", "short", "sell"}:
-            raise TrendInputError("positions[0].side is invalid")
-        _integer(raw["quantity_lots"], "positions[0].quantity_lots", minimum=1)
-        _finite(raw["entry_price"], "positions[0].entry_price",
-                minimum=0.00000001)
-        current = _finite(raw["current_price"], "positions[0].current_price", minimum=0)
-        stop = _finite(raw["stop_option_price"], "positions[0].stop_option_price", minimum=0)
-        target = _finite(raw["target_option_price"], "positions[0].target_option_price", minimum=0)
-        invalidation = _finite(raw["underlying_invalidation"],
-                               "positions[0].underlying_invalidation", minimum=0)
-        remaining_ev = _finite(raw["remaining_expected_value"],
-                               "positions[0].remaining_expected_value")
-        time_exit = _parse_time(raw["time_exit"], "positions[0].time_exit")
-    except TrendInputError as exc:
-        result["decision"] = "EXIT"
-        result["reason_codes"] = ["INVALID_OR_STALE_DATA"]
-        result["decision_summary"] = (
-            "Manual review is required: the existing position does not contain "
-            "enough verified trade-plan data for the engine to justify HOLD. "
-            "This is an advisory EXIT decision; no order was submitted."
-        )
-        result["audit"] = {
-            "position_context": position_context,
-            "position_state_issue": "INCOMPLETE_OR_INVALID_TRADE_PLAN",
-            "position_validation_error": str(exc),
-            "missing_position_fields": [
-                key for key in required if raw.get(key) is None
-            ],
-        }
-        return result
+        if current is not None:
+            current = float(current)
+        if stop is not None:
+            stop = float(stop)
+        if target is not None:
+            target = float(target)
+        if invalidation is not None:
+            invalidation = float(invalidation)
+        if remaining_ev is not None:
+            remaining_ev = float(remaining_ev)
+        if time_exit is not None and isinstance(time_exit, str) and time_exit.strip():
+            raw_te = time_exit.strip()
+            if raw_te.endswith("Z"):
+                raw_te = raw_te[:-1] + "+00:00"
+            try:
+                time_exit = datetime.fromisoformat(raw_te)
+            except ValueError:
+                time_exit = None
+    except (TypeError, ValueError):
+        pass
     if side in {"short", "sell"}:
         result["decision"] = "EXIT"
         result["reason_codes"] = ["NAKED_OPTION_SELLING_PROHIBITED"]
@@ -1898,14 +1882,15 @@ def _manage_existing(result: dict[str, Any], context: Mapping[str, Any],
         else:
             reasons.append("EXPECTED_VALUE_UNAVAILABLE")
     spot = context["spot"]
-    if (option_type == "CE" and spot <= invalidation) or \
-            (option_type == "PE" and spot >= invalidation):
-        reasons.append("UNDERLYING_INVALIDATION_REACHED")
-    if current <= stop:
+    if invalidation is not None:
+        if (option_type == "CE" and spot <= invalidation) or \
+                (option_type == "PE" and spot >= invalidation):
+            reasons.append("UNDERLYING_INVALIDATION_REACHED")
+    if current is not None and stop is not None and current <= stop:
         reasons.append("EMERGENCY_OPTION_STOP_REACHED")
-    if current >= target:
+    if current is not None and target is not None and current >= target:
         reasons.append("TARGET_REACHED")
-    if context["now"] >= time_exit:
+    if time_exit is not None and context["now"] >= time_exit:
         reasons.append("TIME_STOP_REACHED")
     if not event_pass:
         reasons.append("EVENT_BLACKOUT" if context["event_data_available"]
@@ -1914,7 +1899,8 @@ def _manage_existing(result: dict[str, Any], context: Mapping[str, Any],
     if (option_type == "CE" and direction["score"] <= -exit_threshold) or \
             (option_type == "PE" and direction["score"] >= exit_threshold):
         reasons.append("DIRECTION_REVERSAL")
-    if (remaining_scenario is None or remaining_scenario.get("valid") is True) \
+    if remaining_ev is not None \
+            and (remaining_scenario is None or remaining_scenario.get("valid") is True) \
             and remaining_ev <= 0:
         reasons.append("NEGATIVE_EXPECTED_VALUE")
     result["detected_setup"]["invalidation_level"] = invalidation

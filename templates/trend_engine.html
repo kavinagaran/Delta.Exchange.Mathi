@@ -454,18 +454,6 @@
       action: 'Close the position.',
     },
   });
-  const positionFieldLabels = Object.freeze({
-    symbol: 'contract symbol',
-    option_type: 'option type',
-    quantity_lots: 'position size',
-    entry_price: 'entry price',
-    current_price: 'current option price',
-    underlying_invalidation: 'underlying invalidation level',
-    stop_option_price: 'emergency option stop',
-    target_option_price: 'profit target',
-    time_exit: 'planned exit time',
-    remaining_expected_value: 'remaining expected edge',
-  });
 
   const byId = id => document.getElementById(id);
   const hasValue = value => value !== null && value !== undefined && value !== '';
@@ -790,18 +778,6 @@
 
   function reasonDetails(code, decision) {
     const audit = decision.audit && typeof decision.audit === 'object' ? decision.audit : {};
-    if (code === 'INVALID_OR_STALE_DATA' && audit.position_state_issue) {
-      const missing = Array.isArray(audit.missing_position_fields)
-        ? audit.missing_position_fields.filter(hasValue).map(field => positionFieldLabels[field] || humanize(field).toLowerCase()) : [];
-      const label = positionLabel(decision);
-      return {
-        title: missing.length ? 'Open position has an incomplete risk plan' : 'Open position has an invalid risk-plan value',
-        explanation: missing.length
-          ? `The saved ${label} is missing ${naturalList(missing)}. Without these values, the engine cannot verify stop, target, exit or remaining edge.`
-          : `One or more saved values for the ${label} are invalid. The engine cannot prove holding is safe.`,
-        action: 'Review the position now. Restore only from an authoritative original record; otherwise manage or close manually.',
-      };
-    }
     if (code === 'INVALID_OR_STALE_DATA' && hasValue(audit.collection_error)) {
       return { title: 'Live data could not be loaded', explanation: 'The feed did not provide a complete snapshot. The engine stopped instead of guessing.', action: 'Check connections and refresh.' };
     }
@@ -816,10 +792,6 @@
   }
 
   function decisionOutcome(decision) {
-    const audit = decision.audit && typeof decision.audit === 'object' ? decision.audit : {};
-    if (decision.decision === 'EXIT' && audit.position_state_issue) {
-      return { tone: 'is-exit', symbol: '!', sectionTitle: 'Why exit is recommended', headline: `The ${positionLabel(decision)} needs attention`, explanation: 'The position cannot be verified as safe. EXIT is a fail-safe recommendation only.' };
-    }
     const outcomes = {
       EXIT: { tone: 'is-exit', symbol: '!', sectionTitle: 'Why exit is recommended', headline: 'An exit rule is active', explanation: 'At least one mandatory safety condition no longer supports holding. Guidance only.' },
       HOLD: { tone: 'is-hold', symbol: '✓', sectionTitle: 'Why holding is recommended', headline: 'The position still follows its plan', explanation: 'No mandatory exit rule is active. Continue monitoring.' },
