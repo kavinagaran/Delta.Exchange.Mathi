@@ -606,6 +606,7 @@
       const g = Math.round(97 * (1 - t) + 194 * t);
       const b = Math.round(114 * (1 - t) + 110 * t);
       gauge.style.setProperty('--te-tone', `rgb(${r}, ${g}, ${b})`);
+      byId('te-score-wrap').style.setProperty('--te-tone', `rgb(${r}, ${g}, ${b})`);
     }
     byId('te-direction-score').textContent = signed(rawScore);
     renderValidTrades(decision);
@@ -620,20 +621,16 @@
     const decisionCode = String(decision.decision || '').toUpperCase();
     const allPass = gates.direction_pass && gates.price_action_pass
       && gates.event_pass && gates.portfolio_risk_pass;
-    const trades = [
-      { label: 'Buy CE', type: 'CE', side: 'bullish', active: decisionCode === 'BUY_CE', minScore: 40 },
-      { label: 'Buy PE', type: 'PE', side: 'bearish', active: decisionCode === 'BUY_PE', minScore: -40 },
-      { label: 'Short MOVE', type: 'MOVE', side: 'neutral', active: decisionCode === 'NO_TRADE' && !allPass, minScore: null },
-    ];
-    el.innerHTML = trades.map(t => {
-      let valid = false;
-      if (t.type === 'CE') valid = score >= 40 && allPass;
-      else if (t.type === 'PE') valid = score <= -40 && allPass;
-      else valid = score > -40 && score < 40;
-      const cls = t.active ? 'te-trade active' : valid ? 'te-trade valid' : 'te-trade';
-      const icon = t.side === 'bullish' ? '↑' : t.side === 'bearish' ? '↓' : '◆';
-      return `<span class="${cls}"><span class="te-trade-icon">${icon}</span>${safeText(t.label)}</span>`;
-    }).join('');
+    let trade = null;
+    if (decisionCode === 'BUY_CE' || (score >= 40 && allPass)) {
+      trade = { label: 'Buy CE', icon: '↑' };
+    } else if (decisionCode === 'BUY_PE' || (score <= -40 && allPass)) {
+      trade = { label: 'Buy PE', icon: '↓' };
+    } else if (decisionCode === 'NO_TRADE' || score > -40 && score < 40) {
+      trade = { label: 'Short MOVE', icon: '◆' };
+    }
+    if (!trade) { el.innerHTML = ''; return; }
+    el.innerHTML = `<span class="te-trade"><span class="te-trade-icon">${trade.icon}</span>${safeText(trade.label)}</span>`;
   }
 
   function renderComponents(decision) {

@@ -1330,42 +1330,28 @@ body.login-body {
 .te-score-foot { display: flex; justify-content: space-between; width: 162px; margin-top: 6px; color: var(--muted); font-size: 9px; font-weight: 650; }
 .te-valid-trades {
   display: flex;
-  flex-wrap: nowrap;
-  gap: 6px;
+  justify-content: center;
   width: 100%;
-  margin-top: 11px;
+  margin-top: 10px;
 }
 .te-trade {
   display: inline-flex;
   align-items: center;
-  justify-content: center;
-  gap: 5px;
-  flex: 1 1 0;
-  padding: 5px 8px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: color-mix(in srgb, var(--surface-subtle) 88%, transparent);
-  color: var(--muted);
-  font-size: 11px;
-  font-weight: 650;
-  white-space: nowrap;
-}
-.te-trade-icon { font-size: 12px; }
-.te-trade.valid {
-  border-color: color-mix(in srgb, var(--te-tone) 30%, var(--border));
-  color: var(--te-tone);
-}
-.te-trade.active {
-  border-color: var(--te-tone);
+  gap: 6px;
+  padding: 6px 16px;
+  border-radius: 20px;
   background: var(--te-tone);
   color: var(--surface);
+  font-size: 12px;
   font-weight: 700;
+  white-space: nowrap;
   box-shadow: 0 0 10px color-mix(in srgb, var(--te-tone) 50%, transparent), 0 0 24px color-mix(in srgb, var(--te-tone) 25%, transparent);
   animation: te-trade-glow 2s ease-in-out infinite alternate;
 }
+.te-trade-icon { font-size: 13px; }
 @keyframes te-trade-glow {
   from { box-shadow: 0 0 10px color-mix(in srgb, var(--te-tone) 50%, transparent), 0 0 24px color-mix(in srgb, var(--te-tone) 25%, transparent); }
-  to { box-shadow: 0 0 16px color-mix(in srgb, var(--te-tone) 65%, transparent), 0 0 34px color-mix(in srgb, var(--te-tone) 35%, transparent); }
+  to { box-shadow: 0 0 18px color-mix(in srgb, var(--te-tone) 70%, transparent), 0 0 36px color-mix(in srgb, var(--te-tone) 35%, transparent); }
 }
 
 /* Two-column grid */
@@ -1713,7 +1699,7 @@ body.login-body {
   .te-hero-facts > div:nth-child(odd) { padding-left: 0; border-left: 0; }
   .te-score-wrap { padding-top: 2px; border-top: 1px dashed color-mix(in srgb, var(--te-tone) 22%, var(--border)); }
   .te-score-gauge { margin-top: 16px; }
-  .te-valid-trades { max-width: 320px; }
+  .te-valid-trades { margin-top: 8px; }
   .te-page .card-hd { align-items: flex-start; min-height: 0; padding: 11px 12px; }
   .te-page .card-bd { padding: 12px; }
   .te-component-grid,
