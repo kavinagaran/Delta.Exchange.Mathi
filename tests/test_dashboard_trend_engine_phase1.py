@@ -66,7 +66,6 @@ def _decision_and_snapshot(*, side="BUY_CE", symbol=None):
             "data_valid": True,
             "direction_pass": True,
             "price_action_pass": True,
-            "contract_pass": True,
             "spread_pass": True,
             "expiry_pass": True,
             "event_pass": True,

@@ -79,11 +79,11 @@ def _move_product(expiry, strike, *, product_id=20_001, **changes):
     ("score", "expected"),
     [
         (-100, PE_3_ITM),
-        (-40, PE_3_ITM),
-        (-39.999, SHORT_MOVE),
+        (-25, PE_3_ITM),
+        (-24.999, SHORT_MOVE),
         (0, SHORT_MOVE),
-        (39.999, SHORT_MOVE),
-        (40, CE_2_ITM),
+        (24.999, SHORT_MOVE),
+        (25, CE_2_ITM),
         (100, CE_2_ITM),
     ],
 )

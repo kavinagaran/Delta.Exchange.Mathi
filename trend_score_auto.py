@@ -75,7 +75,7 @@ def _iso_utc(value: datetime) -> str:
 def score_zone(score: Any) -> str:
     """Return the exact approved action zone for a validated engine score.
 
-    ``-40`` belongs to the bearish PE zone and ``+40`` belongs to the bullish
+    ``-25`` belongs to the bearish PE zone and ``+25`` belongs to the bullish
     CE zone.  A missing/invalid score is never treated as neutral because that
     would turn a feed failure into permission to short MOVE.
     """
@@ -85,9 +85,9 @@ def score_zone(score: Any) -> str:
         raise TrendScoreAutoInputError(
             "direction_score must be between -100 and 100"
         )
-    if value <= -40:
+    if value <= -25:
         return PE_3_ITM
-    if value >= 40:
+    if value >= 25:
         return CE_2_ITM
     return SHORT_MOVE
 

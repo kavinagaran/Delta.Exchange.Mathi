@@ -228,7 +228,6 @@
     ['data_valid', 'Data valid'],
     ['direction_pass', 'Direction'],
     ['price_action_pass', 'Price action'],
-    ['contract_pass', 'Contract quality'],
     ['spread_pass', 'Bid–ask spread'],
     ['expiry_pass', 'Time to expiry'],
     ['event_pass', 'Event window'],
@@ -237,7 +236,7 @@
     ['portfolio_risk_pass', 'Portfolio risk'],
   ];
   const positionEntryOnlyGates = new Set([
-    'direction_pass', 'price_action_pass', 'contract_pass', 'spread_pass',
+    'direction_pass', 'price_action_pass', 'spread_pass',
     'expiry_pass', 'expected_value_pass', 'reward_risk_pass',
   ]);
   const reasonCatalog = Object.freeze({

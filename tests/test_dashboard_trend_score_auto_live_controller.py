@@ -265,11 +265,11 @@ def test_explicit_live_mode_routes_only_to_live_controller(
     ("score", "expected_zone", "expected_type", "expected_side"),
     (
         (-100, dashboard.TREND_SCORE_PE_ZONE, "PE", "long"),
-        (-40, dashboard.TREND_SCORE_PE_ZONE, "PE", "long"),
-        (-39.999, dashboard.TREND_SCORE_MOVE_ZONE, "MOVE", "short"),
+        (-25, dashboard.TREND_SCORE_PE_ZONE, "PE", "long"),
+        (-24.999, dashboard.TREND_SCORE_MOVE_ZONE, "MOVE", "short"),
         (0, dashboard.TREND_SCORE_MOVE_ZONE, "MOVE", "short"),
-        (39.999, dashboard.TREND_SCORE_MOVE_ZONE, "MOVE", "short"),
-        (40, dashboard.TREND_SCORE_CE_ZONE, "CE", "long"),
+        (24.999, dashboard.TREND_SCORE_MOVE_ZONE, "MOVE", "short"),
+        (25, dashboard.TREND_SCORE_CE_ZONE, "CE", "long"),
         (100, dashboard.TREND_SCORE_CE_ZONE, "CE", "long"),
     ),
 )

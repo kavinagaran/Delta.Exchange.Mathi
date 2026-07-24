@@ -37,9 +37,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "max_risk_per_trade_pct": 0.5,
     "max_daily_loss_pct": 1.5,
     "max_consecutive_losses": 3,
-    "min_direction_score": 40,
+    "min_direction_score": 25,
     "min_price_action_score": 10,
-    "min_contract_score": 70,
     "min_trade_score": 65,
     "min_reward_risk": 1.5,
     "max_bid_ask_spread_pct": 3.0,
@@ -274,7 +273,7 @@ def _base_result(snapshot: Any, config: Mapping[str, Any]) -> dict[str, Any]:
         },
         "hard_gates": {
             "data_valid": False, "direction_pass": False,
-            "price_action_pass": False, "contract_pass": False,
+            "price_action_pass": False,
             "spread_pass": False, "expiry_pass": False,
             "event_pass": False, "expected_value_pass": False,
             "reward_risk_pass": False, "portfolio_risk_pass": False,
@@ -2118,7 +2117,6 @@ def evaluate_trend(snapshot: Mapping[str, Any],
     for item in ranked:
         candidate_reasons: list[str] = []
         scenario = item["scenario"]
-        contract_pass = item["score"] >= float(config["min_contract_score"])
         trade_score = 0.65 * abs(score) + 0.35 * item["score"]
         if not scenario.get("valid"):
             candidate_reasons.append(str(
@@ -2135,8 +2133,6 @@ def evaluate_trend(snapshot: Mapping[str, Any],
                 candidate_reasons.append("REWARD_RISK_TOO_LOW")
             if scenario["lots"] < 1:
                 candidate_reasons.append("MINIMUM_LOT_EXCEEDS_RISK_LIMIT")
-        if not contract_pass:
-            candidate_reasons.append("CONTRACT_SCORE_TOO_LOW")
         if trade_score < float(config["min_trade_score"]):
             candidate_reasons.append("TRADE_SCORE_TOO_LOW")
         item["trade_score"] = trade_score
@@ -2148,8 +2144,6 @@ def evaluate_trend(snapshot: Mapping[str, Any],
     selected = next(
         (item for item in ranked if not item["entry_reasons"]), ranked[0]
     )
-    contract_pass = selected["score"] >= float(config["min_contract_score"])
-    result["hard_gates"]["contract_pass"] = contract_pass
     result["hard_gates"]["spread_pass"] = True
     scenario = selected["scenario"]
     result["hard_gates"]["expiry_pass"] = not (
