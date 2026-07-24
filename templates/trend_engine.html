@@ -2,124 +2,106 @@
 
 {% block content %}
 <div class="te-page" id="trend-engine-page" aria-busy="true">
+
   <div class="te-page-head">
     <div>
       <span class="te-kicker">RULES-BASED MARKET DIRECTION</span>
       <h2>Trend Engine</h2>
-      <p>Underlying-led direction, contract quality and capital risk in one auditable decision.</p>
     </div>
     <button class="btn secondary te-refresh" id="te-refresh" type="button">
       <span aria-hidden="true">↻</span>
-      <span id="te-refresh-label">Refresh analysis</span>
+      <span id="te-refresh-label">Refresh</span>
     </button>
   </div>
 
   <div class="te-readonly-notice" role="note">
     <strong>Decision only</strong>
-    <span>This engine never submits an order. Any execution requires a separate, explicitly authorized action.</span>
+    <span>This engine never submits an order. Execution requires a separate, explicitly authorized action.</span>
   </div>
 
   <div class="te-alert" id="te-error" role="alert" hidden>
     <div>
-      <strong>Trend Engine is temporarily unavailable</strong>
+      <strong>Engine unavailable</strong>
       <p id="te-error-copy">The latest decision could not be loaded.</p>
     </div>
-    <button class="btn secondary sm" id="te-retry" type="button">Try again</button>
+    <button class="btn secondary sm" id="te-retry" type="button">Retry</button>
   </div>
 
   <section class="te-hero is-loading" id="te-hero" aria-labelledby="te-decision" aria-live="polite">
     <div class="te-hero-copy">
       <div class="te-hero-topline">
         <span class="te-decision-dot" aria-hidden="true"></span>
-        <span class="te-kicker">CURRENT DECISION</span>
-        <span class="te-freshness is-unknown" id="te-freshness">Checking data…</span>
+        <span class="te-kicker">DECISION</span>
+        <span class="te-freshness is-unknown" id="te-freshness">Checking…</span>
       </div>
-      <h3 id="te-decision">Evaluating market…</h3>
-      <p class="te-summary" id="te-summary">Validating market, account and option-chain inputs before producing a signal.</p>
-      <div class="te-hero-facts" aria-label="Decision context">
+      <h3 id="te-decision">Evaluating…</h3>
+      <p class="te-summary" id="te-summary"></p>
+      <div class="te-hero-facts" aria-label="Context">
         <div><span>Underlying</span><strong id="te-underlying">—</strong></div>
         <div><span>Bias</span><strong id="te-bias">—</strong></div>
         <div><span>Confidence</span><strong id="te-confidence">—</strong></div>
-        <div><span>Market regime</span><strong id="te-regime">—</strong></div>
+        <div><span>Regime</span><strong id="te-regime">—</strong></div>
       </div>
-      <p class="te-asof" id="te-asof">Awaiting the first completed evaluation.</p>
+      <p class="te-asof" id="te-asof"></p>
     </div>
     <div class="te-score-wrap">
       <div class="te-score-gauge" id="te-score-gauge" role="meter" aria-label="Direction score" aria-valuemin="-100" aria-valuemax="100" aria-valuenow="0">
         <div class="te-score-core">
           <strong id="te-direction-score">—</strong>
-          <span>Direction score</span>
+          <span>Direction</span>
         </div>
       </div>
-      <div class="te-score-foot">
-        <span>PE −100</span>
-        <span>CE +100</span>
-      </div>
-      <div class="te-trade-score"><span>Combined trade score</span><strong id="te-trade-score">—</strong></div>
+      <div class="te-score-foot"><span>PE −100</span><span>CE +100</span></div>
+      <div class="te-trade-score"><span>Trade score</span><strong id="te-trade-score">—</strong></div>
     </div>
   </section>
 
-  <div class="te-analysis-grid">
-    <section class="card te-components-card" aria-labelledby="te-components-title">
+  <div class="te-two-col">
+    <section class="card" aria-labelledby="te-components-title">
       <div class="card-hd">
-        <div>
-          <span class="te-kicker">STAGE A</span>
-          <strong id="te-components-title">Directional evidence</strong>
-        </div>
-        <span class="te-card-note">Underlying first · −100 to +100</span>
+        <div><span class="te-kicker">DIRECTIONAL EVIDENCE</span><strong id="te-components-title">Component scores</strong></div>
       </div>
       <div class="card-bd">
         <div class="te-component-grid" id="te-components">
-          <div class="te-empty-state">Waiting for component scores…</div>
+          <div class="te-empty-state">Waiting for data…</div>
         </div>
       </div>
     </section>
 
-    <section class="card te-timeframes-card" aria-labelledby="te-timeframes-title">
-      <div class="card-hd">
-        <div>
-          <span class="te-kicker">MULTI-TIMEFRAME</span>
-          <strong id="te-timeframes-title">Weighted contributions</strong>
-        </div>
-      </div>
-      <div class="card-bd">
-        <div class="te-timeframes" id="te-timeframes">
-          <div class="te-empty-state">Waiting for closed-candle analysis…</div>
-        </div>
-        <p class="te-correlation-note">The 5-minute trigger cannot override strongly opposing 60-minute structure.</p>
-      </div>
-    </section>
-  </div>
-
-  <div class="te-analysis-grid te-analysis-grid-even">
     <section class="card" aria-labelledby="te-gates-title">
       <div class="card-hd">
-        <div>
-          <span class="te-kicker">MANDATORY CHECKS</span>
-          <strong id="te-gates-title">Hard-gate matrix</strong>
-        </div>
+        <div><span class="te-kicker">SAFETY GATES</span><strong id="te-gates-title">Hard-gate matrix</strong></div>
         <span class="te-gate-tally" id="te-gate-tally">—</span>
       </div>
       <div class="card-bd">
         <div class="te-gates" id="te-gates">
-          <div class="te-empty-state">Validating hard gates…</div>
+          <div class="te-empty-state">Validating…</div>
         </div>
-        <p class="te-correlation-note">A high score never overrides a failed hard gate.</p>
+      </div>
+    </section>
+  </div>
+
+  <div class="te-two-col">
+    <section class="card" aria-labelledby="te-timeframes-title">
+      <div class="card-hd">
+        <div><span class="te-kicker">TIMEFRAME CONVICTION</span><strong id="te-timeframes-title">Weighted signals</strong></div>
+      </div>
+      <div class="card-bd">
+        <div class="te-timeframes" id="te-timeframes">
+          <div class="te-empty-state">Waiting…</div>
+        </div>
       </div>
     </section>
 
     <section class="card" aria-labelledby="te-setup-title">
       <div class="card-hd">
-        <div>
-          <span class="te-kicker">MARKET STRUCTURE</span>
-          <strong id="te-setup-title">Detected setup</strong>
-        </div>
+        <div><span class="te-kicker">MARKET STRUCTURE</span><strong id="te-setup-title">Detected setup</strong></div>
         <span class="badge sim" id="te-pattern-state">UNCONFIRMED</span>
       </div>
       <div class="card-bd">
-        <p class="te-structure-copy" id="te-market-structure">No validated structure is available yet.</p>
+        <p class="te-structure-copy" id="te-market-structure">No validated structure.</p>
         <dl class="te-fact-list">
-          <div><dt>Candlestick</dt><dd id="te-pattern">—</dd></div>
+          <div><dt>Pattern</dt><dd id="te-pattern">—</dd></div>
           <div><dt>Support</dt><dd id="te-support">—</dd></div>
           <div><dt>Resistance</dt><dd id="te-resistance">—</dd></div>
           <div><dt>Invalidation</dt><dd id="te-invalidation">—</dd></div>
@@ -128,20 +110,17 @@
     </section>
   </div>
 
-  <div class="te-analysis-grid te-analysis-grid-even">
+  <div class="te-two-col">
     <section class="card te-contract-card" id="te-contract-card" aria-labelledby="te-contract-title">
       <div class="card-hd">
-        <div>
-          <span class="te-kicker">STAGE B</span>
-          <strong id="te-contract-title">Contract evaluation</strong>
-        </div>
+        <div><span class="te-kicker">SELECTED CONTRACT</span><strong id="te-contract-title">Contract evaluation</strong></div>
         <span class="te-contract-score" id="te-contract-score">Score —</span>
       </div>
       <div class="card-bd">
         <div class="te-contract-head">
           <div>
             <span class="te-contract-type" id="te-contract-type">NO CONTRACT</span>
-            <h3 class="mono" id="te-contract-symbol">No eligible contract selected</h3>
+            <h3 class="mono" id="te-contract-symbol">No eligible contract</h3>
           </div>
           <span class="te-contract-expiry" id="te-contract-expiry">—</span>
         </div>
@@ -151,49 +130,43 @@
           <div><dt>Mid</dt><dd id="te-contract-mid">—</dd></div>
           <div><dt>Spread</dt><dd id="te-contract-spread">—</dd></div>
           <div><dt>Volume</dt><dd id="te-contract-volume">—</dd></div>
-          <div><dt>Open interest</dt><dd id="te-contract-oi">—</dd></div>
+          <div><dt>OI</dt><dd id="te-contract-oi">—</dd></div>
           <div><dt>Delta / Theta</dt><dd id="te-contract-greeks">—</dd></div>
-          <div><dt>Implied volatility</dt><dd id="te-contract-iv">—</dd></div>
+          <div><dt>IV</dt><dd id="te-contract-iv">—</dd></div>
         </dl>
         <div class="te-quality-list" id="te-contract-components"></div>
-        <p class="te-empty-copy" id="te-contract-empty">A contract appears only after direction and every eligibility gate pass. For BTC daily expiries, contracts with less than 1 hour 30 minutes remaining are excluded.</p>
-        <p class="te-empty-copy" id="te-expiry-policy"><strong>Daily BTC expiry rule:</strong> the current expiry can be evaluated while at least 1h 30m remains. Every approved plan uses a configured safety buffer before settlement.</p>
-        <p class="te-empty-copy" id="te-edge-evidence">Edge evidence will appear after a contract is evaluated.</p>
-        <p class="te-empty-copy" id="te-event-policy">Event-risk policy will appear after the market snapshot is checked.</p>
+        <p class="te-empty-copy" id="te-contract-empty">A contract appears only after direction and every eligibility gate pass.</p>
       </div>
     </section>
 
     <section class="card" aria-labelledby="te-plan-title">
       <div class="card-hd">
-        <div>
-          <span class="te-kicker">EXECUTION</span>
-          <strong id="te-plan-title">Order &amp; risk plan</strong>
-        </div>
+        <div><span class="te-kicker">EXECUTION PLAN</span><strong id="te-plan-title">Order &amp; risk</strong></div>
         <span class="badge sim" id="te-kill-switch">RISK CHECKING</span>
       </div>
       <div class="card-bd">
         <div class="te-plan-banner" id="te-plan-banner">
-          <span>ORDER PLAN</span>
+          <span>PLAN</span>
           <strong id="te-plan-primary">No order proposed</strong>
-          <small id="te-plan-secondary">Sizing remains at zero until all mandatory gates pass.</small>
+          <small id="te-plan-secondary">Zero sizing until all gates pass.</small>
         </div>
         <div class="te-plan-columns">
           <dl class="te-fact-list">
             <div><dt>Order type</dt><dd id="te-order-type">—</dd></div>
-            <div><dt>Entry / Maximum</dt><dd id="te-entry-price">—</dd></div>
-            <div><dt>Option stop / Target</dt><dd id="te-option-levels">—</dd></div>
+            <div><dt>Entry / Max</dt><dd id="te-entry-price">—</dd></div>
+            <div><dt>Stop / Target</dt><dd id="te-option-levels">—</dd></div>
             <div><dt>Underlying invalidation</dt><dd id="te-underlying-invalidation">—</dd></div>
             <div><dt>Underlying target</dt><dd id="te-underlying-target">—</dd></div>
             <div><dt>Time exit</dt><dd id="te-time-exit">—</dd></div>
-            <div><dt>Estimated costs</dt><dd id="te-costs">—</dd></div>
+            <div><dt>Costs</dt><dd id="te-costs">—</dd></div>
           </dl>
           <dl class="te-fact-list te-risk-list">
-            <div><dt>Account equity</dt><dd id="te-account-equity">—</dd></div>
+            <div><dt>Equity</dt><dd id="te-account-equity">—</dd></div>
             <div><dt>Risk budget</dt><dd id="te-risk-budget">—</dd></div>
-            <div><dt>Maximum loss</dt><dd id="te-maximum-loss">—</dd></div>
-            <div><dt>Reward / Risk</dt><dd id="te-reward-risk">—</dd></div>
+            <div><dt>Max loss</dt><dd id="te-maximum-loss">—</dd></div>
+            <div><dt>R / R</dt><dd id="te-reward-risk">—</dd></div>
             <div><dt>Daily P&amp;L</dt><dd id="te-daily-pnl">—</dd></div>
-            <div><dt>Consecutive losses</dt><dd id="te-consecutive-losses">—</dd></div>
+            <div><dt>Consec. losses</dt><dd id="te-consecutive-losses">—</dd></div>
           </dl>
         </div>
       </div>
@@ -202,46 +175,33 @@
 
   <section class="card te-reasons-card" aria-labelledby="te-reasons-title">
     <div class="card-hd">
-      <div>
-        <span class="te-kicker">WHY THIS DECISION?</span>
-        <strong id="te-reasons-title">Clear explanation</strong>
-      </div>
-      <span class="te-card-note" id="te-decision-id">Decision —</span>
+      <div><span class="te-kicker">WHY THIS DECISION</span><strong id="te-reasons-title">Explanation</strong></div>
     </div>
     <div class="card-bd">
       <div class="te-reason-overview is-waiting" id="te-reason-overview">
         <span class="te-reason-symbol" id="te-reason-symbol" aria-hidden="true">…</span>
         <div>
-          <span>IN PLAIN ENGLISH</span>
-          <strong id="te-reason-headline">Waiting for the engine’s decision</strong>
-          <p id="te-reason-explanation">The result and its practical meaning will appear here.</p>
+          <span>PLAIN ENGLISH</span>
+          <strong id="te-reason-headline">Waiting for the engine</strong>
+          <p id="te-reason-explanation">The result and its meaning will appear here.</p>
         </div>
       </div>
 
       <div class="te-reason-cards" id="te-reason-cards">
         <div class="te-reason-card is-muted">
           <div class="te-reason-card-head"><span>STATUS</span><strong>Evaluation pending</strong></div>
-          <p>No decision reasons are available yet.</p>
-          <small><b>Next:</b> Wait for the current evaluation to finish.</small>
+          <p>No reasons available yet.</p>
+          <small><b>Next:</b> Wait for the current evaluation.</small>
         </div>
       </div>
 
       <div class="te-next-step" id="te-next-step">
-        <span>WHAT TO DO NEXT</span>
-        <p id="te-next-step-copy">Wait for the current evaluation to finish.</p>
+        <span>WHAT TO DO</span>
+        <p id="te-next-step-copy">Wait for the current evaluation.</p>
       </div>
-
-      <details class="te-technical-details">
-        <summary>Show technical details</summary>
-        <div class="te-reasons" id="te-reasons"><span class="te-reason is-muted">AWAITING_EVALUATION</span></div>
-        <p class="te-final-summary" id="te-final-summary">The engine has not returned a completed decision yet.</p>
-        <div class="te-model-meta">
-          <span id="te-model-version">Model —</span>
-          <span id="te-schema-version">Schema —</span>
-        </div>
-      </details>
     </div>
   </section>
+
 </div>
 {% endblock %}
 
@@ -258,14 +218,13 @@
     ['trend', 'Trend', 15],
     ['momentum', 'Momentum', 10],
     ['volume_vwap', 'Volume & VWAP', 10],
-    ['breadth_sector', 'Breadth & sector', 10],
     ['derivatives_positioning', 'Derivatives', 10],
-    ['volatility_catalyst', 'Volatility & catalyst', 10],
+    ['volatility_catalyst', 'Volatility', 10],
   ];
   const timeframes = [
-    ['60m', '60 minute regime', 40],
-    ['15m', '15 minute setup', 35],
-    ['5m', '5 minute entry', 25],
+    ['60m', '60 min', 40],
+    ['15m', '15 min', 35],
+    ['5m', '5 min', 25],
   ];
   const gates = [
     ['data_valid', 'Data valid'],
@@ -275,7 +234,7 @@
     ['spread_pass', 'Bid–ask spread'],
     ['expiry_pass', 'Time to expiry'],
     ['event_pass', 'Event window'],
-    ['expected_value_pass', 'Conservative edge'],
+    ['expected_value_pass', 'Edge'],
     ['reward_risk_pass', 'Reward / risk'],
     ['portfolio_risk_pass', 'Portfolio risk'],
   ];
@@ -285,216 +244,216 @@
   ]);
   const reasonCatalog = Object.freeze({
     ALL_ENTRY_GATES_PASSED: {
-      title: 'The setup passed every required check',
-      explanation: 'Market direction, price action, contract quality, expected edge and portfolio risk all meet the configured rules.',
-      action: 'Review the proposed plan. Placing an order remains a separate, explicitly authorized action.',
+      title: 'Every required check passed',
+      explanation: 'Direction, price action, contract quality, edge and risk limits all meet the rules.',
+      action: 'Review the proposed plan. Placing an order is a separate action.',
     },
     EXISTING_POSITION_THESIS_VALID: {
-      title: 'The position still follows its original plan',
-      explanation: 'Its direction, stop, target, time limit and remaining expected edge are still valid, so no exit rule is active.',
-      action: 'Continue monitoring the position against its defined stop, target and time exit.',
+      title: 'Position still follows its plan',
+      explanation: 'Direction, stop, target, time limit and edge are valid. No exit rule is active.',
+      action: 'Monitor against the defined stop, target and time exit.',
     },
     INVALID_OR_STALE_DATA: {
-      title: 'Required information is missing or out of date',
-      explanation: 'The engine stopped because it could not verify all data needed for a safe decision. It will not fill gaps with guesses.',
-      action: 'Refresh the analysis and check the market, account and position feeds if the issue remains.',
+      title: 'Required data is missing or stale',
+      explanation: 'The engine stopped instead of guessing from incomplete information.',
+      action: 'Refresh the analysis. Check market, account and position feeds.',
     },
     QUOTE_REVALIDATION_FAILED: {
-      title: 'The price changed during the final confirmation',
-      explanation: 'The contract, direction or entry price no longer matched the setup when the engine checked it a second time.',
-      action: 'Refresh the analysis and do not use the earlier quote.',
+      title: 'Price moved during confirmation',
+      explanation: 'The contract, direction or entry price no longer matched the setup on re-check.',
+      action: 'Refresh the analysis.',
     },
     EVENT_DATA_UNAVAILABLE: {
       title: 'Event risk could not be verified',
-      explanation: 'The engine could not confirm whether a scheduled market-moving event is inside the restricted window.',
-      action: 'Restore or verify the event calendar before entering; review an open position manually if EXIT is shown.',
-      exitAction: 'Review the open position immediately. Verify event risk from an authoritative source, then manually manage or close the position; do not wait on an unverified calendar.',
+      explanation: 'The engine could not confirm whether a scheduled event is inside the restricted window.',
+      action: 'Verify the event calendar before entering.',
+      exitAction: 'Review the position immediately. Verify event risk, then manage manually.',
     },
     EVENT_BLACKOUT: {
-      title: 'Trading is paused around a scheduled event',
-      explanation: 'A restricted market-moving event is currently inside the configured blackout window.',
-      action: 'Wait until the blackout window has ended, then refresh the analysis.',
-      exitAction: 'Review the open position now and follow the manual EXIT recommendation; do not wait passively for the blackout window to end.',
+      title: 'Trading paused around a scheduled event',
+      explanation: 'A restricted market-moving event is inside the configured blackout window.',
+      action: 'Wait for the blackout to end, then refresh.',
+      exitAction: 'Review and manage the position manually now.',
     },
     KILL_SWITCH_ACTIVE: {
-      title: 'Trading is paused by the safety switch',
-      explanation: 'The emergency kill switch is active, so the engine will not approve additional risk.',
-      action: 'Investigate why it was activated and clear it only after conditions are safe.',
-      exitAction: 'Review the open position immediately and manage or close it manually according to the safety policy. Do not add risk while the kill switch is active.',
+      title: 'Emergency kill switch is active',
+      explanation: 'The safety switch is active. No additional risk will be approved.',
+      action: 'Investigate and clear only after conditions are safe.',
+      exitAction: 'Manage the position manually. Do not add risk.',
     },
     DAILY_LOSS_LIMIT: {
-      title: 'Today’s loss limit has been reached',
-      explanation: 'The account has reached the configured maximum daily loss, so new exposure is blocked.',
-      action: 'Stop new entries and review the trading session before resuming on an eligible day.',
-      exitAction: 'Review the open position now and follow the manual EXIT recommendation so portfolio risk is not extended beyond today’s loss limit.',
+      title: 'Daily loss limit reached',
+      explanation: 'Maximum daily loss reached. New exposure is blocked.',
+      action: 'Stop entries. Review the session before resuming.',
+      exitAction: 'Follow the manual EXIT recommendation.',
     },
     CONSECUTIVE_LOSS_LIMIT: {
-      title: 'The losing-streak limit has been reached',
-      explanation: 'The configured number of consecutive losing trades has been reached.',
-      action: 'Pause entries and review the recent trades before enabling new risk.',
-      exitAction: 'Review the open position now and follow the manual EXIT recommendation before pausing and reviewing the recent trades.',
+      title: 'Consecutive loss limit reached',
+      explanation: 'The configured losing-streak limit has been reached.',
+      action: 'Pause and review recent trades.',
+      exitAction: 'Follow the EXIT recommendation, then review.',
     },
     BROKER_CONNECTION_UNRELIABLE: {
-      title: 'The broker connection is not reliable',
-      explanation: 'Account, position or order information may not be current while the broker connection is unstable.',
-      action: 'Restore the broker connection and refresh before acting.',
-      exitAction: 'Treat the position as requiring immediate review. Restore the connection, confirm the actual position, then manually manage or close it; do not place an order from uncertain state.',
+      title: 'Broker connection is unreliable',
+      explanation: 'Account, position or order information may be stale.',
+      action: 'Restore the connection and refresh.',
+      exitAction: 'Confirm the actual position, then manage manually.',
     },
     BROKER_OR_EXCHANGE_ERROR: {
-      title: 'The broker or exchange reported a problem',
-      explanation: 'The trading venue is not operating normally, so its prices or order state cannot be trusted.',
-      action: 'Wait for service recovery and refresh the analysis.',
-      exitAction: 'Treat the position as requiring immediate review. Confirm venue recovery and the actual position before manually managing or closing it.',
+      title: 'Broker or exchange error',
+      explanation: 'The venue is not operating normally. Prices cannot be trusted.',
+      action: 'Wait for recovery and refresh.',
+      exitAction: 'Confirm venue recovery, then manage the position.',
     },
     POSITION_STATE_MISMATCH: {
-      title: 'The saved positions do not match the account',
-      explanation: 'The engine found inconsistent position records, or more open positions than it can safely manage at once.',
-      action: 'Reconcile the dashboard and exchange positions before relying on this decision.',
-      exitAction: 'Reconcile the dashboard and exchange positions immediately, then manually manage or close the confirmed position. Do not act on an uncertain position record.',
+      title: 'Saved positions do not match the account',
+      explanation: 'Inconsistent position records detected.',
+      action: 'Reconcile dashboard and exchange positions.',
+      exitAction: 'Reconcile immediately, then manage the position.',
     },
     ORDER_STATE_UNKNOWN: {
-      title: 'Open-order status could not be confirmed',
-      explanation: 'The engine cannot tell whether an earlier order is still active, filled or cancelled.',
-      action: 'Check and reconcile open orders before proceeding.',
-      exitAction: 'Check and reconcile all open orders immediately, then manually manage or close the confirmed position without creating a duplicate order.',
+      title: 'Open-order status unknown',
+      explanation: 'Cannot confirm whether an order is active, filled or cancelled.',
+      action: 'Reconcile open orders before proceeding.',
+      exitAction: 'Reconcile orders, then manage the position.',
     },
     ACCOUNT_RISK_STATE_UNKNOWN: {
       title: 'Account risk could not be verified',
-      explanation: 'Balance, profit/loss or exposure information is incomplete, so the engine cannot prove that risk limits are respected.',
-      action: 'Restore the missing account values and refresh the analysis.',
-      exitAction: 'Review the open position immediately. Verify the account state, then manually manage or close the position; do not add exposure while risk is unknown.',
+      explanation: 'Balance, P&L or exposure information is incomplete.',
+      action: 'Restore missing values and refresh.',
+      exitAction: 'Verify account state, then manage the position.',
     },
     ABNORMAL_SPREAD_OR_VOLATILITY: {
-      title: 'Market conditions are outside the safe range',
-      explanation: 'Spread or volatility is unusually high relative to the engine’s configured operating limits.',
-      action: 'Wait for conditions to normalize before acting.',
-      exitAction: 'Review the open position now and follow the manual EXIT recommendation using an appropriate order type for the abnormal spread or volatility.',
+      title: 'Market conditions outside safe range',
+      explanation: 'Spread or volatility exceeds configured limits.',
+      action: 'Wait for normalization.',
+      exitAction: 'Follow the EXIT recommendation with appropriate order type.',
     },
     EXPOSURE_LIMIT: {
-      title: 'The portfolio exposure limit has been reached',
-      explanation: 'Current positions already use more exposure than the configured portfolio cap allows.',
-      action: 'Reduce exposure or wait for an existing position to close.',
-      exitAction: 'Review the open position now and reduce or close it manually so portfolio exposure returns within the configured limit.',
+      title: 'Portfolio exposure limit reached',
+      explanation: 'Current positions exceed the configured cap.',
+      action: 'Reduce exposure or wait for a position to close.',
+      exitAction: 'Reduce or close the position.',
     },
     PENDING_ORDER_EXISTS: {
-      title: 'Another order is already pending',
-      explanation: 'Approving another entry could duplicate exposure while the earlier order is unresolved.',
-      action: 'Resolve the pending order, then refresh the analysis.',
+      title: 'Another order is pending',
+      explanation: 'Approving another entry could duplicate exposure.',
+      action: 'Resolve the pending order, then refresh.',
     },
     TIMEFRAME_CONFLICT: {
-      title: 'The 5, 15 and 60-minute views disagree',
-      explanation: 'Short-term and higher-timeframe signals are materially opposed, so direction is not dependable yet.',
-      action: 'Wait for completed candles to align before entering.',
+      title: 'Timeframe signals disagree',
+      explanation: 'Short-term and higher-timeframe signals are opposed.',
+      action: 'Wait for alignment before entering.',
     },
     DIRECTION_SCORE_TOO_LOW: {
-      title: 'There is no strong market direction yet',
-      explanation: 'The combined directional evidence is below the minimum required for a bullish or bearish position.',
-      action: 'Wait for a clearer directional signal and refresh later.',
+      title: 'No strong direction yet',
+      explanation: 'Combined directional evidence is below the minimum threshold.',
+      action: 'Wait for a clearer signal.',
     },
     PRICE_ACTION_NOT_CONFIRMED: {
-      title: 'Price action has not confirmed an entry',
-      explanation: 'A directional bias exists, but the required market structure or trigger is not confirmed.',
-      action: 'Wait for price action confirmation rather than anticipating it.',
+      title: 'Price action not confirmed',
+      explanation: 'A bias exists, but the required trigger is not confirmed.',
+      action: 'Wait for confirmation.',
     },
     DIRECTION_REVERSAL: {
-      title: 'Market direction has reversed against the position',
-      explanation: 'The directional score now materially opposes the held CE or PE thesis.',
-      action: 'Review and exit the position; do not add risk to the invalidated direction.',
+      title: 'Direction reversed against position',
+      explanation: 'The score now opposes the held CE or PE thesis.',
+      action: 'Exit the position.',
     },
     WRONG_OPTION_TYPE: {
-      title: 'The contract does not match the predicted direction',
-      explanation: 'This contract is the opposite option type from the engine’s current CE or PE bias.',
-      action: 'Evaluate a contract that matches the predicted direction instead.',
+      title: 'Contract does not match direction',
+      explanation: 'This contract is the opposite option type from the current bias.',
+      action: 'Evaluate a matching contract instead.',
     },
     INSUFFICIENT_LIQUIDITY: {
-      title: 'The contract is not liquid enough',
-      explanation: 'Its quote, order-book depth, volume or open interest is below the safe minimum.',
+      title: 'Contract not liquid enough',
+      explanation: 'Quote, depth, volume or OI is below the safe minimum.',
       action: 'Wait or use a more liquid contract.',
     },
     SPREAD_TOO_WIDE: {
-      title: 'The bid–ask spread is too wide',
-      explanation: 'Expected trading cost exceeds the maximum spread allowed by the strategy.',
-      action: 'Wait for a tighter spread or evaluate another contract.',
+      title: 'Bid–ask spread too wide',
+      explanation: 'Expected cost exceeds the maximum allowed.',
+      action: 'Wait for a tighter spread.',
     },
     EXPIRY_RESTRICTION: {
-      title: 'There is not enough time before settlement',
-      explanation: 'BTC options with less than 1 hour 30 minutes remaining are excluded. This reason also appears when no usable holding window remains before the configured settlement buffer.',
-      action: 'Let the engine evaluate the next daily expiry; do not use a contract whose planned exit reaches the settlement buffer.',
+      title: 'Not enough time before settlement',
+      explanation: 'Contracts with less than 1h 30m remaining are excluded.',
+      action: 'Let the engine evaluate the next expiry.',
     },
     ENTRY_PRICE_DEVIATION: {
-      title: 'The entry price moved too far',
-      explanation: 'The current ask is above the maximum permitted deviation from the evaluated quote.',
-      action: 'Refresh the quote or skip this entry.',
+      title: 'Entry price moved too far',
+      explanation: 'Current ask exceeds the maximum permitted deviation.',
+      action: 'Refresh the quote.',
     },
     NO_ELIGIBLE_CONTRACT: {
-      title: 'No suitable option contract is available',
-      explanation: 'No contract matching the predicted CE or PE direction passed every mandatory quality filter.',
-      action: 'Wait for an eligible contract rather than lowering the safety rules.',
+      title: 'No suitable contract available',
+      explanation: 'No contract passed every mandatory quality filter.',
+      action: 'Wait for an eligible contract.',
     },
     CONTRACT_SCORE_TOO_LOW: {
-      title: 'Contract quality is below the minimum',
-      explanation: 'The combined liquidity, spread, delta, expiry eligibility, volatility and cost score is not high enough.',
-      action: 'Choose a stronger contract or wait for market quality to improve.',
+      title: 'Contract quality below minimum',
+      explanation: 'Combined liquidity, spread, delta and cost score is too low.',
+      action: 'Choose a stronger contract.',
     },
     TRADE_SCORE_TOO_LOW: {
-      title: 'The overall setup is not strong enough',
-      explanation: 'The combined market-direction and contract-quality score is below the entry threshold.',
-      action: 'Wait for a stronger complete setup.',
+      title: 'Setup not strong enough',
+      explanation: 'Combined direction and contract score is below the entry threshold.',
+      action: 'Wait for a stronger setup.',
     },
     RISK_CALCULATION_FAILED: {
-      title: 'A safe trade plan could not be calculated',
-      explanation: 'The engine could not produce valid size, stop, target or timing values from the available inputs.',
-      action: 'Review the plan inputs and do not trade until sizing can be verified.',
+      title: 'Safe trade plan could not be calculated',
+      explanation: 'Could not produce valid size, stop, target or timing values.',
+      action: 'Do not trade until sizing is verified.',
     },
     BREAKEVEN_UNREALISTIC: {
-      title: 'The forecast move does not clear breakeven',
-      explanation: 'The expected move is not large enough to overcome option premium and estimated trading costs.',
-      action: 'Skip this setup and wait for a better price or stronger forecast.',
+      title: 'Forecast does not clear breakeven',
+      explanation: 'Expected move is too small to overcome premium and costs.',
+      action: 'Skip this setup.',
     },
     EXPECTED_VALUE_UNAVAILABLE: {
       title: 'Expected value could not be verified',
-      explanation: 'The configured edge method could not be completed from verified current inputs, so the engine did not estimate a value.',
-      action: 'Refresh the analysis. If this persists, restore the required market or scenario inputs rather than estimating an edge.',
+      explanation: 'Edge method could not complete from verified inputs.',
+      action: 'Restore required inputs.',
     },
     NEGATIVE_EXPECTED_VALUE: {
-      title: 'The estimated edge is not positive',
-      explanation: 'The selected edge method is not positive after the option premium, multiplier and estimated trading costs.',
-      action: 'Skip a new entry, or review the open position for exit if one is held.',
+      title: 'Estimated edge is not positive',
+      explanation: 'Edge method shows no positive value after costs.',
+      action: 'Skip a new entry.',
     },
     REWARD_RISK_TOO_LOW: {
-      title: 'The potential reward does not justify the risk',
-      explanation: 'Expected reward is below the configured minimum relative to the estimated loss.',
-      action: 'Skip this contract and wait for a better reward-to-risk setup.',
+      title: 'Reward does not justify risk',
+      explanation: 'Expected reward is below the minimum ratio.',
+      action: 'Skip this contract.',
     },
     MINIMUM_LOT_EXCEEDS_RISK_LIMIT: {
-      title: 'Even one lot would exceed the risk limit',
-      explanation: 'The smallest possible position is too large for available funds, risk, exposure or market depth.',
-      action: 'Use a lower-risk contract or do not enter this trade.',
+      title: 'One lot exceeds risk limit',
+      explanation: 'The smallest position is too large for available funds.',
+      action: 'Use a lower-risk contract.',
     },
     NAKED_OPTION_SELLING_PROHIBITED: {
-      title: 'Short option positions are not supported',
-      explanation: 'This Trend Engine manages long options only and cannot safely manage a naked short option.',
-      action: 'Close or manage the short position outside this model.',
+      title: 'Short options not supported',
+      explanation: 'This engine manages long options only.',
+      action: 'Manage the short position outside this model.',
     },
     UNDERLYING_INVALIDATION_REACHED: {
-      title: 'The market thesis has been invalidated',
-      explanation: 'The underlying price crossed the level that defined the original trade idea as wrong.',
-      action: 'Exit the position and do not average down.',
+      title: 'Market thesis invalidated',
+      explanation: 'Underlying crossed the level that defined the trade idea as wrong.',
+      action: 'Exit the position.',
     },
     EMERGENCY_OPTION_STOP_REACHED: {
-      title: 'The option’s emergency stop has been reached',
-      explanation: 'The option price touched or crossed the maximum-loss stop defined for this position.',
-      action: 'Exit promptly according to the position’s risk plan.',
+      title: 'Option emergency stop reached',
+      explanation: 'Option price touched the maximum-loss stop.',
+      action: 'Exit promptly.',
     },
     TARGET_REACHED: {
-      title: 'The planned profit target has been reached',
-      explanation: 'The option price reached the target defined when the position was opened.',
-      action: 'Review and secure the planned exit.',
+      title: 'Profit target reached',
+      explanation: 'Option price reached the planned target.',
+      action: 'Secure the exit.',
     },
     TIME_STOP_REACHED: {
-      title: 'The planned holding time has ended',
-      explanation: 'The position reached its time-based exit, so the original plan no longer supports holding it.',
-      action: 'Close the position rather than extending it without a new validated plan.',
+      title: 'Holding time ended',
+      explanation: 'Position reached its time-based exit.',
+      action: 'Close the position.',
     },
   });
   const positionFieldLabels = Object.freeze({
@@ -524,11 +483,8 @@
     return `${values.slice(0, -1).join(', ')}, and ${values.at(-1)}`;
   };
   const safeText = value => String(value ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   const number = (value, digits = 0) => finite(value)
     ? Number(value).toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits })
     : '—';
@@ -545,57 +501,44 @@
     return `${number(percent, 2)}%`;
   };
   const scoreTone = value => !finite(value) || Number(value) === 0
-    ? 'is-neutral'
-    : (Number(value) > 0 ? 'is-positive' : 'is-negative');
+    ? 'is-neutral' : (Number(value) > 0 ? 'is-positive' : 'is-negative');
   const displayTimestamp = value => {
     if (!hasValue(value)) return '—';
     const parsed = new Date(value);
-    return Number.isNaN(parsed.getTime())
-      ? String(value)
+    return Number.isNaN(parsed.getTime()) ? String(value)
       : parsed.toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'medium' });
   };
   const displayExpiryTimestamp = value => {
     if (!hasValue(value)) return '—';
     const parsed = new Date(value);
-    return Number.isNaN(parsed.getTime())
-      ? String(value)
+    return Number.isNaN(parsed.getTime()) ? String(value)
       : parsed.toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' });
   };
   const contractTimeToExpiryHours = (contract, decision) => {
-    const expiryMs = hasValue(contract?.expiry)
-      ? new Date(contract.expiry).getTime()
-      : Number.NaN;
+    const expiryMs = hasValue(contract?.expiry) ? new Date(contract.expiry).getTime() : Number.NaN;
     const reference = decision?.timestamp || decision?.market_data_timestamp;
     const referenceMs = hasValue(reference) ? new Date(reference).getTime() : Number.NaN;
-    if (Number.isFinite(expiryMs) && Number.isFinite(referenceMs)) {
-      return (expiryMs - referenceMs) / 3_600_000;
-    }
-    if (finite(contract?.time_to_expiry_hours)) {
-      return Number(contract.time_to_expiry_hours);
-    }
+    if (Number.isFinite(expiryMs) && Number.isFinite(referenceMs)) return (expiryMs - referenceMs) / 3_600_000;
+    if (finite(contract?.time_to_expiry_hours)) return Number(contract.time_to_expiry_hours);
     if (finite(contract?.days_to_expiry)) return Number(contract.days_to_expiry) * 24;
     return null;
   };
   const formatTimeToExpiry = value => {
-    if (!finite(value)) return 'Time remaining unavailable';
+    if (!finite(value)) return '—';
     const totalMinutes = Math.floor(Number(value) * 60 + 1e-9);
     if (totalMinutes < 0) return 'Expired';
-    if (totalMinutes === 0) return 'Less than 1m remaining';
+    if (totalMinutes === 0) return '< 1m';
     const hours = Math.floor(totalMinutes / 60);
     const minutes = totalMinutes % 60;
-    if (!hours) return `${minutes}m remaining`;
-    return `${hours}h ${minutes}m remaining`;
+    return hours ? `${hours}h ${minutes}m` : `${minutes}m`;
   };
   const contractExpiryLabel = (contract, decision) => {
     const settlement = displayExpiryTimestamp(contract?.expiry);
-    const remaining = formatTimeToExpiry(
-      contractTimeToExpiryHours(contract || {}, decision || {})
-    );
+    const remaining = formatTimeToExpiry(contractTimeToExpiryHours(contract || {}, decision || {}));
     return settlement === '—' ? remaining : `${settlement} · ${remaining}`;
   };
   const joinValues = (first, second, formatter = number, separator = ' / ') => {
-    const left = formatter(first);
-    const right = formatter(second);
+    const left = formatter(first); const right = formatter(second);
     return left === '—' && right === '—' ? '—' : `${left}${separator}${right}`;
   };
 
@@ -625,9 +568,9 @@
 
   function freshness(decision) {
     const value = decision?.market_data_timestamp;
-    if (!hasValue(value)) return { label: 'Timestamp unavailable', tone: 'is-unknown', age: null };
+    if (!hasValue(value)) return { label: 'No timestamp', tone: 'is-unknown', age: null };
     const stamp = new Date(value).getTime();
-    if (!Number.isFinite(stamp)) return { label: 'Timestamp invalid', tone: 'is-stale', age: null };
+    if (!Number.isFinite(stamp)) return { label: 'Invalid timestamp', tone: 'is-stale', age: null };
     const seconds = Math.max(0, Math.floor((Date.now() - stamp) / 1000));
     let age;
     if (seconds < 10) age = 'just now';
@@ -646,9 +589,7 @@
     const el = byId('te-freshness');
     el.textContent = state.label;
     el.className = `te-freshness ${state.tone}`;
-    const stamp = displayTimestamp(latestDecision.market_data_timestamp);
-    const evaluated = displayTimestamp(latestDecision.timestamp);
-    byId('te-asof').textContent = `Market data ${stamp} · Evaluated ${evaluated}`;
+    byId('te-asof').textContent = `Data ${displayTimestamp(latestDecision.market_data_timestamp)} · Evaluated ${displayTimestamp(latestDecision.timestamp)}`;
   }
 
   function scoreMeter(value, max) {
@@ -661,21 +602,18 @@
 
   function renderHero(decision) {
     const [label, tone] = decisionMeta(decision.decision);
-    const hero = byId('te-hero');
-    hero.className = `te-hero ${tone}`;
+    byId('te-hero').className = `te-hero ${tone}`;
     byId('te-decision').textContent = label;
-    byId('te-summary').textContent = decision.decision_summary || 'No factual decision summary was returned.';
+    byId('te-summary').textContent = decision.decision_summary || '';
     byId('te-underlying').textContent = decision.underlying || '—';
     byId('te-bias').textContent = humanize(decision.directional_bias);
     byId('te-confidence').textContent = humanize(decision.confidence);
     byId('te-regime').textContent = humanize(decision.market_regime);
-
     const rawScore = finite(decision.direction_score) ? clamp(Number(decision.direction_score), -100, 100) : null;
     const magnitude = rawScore === null ? 0 : Math.abs(rawScore);
     const gauge = byId('te-score-gauge');
     gauge.style.setProperty('--te-score-angle', `${magnitude * 3.6}deg`);
     gauge.setAttribute('aria-valuenow', rawScore === null ? '0' : String(rawScore));
-    gauge.setAttribute('aria-valuetext', rawScore === null ? 'Direction score unavailable' : `${rawScore} out of 100 toward ${rawScore < 0 ? 'PE' : rawScore > 0 ? 'CE' : 'neutral'}`);
     byId('te-direction-score').textContent = signed(rawScore);
     byId('te-trade-score').textContent = number(decision.trade_score, 1);
     updateFreshness();
@@ -691,7 +629,7 @@
           <strong>${signed(value, 1)}</strong>
         </div>
         ${scoreMeter(value, max)}
-        <small>Range −${max} to +${max}</small>
+        <small>±${max}</small>
       </article>`;
     }).join('');
   }
@@ -720,7 +658,7 @@
           <b>${signed(value)}</b>
         </div>
         ${scoreMeter(value, 100)}
-        <div class="te-timeframe-foot"><span>${weight}% weight</span><span>${signed(contribution, 1)} contribution</span></div>
+        <div class="te-timeframe-foot"><span>${weight}% weight</span><span>${signed(contribution, 1)} contrib</span></div>
       </article>`;
     }).join('');
   }
@@ -730,19 +668,13 @@
     const codes = Array.isArray(decision.reason_codes) ? decision.reason_codes : [];
     const positionDecision = decision.decision === 'HOLD' || decision.decision === 'EXIT';
     const invalidSnapshot = values.data_valid === false && codes.includes('INVALID_OR_STALE_DATA');
-    let passed = 0;
-    let failed = 0;
-    let notApplicable = 0;
+    let passed = 0, failed = 0, notApplicable = 0;
     const html = gates.map(([key, label]) => {
       const value = values[key];
       const isNotApplicable = (positionDecision && positionEntryOnlyGates.has(key))
         || (invalidSnapshot && key !== 'data_valid');
-      const state = isNotApplicable
-        ? 'is-na'
-        : value === true ? 'is-pass' : value === false ? 'is-fail' : 'is-unknown';
-      const word = isNotApplicable
-        ? 'N/A'
-        : value === true ? 'Pass' : value === false ? 'Fail' : 'Unknown';
+      const state = isNotApplicable ? 'is-na' : value === true ? 'is-pass' : value === false ? 'is-fail' : 'is-unknown';
+      const word = isNotApplicable ? 'N/A' : value === true ? 'Pass' : value === false ? 'Fail' : '—';
       const symbol = isNotApplicable ? '–' : value === true ? '✓' : value === false ? '×' : '–';
       if (isNotApplicable) notApplicable += 1;
       else if (value === true) passed += 1;
@@ -756,86 +688,45 @@
     byId('te-gates').innerHTML = html;
     const tally = byId('te-gate-tally');
     tally.textContent = notApplicable
-      ? `${failed} failed · ${passed} passed · ${notApplicable} not applicable`
-      : failed ? `${failed} failed · ${passed} passed` : `${passed}/${gates.length} passed`;
+      ? `${failed} fail · ${passed} pass · ${notApplicable} n/a`
+      : failed ? `${failed} fail · ${passed} pass` : `${passed}/${gates.length} pass`;
     tally.className = `te-gate-tally ${failed ? 'has-failures' : passed === gates.length ? 'all-passed' : ''}`;
   }
 
   function renderSetup(decision) {
     const setup = decision.detected_setup || {};
-    byId('te-market-structure').textContent = setup.market_structure || 'No validated market structure was returned.';
+    byId('te-market-structure').textContent = setup.market_structure || 'No validated structure.';
     byId('te-pattern').textContent = humanize(setup.candlestick_pattern);
     byId('te-support').textContent = number(setup.support, 2);
     byId('te-resistance').textContent = number(setup.resistance, 2);
     byId('te-invalidation').textContent = number(setup.invalidation_level, 2);
     const state = byId('te-pattern-state');
-    if (setup.pattern_confirmed === true) {
-      state.textContent = 'CONFIRMED';
-      state.className = 'badge win';
-    } else if (setup.pattern_confirmed === false) {
-      state.textContent = 'UNCONFIRMED';
-      state.className = 'badge sim';
-    } else {
-      state.textContent = 'UNKNOWN';
-      state.className = 'badge live';
-    }
+    if (setup.pattern_confirmed === true) { state.textContent = 'CONFIRMED'; state.className = 'badge win'; }
+    else if (setup.pattern_confirmed === false) { state.textContent = 'UNCONFIRMED'; state.className = 'badge sim'; }
+    else { state.textContent = '—'; state.className = 'badge live'; }
   }
 
   function renderContract(decision) {
     const contract = decision.selected_contract || {};
     const selected = hasValue(contract.symbol);
-    const card = byId('te-contract-card');
-    card.classList.toggle('has-contract', selected);
-    byId('te-contract-symbol').textContent = selected ? contract.symbol : 'No eligible contract selected';
+    byId('te-contract-card').classList.toggle('has-contract', selected);
+    byId('te-contract-symbol').textContent = selected ? contract.symbol : 'No eligible contract';
     byId('te-contract-type').textContent = selected ? humanize(contract.option_type) : 'NO CONTRACT';
-    byId('te-contract-expiry').textContent = selected
-      ? contractExpiryLabel(contract, decision)
-      : '—';
+    byId('te-contract-expiry').textContent = selected ? contractExpiryLabel(contract, decision) : '—';
     byId('te-contract-score').textContent = `Score ${number(contract.contract_score, 1)}`;
     byId('te-contract-strike').textContent = number(contract.strike, 2);
-    byId('te-contract-quote').textContent = joinValues(contract.bid, contract.ask, value => money(value, 2));
+    byId('te-contract-quote').textContent = joinValues(contract.bid, contract.ask, v => money(v, 2));
     byId('te-contract-mid').textContent = money(contract.mid, 2);
     byId('te-contract-spread').textContent = finite(contract.spread_pct) ? `${number(contract.spread_pct, 2)}%` : '—';
     byId('te-contract-volume').textContent = number(contract.volume);
     byId('te-contract-oi').textContent = number(contract.open_interest);
-    byId('te-contract-greeks').textContent = joinValues(contract.delta, contract.theta, value => number(value, 3));
+    byId('te-contract-greeks').textContent = joinValues(contract.delta, contract.theta, v => number(v, 3));
     byId('te-contract-iv').textContent = impliedVolatility(contract.implied_volatility);
     byId('te-contract-empty').hidden = selected;
 
-    const audit = decision.audit && typeof decision.audit === 'object' ? decision.audit : {};
-    const scenario = audit.scenario && typeof audit.scenario === 'object' ? audit.scenario : {};
-    const evidence = scenario.scenario_evidence && typeof scenario.scenario_evidence === 'object'
-      ? scenario.scenario_evidence
-      : {};
-    const historicalReplay = scenario.expected_value_method === 'btc_historical_replay_intrinsic_floor_v1';
-    if (historicalReplay) {
-      const days = Number(evidence.complete_day_count ?? scenario.complete_day_count);
-      const paths = Number(evidence.total_path_count ?? scenario.path_count);
-      const ev = scenario.net_expected_value_per_lot;
-      byId('te-edge-evidence').textContent = `Conservative scenario check: ${Number.isFinite(days) ? number(days) : '—'} complete UTC days · ${Number.isFinite(paths) ? number(paths) : '—'} equal-weighted replay paths · lower-day result ${finite(ev) ? money(ev, 4) : 'unavailable'} per lot. This is not a calibrated win probability.`;
-    } else if (hasValue(scenario.pricing_method)) {
-      byId('te-edge-evidence').textContent = `Edge method: ${humanize(scenario.pricing_method)}.`;
-    } else {
-      byId('te-edge-evidence').textContent = 'Edge evidence will appear after a contract is evaluated.';
-    }
-    const eventPolicy = audit.event_policy && typeof audit.event_policy === 'object'
-      ? audit.event_policy
-      : {};
-    if (eventPolicy.unknown_risk_override_applied === true) {
-      byId('te-event-policy').textContent = 'Event calendar status: unavailable. DRY RUN records this as unknown risk and continues; it does not label the window clear. Any known blackout still blocks.';
-    } else if (eventPolicy.event_data_available === true) {
-      byId('te-event-policy').textContent = eventPolicy.known_blackout_detected === true
-        ? (eventPolicy.known_blackout_override_applied === true
-          ? 'Event calendar status: a known blackout is active and the configured event-trading override is recorded.'
-          : 'Event calendar status: a known blackout is active, so entry is blocked.')
-        : 'Event calendar status: checked; no configured blackout is active.';
-    } else {
-      byId('te-event-policy').textContent = 'Event calendar status: unavailable; this mode blocks entry.';
-    }
-
     const labels = {
-      liquidity: 'Liquidity', spread: 'Spread', delta: 'Delta', expiry: 'Expiry eligibility',
-      iv_value: 'IV value', breakeven: 'Breakeven', theta_efficiency: 'Theta efficiency',
+      liquidity: 'Liquidity', spread: 'Spread', delta: 'Delta', expiry: 'Expiry',
+      iv_value: 'IV value', breakeven: 'Breakeven', theta_efficiency: 'Theta eff.',
     };
     const quality = contract.contract_components || {};
     const qualityItems = Object.keys(labels).filter(key => hasValue(quality[key]));
@@ -844,7 +735,7 @@
       const value = clamp(Number(quality[key]) || 0, 0, max);
       return `<div class="te-quality-item">
         <span>${safeText(labels[key])}</span>
-        <div role="meter" aria-label="${safeText(labels[key])} score" aria-valuemin="0" aria-valuemax="${max}" aria-valuenow="${value}"><i style="width:${(value / max * 100).toFixed(1)}%"></i></div>
+        <div role="meter" aria-label="${safeText(labels[key])}" aria-valuemin="0" aria-valuemax="${max}" aria-valuenow="${value}"><i style="width:${(value / max * 100).toFixed(1)}%"></i></div>
         <strong>${number(quality[key], 1)}<small>/${max}</small></strong>
       </div>`;
     }).join('');
@@ -859,12 +750,12 @@
       ? `${number(lots)} lot${lots === 1 ? '' : 's'}${finite(plan.lot_size) ? ` × ${number(plan.lot_size)}` : ''}`
       : 'No order proposed';
     byId('te-plan-secondary').textContent = hasOrder
-      ? `${humanize(plan.order_type)} · revalidate quote before execution`
-      : 'Sizing remains at zero until all mandatory gates pass.';
+      ? `${humanize(plan.order_type)} · revalidate before execution`
+      : 'Zero sizing until all gates pass.';
     byId('te-plan-banner').classList.toggle('is-active', hasOrder);
     byId('te-order-type').textContent = humanize(plan.order_type);
-    byId('te-entry-price').textContent = joinValues(plan.entry_price, plan.maximum_entry_price, value => money(value, 2));
-    byId('te-option-levels').textContent = joinValues(plan.stop_option_price, plan.target_option_price, value => money(value, 2));
+    byId('te-entry-price').textContent = joinValues(plan.entry_price, plan.maximum_entry_price, v => money(v, 2));
+    byId('te-option-levels').textContent = joinValues(plan.stop_option_price, plan.target_option_price, v => money(v, 2));
     byId('te-underlying-invalidation').textContent = number(plan.underlying_invalidation, 2);
     byId('te-underlying-target').textContent = number(plan.underlying_target, 2);
     byId('te-time-exit').textContent = displayTimestamp(plan.time_exit);
@@ -878,25 +769,16 @@
     daily.className = finite(risk.daily_pnl) ? (Number(risk.daily_pnl) >= 0 ? 'c-pos' : 'c-neg') : '';
     byId('te-consecutive-losses').textContent = number(risk.consecutive_losses);
     const kill = byId('te-kill-switch');
-    if (risk.kill_switch_active === true) {
-      kill.textContent = 'KILL SWITCH ACTIVE';
-      kill.className = 'badge loss';
-    } else if (risk.kill_switch_active === false) {
-      kill.textContent = 'RISK CLEAR';
-      kill.className = 'badge win';
-    } else {
-      kill.textContent = 'RISK UNKNOWN';
-      kill.className = 'badge sim';
-    }
+    if (risk.kill_switch_active === true) { kill.textContent = 'KILL ACTIVE'; kill.className = 'badge loss'; }
+    else if (risk.kill_switch_active === false) { kill.textContent = 'RISK CLEAR'; kill.className = 'badge win'; }
+    else { kill.textContent = 'UNKNOWN'; kill.className = 'badge sim'; }
   }
 
   function positionLabel(decision) {
     const audit = decision.audit && typeof decision.audit === 'object' ? decision.audit : {};
-    const context = audit.position_context && typeof audit.position_context === 'object'
-      ? audit.position_context
-      : {};
+    const context = audit.position_context && typeof audit.position_context === 'object' ? audit.position_context : {};
     const mode = String(context.source || '').toLowerCase() === 'dry_run' ? 'DRY RUN ' : '';
-    const slot = hasValue(context.slot) ? `${humanize(context.slot)} position` : 'open position';
+    const slot = hasValue(context.slot) ? `${humanize(context.slot)} position` : 'position';
     const scopedPosition = `${mode}${slot}`;
     return hasValue(context.symbol) ? `${scopedPosition} ${context.symbol}` : scopedPosition;
   }
@@ -905,132 +787,69 @@
     const audit = decision.audit && typeof decision.audit === 'object' ? decision.audit : {};
     if (code === 'INVALID_OR_STALE_DATA' && audit.position_state_issue) {
       const missing = Array.isArray(audit.missing_position_fields)
-        ? audit.missing_position_fields
-          .filter(hasValue)
-          .map(field => positionFieldLabels[field] || humanize(field).toLowerCase())
-        : [];
+        ? audit.missing_position_fields.filter(hasValue).map(field => positionFieldLabels[field] || humanize(field).toLowerCase()) : [];
       const label = positionLabel(decision);
       return {
-        title: missing.length
-          ? 'This open position does not have a complete risk plan'
-          : 'This open position has an invalid risk-plan value',
+        title: missing.length ? 'Open position has an incomplete risk plan' : 'Open position has an invalid risk-plan value',
         explanation: missing.length
-          ? `The saved ${label} is missing ${naturalList(missing)}. Without these values, the engine cannot verify its stop, target, planned exit or remaining edge.`
-          : `One or more saved values for the ${label} are invalid. The engine therefore cannot prove that continuing to hold it is safe.`,
-        action: 'Review the position now. Restore missing values only if they can be recovered exactly from an authoritative original entry record; otherwise manage or close the position manually. Do not invent a new risk plan after entry.',
+          ? `The saved ${label} is missing ${naturalList(missing)}. Without these values, the engine cannot verify stop, target, exit or remaining edge.`
+          : `One or more saved values for the ${label} are invalid. The engine cannot prove holding is safe.`,
+        action: 'Review the position now. Restore only from an authoritative original record; otherwise manage or close manually.',
       };
     }
     if (code === 'INVALID_OR_STALE_DATA' && hasValue(audit.collection_error)) {
-      return {
-        title: 'Live market or account data could not be loaded',
-        explanation: 'The latest feed did not provide a complete snapshot, so the engine stopped instead of making a decision from partial information.',
-        action: 'Check the market and account connections, then refresh the analysis.',
-      };
+      return { title: 'Live data could not be loaded', explanation: 'The feed did not provide a complete snapshot. The engine stopped instead of guessing.', action: 'Check connections and refresh.' };
     }
     if (code === 'INVALID_OR_STALE_DATA' && hasValue(audit.validation_error)) {
-      return {
-        title: 'The latest data did not pass safety validation',
-        explanation: 'At least one required market, account or position value was missing, outdated or malformed, so the snapshot was rejected.',
-        action: 'Refresh the data. If the warning remains, inspect the technical validation detail or the relevant feed.',
-      };
+      return { title: 'Data failed safety validation', explanation: 'A required value was missing, outdated or malformed. The snapshot was rejected.', action: 'Refresh the data.' };
     }
     if (reasonCatalog[code]) {
       const item = reasonCatalog[code];
-      return decision.decision === 'EXIT' && item.exitAction
-        ? { ...item, action: item.exitAction }
-        : item;
+      return decision.decision === 'EXIT' && item.exitAction ? { ...item, action: item.exitAction } : item;
     }
-    return {
-      title: humanize(code),
-      explanation: 'This safety rule affected the decision, but this dashboard version does not yet have a dedicated plain-English description for it.',
-      action: 'Review the technical details and do not act until the rule is understood.',
-    };
+    return { title: humanize(code), explanation: 'This rule affected the decision but has no dedicated description yet.', action: 'Review technical details.' };
   }
 
   function decisionOutcome(decision) {
     const audit = decision.audit && typeof decision.audit === 'object' ? decision.audit : {};
     if (decision.decision === 'EXIT' && audit.position_state_issue) {
-      return {
-        tone: 'is-exit',
-        symbol: '!',
-        sectionTitle: 'Why the engine recommends exiting',
-        headline: `The ${positionLabel(decision)} needs attention`,
-        explanation: 'The engine found the position, but it cannot verify that holding is safe because the saved trade plan is incomplete or invalid. EXIT is a fail-safe recommendation only; the Trend Engine has not placed an exit order.',
-      };
+      return { tone: 'is-exit', symbol: '!', sectionTitle: 'Why exit is recommended', headline: `The ${positionLabel(decision)} needs attention`, explanation: 'The position cannot be verified as safe. EXIT is a fail-safe recommendation only.' };
     }
     const outcomes = {
-      EXIT: {
-        tone: 'is-exit', symbol: '!', sectionTitle: 'Why the engine recommends exiting',
-        headline: 'An exit rule is active for the open position',
-        explanation: 'At least one mandatory safety condition no longer supports holding. This is guidance only; the Trend Engine has not placed an exit order.',
-      },
-      HOLD: {
-        tone: 'is-hold', symbol: '✓', sectionTitle: 'Why the engine recommends holding',
-        headline: 'The open position still follows its trade plan',
-        explanation: 'No mandatory exit rule is active. Continue monitoring the defined invalidation, stop, target and time limit.',
-      },
-      NO_TRADE: {
-        tone: 'is-no-trade', symbol: '–', sectionTitle: 'Why the engine is waiting',
-        headline: 'No new position should be opened now',
-        explanation: 'One or more mandatory checks did not pass. The engine is waiting rather than forcing a low-quality or unverifiable setup.',
-      },
-      BUY_CE: {
-        tone: 'is-buy', symbol: '↑', sectionTitle: 'Why this bullish setup qualifies',
-        headline: 'Every rule supports a bullish call setup',
-        explanation: 'Direction, price action, contract quality, expected edge and portfolio risk passed. This is a decision only; no order has been placed.',
-      },
-      BUY_PE: {
-        tone: 'is-buy', symbol: '↓', sectionTitle: 'Why this bearish setup qualifies',
-        headline: 'Every rule supports a bearish put setup',
-        explanation: 'Direction, price action, contract quality, expected edge and portfolio risk passed. This is a decision only; no order has been placed.',
-      },
+      EXIT: { tone: 'is-exit', symbol: '!', sectionTitle: 'Why exit is recommended', headline: 'An exit rule is active', explanation: 'At least one mandatory safety condition no longer supports holding. Guidance only.' },
+      HOLD: { tone: 'is-hold', symbol: '✓', sectionTitle: 'Why holding is recommended', headline: 'The position still follows its plan', explanation: 'No mandatory exit rule is active. Continue monitoring.' },
+      NO_TRADE: { tone: 'is-no-trade', symbol: '–', sectionTitle: 'Why the engine is waiting', headline: 'No position should be opened now', explanation: 'One or more mandatory checks did not pass.' },
+      BUY_CE: { tone: 'is-buy', symbol: '↑', sectionTitle: 'Why this bullish setup qualifies', headline: 'Every rule supports a bullish call', explanation: 'Direction, price action, contract quality, edge and risk passed. Decision only; no order placed.' },
+      BUY_PE: { tone: 'is-buy', symbol: '↓', sectionTitle: 'Why this bearish setup qualifies', headline: 'Every rule supports a bearish put', explanation: 'Direction, price action, contract quality, edge and risk passed. Decision only; no order placed.' },
     };
-    return outcomes[decision.decision] || {
-      tone: 'is-waiting', symbol: '…', sectionTitle: 'Clear explanation',
-      headline: 'The decision could not be interpreted',
-      explanation: 'Refresh the analysis before acting.',
-    };
+    return outcomes[decision.decision] || { tone: 'is-waiting', symbol: '…', sectionTitle: 'Explanation', headline: 'Decision could not be interpreted', explanation: 'Refresh the analysis.' };
   }
 
   function renderReasons(decision) {
     const codes = Array.isArray(decision.reason_codes) ? decision.reason_codes.filter(hasValue) : [];
     const details = codes.map(code => ({ code, ...reasonDetails(code, decision) }));
     const outcome = decisionOutcome(decision);
-    const overview = byId('te-reason-overview');
-    overview.className = `te-reason-overview ${outcome.tone}`;
+    byId('te-reason-overview').className = `te-reason-overview ${outcome.tone}`;
     byId('te-reason-symbol').textContent = outcome.symbol;
     byId('te-reason-headline').textContent = outcome.headline;
     byId('te-reason-explanation').textContent = outcome.explanation;
     byId('te-reasons-title').textContent = outcome.sectionTitle;
-
     const positiveCodes = new Set(['ALL_ENTRY_GATES_PASSED', 'EXISTING_POSITION_THESIS_VALID']);
     byId('te-reason-cards').innerHTML = details.length
-      ? details.map((item, index) => `<article class="te-reason-card ${positiveCodes.has(item.code) ? 'is-positive' : ''}">
-          <div class="te-reason-card-head">
-            <span>REASON ${String(index + 1).padStart(2, '0')}</span>
-            <strong>${safeText(item.title)}</strong>
-          </div>
+      ? details.map((item, i) => `<article class="te-reason-card ${positiveCodes.has(item.code) ? 'is-positive' : ''}">
+          <div class="te-reason-card-head"><span>REASON ${String(i + 1).padStart(2, '0')}</span><strong>${safeText(item.title)}</strong></div>
           <p>${safeText(item.explanation)}</p>
-          <small><b>What to do:</b> ${safeText(item.action)}</small>
+          <small><b>Do:</b> ${safeText(item.action)}</small>
         </article>`).join('')
       : `<article class="te-reason-card is-muted">
-          <div class="te-reason-card-head"><span>STATUS</span><strong>No explanation was returned</strong></div>
+          <div class="te-reason-card-head"><span>STATUS</span><strong>No reasons returned</strong></div>
           <p>The decision response did not contain a reason.</p>
-          <small><b>What to do:</b> Refresh the analysis; if this continues, inspect the engine log.</small>
+          <small><b>Do:</b> Refresh the analysis.</small>
         </article>`;
-
-    const firstAction = details[0]?.action || 'Refresh the analysis before acting.';
+    const firstAction = details[0]?.action || 'Refresh the analysis.';
     byId('te-next-step-copy').textContent = details.length > 1
-      ? `${firstAction} Also resolve the other ${details.length - 1} reason${details.length === 2 ? '' : 's'} shown above before acting.`
+      ? `${firstAction} Also resolve the other ${details.length - 1} reason${details.length === 2 ? '' : 's'}.`
       : firstAction;
-
-    byId('te-reasons').innerHTML = codes.length
-      ? codes.map(code => `<span class="te-reason">${safeText(code)}</span>`).join('')
-      : '<span class="te-reason is-muted">NO_REASON_CODES_RETURNED</span>';
-    byId('te-final-summary').textContent = `Engine summary: ${decision.decision_summary || 'No factual decision summary was returned.'}`;
-    byId('te-decision-id').textContent = `Decision ${decision.decision_id || '—'}`;
-    byId('te-model-version').textContent = `Model ${decision.model_version || '—'}`;
-    byId('te-schema-version').textContent = `Schema ${decision.schema_version || '—'}`;
   }
 
   function render(decision) {
@@ -1046,17 +865,14 @@
   }
 
   function showError(message, hasCachedDecision) {
-    const panel = byId('te-error');
-    panel.hidden = false;
+    byId('te-error').hidden = false;
     byId('te-error-copy').textContent = hasCachedDecision
-      ? `Could not refresh the engine. The last successful decision remains visible. ${message}`
-      : message;
+      ? `Could not refresh. Last successful decision remains. ${message}` : message;
     if (!hasCachedDecision) {
-      const hero = byId('te-hero');
-      hero.className = 'te-hero is-error';
-      byId('te-decision').textContent = 'ENGINE UNAVAILABLE';
-      byId('te-summary').textContent = 'No trading direction is shown because a validated decision could not be retrieved.';
-      byId('te-freshness').textContent = 'No verified data';
+      byId('te-hero').className = 'te-hero is-error';
+      byId('te-decision').textContent = 'UNAVAILABLE';
+      byId('te-summary').textContent = 'No decision could be retrieved.';
+      byId('te-freshness').textContent = 'No data';
       byId('te-freshness').className = 'te-freshness is-stale';
     }
   }
@@ -1073,30 +889,25 @@
     try {
       const url = announce ? `${endpoint}?refresh=1` : endpoint;
       const response = await fetch(url, { cache: 'no-store', signal: controller.signal });
-      if (response.status === 401) {
-        window.location.href = '/login';
-        return;
-      }
+      if (response.status === 401) { window.location.href = '/login'; return; }
       let payload = null;
       try { payload = await response.json(); } catch (_) { /* handled below */ }
-      if (!response.ok) {
-        throw new Error(payload?.error || payload?.message || `Request failed with status ${response.status}`);
-      }
+      if (!response.ok) throw new Error(payload?.error || payload?.message || `Request failed ${response.status}`);
       const decision = unwrap(payload);
       if (!decision || typeof decision !== 'object' || !allowedDecisions.has(String(decision.decision || '').toUpperCase())) {
-        throw new Error('The endpoint returned an incomplete decision object.');
+        throw new Error('Incomplete decision object.');
       }
       decision.decision = String(decision.decision).toUpperCase();
       render(decision);
       byId('te-error').hidden = true;
-      if (announce && typeof toast === 'function') toast('Trend Engine analysis refreshed');
+      if (announce && typeof toast === 'function') toast('Trend Engine refreshed');
     } catch (error) {
       if (error?.name === 'AbortError') return;
-      showError(error?.message || 'The latest decision could not be loaded.', Boolean(latestDecision));
+      showError(error?.message || 'Could not load the decision.', Boolean(latestDecision));
     } finally {
       if (requestController === controller) {
         button.disabled = false;
-        label.textContent = 'Refresh analysis';
+        label.textContent = 'Refresh';
         byId('trend-engine-page').setAttribute('aria-busy', 'false');
         requestController = null;
       }
@@ -1107,9 +918,7 @@
   byId('te-retry').addEventListener('click', () => load({ announce: true }));
   load();
   window.setInterval(updateFreshness, 15_000);
-  window.setInterval(() => {
-    if (document.visibilityState === 'visible') load();
-  }, 60_000);
+  window.setInterval(() => { if (document.visibilityState === 'visible') load(); }, 60_000);
 })();
 </script>
 {% endblock %}
