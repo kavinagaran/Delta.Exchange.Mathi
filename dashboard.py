@@ -10859,6 +10859,11 @@ def _maybe_auto_trend_score_live_cycle(
         ).upper()
         guessed_ledger = _trend_score_auto_ledger(data_dir)
         guessed_consumed = set(guessed_ledger["signals"])
+        guessed_consumed |= set(
+            _trend_score_auto_ledger(_mode_data_dir(True)).get(
+                "signals", {}
+            )
+        )
         durable_signal_key = str(
             guessed_state.get("score_auto_signal_key")
             or guessed_state.get("last_entry_signal_key")
@@ -11099,6 +11104,11 @@ def _maybe_auto_trend_score_live_cycle(
                         if blocker:
                             raise RuntimeError(blocker)
                     consumed = set(ledger["signals"])
+                    consumed |= set(
+                        _trend_score_auto_ledger(_mode_data_dir(True)).get(
+                            "signals", {}
+                        )
+                    )
                     durable_key = str(
                         states["trend"].get("score_auto_signal_key")
                         or states["trend"].get("last_entry_signal_key")
@@ -11428,6 +11438,10 @@ def _maybe_auto_trend_score_cycle() -> bool:
             guess_owned = _trend_score_auto_owned_position(guess_state)
             guess_ledger = _trend_score_auto_ledger(_mode_data_dir(True))
             already = signal["signal_key"] in guess_ledger["signals"]
+            if not already:
+                already = signal["signal_key"] in _trend_score_auto_ledger(
+                    _mode_data_dir(False)
+                ).get("signals", {})
             if (
                 str(guess_state.get("status") or "").upper() == "CLOSED"
                 and guess_state.get("ownership") == TREND_SCORE_AUTO_OWNERSHIP
@@ -11528,6 +11542,11 @@ def _maybe_auto_trend_score_cycle() -> bool:
                     )
                     return False
                 consumed = set(ledger["signals"])
+                consumed |= set(
+                    _trend_score_auto_ledger(_mode_data_dir(False)).get(
+                        "signals", {}
+                    )
+                )
                 if (
                     str(states["trend"].get("status") or "").upper() == "CLOSED"
                     and states["trend"].get("ownership") == TREND_SCORE_AUTO_OWNERSHIP
