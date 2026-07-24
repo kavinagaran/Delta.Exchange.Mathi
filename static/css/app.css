@@ -1357,15 +1357,15 @@ body.login-body {
 }
 .te-trade.active {
   border-color: var(--te-tone);
-  background: color-mix(in srgb, var(--te-tone) 12%, transparent);
-  color: var(--te-tone);
+  background: var(--te-tone);
+  color: var(--surface);
   font-weight: 700;
-  box-shadow: 0 0 8px color-mix(in srgb, var(--te-tone) 35%, transparent), 0 0 20px color-mix(in srgb, var(--te-tone) 15%, transparent);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--te-tone) 50%, transparent), 0 0 24px color-mix(in srgb, var(--te-tone) 25%, transparent);
   animation: te-trade-glow 2s ease-in-out infinite alternate;
 }
 @keyframes te-trade-glow {
-  from { box-shadow: 0 0 8px color-mix(in srgb, var(--te-tone) 35%, transparent), 0 0 20px color-mix(in srgb, var(--te-tone) 15%, transparent); }
-  to { box-shadow: 0 0 12px color-mix(in srgb, var(--te-tone) 50%, transparent), 0 0 28px color-mix(in srgb, var(--te-tone) 25%, transparent); }
+  from { box-shadow: 0 0 10px color-mix(in srgb, var(--te-tone) 50%, transparent), 0 0 24px color-mix(in srgb, var(--te-tone) 25%, transparent); }
+  to { box-shadow: 0 0 16px color-mix(in srgb, var(--te-tone) 65%, transparent), 0 0 34px color-mix(in srgb, var(--te-tone) 35%, transparent); }
 }
 
 /* Two-column grid */
