@@ -158,6 +158,24 @@ dedicated `funding_rate` channel adds `predicted_funding_rate` and
 The engine binds `127.0.0.1:5055` and is never proxied. Confirm no config
 change is needed, and confirm port 5055 is not already taken on the host.
 
+## A9 — `/v2/positions/margined` reports `margin` and `liquidation_price`
+**Status: OPEN — cannot verify from this workstation** · gates Exposure page
+liquidation-buffer display only, not the reconciliation card
+
+The Positions/Exposure page (`/api/all-positions`) reads `p.get("margin")` and
+`p.get("liquidation_price")` from the raw venue response. A live probe from
+this workstation returned `ip_not_whitelisted_for_api_key` (client IP not on
+the key's allowlist — this only works from the EC2 host that key is scoped
+to), and WebFetch/WebSearch were both unavailable at the time of writing
+(tooling fault, same as A2b). Field names are unconfirmed.
+
+**Consequence, by design:** both reads are defensive — `float(x or 0) or None`
+— so a wrong or absent field name degrades to "not reported" in the UI
+("—" for margin/liquidation/distance-to-liq) rather than a fabricated or
+crashing value. Confirm the real field names from the EC2 host (or official
+docs) before trusting the liquidation-buffer column for anything beyond
+"the exchange reported a number and it looked plausible."
+
 ---
 
 ## Summary
@@ -173,6 +191,8 @@ change is needed, and confirm port 5055 is not already taken on the host.
 | A6 | EC2 disk headroom | **OPEN** | P2 retention |
 | A7 | OI / funding on WS | **CONFIRMED** | §9.5 |
 | A8 | nginx unchanged | **OPEN** | — |
+| A9 | positions/margined margin/liquidation_price fields | **OPEN** | Exposure liq-buffer display |
 
 Nothing OPEN blocks the start of Phase 2. A2b narrows one integrity check, A6
-and A8 are operational checks on the deployment host.
+and A8 are operational checks on the deployment host. A9 narrows one display
+column on the Exposure page — degrades to "—", never fabricates a number.

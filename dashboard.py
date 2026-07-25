@@ -1763,7 +1763,7 @@ _PAGES = {
     "trend-engine": ("trend_engine.html", "Trend Engine"),
     "dry-run":   ("dry_run.html",   "Dry Run Dashboard"),
     "trades":    ("trades.html",    "Trades & P&L"),
-    "positions": ("positions.html", "Positions"),
+    "positions": ("positions.html", "Exposure"),
     "config":    ("config.html",    "Bot Config"),
     "accounts":  ("accounts.html",  "API Accounts"),
     "logs":      ("logs.html",      "Logs"),
@@ -10943,14 +10943,23 @@ def api_all_positions():
             except Exception:
                 mark = 0.0
             pnl = (mark - entry) * cv * size   # signed size handles long vs short
+            # margin/liquidation_price/bankruptcy_price field names are an
+            # unverified assumption (docs/assumptions.md A9) — this workstation's
+            # IP isn't whitelisted for the API key, so the live shape is
+            # unconfirmed. Read defensively; missing or zero renders as "not
+            # reported" in the UI rather than a fabricated number.
+            margin           = float(p.get("margin") or 0) or None
+            liquidation_price = float(p.get("liquidation_price") or 0) or None
             out.append({
-                "symbol":       symbol,
-                "product_id":   product_id,
-                "side":         "LONG" if size > 0 else "SHORT",
-                "size":         abs(size),
-                "entry_price":  entry,
-                "mark_price":   mark,
-                "live_pnl":     round(pnl, 2),
+                "symbol":            symbol,
+                "product_id":        product_id,
+                "side":              "LONG" if size > 0 else "SHORT",
+                "size":              abs(size),
+                "entry_price":       entry,
+                "mark_price":        mark,
+                "live_pnl":          round(pnl, 2),
+                "margin":            margin,
+                "liquidation_price": liquidation_price,
             })
         return jsonify(out)
     except Exception as e:

@@ -540,6 +540,7 @@ body.native-app .toast { left: 12px; right: 12px; bottom: 16px; max-width: none;
 
 .c-pos { color: var(--pos); }
 .c-neg { color: var(--neg); }
+.c-warn { color: var(--warn); }
 .c-muted { color: var(--muted); }
 
 /* ── Tables ─────────────────────────────────────────────── */
@@ -635,9 +636,10 @@ input.mono { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; fon
   border-radius: 8px; padding: 10px 15px; font-size: 13px; font-weight: 600;
   margin-bottom: 16px; display: flex; align-items: center; gap: 9px;
 }
-.banner.warn { background: var(--warn-soft); color: var(--warn); }
-.banner.ok   { background: var(--pos-soft);  color: var(--pos); }
-.banner.info { background: var(--accent-soft); color: var(--accent-dark); }
+.banner.warn   { background: var(--warn-soft); color: var(--warn); }
+.banner.ok     { background: var(--pos-soft);  color: var(--pos); }
+.banner.info   { background: var(--accent-soft); color: var(--accent-dark); }
+.banner.danger { background: var(--neg-soft);  color: var(--neg); }
 
 /* ── TP/SL/TSL monitor box ──────────────────────────────── */
 /* A self-contained panel inside the slot card: header line (title, status

@@ -17,8 +17,23 @@
       <div class="stats" style="margin:0">
         <div class="stat"><div class="lbl">Open positions</div><div class="val" id="x-count">—</div></div>
         <div class="stat"><div class="lbl">Unrealized P&L</div><div class="val" id="x-pnl">—</div></div>
+        <div class="stat"><div class="lbl">Margin used</div><div class="val" id="x-margin">—</div><div class="sub" id="x-margin-note"></div></div>
       </div>
     </div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-hd">Reconciliation <span class="spacer"></span><span class="hint">Bot-tracked slots vs. what the exchange actually reports</span></div>
+  <div class="card-bd">
+    <div id="recon-banner"></div>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Slot</th><th>Bot believes</th><th>Exchange match</th></tr></thead>
+        <tbody id="recon-body"><tr class="empty-row"><td colspan="3">Loading…</td></tr></tbody>
+      </table>
+    </div>
+    <div class="fld-hint" id="recon-external-note"></div>
   </div>
 </div>
 
@@ -27,9 +42,10 @@
   <div class="tbl-wrap">
     <table>
       <thead><tr>
-        <th>Contract</th><th>Side</th><th>Size</th><th>Entry</th><th>Mark</th><th>Live P&L</th>
+        <th>Contract</th><th>Bot</th><th>Side</th><th>Size</th><th>Entry</th><th>Mark</th>
+        <th>Live P&L</th><th>Margin</th><th>Liq. price</th><th>Distance to liq.</th>
       </tr></thead>
-      <tbody id="pos-body"><tr class="empty-row"><td colspan="6">Loading…</td></tr></tbody>
+      <tbody id="pos-body"><tr class="empty-row"><td colspan="10">Loading…</td></tr></tbody>
     </table>
   </div>
 </div>
@@ -37,6 +53,68 @@
 
 {% block scripts %}
 <script>
+/* Distance-to-liquidation colour bands are a display heuristic for at-a-glance
+ * scanning, not a risk-management gate — sizing/kill-switch logic is Phase 4
+ * (risk_manager.py), not this page. */
+function liqDistancePct(position) {
+  const { side, mark_price: mark, liquidation_price: liq } = position;
+  if (!Number.isFinite(+liq) || !liq || !Number.isFinite(+mark) || !mark) return null;
+  const pct = side === 'LONG' ? (mark - liq) / mark : (liq - mark) / mark;
+  return Number.isFinite(pct) ? pct : null;
+}
+
+function liqDistanceCls(pct) {
+  if (pct == null) return 'c-muted';
+  if (pct < 0.10) return 'c-neg';
+  if (pct < 0.20) return 'c-warn';
+  return 'c-pos';
+}
+
+function botOwnedProductIds(displaySlots) {
+  const ids = new Set();
+  for (const slot of Object.values(displaySlots || {})) {
+    if (slot && slot.status === 'OPEN' && slot.product_id != null) {
+      ids.add(Number(slot.product_id));
+    }
+  }
+  return ids;
+}
+
+function renderReconciliation(displaySlots, positions, externalCount) {
+  const positionIds = new Set((positions || [])
+    .map(p => Number(p.product_id)).filter(Number.isFinite));
+  const banner = document.getElementById('recon-banner');
+  const body = document.getElementById('recon-body');
+  const rows = [];
+  let mismatched = 0;
+  for (const slotName of ['morning', 'evening', 'trend']) {
+    const slot = (displaySlots || {})[slotName] || {};
+    if (slot.status !== 'OPEN') {
+      rows.push(`<tr><td>${esc(slotName)}</td><td class="c-muted">No open position</td><td>—</td></tr>`);
+      continue;
+    }
+    const matched = slot.product_id != null && positionIds.has(Number(slot.product_id));
+    if (!matched) mismatched += 1;
+    rows.push(`<tr>
+      <td>${esc(slotName)}</td>
+      <td>${esc(slot.symbol || '—')} · ${fN(slot.lots)} lots</td>
+      <td>${matched
+        ? '<span class="badge win">MATCHED</span>'
+        : '<span class="badge loss">NOT FOUND ON EXCHANGE</span>'}</td>
+    </tr>`);
+  }
+  body.innerHTML = rows.join('');
+  banner.innerHTML = mismatched
+    ? `<div class="banner danger">⚠ ${mismatched} bot-tracked position${mismatched > 1 ? 's' : ''}
+        ${mismatched > 1 ? "don't" : "doesn't"} match any exchange position.
+        The TP monitor resolves this on its own tighter checks — nothing here
+        has been changed automatically.</div>`
+    : `<div class="banner ok">✓ Every bot-tracked open position matches an exchange position.</div>`;
+  document.getElementById('recon-external-note').textContent = externalCount
+    ? `${externalCount} other position${externalCount > 1 ? 's' : ''} on this account ${externalCount > 1 ? 'are' : 'is'} not tracked by the bot — see Overview for details.`
+    : '';
+}
+
 async function load() {
   try {
     const w = await jget('/api/wallet');
@@ -48,28 +126,59 @@ async function load() {
     }
   } catch (e) {}
 
-  const rows = await jget('/api/all-positions');
+  const [rows, status] = await Promise.all([
+    jget('/api/all-positions'),
+    jget('/api/status').catch(() => ({})),
+  ]);
+  const displaySlots = status.display_slots || {};
+  const externalCount = (status.external_options || []).length;
+  renderReconciliation(displaySlots, Array.isArray(rows) ? rows : [], externalCount);
+
   const body = document.getElementById('pos-body');
   if (!Array.isArray(rows) || !rows.length) {
-    body.innerHTML = '<tr class="empty-row"><td colspan="6">No open positions</td></tr>';
+    body.innerHTML = '<tr class="empty-row"><td colspan="10">No open positions</td></tr>';
     document.getElementById('x-count').textContent = '0';
     document.getElementById('x-pnl').textContent = '—';
+    document.getElementById('x-margin').textContent = '—';
+    document.getElementById('x-margin-note').textContent = '';
     return;
   }
-  const total = rows.reduce((a, p) => a + (+p.live_pnl || 0), 0);
+  const totalPnl = rows.reduce((a, p) => a + (+p.live_pnl || 0), 0);
   document.getElementById('x-count').textContent = rows.length;
   const xp = document.getElementById('x-pnl');
-  xp.textContent = f$(total);
-  xp.className = 'val ' + pnlCls(total);
-  body.innerHTML = rows.map(p => `
-    <tr>
+  xp.textContent = f$(totalPnl);
+  xp.className = 'val ' + pnlCls(totalPnl);
+
+  const knownMargins = rows.filter(p => Number.isFinite(+p.margin));
+  const xm = document.getElementById('x-margin');
+  const xmNote = document.getElementById('x-margin-note');
+  if (knownMargins.length) {
+    xm.textContent = '$' + fN(knownMargins.reduce((a, p) => a + (+p.margin || 0), 0), 2);
+    xmNote.textContent = knownMargins.length < rows.length
+      ? `${rows.length - knownMargins.length} position(s) didn't report margin`
+      : '';
+  } else {
+    xm.textContent = '—';
+    xmNote.textContent = 'Not reported by the exchange';
+  }
+
+  const botIds = botOwnedProductIds(displaySlots);
+  body.innerHTML = rows.map(p => {
+    const pct = liqDistancePct(p);
+    const owned = botIds.has(Number(p.product_id));
+    return `<tr>
       <td>${esc(p.symbol)}</td>
+      <td>${owned ? '<span class="badge live">BOT</span>' : '<span class="badge sim">EXTERNAL</span>'}</td>
       <td><span class="badge ${p.side === 'LONG' ? 'long' : 'short'}">${esc(p.side)}</span></td>
       <td>${fN(p.size)}</td>
       <td>$${fN(p.entry_price, 4)}</td>
       <td>$${fN(p.mark_price, 4)}</td>
       <td class="${pnlCls(p.live_pnl)}">${f$(p.live_pnl)}</td>
-    </tr>`).join('');
+      <td>${p.margin != null ? '$' + fN(p.margin, 2) : '—'}</td>
+      <td>${p.liquidation_price != null ? '$' + fN(p.liquidation_price, 2) : '—'}</td>
+      <td class="${liqDistanceCls(pct)}">${pct != null ? fN(pct * 100, 1) + '%' : '—'}</td>
+    </tr>`;
+  }).join('');
 }
 load();
 setInterval(load, 15_000);

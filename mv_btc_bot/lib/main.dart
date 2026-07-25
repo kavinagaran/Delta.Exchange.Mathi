@@ -35,7 +35,7 @@ const kBlueBackgroundAsset = 'assets/sparkling-blue-dashboard-bg.png';
 
 final appTheme = AppThemeController();
 
-const kWebAssetRevision = '3.5.0+8-shared-js-nav-reorder';
+const kWebAssetRevision = '3.6.0+9-exposure-page';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -388,8 +388,8 @@ const appPages = <AppPageSpec>[
     icon: Icons.science_outlined,
   ),
   AppPageSpec(
-    label: 'Positions',
-    navLabel: 'Positions',
+    label: 'Exposure',
+    navLabel: 'Exposure',
     path: '/positions',
     icon: Icons.view_list_outlined,
   ),
