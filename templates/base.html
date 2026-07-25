@@ -18,6 +18,13 @@
 <link rel="icon" type="image/png" href="/static/img/favicon.png?v={{ asset_v('img/favicon.png') }}">
 <link rel="stylesheet" href="/static/css/app.css?v={{ asset_v('css/app.css') }}">
 <script src="/static/js/app.js?v={{ asset_v('js/app.js') }}"></script>
+{#  Shared page modules. Classic scripts on purpose — the Flutter WebView and
+    asset_v() cache-busting both depend on plain <script src>, not ES modules.
+    Each is a few KB; Chart.js is heavy and stays per-page in {% block head %}. #}
+<script src="/static/js/slots.js?v={{ asset_v('js/slots.js') }}"></script>
+<script src="/static/js/stats.js?v={{ asset_v('js/stats.js') }}"></script>
+<script src="/static/js/protection.js?v={{ asset_v('js/protection.js') }}"></script>
+<script src="/static/js/charts.js?v={{ asset_v('js/charts.js') }}"></script>
 {% block head %}{% endblock %}
 </head>
 <body class="{{ 'native-app' if request.args.get('app') == '1' else '' }}">
@@ -33,9 +40,8 @@
     </div>
 
     <nav class="nav">
-      {% set items = [
+      {% set primary_items = [
         ('overview',  '/',          'Overview',     'M3 12l9-8 9 8M5 10v10h4v-6h6v6h4V10'),
-        ('trend-engine', '/trend-engine', 'Trend Engine', 'M3 17l5-6 4 3 6-8M14 6h4v4'),
         ('trades',    '/trades',    'Trades & P&L', 'M3 17l5-6 4 3 6-8M14 6h4v4'),
         ('dry-run',   '/dry-run',   'Dry Run',      'M9 3v5l-4.5 8A3 3 0 007 20h10a3 3 0 002.5-4L15 8V3M8 13h8'),
         ('positions', '/positions', 'Positions',    'M4 6h16M4 12h16M4 18h10'),
@@ -43,7 +49,20 @@
         ('accounts',  '/accounts',  'API Accounts', 'M16 7a4 4 0 11-8 0 4 4 0 018 0zM4 21v-1a6 6 0 016-6h4a6 6 0 016 6v1'),
         ('logs',      '/logs',      'Logs',         'M6 3h9l5 5v13H6zM14 3v6h6M9 13h6M9 17h6'),
       ] %}
-      {% for key, href, label, d in items %}
+      {% for key, href, label, d in primary_items %}
+      <a href="{{ href }}" class="{{ 'active' if page == key else '' }}">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="{{ d }}"/></svg>
+        <span>{{ label }}</span>
+      </a>
+      {% endfor %}
+      {# Visually separated from the operational pages above — two nav-rows
+         of empty space — so the rewritten Trend Engine reads as its own
+         section rather than one more item in the daily-use list. #}
+      <div class="nav-gap" aria-hidden="true"></div>
+      {% set trend_items = [
+        ('trend-engine', '/trend-engine', 'Trend Engine', 'M3 17l5-6 4 3 6-8M14 6h4v4'),
+      ] %}
+      {% for key, href, label, d in trend_items %}
       <a href="{{ href }}" class="{{ 'active' if page == key else '' }}">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="{{ d }}"/></svg>
         <span>{{ label }}</span>

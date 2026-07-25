@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 
 {% block head %}
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script src="/static/js/vendor/chart.umd.min.js?v={{ asset_v('js/vendor/chart.umd.min.js') }}"></script>
 {% endblock %}
 
 {% block content %}
@@ -733,33 +733,21 @@ async function endDrySimulation(controlSlot, displaySlot = controlSlot) {
 }
 
 async function saveDryProtection(displaySlot, controlSlot = displaySlot) {
-  const keys = controlSlot === 'morning'
-    ? { tp: 'TP_TARGET_PNL_MORNING', sl: 'SL_TARGET_PNL_MORNING',
-        arm: 'TSL_ARM_PNL_MORNING', trail: 'TSL_TRAIL_PNL_MORNING',
-        lock: 'TSL_LOCK_MIN_PNL_MORNING', poll: 'TP_POLL_SECS_MORNING' }
-    : controlSlot === 'trend'
-      ? { tp: 'TP_TARGET_PNL_TREND', sl: 'SL_TARGET_PNL_TREND',
-          arm: 'TSL_ARM_PNL_TREND', trail: 'TSL_TRAIL_PNL_TREND',
-          lock: 'TSL_LOCK_MIN_PNL_TREND', poll: 'TP_POLL_SECS_TREND' }
-      : { tp: 'TP_TARGET_PNL', sl: 'SL_TARGET_PNL',
-          arm: 'TSL_ARM_PNL', trail: 'TSL_TRAIL_PNL',
-          lock: 'TSL_LOCK_MIN_PNL', poll: 'TP_POLL_SECS' };
-  const read = id => Number(document.getElementById(id)?.value);
-  const values = {
-    tp: read(`dry-tp-${displaySlot}`),
-    sl: read(`dry-sl-${displaySlot}`),
-    arm: read(`dry-tsl-arm-${displaySlot}`),
-    trail: read(`dry-tsl-trail-${displaySlot}`),
-    lock: read(`dry-tsl-lock-${displaySlot}`),
-    poll: read(`dry-poll-${displaySlot}`),
+  /* Key-name table + validation thresholds now live once, in protection.js
+   * (protectionConfigKeys / protectionValuesError) — this used to be a
+   * locally duplicated copy, byte-identical to overview.html's equivalent. */
+  const idFor = {
+    tp: `dry-tp-${displaySlot}`, sl: `dry-sl-${displaySlot}`,
+    arm: `dry-tsl-arm-${displaySlot}`, trail: `dry-tsl-trail-${displaySlot}`,
+    lock: `dry-tsl-lock-${displaySlot}`, poll: `dry-poll-${displaySlot}`,
   };
-  if (!Number.isFinite(values.tp) || values.tp < 1 ||
-      !Number.isFinite(values.poll) || values.poll < 10 ||
-      ['sl', 'arm', 'trail', 'lock'].some(
-        key => !Number.isFinite(values[key]) || values[key] < 0)) {
-    toast('Enter TP of at least $1, poll of at least 10 seconds, and non-negative SL/TSL values', 'err');
+  const values = readProtectionInputs(idFor);
+  const validationError = protectionValuesError(values);
+  if (validationError) {
+    toast(validationError, 'err');
     return;
   }
+  const keys = protectionConfigKeys(controlSlot);
   const body = {
     [keys.tp]: values.tp,
     [keys.sl]: values.sl,
@@ -989,7 +977,9 @@ function loadDryDashboard() {
   loadDryToday();
 }
 
-window.addEventListener('themechange', () => {
+/* app.js dispatches themechange on `document`, not `window` — see charts.js.
+ * onThemeChange() subscribes correctly; the old window listener never fired. */
+onThemeChange(() => {
   if (dryHistory.length) drawDryChart(dryHistory);
 });
 loadDryDashboard();

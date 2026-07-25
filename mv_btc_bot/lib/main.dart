@@ -35,7 +35,7 @@ const kBlueBackgroundAsset = 'assets/sparkling-blue-dashboard-bg.png';
 
 final appTheme = AppThemeController();
 
-const kWebAssetRevision = '3.4.0+7-red-blue-trend-tabs';
+const kWebAssetRevision = '3.5.0+8-shared-js-nav-reorder';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -365,18 +365,15 @@ class AppPageSpec {
   final IconData icon;
 }
 
+// Order matches the web sidebar's primary_items (templates/base.html):
+// operational pages first, Trend Engine last — it's a separate section
+// there too, just without the nav-gap spacer this flat list has no room for.
 const appPages = <AppPageSpec>[
   AppPageSpec(
     label: 'Nithi Bot',
     navLabel: 'Home',
     path: '/',
     icon: Icons.home_outlined,
-  ),
-  AppPageSpec(
-    label: 'Trend Engine',
-    navLabel: 'Trend',
-    path: '/trend-engine',
-    icon: Icons.insights_rounded,
   ),
   AppPageSpec(
     label: 'Trades & P&L',
@@ -407,6 +404,12 @@ const appPages = <AppPageSpec>[
     navLabel: 'Accounts',
     path: '/accounts',
     icon: Icons.manage_accounts_outlined,
+  ),
+  AppPageSpec(
+    label: 'Trend Engine',
+    navLabel: 'Trend',
+    path: '/trend-engine',
+    icon: Icons.insights_rounded,
   ),
 ];
 

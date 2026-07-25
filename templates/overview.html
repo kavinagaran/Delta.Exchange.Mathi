@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 
 {% block head %}
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script src="/static/js/vendor/chart.umd.min.js?v={{ asset_v('js/vendor/chart.umd.min.js') }}"></script>
 {% endblock %}
 
 {% block content %}
@@ -292,19 +292,6 @@ async function loadSlots() {
   renderExternalOptions(st.external_options || []);
 }
 
-/* ── Stat tiles ─────────────────────────────────────────── */
-async function loadStats() {
-  const s = await jget('/api/summary');
-  const el = document.getElementById('stats');
-  if (!s || !s.total_days) { el.innerHTML = ''; return; }
-  el.innerHTML = `
-    <div class="stat"><div class="lbl">Total P&L</div><div class="val ${pnlCls(s.total_pnl)}">${f$(s.total_pnl)}</div><div class="sub">${s.total_days} trades</div></div>
-    <div class="stat"><div class="lbl">Win rate</div><div class="val">${fN(s.win_rate, 1)}%</div><div class="sub">${s.wins} W / ${s.losses} L</div></div>
-    <div class="stat"><div class="lbl">Avg win</div><div class="val c-pos">${f$(s.avg_win)}</div><div class="sub">Avg loss ${f$(s.avg_loss)}</div></div>
-    <div class="stat"><div class="lbl">Risk / reward</div><div class="val">${fN(s.rr, 2)}</div><div class="sub">Reward per $1 risked</div></div>
-    <div class="stat"><div class="lbl">Max drawdown</div><div class="val c-neg">${f$(s.max_dd)}</div><div class="sub">Peak to trough</div></div>`;
-}
-
 /* ── Today's trades ─────────────────────────────────────── */
 async function loadToday() {
   const rows = await jget('/api/today-trades');
@@ -361,21 +348,18 @@ async function toggleTp(slot, running) {
 }
 
 async function saveTp(displaySlot, controlSlot = displaySlot) {
-  const keys = controlSlot === 'morning'
-    ? { t: 'TP_TARGET_PNL_MORNING', p: 'TP_POLL_SECS_MORNING', s: 'SL_TARGET_PNL_MORNING',
-        a: 'TSL_ARM_PNL_MORNING', tr: 'TSL_TRAIL_PNL_MORNING', l: 'TSL_LOCK_MIN_PNL_MORNING' }
-    : controlSlot === 'trend'
-      ? { t: 'TP_TARGET_PNL_TREND', p: 'TP_POLL_SECS_TREND', s: 'SL_TARGET_PNL_TREND',
-          a: 'TSL_ARM_PNL_TREND', tr: 'TSL_TRAIL_PNL_TREND', l: 'TSL_LOCK_MIN_PNL_TREND' }
-      : { t: 'TP_TARGET_PNL', p: 'TP_POLL_SECS', s: 'SL_TARGET_PNL',
-          a: 'TSL_ARM_PNL', tr: 'TSL_TRAIL_PNL', l: 'TSL_LOCK_MIN_PNL' };
+  /* Key-name table now lives once, in protection.js (protectionConfigKeys) —
+   * this used to be a locally duplicated ternary, byte-identical to the one
+   * in dry_run.html's saveDryProtection. No validation here (unlike the dry
+   * run page) — preserved as-is, the server is the validator for live saves. */
+  const keys = protectionConfigKeys(controlSlot);
   const body = {};
-  body[keys.t]  = document.getElementById(`tp-target-${displaySlot}`).value;
-  body[keys.p]  = document.getElementById(`tp-poll-${displaySlot}`).value;
-  body[keys.s]  = document.getElementById(`tp-sl-${displaySlot}`).value || '0';
-  body[keys.a]  = document.getElementById(`tp-tsl-arm-${displaySlot}`).value || '0';
-  body[keys.tr] = document.getElementById(`tp-tsl-trail-${displaySlot}`).value || '0';
-  body[keys.l]  = document.getElementById(`tp-tsl-lock-${displaySlot}`).value || '0';
+  body[keys.tp]    = document.getElementById(`tp-target-${displaySlot}`).value;
+  body[keys.poll]  = document.getElementById(`tp-poll-${displaySlot}`).value;
+  body[keys.sl]    = document.getElementById(`tp-sl-${displaySlot}`).value || '0';
+  body[keys.arm]   = document.getElementById(`tp-tsl-arm-${displaySlot}`).value || '0';
+  body[keys.trail] = document.getElementById(`tp-tsl-trail-${displaySlot}`).value || '0';
+  body[keys.lock]  = document.getElementById(`tp-tsl-lock-${displaySlot}`).value || '0';
   const d = await jpost('/api/config', body);
   if (d.ok) toast('TP/SL settings saved' + (d.tp_restarted?.length ? ' — monitor restarted' : ''), 'ok');
   else toast('Save failed', 'err');
@@ -477,9 +461,9 @@ function closePayoff() {
 }
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closePayoff(); });
 
-function loadAll() { loadSlots(); loadStats(); loadToday(); refreshTopbar(); }
+function loadAll() { loadSlots(); loadStatsInto('stats'); loadToday(); refreshTopbar(); }
 loadAll();
 setInterval(() => { loadSlots(); loadToday(); }, 12_000);
-setInterval(loadStats, 60_000);
+setInterval(() => loadStatsInto('stats'), 60_000);
 </script>
 {% endblock %}

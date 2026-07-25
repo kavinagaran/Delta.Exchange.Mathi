@@ -130,6 +130,9 @@ body.native-app .toast { left: 12px; right: 12px; bottom: 16px; max-width: none;
 .brand .sub  { color: var(--sidebar-text); font-size: 10px; letter-spacing: .02em; white-space: nowrap; }
 
 .nav { padding: 12px 10px; display: flex; flex-direction: column; gap: 2px; flex: 1; }
+/* Two nav-row heights of empty space ahead of Trend Engine — visually
+   separates it from the daily-use pages above (base.html primary_items). */
+.nav-gap { height: calc(2 * (9px + 9px + 17px)); flex-shrink: 0; }
 .nav a {
   display: flex; align-items: center; gap: 11px;
   padding: 9px 12px; border-radius: 8px;
