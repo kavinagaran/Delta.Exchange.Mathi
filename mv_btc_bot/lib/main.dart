@@ -35,7 +35,7 @@ const kBlueBackgroundAsset = 'assets/sparkling-blue-dashboard-bg.png';
 
 final appTheme = AppThemeController();
 
-const kWebAssetRevision = '3.6.0+9-exposure-page';
+const kWebAssetRevision = '3.7.0+10-trend-engine-page-rebuild';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -410,6 +410,12 @@ const appPages = <AppPageSpec>[
     navLabel: 'Trend',
     path: '/trend-engine',
     icon: Icons.insights_rounded,
+  ),
+  AppPageSpec(
+    label: 'Trend Engine (Legacy)',
+    navLabel: 'Legacy',
+    path: '/trend-engine-legacy',
+    icon: Icons.history_rounded,
   ),
 ];
 

@@ -28,6 +28,7 @@ from dotenv import load_dotenv, set_key
 from flask import (Flask, jsonify, request, abort, session,
                    redirect, render_template, has_request_context, g)
 
+import trend_engine_client
 from risk_controls import (account_entry_lock, account_file_lock, audit_event,
                            decision_dict, evaluate_entry, risk_based_lots)
 from trend_engine import DEFAULT_CONFIG as TREND_ENGINE_DEFAULT_CONFIG, evaluate_trend
@@ -1761,6 +1762,7 @@ def _pnl_stats(trades: list, *, dry_run: bool = False) -> dict:
 _PAGES = {
     "":          ("overview.html",  "Overview"),
     "trend-engine": ("trend_engine.html", "Trend Engine"),
+    "trend-engine-legacy": ("trend_engine_legacy.html", "Trend Engine (Legacy)"),
     "dry-run":   ("dry_run.html",   "Dry Run Dashboard"),
     "trades":    ("trades.html",    "Trades & P&L"),
     "positions": ("positions.html", "Exposure"),
@@ -5044,6 +5046,29 @@ def api_trend():
     except Exception as e:
         return jsonify({"trend": "na", "combined": "na", "timeframes": {},
                         "error": str(e)}), 502
+
+
+# ── btc_trend_engine proxy (Trend Engine page, shadow mode) ────────────────
+# Read-only pass-through to trend_engine_client.py. This engine holds no
+# trading credentials and cannot place an order (ADR 0001) -- these routes
+# exist purely so the browser doesn't need a second origin/token to display
+# what the engine currently thinks. Never a decision input for the live
+# automation loop below; that stays on the legacy /api/trend-engine chain
+# until the shadow-mode cutover ladder (Trend_Engine.md §8/P8) says otherwise.
+@app.route("/api/engine/snapshot")
+def api_engine_snapshot():
+    symbol = request.args.get("symbol", "BTCUSD")
+    return jsonify(trend_engine_client.get_snapshot(symbol))
+
+
+@app.route("/api/engine/health")
+def api_engine_health():
+    return jsonify(trend_engine_client.get_health())
+
+
+@app.route("/api/engine/status")
+def api_engine_status():
+    return jsonify(trend_engine_client.get_status())
 
 
 def _trend_engine_config_overrides() -> dict:

@@ -1482,6 +1482,8 @@ body.login-body {
 .te-gate.is-na strong { color: var(--muted); }
 .te-gate strong { font-size: 9px; letter-spacing: .04em; text-transform: uppercase; }
 
+.te-reason-codes { display: flex; flex-wrap: wrap; gap: 7px; }
+
 /* Market structure */
 .te-structure-copy {
   min-height: 48px;

@@ -367,18 +367,21 @@ def test_cache_is_invalidated_when_kill_switch_configuration_changes(
     assert len(calls) == 2
 
 
-def test_trend_engine_page_has_navigation_read_only_notice_and_get_only_fetch():
+def test_trend_engine_legacy_page_has_navigation_read_only_notice_and_get_only_fetch():
+    """The discretionary decision UI moved to /trend-engine-legacy (UI-3) so
+    /trend-engine could be rebuilt against TrendSnapshot v1.0.0 — this test
+    follows it there. Everything it asserts is unchanged content."""
     base = Path(dashboard.BASE)
     shell = (base / "templates" / "base.html").read_text(encoding="utf-8")
-    page = (base / "templates" / "trend_engine.html").read_text(
+    page = (base / "templates" / "trend_engine_legacy.html").read_text(
         encoding="utf-8"
     )
 
-    assert dashboard._PAGES["trend-engine"] == (
-        "trend_engine.html",
-        "Trend Engine",
+    assert dashboard._PAGES["trend-engine-legacy"] == (
+        "trend_engine_legacy.html",
+        "Trend Engine (Legacy)",
     )
-    assert "('trend-engine', '/trend-engine', 'Trend Engine'" in shell
+    assert "('trend-engine-legacy', '/trend-engine-legacy', 'Trend Engine (Legacy)'" in shell
     assert 'class="te-readonly-notice"' in page
     assert "This engine never submits an order" in page
     assert "const endpoint = '/api/trend-engine'" in page
@@ -389,8 +392,8 @@ def test_trend_engine_page_has_navigation_read_only_notice_and_get_only_fetch():
     assert "method: 'DELETE'" not in page
 
 
-def test_trend_engine_page_explains_reasons_in_plain_english():
-    page = (Path(dashboard.BASE) / "templates" / "trend_engine.html").read_text(
+def test_trend_engine_legacy_page_explains_reasons_in_plain_english():
+    page = (Path(dashboard.BASE) / "templates" / "trend_engine_legacy.html").read_text(
         encoding="utf-8"
     )
 

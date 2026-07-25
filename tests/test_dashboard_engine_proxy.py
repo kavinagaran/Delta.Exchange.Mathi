@@ -1,0 +1,88 @@
+"""/api/engine/{snapshot,health,status} — read-only proxy onto
+trend_engine_client.py for the rebuilt Trend Engine page (UI-3).
+
+These routes carry no side effects and cannot reach any order-placement
+code path; they only ever call through to the fail-closed client, which
+never raises (ADR 0001).
+"""
+from contextlib import contextmanager
+from unittest.mock import patch
+
+import dashboard
+import trend_engine_client
+
+
+@contextmanager
+def _authenticated_client(tmp_path):
+    with patch.object(dashboard, "DASH_PASS", ""), \
+            patch.object(dashboard, "USERS_DIR", tmp_path / "no-accounts"):
+        yield dashboard.app.test_client()
+
+
+def test_snapshot_route_proxies_the_client_and_forwards_symbol(tmp_path):
+    calls = []
+
+    def fake_get_snapshot(symbol="BTCUSD", **kwargs):
+        calls.append(symbol)
+        return {"symbol": symbol, "regime": "RANGE"}
+
+    with _authenticated_client(tmp_path) as client, \
+            patch.object(trend_engine_client, "get_snapshot", side_effect=fake_get_snapshot):
+        resp = client.get("/api/engine/snapshot?symbol=ETHUSD")
+    assert resp.status_code == 200
+    assert resp.get_json() == {"symbol": "ETHUSD", "regime": "RANGE"}
+    assert calls == ["ETHUSD"]
+
+
+def test_snapshot_route_defaults_to_btcusd(tmp_path):
+    with _authenticated_client(tmp_path) as client, \
+            patch.object(trend_engine_client, "get_snapshot",
+                         return_value={"symbol": "BTCUSD"}) as mocked:
+        resp = client.get("/api/engine/snapshot")
+    assert resp.status_code == 200
+    mocked.assert_called_once_with("BTCUSD")
+
+
+def test_snapshot_route_never_raises_into_the_dashboard(tmp_path):
+    """The whole point of trend_engine_client.get_snapshot is that it never
+    raises — but if it somehow did, the route must not 500 into a broken
+    page; degrading is the client's job, not this proxy's."""
+    with _authenticated_client(tmp_path) as client, \
+            patch.object(trend_engine_client, "get_snapshot",
+                         return_value=trend_engine_client.degraded_snapshot(
+                             "BTCUSD", trend_engine_client.ENGINE_UNREACHABLE)):
+        resp = client.get("/api/engine/snapshot")
+    assert resp.status_code == 200
+    payload = resp.get_json()
+    assert payload["data_quality"] == "ENGINE_UNREACHABLE"
+    assert payload["entry_allowed"] is False
+
+
+def test_health_route_proxies_the_client(tmp_path):
+    with _authenticated_client(tmp_path) as client, \
+            patch.object(trend_engine_client, "get_health",
+                         return_value={"ok": True, "version": "0.2.0"}):
+        resp = client.get("/api/engine/health")
+    assert resp.status_code == 200
+    assert resp.get_json() == {"ok": True, "version": "0.2.0"}
+
+
+def test_status_route_proxies_the_client(tmp_path):
+    with _authenticated_client(tmp_path) as client, \
+            patch.object(trend_engine_client, "get_status",
+                         return_value={"available": False, "detail": "boom"}):
+        resp = client.get("/api/engine/status")
+    assert resp.status_code == 200
+    assert resp.get_json() == {"available": False, "detail": "boom"}
+
+
+def test_engine_proxy_routes_require_authentication(tmp_path):
+    """A trading dashboard's /api/* stays behind the login gate — these new
+    routes must not be an accidental exception."""
+    with patch.object(dashboard, "DASH_PASS", "secret"), \
+            patch.object(dashboard, "USERS_DIR", tmp_path / "users"):
+        (tmp_path / "users").mkdir()
+        client = dashboard.app.test_client()
+        for path in ("/api/engine/snapshot", "/api/engine/health", "/api/engine/status"):
+            resp = client.get(path)
+            assert resp.status_code == 401, path

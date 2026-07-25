@@ -10,7 +10,10 @@ NODE = shutil.which("node")
 
 
 def test_trend_engine_explains_the_daily_btc_expiry_policy():
-    template = (ROOT / "templates" / "trend_engine.html").read_text(
+    """Discretionary contract-expiry copy — legacy page only (UI-3 moved the
+    contract-selection UI to /trend-engine-legacy; the rebuilt /trend-engine
+    has no contract selection, just a market-direction snapshot)."""
+    template = (ROOT / "templates" / "trend_engine_legacy.html").read_text(
         encoding="utf-8"
     )
 
@@ -32,7 +35,7 @@ def test_time_to_expiry_is_rendered_without_overstating_minutes():
     script = r"""
 const fs = require('fs');
 const vm = require('vm');
-const source = fs.readFileSync('templates/trend_engine.html', 'utf8');
+const source = fs.readFileSync('templates/trend_engine_legacy.html', 'utf8');
 const start = source.indexOf('const displayExpiryTimestamp');
 const end = source.indexOf('const joinValues', start);
 if (start < 0 || end <= start) throw new Error('expiry display helpers not found');
