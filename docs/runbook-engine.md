@@ -14,6 +14,15 @@ python -m venv .venv-engine
 .venv-engine\Scripts\pip install -r requirements-engine.txt      # Windows
 ```
 
+**Current EC2 deploy host:** `ubuntu@13.207.78.56` (also reachable at
+`mathibot.duckdns.org`), checked out at `/home/ubuntu/mathi`. This is the
+*real* path — an earlier draft of `deploy/systemd/btc-trend-engine.service`
+assumed `/home/ubuntu/Delta.Exchange.Mathi`, which never existed on the box;
+that only surfaced once an actual deploy needed the path. The live legacy
+dashboard/bot also run from this same directory
+(`mathi-dashboard.service`, `mathi-bot@<account>.service`) — the engine is a
+separate systemd unit alongside them, not a replacement for anything.
+
 Set in `.env` (see `.env.example`): `ENGINE_TOKEN` (any random string).
 Before first capture on EC2 verify assumption A6:
 
