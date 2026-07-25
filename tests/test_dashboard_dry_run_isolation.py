@@ -344,10 +344,8 @@ def test_manual_move_dry_entry_is_disabled_and_never_writes_or_posts(
     }
     quote = {"entry_price": 100.0, "limit_price": 101.0}
     plan = {"lots": 7, "proposed_risk_usd": 10.0}
-    monkeypatch.setattr(dashboard, "_current_atm_mv", lambda slot: contract)
-    monkeypatch.setattr(dashboard, "_move_execution_quote", lambda *a, **k: quote)
-    lot_plan = Mock(return_value=plan)
-    monkeypatch.setattr(dashboard, "_move_lot_plan", lot_plan)
+    contract_lookup = Mock(return_value=[contract])
+    monkeypatch.setattr(dashboard, "_fetch_live_mv_products", contract_lookup)
     monkeypatch.setattr(dashboard, "evaluate_entry", lambda *a, **k: _allowed_risk())
     monkeypatch.setattr(dashboard, "_tp_policy", lambda slot: {
         "tp_target_pnl": 10, "sl_target_pnl": 5,
@@ -379,7 +377,7 @@ def test_manual_move_dry_entry_is_disabled_and_never_writes_or_posts(
     assert response.status_code == 404
     assert not (account / "dry_run" / "straddle_state.json").exists()
     assert not (account / "straddle_state.json").exists()
-    lot_plan.assert_not_called()
+    contract_lookup.assert_not_called()
     order_post.assert_not_called()
     raw_post.assert_not_called()
 
@@ -508,7 +506,7 @@ def test_mode_and_revision_mismatch_fail_before_move_or_trend_strategy_work(
     move_work = Mock(side_effect=AssertionError("MOVE work ran after mode mismatch"))
     trend_work = Mock(side_effect=AssertionError("Trend work ran after revision mismatch"))
     order_post = Mock(side_effect=AssertionError("mismatch reached order POST"))
-    monkeypatch.setattr(dashboard, "_current_atm_mv", move_work)
+    monkeypatch.setattr(dashboard, "_fetch_live_mv_products", move_work)
     monkeypatch.setattr(dashboard, "_trend_entry_preview_data", trend_work)
     monkeypatch.setattr(dashboard, "_post_dashboard_order", order_post)
 
