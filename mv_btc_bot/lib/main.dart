@@ -35,7 +35,7 @@ const kBlueBackgroundAsset = 'assets/sparkling-blue-dashboard-bg.png';
 
 final appTheme = AppThemeController();
 
-const kWebAssetRevision = '3.7.0+10-trend-engine-page-rebuild';
+const kWebAssetRevision = '4.0.0+11-today-performance-paper-rebuild';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -376,14 +376,14 @@ const appPages = <AppPageSpec>[
     icon: Icons.home_outlined,
   ),
   AppPageSpec(
-    label: 'Trades & P&L',
-    navLabel: 'Trades',
+    label: 'Performance',
+    navLabel: 'Performance',
     path: '/trades',
     icon: Icons.trending_up_rounded,
   ),
   AppPageSpec(
-    label: 'Dry Run',
-    navLabel: 'Dry Run',
+    label: 'Paper',
+    navLabel: 'Paper',
     path: '/dry-run',
     icon: Icons.science_outlined,
   ),

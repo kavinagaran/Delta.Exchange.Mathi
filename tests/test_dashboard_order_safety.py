@@ -157,7 +157,11 @@ def test_overview_has_no_manual_or_scheduled_move_controls():
     assert "function moveDecisionHtml(view)" not in source
     assert "Automatic MOVE Forecast" not in source
     assert "SIDEWAYS SELL immediate" not in source
-    assert "Trend-based position (CE / PE)" in source
+    # UI-4: the three separate morning/evening/trend cards (one of which was
+    # literally titled "Trend-based position (CE / PE)") were replaced by one
+    # unified open-positions list; the Trend slot is still bot-owned and
+    # still iterated, just rendered as a compact row instead of its own card.
+    assert "for (const slot of ['morning', 'evening', 'trend'])" in source
     assert "st.display_slots ||" in source
     assert "/api/manual-entry" not in mobile
     assert "MORNING_SIDE" not in mobile

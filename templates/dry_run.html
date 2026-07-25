@@ -27,6 +27,23 @@
   </div>
 </div>
 
+<div class="stats" id="dry-status-tiles">
+  <div class="stat"><div class="lbl">Trading mode</div><div class="val" id="dry-tile-mode">—</div></div>
+  <div class="stat"><div class="lbl">Engine health</div><div class="val" id="dry-tile-engine">—</div></div>
+  <div class="stat"><div class="lbl">Day P&amp;L (simulated)</div><div class="val" id="dry-tile-day-pnl">—</div><div class="sub" id="dry-tile-day-pnl-note"></div></div>
+</div>
+
+<div class="card">
+  <div class="card-hd">
+    Engine shadow decisions
+    <span class="spacer"></span>
+    <span class="hint">btc_trend_engine's current read — informational only, does not drive this page's simulations</span>
+  </div>
+  <div class="card-bd" id="engine-shadow-card">
+    <div class="no-pos">Loading…</div>
+  </div>
+</div>
+
 <div class="section-title">
   <span>Simulated strategies</span>
   <small>Trend Engine entries only · MOVE positions are grouped by actual IST trade time</small>
@@ -435,7 +452,7 @@ function dryTrendScoreAutoHtml() {
     ${reachability}${error}
     <p class="dry-engine-action-copy">No confirmation is required. The older Phase-1 manual “Start simulation” control is disabled while this controller is active.</p>
     <div class="dry-engine-actions">
-      <a href="/trend-engine" class="btn secondary sm">View full analysis</a>
+      <a href="/trend-engine-legacy" class="btn secondary sm">View full analysis</a>
     </div>
     <small>Simulation only — no exchange order will be placed and no real balance will be affected.</small>
   </section>`;
@@ -543,7 +560,7 @@ function dryTrendEngineHtml(preview) {
     </dl>
     <p class="dry-engine-action-copy">${esc(actionCopy)}</p>
     <div class="dry-engine-actions">
-      <a href="/trend-engine" class="btn secondary sm">View full analysis</a>
+      <a href="/trend-engine-legacy" class="btn secondary sm">View full analysis</a>
       ${canStart ? `<button class="btn ${decision === 'BUY_CE' ? 'success' : 'danger'} sm"
         id="dry-trend-engine-start" type="button" onclick="startDryTrendEngineSimulation()">
         Start ${decision === 'BUY_CE' ? 'CE' : 'PE'} simulation
@@ -971,10 +988,73 @@ async function loadDryToday() {
   }
 }
 
+/* ── UI-4 additive: status tiles + engine shadow decisions ──
+ * Neither of these touches dryStatus/dryTrendEnginePreview or any element
+ * loadDryStatus writes to — the Phase-1 preview/entry bridge above is
+ * untouched and still the only thing that can start a paper simulation. */
+async function loadDryStatusTiles() {
+  const modeEl = document.getElementById('dry-tile-mode');
+  modeEl.textContent = dryModeActive ? 'DRY RUN' : 'LIVE';
+  modeEl.className = 'val ' + (dryModeActive ? 'c-warn' : 'c-pos');
+
+  try {
+    const rows = await jget('/api/dry-run/today-trades');
+    const dayPnl = (Array.isArray(rows) ? rows : []).reduce((sum, t) => {
+      const live = t._live || t.status === 'OPEN';
+      const value = live ? t.live_pnl : t.pnl_usd;
+      return dryKnownNumber(value) ? sum + Number(value) : sum;
+    }, 0);
+    const pnlEl = document.getElementById('dry-tile-day-pnl');
+    pnlEl.textContent = f$(dayPnl);
+    pnlEl.className = 'val ' + pnlCls(dayPnl);
+    document.getElementById('dry-tile-day-pnl-note').textContent =
+      `${(rows || []).length} simulation(s) today`;
+  } catch (e) { /* transient */ }
+
+  try {
+    const health = await jget('/api/engine/health');
+    const el = document.getElementById('dry-tile-engine');
+    el.textContent = health.ok ? 'Reachable' : 'Unreachable';
+    el.className = 'val ' + (health.ok ? 'c-pos' : 'c-muted');
+  } catch (e) {
+    const el = document.getElementById('dry-tile-engine');
+    el.textContent = 'Unreachable';
+    el.className = 'val c-muted';
+  }
+}
+
+function engineShadowCardHtml(snapshot) {
+  const degraded = snapshot.data_quality !== 'OK';
+  const regime = String(snapshot.regime || '—').replace(/_/g, ' ');
+  const direction = snapshot.direction > 0 ? 'UP' : snapshot.direction < 0 ? 'DOWN' : 'FLAT';
+  const score = dryKnownNumber(snapshot.trend_score) ? fN(snapshot.trend_score, 1) : '—';
+  return `<dl class="kv">
+    <dt>Regime</dt><dd>${esc(regime)}</dd>
+    <dt>Direction</dt><dd>${esc(direction)}</dd>
+    <dt>Trend score</dt><dd>${esc(score)}</dd>
+    <dt>Data quality</dt><dd class="${degraded ? 'c-neg' : 'c-pos'}">${esc(snapshot.data_quality || '—')}</dd>
+  </dl>
+  <p class="fld-hint">This is the rebuilt btc_trend_engine's independent read of the market, shown for
+    side-by-side comparison during the shadow window. It never drives a simulation on this page —
+    the Trend Engine panels below (Phase-1 preview / score automation) remain the only source of
+    paper entries. <a href="/trend-engine">View full analysis →</a></p>`;
+}
+
+async function loadEngineShadowCard() {
+  const card = document.getElementById('engine-shadow-card');
+  try {
+    const snapshot = await jget('/api/engine/snapshot');
+    card.innerHTML = engineShadowCardHtml(snapshot);
+  } catch (e) {
+    card.innerHTML = '<div class="no-pos c-neg">Engine snapshot is unavailable</div>';
+  }
+}
+
 function loadDryDashboard() {
-  loadDryStatus();
+  loadDryStatus().then(loadDryStatusTiles);
   loadDryResults();
   loadDryToday();
+  loadEngineShadowCard();
 }
 
 /* app.js dispatches themechange on `document`, not `window` — see charts.js.
@@ -987,5 +1067,7 @@ setInterval(() => loadDryStatus(false), 4_000);
 setInterval(() => loadDryStatus(true), 20_000);
 setInterval(loadDryToday, 12_000);
 setInterval(loadDryResults, 60_000);
+setInterval(loadDryStatusTiles, 12_000);
+setInterval(loadEngineShadowCard, 20_000);
 </script>
 {% endblock %}

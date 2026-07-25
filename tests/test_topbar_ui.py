@@ -149,67 +149,61 @@ if (attributes['aria-pressed'] !== 'false' || !attributes['aria-label'].includes
 
 
 @pytest.mark.skipif(NODE is None, reason="Node.js is required for frontend JavaScript tests")
-def test_closed_cards_never_render_inactive_protection_controls():
+def test_closed_positions_never_appear_on_the_unified_open_positions_card():
+    """UI-4 replaced slotHtml's per-slot CLOSED-state branch (dashboard_visible
+    hides a stale close, same-day shows it) with a structural filter: the
+    unified card only ever iterates OPEN, non-dry-run slots. A CLOSED slot --
+    stale or same-day -- can no longer leak financial detail onto this card
+    at all; same-day detail lives in Today's Trades instead."""
     script = r"""
 const fs = require('fs');
 const vm = require('vm');
 const source = fs.readFileSync('templates/overview.html', 'utf8');
-const start = source.indexOf('function liveMoveDisplaySlotFromUtc');
-const end = source.indexOf('function renderExternalOptions');
-if (start < 0 || end <= start) throw new Error('Overview card functions not found');
+const start = source.indexOf('const SLOT_ICON');
+const end = source.indexOf('function openProtectionDrawer');
+if (start < 0 || end <= start) throw new Error('Overview position-row functions not found');
 
-global.manualBtns = () => '<button>MANUAL</button>';
+const elements = {};
+function fakeElement() { return { innerHTML: '', className: '', textContent: '' }; }
+global.document = { getElementById: id => elements[id] || (elements[id] = fakeElement()) };
 global.fN = value => String(value ?? '');
 global.f$ = value => '$' + String(value ?? '');
 global.esc = value => String(value ?? '');
 global.utcToIst = value => String(value ?? '');
+global.tradeTimeIst = () => '—';
 global.pnlCls = () => 'c-neg';
 vm.runInThisContext(source.slice(start, end));
 
-const html = slotHtml({
-  status: 'CLOSED',
-  dashboard_visible: false,
-  symbol: 'OLD-CONTRACT',
-  pnl_usd: -99,
-}, 'trend', {
+const displaySlots = {
+  morning: { status: 'IDLE' },
+  evening: { status: 'IDLE' },
   trend: {
-    running: true,
-    protection_established: true,
-    protected_lots: 6,
-    bot_entry_lots: 3,
-    external_protected_lots: 3,
-    coverage_status: 'exchange_protected',
-    monitor_error: 'stale monitor error',
+    status: 'CLOSED', dashboard_visible: false,
+    symbol: 'OLD-CONTRACT', pnl_usd: -99,
   },
-});
-
-for (const stale of ['OLD-CONTRACT', '-99', 'aggregate lots targeted',
-                     'Full-size exchange coverage', 'stale monitor error']) {
-  if (html.includes(stale)) throw new Error(`stale detail remained: ${stale}`);
+};
+renderPositions(displaySlots, [], {});
+const html = elements['positions-body'].innerHTML;
+for (const stale of ['OLD-CONTRACT', '-99']) {
+  if (html.includes(stale)) throw new Error(`stale CLOSED detail leaked onto the open-positions card: ${stale}`);
 }
-if (!html.includes('No position') || html.includes('Auto-starts on entry')) {
+if (!html.includes('No open positions')) {
   throw new Error(`clean idle state was not rendered: ${html}`);
 }
 
-const current = slotHtml({
-  status: 'CLOSED',
-  dashboard_visible: true,
-  symbol: 'TODAY-CONTRACT',
-  pnl_usd: 5,
-  exit_time_utc: '05:00:00',
-}, 'trend', {
+const withOpenTrend = {
+  morning: { status: 'IDLE' },
+  evening: { status: 'IDLE' },
   trend: {
-    running: true,
-    protected_lots: 6,
-    bot_entry_lots: 3,
-    external_protected_lots: 3,
-    coverage_status: 'exchange_protected',
-    monitor_error: 'current reconciliation',
+    status: 'OPEN', symbol: 'TODAY-CONTRACT', side: 'long', lots: 3,
+    live_pnl: 5, control_slot: 'trend',
   },
-});
-for (const currentDetail of ['TODAY-CONTRACT', 'Time of trade']) {
+};
+renderPositions(withOpenTrend, [], {});
+const current = elements['positions-body'].innerHTML;
+for (const currentDetail of ['TODAY-CONTRACT', '<span class="badge live">BOT</span>']) {
   if (!current.includes(currentDetail)) {
-    throw new Error(`same-day detail was hidden: ${currentDetail}`);
+    throw new Error(`open position detail was hidden: ${currentDetail}`);
   }
 }
 for (const inactive of ['aggregate lots targeted', 'Full-size exchange coverage',

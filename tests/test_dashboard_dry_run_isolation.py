@@ -756,6 +756,8 @@ def test_dry_run_cards_are_equal_sized_and_every_open_slot_has_manual_exit():
     for slot in ("morning", "evening", "trend"):
         assert f"dryPositionDetails(displaySlots.{slot} || {{}}, '{slot}'" in template
 
-    assert "squareOff('${controlSlot}', '${slot}', 'dry_run')" in overview
-    assert "squareOff('${controlSlot}', '${slot}', 'live')" in overview
+    # UI-4: Overview's unified position card is live-only now -- dry-run
+    # simulated positions moved exclusively to the Dry Run page's own card,
+    # so there is no dry_run-mode squareOff call site left on Overview.
+    assert "squareOff('${controlSlot}', '${displaySlot}', 'live')" in overview
     assert "target_mode: targetMode" in overview

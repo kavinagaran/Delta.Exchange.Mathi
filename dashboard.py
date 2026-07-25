@@ -1760,11 +1760,11 @@ def _pnl_stats(trades: list, *, dry_run: bool = False) -> dict:
 # ROUTES
 # ─────────────────────────────────────────────────────────────
 _PAGES = {
-    "":          ("overview.html",  "Overview"),
+    "":          ("overview.html",  "Today"),
     "trend-engine": ("trend_engine.html", "Trend Engine"),
     "trend-engine-legacy": ("trend_engine_legacy.html", "Trend Engine (Legacy)"),
-    "dry-run":   ("dry_run.html",   "Dry Run Dashboard"),
-    "trades":    ("trades.html",    "Trades & P&L"),
+    "dry-run":   ("dry_run.html",   "Paper"),
+    "trades":    ("trades.html",    "Performance"),
     "positions": ("positions.html", "Exposure"),
     "config":    ("config.html",    "Bot Config"),
     "accounts":  ("accounts.html",  "API Accounts"),

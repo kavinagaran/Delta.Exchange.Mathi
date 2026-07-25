@@ -56,3 +56,22 @@ async function saveProtectionConfig(controlSlot, values) {
     [keys.poll]: values.poll,
   });
 }
+
+/* UI-4: one slide-out drawer replaces the always-visible per-slot TP/SL box,
+ * so only one instance of these six fields exists in the DOM at a time.
+ * Fixed ids are safe because only one position's drawer is ever open. */
+function protectionDrawerFieldsHtml(record = {}) {
+  const t = record || {};
+  return `
+    <label class="fld"><span>Take profit $</span><input id="pdw-target" type="number" step="1" min="1" value="${t.target_pnl ?? ''}"></label>
+    <label class="fld"><span>Stop loss $</span><input id="pdw-sl" type="number" step="1" min="0" value="${t.sl_pnl ?? 0}" placeholder="0 = off"></label>
+    <label class="fld"><span>TSL arm P&amp;L $</span><input id="pdw-tsl-arm" type="number" step="1" min="0" value="${t.tsl_arm_pnl ?? t.tsl_pnl ?? 0}" placeholder="0 = off"></label>
+    <label class="fld"><span>TSL trail $</span><input id="pdw-tsl-trail" type="number" step="1" min="0" value="${t.tsl_trail_pnl ?? t.tsl_pnl ?? 0}" placeholder="0 = off"></label>
+    <label class="fld"><span>Minimum locked $</span><input id="pdw-tsl-lock" type="number" step="1" min="0" value="${t.tsl_lock_min_pnl ?? 0}"></label>
+    <label class="fld"><span>Poll secs</span><input id="pdw-poll" type="number" step="5" min="10" value="${t.poll_secs ?? ''}"></label>`;
+}
+
+function protectionDrawerIdFor() {
+  return { tp: 'pdw-target', sl: 'pdw-sl', arm: 'pdw-tsl-arm',
+           trail: 'pdw-tsl-trail', lock: 'pdw-tsl-lock', poll: 'pdw-poll' };
+}

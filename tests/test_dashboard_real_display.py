@@ -182,12 +182,18 @@ def test_live_display_projection_reports_a_same_frame_conflict_without_mutation(
 
 
 def test_real_overview_has_only_current_trend_engine_position_copy():
+    """UI-4 replaced the three separate morning/evening/trend cards (each
+    with its own "Morning MOVE" / "Trend-based position (CE / PE)" label)
+    with one unified open-positions list -- slot identity now comes from
+    SLOT_ICON + the symbol/side shown per row, not a section header per
+    slot. The obsolete manual-entry copy this test guards against is
+    unaffected by that redesign."""
     source = (ROOT / "templates" / "overview.html").read_text(encoding="utf-8")
 
-    assert "Trend Engine positions" in source
-    assert "Morning MOVE" in source
-    assert "Evening MOVE" in source
-    assert "Trend-based position (CE / PE)" in source
+    assert "SLOT_ICON = { morning: '🌅', evening: '🌇', trend: '📈' }" in source
+    assert "for (const slot of ['morning', 'evening', 'trend'])" in source
+    assert 'id="positions-body"' in source
+    assert "No open positions" in source
     assert "st.display_slots ||" in source
     for obsolete in (
         "Scheduled forecast-driven entries only",
@@ -207,80 +213,55 @@ def test_real_overview_has_only_current_trend_engine_position_copy():
 
 @pytest.mark.skipif(NODE is None, reason="Node.js is required for frontend JavaScript tests")
 def test_real_cards_route_actions_to_source_slot_and_show_trade_time_first():
+    """UI-4: slotHtml's rich <dt>/<dd> fact list became botPosRowHtml's
+    compact row. Trade time is still the first fact shown (now the first
+    item in the row's <small> line); action buttons must still be wired to
+    the position's own control_slot, not the display slot it's projected
+    into -- wiring Exit to the wrong slot would close the wrong position."""
     script = r"""
 const fs = require('fs');
 const vm = require('vm');
 const source = fs.readFileSync('templates/overview.html', 'utf8');
-const start = source.indexOf('function liveMoveDisplaySlotFromUtc');
-const end = source.indexOf('function renderExternalOptions');
-if (start < 0 || end <= start) throw new Error('REAL card functions not found');
+const start = source.indexOf('const SLOT_ICON');
+const end = source.indexOf('function openProtectionDrawer');
+if (start < 0 || end <= start) throw new Error('Overview position-row functions not found');
 
 global.fN = value => String(value ?? '—');
 global.f$ = value => String(value ?? '—');
 global.pnlCls = () => 'c-pos';
 global.esc = value => String(value ?? '').replace(/&/g, '&amp;')
   .replace(/</g, '&lt;').replace(/>/g, '&gt;');
-global.utcToIst = value => {
-  const [h, m] = String(value || '').split(':').map(Number);
-  if (!Number.isFinite(h) || !Number.isFinite(m)) return '';
-  const total = (h * 60 + m + 330) % 1440;
-  const hh = Math.floor(total / 60);
-  const mm = total % 60;
+global.tradeTimeIst = state => {
+  const explicit = String(state?.entry_at_utc || '').trim();
+  if (!explicit) return '—';
+  const d = new Date(explicit);
+  const total = (d.getUTCHours() * 60 + d.getUTCMinutes() + 330) % 1440;
+  const hh = Math.floor(total / 60), mm = total % 60;
   const ap = hh >= 12 ? 'PM' : 'AM';
   return `${((hh + 11) % 12) + 1}:${String(mm).padStart(2, '0')} ${ap} IST`;
 };
 vm.runInThisContext(source.slice(start, end));
 
-if (liveMoveDisplaySlotFromUtc('05:29:59') !== 'morning') {
-  throw new Error('10:59:59 AM IST did not route to Morning');
-}
-if (liveMoveDisplaySlotFromUtc('05:30:00') !== 'evening') {
-  throw new Error('11:00 AM IST did not route to Evening');
-}
-
 const state = {
   status: 'OPEN',
-  source_slot: 'trend',
   control_slot: 'trend',
-  display_slot: 'morning',
-  entry_time_utc: '12:00:00',
   entry_at_utc: '2026-07-23T01:50:00Z',
   symbol: 'MV-BTC-65800-230726',
   side: 'short',
   lots: 1000,
-  entry_mark: 445,
-  current_mark: 414,
   live_pnl: 17.45,
-  total_cost_usd: 445,
 };
 const protection = {
-  trend: {
-    running: true,
-    protection_established: true,
-    target_pnl: 500,
-    sl_pnl: 300,
-    tsl_arm_pnl: 125,
-    tsl_trail_pnl: 125,
-    tsl_lock_min_pnl: 0,
-    poll_secs: 30,
-  },
+  trend: { running: true, protection_established: true, target_pnl: 500 },
 };
-const html = slotHtml(state, 'morning', protection);
-const tradeTime = html.indexOf('<dt>Time of trade</dt>');
-const contract = html.indexOf('<dt>Contract</dt>');
-if (tradeTime < 0 || contract < 0 || tradeTime > contract) {
-  throw new Error(`trade time is not the first detail row: ${html}`);
-}
-if (!html.includes('7:20 AM IST')) {
-  throw new Error(`actual IST trade time is missing: ${html}`);
-}
-if (html.includes('<dt>Entered</dt>')) {
-  throw new Error('obsolete Entered row remains');
+const html = botPosRowHtml('morning', state, protection);
+const small = html.slice(html.indexOf('<small>') + '<small>'.length, html.indexOf('</small>'));
+if (!small.trim().startsWith('7:20 AM IST')) {
+  throw new Error(`trade time is not the first fact shown: ${small}`);
 }
 for (const required of [
   "squareOff('trend', 'morning', 'live')",
-  "saveTp('morning', 'trend')",
-  "toggleTp('trend', true)",
+  "openProtectionDrawer('trend', 'morning')",
   "showPayoff('morning')",
 ]) {
   if (!html.includes(required)) {
@@ -291,27 +272,9 @@ if (html.includes('Automatic MOVE Forecast')) {
   throw new Error(`routed score position inherited scheduled copy: ${html}`);
 }
 
-const closed = slotHtml({
-  ...state,
-  status: 'CLOSED',
-  pnl_usd: 10,
-  exit_mark: 400,
-  exit_time_utc: '02:50:00',
-}, 'morning', protection);
-if (closed.indexOf('<dt>Time of trade</dt>') > closed.indexOf('<dt>Contract</dt>')) {
-  throw new Error(`closed trade time is not first: ${closed}`);
-}
-if (closed.includes('TP / SL / TSL Monitor')) {
-  throw new Error(`closed trade retained inactive protection controls: ${closed}`);
-}
-
-const pending = slotHtml({
-  ...state,
-  status: 'ENTRY_PENDING',
-}, 'morning', protection);
-if (!pending.includes('ENTRY PENDING') || pending.includes('Closed') ||
-    pending.includes('NaN')) {
-  throw new Error(`pending entry was rendered as a closed trade: ${pending}`);
+const pending = botPosRowHtml('morning', { ...state, status: 'ENTRY_PENDING' }, protection);
+if (!pending.includes('PENDING') || pending.includes('squareOff(')) {
+  throw new Error(`pending entry exposed live actions or lost its pending badge: ${pending}`);
 }
 """
     result = subprocess.run(
