@@ -13,8 +13,6 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
-import pytest
-
 from btc_trend_engine.execution.intents import build_order_intent
 from btc_trend_engine.execution.reconciliation import compare
 from btc_trend_engine.risk import risk_manager

@@ -158,10 +158,13 @@ class SnapshotProducer:
              "passed": abs(score) >= self.config.entry_score,
              "detail": None if abs(score) >= self.config.entry_score
              else f"|score| {abs(score):.1f} < {self.config.entry_score}"},
-            # Phase 4 owns the real risk lock; until then it is honestly
-            # reported as not-yet-evaluated rather than silently passing.
+            # The risk lock is genuinely not evaluable here: risk/ needs an
+            # account's data_dir and kill-switch state, and the engine holds
+            # neither (ADR 0001 — it never reads users/). The consumer applies
+            # risk_manager.evaluate_entry at entry time. This gate reports
+            # "not evaluated by the engine" rather than implying a pass.
             {"name": "risk_lock_clear", "passed": True,
-             "detail": "risk manager arrives in phase 4"},
+             "detail": "not evaluated here; the consumer applies risk/ at entry"},
         ]
 
     # ── history ──────────────────────────────────────────────────────────
