@@ -58,14 +58,78 @@ def create_app(config: EngineConfig,
     async def health() -> dict[str, object]:
         return {"ok": True, "version": __version__}
 
-    @app.get("/status", dependencies=[Depends(require_token)])
-    async def status(request: Request) -> dict[str, object]:
+    def _service(request: Request) -> EngineService:
         engine_service: EngineService | None = request.app.state.service
         if engine_service is None:
             raise HTTPException(status_code=503, detail="service not started")
-        return engine_service.status()
+        return engine_service
+
+    @app.get("/status", dependencies=[Depends(require_token)])
+    async def status(request: Request) -> dict[str, object]:
+        return _service(request).status()
+
+    @app.get("/trend/latest", dependencies=[Depends(require_token)])
+    async def trend_latest(request: Request, symbol: str | None = None
+                           ) -> dict[str, object]:
+        engine_service = _service(request)
+        _require_symbol(engine_service, symbol)
+        snapshot = engine_service.producer.latest()
+        if snapshot is None:
+            # No closed trigger candle yet. 503 rather than a fabricated
+            # neutral snapshot: "nothing to say yet" and "no trade" are
+            # different facts, and the client fails closed on both.
+            raise HTTPException(status_code=503,
+                                detail="no snapshot yet; awaiting a closed 5m candle")
+        return snapshot
+
+    @app.get("/trend/history", dependencies=[Depends(require_token)])
+    async def trend_history(request: Request, symbol: str | None = None,
+                            limit: int = 50) -> dict[str, object]:
+        engine_service = _service(request)
+        _require_symbol(engine_service, symbol)
+        return {"symbol": engine_service.config.engine.symbol,
+                "snapshots": engine_service.producer.history(
+                    max(1, min(limit, 500)))}
+
+    @app.get("/regime/latest", dependencies=[Depends(require_token)])
+    async def regime_latest(request: Request, symbol: str | None = None
+                            ) -> dict[str, object]:
+        engine_service = _service(request)
+        _require_symbol(engine_service, symbol)
+        snapshot = engine_service.producer.latest() or {}
+        return {
+            "symbol": engine_service.config.engine.symbol,
+            "regime": engine_service.producer.classifier.current.value,
+            "regime_since": snapshot.get("regime_since"),
+            "trend_score": snapshot.get("trend_score"),
+            "data_quality": engine_service.current_data_quality(),
+        }
+
+    @app.get("/features/latest", dependencies=[Depends(require_token)])
+    async def features_latest(request: Request, symbol: str | None = None
+                              ) -> dict[str, object]:
+        engine_service = _service(request)
+        _require_symbol(engine_service, symbol)
+        snapshot = engine_service.producer.latest()
+        if snapshot is None:
+            raise HTTPException(status_code=503, detail="no snapshot yet")
+        return {"symbol": snapshot["symbol"],
+                "as_of": snapshot["candle_close_utc"],
+                "feature_set_version": snapshot["feature_set_version"],
+                "components": snapshot["components"],
+                "timeframes": snapshot["timeframes"]}
 
     return app
+
+
+def _require_symbol(engine_service: EngineService, symbol: str | None) -> None:
+    """This engine instance serves exactly one symbol; asking for another must
+    be an error, never silently answered with the configured one."""
+    configured = engine_service.config.engine.symbol
+    if symbol is not None and symbol != configured:
+        raise HTTPException(
+            status_code=404,
+            detail=f"this engine serves {configured}, not {symbol}")
 
 
 def _watch_stop_sentinel(service_getter, stop_path: Path,

@@ -138,6 +138,13 @@ def finalize_stale_plain_files(root: Path, symbol: str,
     for path in sorted(base.rglob("*.ndjson")):
         if active_path is not None and path == active_path:
             continue
-        _gzip_finalize(path)
+        try:
+            _gzip_finalize(path)
+        except OSError:
+            # A transient handle (backup agent, indexer) must not stop the
+            # engine starting; the file stays plain and is finalized on a
+            # later run. A *second engine* holding it is prevented upstream
+            # by the data-directory lock, not tolerated here.
+            continue
         count += 1
     return count

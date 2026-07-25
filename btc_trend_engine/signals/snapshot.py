@@ -31,6 +31,7 @@ class SignalConfig:
     minimum_confidence: float = 0.62
     ttl_seconds: int = 300
     forecast_horizon_seconds: int = 900
+    max_spread_bps: float = 8.0     # §20 execution.maximum_spread_bps
 
 
 class SignalHysteresis:

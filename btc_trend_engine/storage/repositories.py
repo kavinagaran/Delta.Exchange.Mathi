@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from ..market_data.messages import Candle
 from ..market_data.normalizer import decimal_str
-from .models import CandleRow, HealthEvent, MarketSnapshot
+from .models import CandleRow, HealthEvent, MarketSnapshot, TrendSnapshotRow
 
 
 def _utc_iso(moment: datetime) -> str:
@@ -63,6 +63,32 @@ class Repositories:
                     CandleRow.resolution == resolution)
             ).all()
             return len(rows)
+
+    # ── trend snapshots ──────────────────────────────────────────────────
+    def record_trend_snapshot(self, snapshot: dict, now: datetime) -> None:
+        """Idempotent on signal_id: the same closed candle re-evaluated (a
+        restart, a replay) must not create a second row."""
+        import json
+
+        with self._sessions() as session:
+            statement = sqlite_insert(TrendSnapshotRow).values(
+                signal_id=snapshot["signal_id"], symbol=snapshot["symbol"],
+                candle_close_utc=snapshot["candle_close_utc"],
+                snapshot_json=json.dumps(snapshot, separators=(",", ":")),
+                created_at_utc=_utc_iso(now),
+            ).on_conflict_do_nothing(index_elements=["signal_id"])
+            session.execute(statement)
+            session.commit()
+
+    def recent_trend_snapshots(self, symbol: str, limit: int = 100
+                               ) -> list[TrendSnapshotRow]:
+        with self._sessions() as session:
+            rows = session.execute(
+                select(TrendSnapshotRow)
+                .where(TrendSnapshotRow.symbol == symbol)
+                .order_by(TrendSnapshotRow.id.desc()).limit(limit)
+            ).scalars().all()
+            return list(rows)
 
     # ── market snapshots ─────────────────────────────────────────────────
     def record_market_snapshot(self, snapshot: MarketSnapshot) -> None:

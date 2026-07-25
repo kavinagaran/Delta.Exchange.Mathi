@@ -35,8 +35,10 @@ from .market_data.messages import (
 )
 from .market_data.normalizer import decimal_str, resolution_seconds, to_book_delta, to_trades
 from .market_data.orderbook import ApplyResult, OrderBook
+from .signals.producer import SnapshotProducer, spread_bps_from
 from .storage.db import create_db_engine, init_schema, make_session_factory
 from .storage.event_store import EventStore, finalize_stale_plain_files
+from .storage.lock import DataDirectoryLock
 from .storage.models import MarketSnapshot
 from .storage.repositories import Repositories
 
@@ -59,6 +61,11 @@ class EngineService:
         symbol = config.engine.symbol
 
         data_path = config.storage.data_path
+        # Claim single-writer ownership BEFORE touching any file: startup
+        # finalization would otherwise destroy a running engine's active
+        # capture file (ADR 0002).
+        self.data_lock = DataDirectoryLock(data_path)
+        self.data_lock.acquire()
         self.event_store = EventStore(
             data_path, symbol, clock=self.clock,
             fsync_interval_seconds=config.storage.fsync_interval_seconds)
@@ -89,9 +96,11 @@ class EngineService:
             clock=self.clock,
         )
 
+        self.producer = SnapshotProducer(symbol)
         self.last_ticker: dict[str, Any] = {}
         self.raw_capture_enabled = True
         self.dispatch_errors = 0
+        self.snapshot_errors = 0
         self._tasks: list[asyncio.Task[None]] = []
 
     # ── wiring ───────────────────────────────────────────────────────────
@@ -140,6 +149,39 @@ class EngineService:
 
     def _on_candle_close(self, candle: Candle) -> None:
         self.repos.upsert_candle(candle, source="live", now=self.clock.now())
+        # The trigger timeframe closing is the decision moment (§7 rule 6).
+        if candle.resolution == "5m":
+            self.produce_snapshot()
+
+    def produce_snapshot(self) -> dict[str, Any] | None:
+        """Build and persist one TrendSnapshot. Never raises into the feed
+        loop: a snapshot failure must not take down market-data capture."""
+        top = self.book.top()
+        spread = spread_bps_from(
+            float(top.bid.price) if top and top.bid else None,
+            float(top.ask.price) if top and top.ask else None,
+        )
+        try:
+            snapshot = self.producer.produce(
+                now=self.clock.now(),
+                candles={resolution: series.closed_candles()
+                         for resolution, series in self.candles.series.items()},
+                ticker=self.last_ticker,
+                data_quality=self.current_data_quality(),
+                book_valid=self.book.is_valid,
+                spread_bps=spread,
+            )
+        except Exception as exc:
+            self.snapshot_errors += 1
+            self._health("snapshot_failed", f"{type(exc).__name__}: {exc}")
+            return None
+        if snapshot is None:
+            return None
+        try:
+            self.repos.record_trend_snapshot(snapshot, now=self.clock.now())
+        except Exception:
+            log.exception("trend snapshot write failed")
+        return snapshot
 
     def _on_disconnect(self, reason: str) -> None:
         # Block-entries-first (§6.4 step 1): the book is invalid the moment the
@@ -246,6 +288,7 @@ class EngineService:
                 pass
         self.event_store.close()
         await self.rest.aclose()
+        self.data_lock.release()
 
     # ── status for the API ───────────────────────────────────────────────
     def current_data_quality(self) -> str:
@@ -280,6 +323,8 @@ class EngineService:
             "clock_drift_ms": self.data_quality.clock_drift.drift_ms(),
             "ws_connects": self.ws.connect_count,
             "normalization_errors": self.ws.normalization_errors + self.dispatch_errors,
+            "snapshots_produced": self.producer.produced,
+            "snapshot_errors": self.snapshot_errors,
             "events_written": self.event_store.written,
             "raw_capture_enabled": self.raw_capture_enabled,
             "candles": {
