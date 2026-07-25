@@ -147,6 +147,28 @@
     </section>
   </div>
 
+  <div class="te-two-col">
+    <section class="card" aria-labelledby="te-shadow-title">
+      <div class="card-hd">
+        <div><span class="te-kicker">PHASE 8A · SHADOW MODE</span><strong id="te-shadow-title">Legacy vs. engine agreement</strong></div>
+        <span class="pill idle" id="te-shadow-pill"><span class="dot"></span>Checking…</span>
+      </div>
+      <div class="card-bd">
+        <p class="fld-hint">The legacy engine still drives every live trade. This
+          compares what it decided against what this engine would have decided,
+          per closed candle — agreement rate is only one of the ten criteria
+          Phase 8 requires before any live stage.</p>
+        <dl class="te-fact-list">
+          <div><dt>Candles compared</dt><dd id="te-shadow-total">—</dd></div>
+          <div><dt>Engine coverage</dt><dd id="te-shadow-coverage">—</dd></div>
+          <div><dt>Agreement rate</dt><dd id="te-shadow-rate">—</dd></div>
+          <div><dt>Engine entry-eligible signals</dt><dd id="te-shadow-eligible">—</dd></div>
+        </dl>
+        <div id="te-shadow-histogram" class="te-reason-codes"></div>
+      </div>
+    </section>
+  </div>
+
 </div>
 {% endblock %}
 
@@ -345,6 +367,42 @@ async function renderEngineHealth() {
   }
 }
 
+function shadowReasonLabel(reason) {
+  const labels = {
+    agree: 'Agreed', engine_no_snapshot: 'No engine snapshot',
+    engine_data_degraded: 'Engine data degraded', engine_gated_entry: 'Engine gate blocked',
+    direction_opposed: 'Direction opposed',
+    engine_flat_legacy_directional: 'Engine flat, legacy directional',
+    engine_directional_legacy_flat: 'Engine directional, legacy flat',
+  };
+  return labels[reason] || reason;
+}
+
+async function renderShadowSummary() {
+  const pill = document.getElementById('te-shadow-pill');
+  try {
+    const summary = await jget('/api/engine/shadow');
+    if (!summary.available) {
+      _setPill(pill, 'idle', 'Unreachable');
+      return;
+    }
+    _setPill(pill, 'live', 'Recording');
+    document.getElementById('te-shadow-total').textContent = fN(summary.total_candles);
+    document.getElementById('te-shadow-coverage').textContent =
+      finite(summary.engine_coverage) ? `${(summary.engine_coverage * 100).toFixed(1)}%` : '—';
+    document.getElementById('te-shadow-rate').textContent =
+      finite(summary.agreement_rate) ? `${(summary.agreement_rate * 100).toFixed(1)}%` : 'n/a (no comparable candles yet)';
+    document.getElementById('te-shadow-eligible').textContent = fN(summary.engine_entry_eligible_signals);
+    const histogram = summary.disagreement_histogram || {};
+    document.getElementById('te-shadow-histogram').innerHTML = Object.keys(histogram).length
+      ? Object.entries(histogram).map(([reason, count]) =>
+          `<span class="badge sim">${esc(shadowReasonLabel(reason))}: ${fN(count)}</span>`).join(' ')
+      : '<div class="te-empty-state">No candles compared yet.</div>';
+  } catch (e) {
+    _setPill(pill, 'idle', 'Unreachable');
+  }
+}
+
 async function load() {
   document.getElementById('trend-engine-page').setAttribute('aria-busy', 'true');
   try {
@@ -363,6 +421,7 @@ async function load() {
     document.getElementById('trend-engine-page').setAttribute('aria-busy', 'false');
   }
   renderEngineHealth();
+  renderShadowSummary();
 }
 
 document.getElementById('te-refresh').addEventListener('click', load);

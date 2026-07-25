@@ -7,7 +7,7 @@ suffix; every row carries ``created_at_utc``.
 
 from __future__ import annotations
 
-from sqlalchemy import Index, Integer, String, Text
+from sqlalchemy import Boolean, Index, Integer, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 SCHEMA_VERSION = "2026.07.p2"
@@ -96,3 +96,44 @@ class TrendSnapshotRow(Base):
     candle_close_utc: Mapped[str] = mapped_column(String(32), index=True)
     snapshot_json: Mapped[str] = mapped_column(Text)
     created_at_utc: Mapped[str] = mapped_column(String(32))
+
+
+class ShadowComparisonRow(Base):
+    """One completed candle, as seen by the legacy engine and by this one.
+
+    Adding this table needs no SCHEMA_VERSION bump: ``init_schema`` runs
+    ``create_all`` before the version check, so a purely additive table
+    appears on existing data stores automatically. The version guards
+    *restructuring* of existing tables, which this is not.
+
+    Keyed on ``candle_close_utc`` so the join is on the candle, never on wall
+    clock, and so re-posting the same candle updates rather than duplicates.
+    """
+
+    __tablename__ = "shadow_comparison"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    candle_close_utc: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    recorded_at_utc: Mapped[str] = mapped_column(String(32))
+
+    # Legacy side (posted by dashboard.py).
+    legacy_signal_key: Mapped[str] = mapped_column(String(128))
+    legacy_direction: Mapped[int] = mapped_column(Integer)
+    legacy_zone: Mapped[str] = mapped_column(String(32))
+    legacy_score: Mapped[str] = mapped_column(String(32))
+    legacy_regime: Mapped[str] = mapped_column(String(32))
+    legacy_dry_run: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # Engine side, resolved from this engine's own snapshot for that candle.
+    # Nullable on purpose: "the engine had no snapshot for this candle" is a
+    # real and important outcome, distinct from a disagreement, and must not
+    # be silently scored as one.
+    engine_present: Mapped[bool] = mapped_column(Boolean, default=False)
+    engine_signal_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    engine_direction: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    engine_regime: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    engine_score: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    engine_entry_allowed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    engine_data_quality: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
+    agreed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    disagreement_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)

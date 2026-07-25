@@ -22,6 +22,7 @@ from .. import __version__
 from ..config import EngineConfig, load_config
 from ..risk.kill_switch import KillSwitchName, KillSwitchStore
 from ..service import EngineService
+from ..signals import shadow
 
 log = logging.getLogger(__name__)
 
@@ -121,6 +122,81 @@ def create_app(config: EngineConfig,
                 "feature_set_version": snapshot["feature_set_version"],
                 "components": snapshot["components"],
                 "timeframes": snapshot["timeframes"]}
+
+    # ── shadow comparison (Phase 8a) ─────────────────────────────────────
+    @app.post("/shadow/legacy-decision", dependencies=[Depends(require_token)])
+    async def shadow_legacy_decision(request: Request) -> dict[str, object]:
+        """Record one legacy decision and compare it with our own.
+
+        This is the only write endpoint. It is called fire-and-forget by the
+        dashboard's live trading loop, so it must never be slow and must never
+        return anything the caller has to handle — but the caller ignores the
+        response entirely, so correctness here costs the loop nothing.
+        """
+        engine_service = _service(request)
+        try:
+            body = await request.json()
+        except Exception:
+            raise HTTPException(status_code=400, detail="body must be JSON") from None
+        if not isinstance(body, dict):
+            raise HTTPException(status_code=400, detail="body must be an object")
+
+        candle_close = str(body.get("candle_close_utc") or "")
+        if not candle_close:
+            raise HTTPException(status_code=400,
+                                detail="candle_close_utc is required (the join key)")
+        try:
+            legacy_direction = int(body.get("direction") or 0)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400,
+                                detail="direction must be an integer") from None
+
+        snapshot = engine_service.repos.snapshot_for_candle(
+            engine_service.config.engine.symbol, candle_close)
+        agreed, reason = shadow.classify(legacy_direction, snapshot)
+
+        engine_service.repos.record_shadow_comparison({
+            "candle_close_utc": candle_close,
+            "legacy_signal_key": str(body.get("signal_key") or ""),
+            "legacy_direction": legacy_direction,
+            "legacy_zone": str(body.get("zone") or ""),
+            "legacy_score": str(body.get("score") if body.get("score") is not None else ""),
+            "legacy_regime": str(body.get("market_regime") or ""),
+            "legacy_dry_run": bool(body.get("dry_run")),
+            "engine_present": snapshot is not None,
+            "engine_signal_id": (snapshot or {}).get("signal_id"),
+            "engine_direction": (int((snapshot or {}).get("direction") or 0)
+                                 if snapshot else None),
+            "engine_regime": (snapshot or {}).get("regime"),
+            "engine_score": (str((snapshot or {}).get("trend_score"))
+                             if snapshot else None),
+            "engine_entry_allowed": (bool(snapshot.get("entry_allowed"))
+                                     if snapshot else None),
+            "engine_data_quality": (snapshot or {}).get("data_quality"),
+            "agreed": agreed,
+            "disagreement_reason": reason,
+        }, now=engine_service.clock.now())
+        return {"ok": True, "agreed": agreed, "reason": reason}
+
+    @app.get("/shadow/summary", dependencies=[Depends(require_token)])
+    async def shadow_summary(request: Request) -> dict[str, object]:
+        engine_service = _service(request)
+        rows = engine_service.repos.all_shadow_comparisons()
+        summary = shadow.summarise(rows)
+        summary["recent"] = [
+            {
+                "candle_close_utc": row.candle_close_utc,
+                "legacy_direction": row.legacy_direction,
+                "legacy_zone": row.legacy_zone,
+                "engine_direction": row.engine_direction,
+                "engine_regime": row.engine_regime,
+                "engine_data_quality": row.engine_data_quality,
+                "agreed": row.agreed,
+                "reason": row.disagreement_reason,
+            }
+            for row in reversed(rows[-25:])
+        ]
+        return summary
 
     def _kill_switches(request: Request) -> KillSwitchStore:
         return request.app.state.kill_switches

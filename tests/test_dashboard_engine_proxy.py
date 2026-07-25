@@ -98,6 +98,27 @@ def test_risk_route_reports_active_when_the_engine_is_unreachable(tmp_path):
     assert payload["any_active"] is True
 
 
+def test_shadow_route_proxies_the_client(tmp_path):
+    with _authenticated_client(tmp_path) as client, \
+            patch.object(trend_engine_client, "get_shadow_summary",
+                         return_value={"available": True, "agreement_rate": 0.8,
+                                       "total_candles": 40, "recent": []}):
+        resp = client.get("/api/engine/shadow")
+    assert resp.status_code == 200
+    assert resp.get_json()["agreement_rate"] == 0.8
+
+
+def test_no_route_can_post_a_shadow_decision_from_the_browser(tmp_path):
+    """Only the trend-auto loop posts a shadow decision, and it does so via
+    trend_engine_client directly — never through a dashboard route a browser
+    could reach."""
+    with _authenticated_client(tmp_path) as client:
+        for path in ("/api/engine/shadow/legacy-decision",
+                     "/api/engine/legacy-decision"):
+            assert client.post(path).status_code == 404, path
+        assert client.post("/api/engine/shadow").status_code == 405
+
+
 def test_no_proxy_route_can_fire_or_resume_a_kill_switch(tmp_path):
     """Kill-switch mutation is an operator action against the engine's own
     /admin endpoints. The dashboard exposes visibility only — a page (or an
@@ -117,6 +138,7 @@ def test_engine_proxy_routes_require_authentication(tmp_path):
         (tmp_path / "users").mkdir()
         client = dashboard.app.test_client()
         for path in ("/api/engine/snapshot", "/api/engine/health",
-                     "/api/engine/status", "/api/engine/risk"):
+                     "/api/engine/status", "/api/engine/risk",
+                     "/api/engine/shadow"):
             resp = client.get(path)
             assert resp.status_code == 401, path

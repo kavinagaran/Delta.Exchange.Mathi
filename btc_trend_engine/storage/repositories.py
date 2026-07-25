@@ -10,7 +10,13 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from ..market_data.messages import Candle
 from ..market_data.normalizer import decimal_str
-from .models import CandleRow, HealthEvent, MarketSnapshot, TrendSnapshotRow
+from .models import (
+    CandleRow,
+    HealthEvent,
+    MarketSnapshot,
+    ShadowComparisonRow,
+    TrendSnapshotRow,
+)
 
 
 def _utc_iso(moment: datetime) -> str:
@@ -89,6 +95,56 @@ class Repositories:
                 .order_by(TrendSnapshotRow.id.desc()).limit(limit)
             ).scalars().all()
             return list(rows)
+
+    def snapshot_for_candle(self, symbol: str, candle_close_utc: str
+                            ) -> dict | None:
+        """This engine's own snapshot for one candle close, or None if it
+        never produced one. Used to join a posted legacy decision."""
+        import json
+
+        with self._sessions() as session:
+            row = session.execute(
+                select(TrendSnapshotRow)
+                .where(TrendSnapshotRow.symbol == symbol,
+                       TrendSnapshotRow.candle_close_utc == candle_close_utc)
+                .limit(1)
+            ).scalars().first()
+        if row is None:
+            return None
+        try:
+            return json.loads(row.snapshot_json)
+        except ValueError:
+            return None
+
+    # ── shadow comparison (Phase 8a) ─────────────────────────────────────
+    def record_shadow_comparison(self, values: dict, now: datetime) -> None:
+        """Upsert on candle_close_utc: re-posting the same candle corrects the
+        row rather than double-counting it in the agreement rate."""
+        payload = {**values, "recorded_at_utc": _utc_iso(now)}
+        with self._sessions() as session:
+            statement = sqlite_insert(ShadowComparisonRow).values(**payload)
+            statement = statement.on_conflict_do_update(
+                index_elements=["candle_close_utc"],
+                set_={k: v for k, v in payload.items()
+                      if k != "candle_close_utc"},
+            )
+            session.execute(statement)
+            session.commit()
+
+    def recent_shadow_comparisons(self, limit: int = 200
+                                  ) -> list[ShadowComparisonRow]:
+        with self._sessions() as session:
+            rows = session.execute(
+                select(ShadowComparisonRow)
+                .order_by(ShadowComparisonRow.id.desc()).limit(limit)
+            ).scalars().all()
+            return list(rows)
+
+    def all_shadow_comparisons(self) -> list[ShadowComparisonRow]:
+        with self._sessions() as session:
+            return list(session.execute(
+                select(ShadowComparisonRow)
+                .order_by(ShadowComparisonRow.id)).scalars().all())
 
     # ── market snapshots ─────────────────────────────────────────────────
     def record_market_snapshot(self, snapshot: MarketSnapshot) -> None:

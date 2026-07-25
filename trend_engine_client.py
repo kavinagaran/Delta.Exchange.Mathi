@@ -19,6 +19,9 @@ misreports.
 from __future__ import annotations
 
 import os
+import queue
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -194,6 +197,126 @@ def get_status() -> dict[str, Any]:
     try:
         response = requests.get(
             f"{engine_base_url()}/status",
+            headers={"X-Engine-Token": os.getenv("ENGINE_TOKEN", "")},
+            timeout=_timeout(),
+        )
+        if response.status_code != 200:
+            return {"available": False, "detail": f"HTTP {response.status_code}"}
+        return {"available": True, **response.json()}
+    except Exception as exc:
+        return {"available": False, "detail": f"{type(exc).__name__}: {exc}"}
+
+
+# ── shadow reporting (Phase 8a) ─────────────────────────────────────────
+# Reporting the legacy decision to the engine is the one place this module
+# WRITES. It is attached to a loop that places real orders, so it is
+# fire-and-forget through a bounded queue and a daemon worker rather than an
+# inline HTTP call: a hung engine must cost the trading loop exactly zero
+# latency, and an 8-second timeout is not zero. See tests/test_shadow_survival.py.
+
+SHADOW_QUEUE_MAX = 256
+
+_shadow_queue: "queue.Queue[dict[str, Any]] | None" = None
+_shadow_worker: threading.Thread | None = None
+_shadow_lock = threading.Lock()
+_shadow_dropped = 0
+
+
+def _shadow_send(payload: dict[str, Any]) -> None:
+    """The actual HTTP write. Patched wholesale in tests."""
+    requests.post(
+        f"{engine_base_url()}/shadow/legacy-decision",
+        json=payload,
+        headers={"X-Engine-Token": os.getenv("ENGINE_TOKEN", "")},
+        timeout=_timeout(),
+    )
+
+
+def _shadow_loop(work_queue: "queue.Queue[dict[str, Any]]") -> None:
+    # The queue is bound as an argument, not read from the module global: a
+    # reset (or a future re-init) swaps the global while this thread is parked
+    # in get(), and reading it back afterwards would hit whatever replaced it.
+    while True:
+        payload = work_queue.get()
+        try:
+            if payload is None:  # shutdown sentinel
+                return
+            _shadow_send(payload)
+        except BaseException:
+            # Deliberately bare: this thread exists to be unkillable. A
+            # transport error, a bad payload, or a bug in _shadow_send must
+            # not end the worker, because a dead worker silently stops
+            # recording comparisons that the cutover decision depends on.
+            pass
+        finally:
+            work_queue.task_done()
+
+
+def _ensure_shadow_worker() -> "queue.Queue[dict[str, Any]]":
+    global _shadow_queue, _shadow_worker
+    with _shadow_lock:
+        if _shadow_queue is None:
+            _shadow_queue = queue.Queue(maxsize=SHADOW_QUEUE_MAX)
+        if _shadow_worker is None or not _shadow_worker.is_alive():
+            _shadow_worker = threading.Thread(
+                target=_shadow_loop, args=(_shadow_queue,),
+                name="shadow-reporter", daemon=True)
+            _shadow_worker.start()
+        return _shadow_queue
+
+
+def post_legacy_decision(payload: dict[str, Any]) -> bool:
+    """Enqueue one legacy decision for the engine. Never raises, never blocks.
+
+    Returns True if enqueued, False if dropped because the queue is full
+    (i.e. the engine is not draining). Dropping is the correct behaviour: the
+    alternative is unbounded memory growth or a blocked trading loop, and a
+    missing comparison is visible via ``shadow_dropped_count()``.
+    """
+    global _shadow_dropped
+    try:
+        work_queue = _ensure_shadow_worker()
+        work_queue.put_nowait(dict(payload))
+        return True
+    except BaseException:
+        # Includes queue.Full, and anything a caller passed that dict() chokes
+        # on. Either way the trading loop learns nothing about it.
+        _shadow_dropped += 1
+        return False
+
+
+def shadow_queue_depth() -> int:
+    return 0 if _shadow_queue is None else _shadow_queue.qsize()
+
+
+def shadow_dropped_count() -> int:
+    return _shadow_dropped
+
+
+def drain_shadow_queue_for_test(timeout: float = 2.0) -> bool:
+    """Wait for the worker to finish outstanding work. Test-only."""
+    if _shadow_queue is None:
+        return True
+    deadline = time.monotonic() + timeout
+    while _shadow_queue.qsize() > 0 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    return _shadow_queue.qsize() == 0
+
+
+def reset_shadow_transport_for_test() -> None:
+    """Drop the queue and worker so each test starts clean. Test-only."""
+    global _shadow_queue, _shadow_worker, _shadow_dropped
+    with _shadow_lock:
+        _shadow_queue = None
+        _shadow_worker = None
+        _shadow_dropped = 0
+
+
+def get_shadow_summary() -> dict[str, Any]:
+    """Agreement statistics for the Trend Engine page. Never raises."""
+    try:
+        response = requests.get(
+            f"{engine_base_url()}/shadow/summary",
             headers={"X-Engine-Token": os.getenv("ENGINE_TOKEN", "")},
             timeout=_timeout(),
         )

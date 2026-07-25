@@ -5079,6 +5079,15 @@ def api_engine_risk():
     return jsonify(trend_engine_client.get_risk_status())
 
 
+@app.route("/api/engine/shadow")
+def api_engine_shadow():
+    """Read-only shadow-comparison summary (Phase 8a). Posting a decision
+    happens only from the trend-auto loop via trend_engine_client directly —
+    there is no route here that writes, for the same reason /api/engine/risk
+    has none: a browser page must not be able to feed the comparison."""
+    return jsonify(trend_engine_client.get_shadow_summary())
+
+
 def _trend_engine_config_overrides() -> dict:
     """Approved model overrides from account config or process environment.
 
@@ -7688,7 +7697,13 @@ def _trend_score_auto_market_decision(snapshot: dict, engine_config: dict) -> di
 
 
 def _collect_trend_score_auto_signal() -> dict:
-    """Collect one completed-5m score event in the selected account namespace."""
+    """Collect one completed-5m score event in the selected account namespace.
+
+    Also reports the resulting legacy decision to the engine for shadow
+    comparison (Phase 8a). That report is fire-and-forget and wrapped: it is
+    attached to a loop that places real orders, and nothing about observing
+    the loop may perturb it. See tests/test_shadow_survival.py.
+    """
     mode = _trading_mode_payload()
     controller_mode = _trend_score_auto_mode()
     expected_dry_run = controller_mode == "dry_run"
@@ -7729,7 +7744,7 @@ def _collect_trend_score_auto_signal() -> dict:
     if opened_at.tzinfo is None:
         opened_at = opened_at.replace(tzinfo=timezone.utc)
     bar_close = (opened_at.astimezone(timezone.utc) + timedelta(minutes=5))
-    return {
+    signal = {
         "mode": mode,
         "snapshot": snapshot,
         "decision": decision,
@@ -7739,6 +7754,44 @@ def _collect_trend_score_auto_signal() -> dict:
         "signal_bar_close_utc": bar_close.isoformat().replace("+00:00", "Z"),
         "market_regime": str(decision.get("market_regime") or "UNCLEAR"),
     }
+    _report_legacy_decision_to_shadow(signal, dry_run=expected_dry_run)
+    return signal
+
+
+def _report_legacy_decision_to_shadow(signal: dict, *, dry_run: bool) -> None:
+    """Fire-and-forget shadow report. Belt and braces: post_legacy_decision is
+    already incapable of raising, and this wrapper means a future change that
+    breaks that promise still cannot reach the trading loop."""
+    try:
+        trend_engine_client.post_legacy_decision({
+            "source": "legacy",
+            "signal_key": signal["signal_key"],
+            # Joined on the candle close, never wall clock — the engine and
+            # the dashboard must agree on WHICH candle a decision describes.
+            "candle_close_utc": signal["signal_bar_close_utc"],
+            "zone": signal["zone"],
+            "score": signal["score"],
+            "market_regime": signal["market_regime"],
+            "direction": _shadow_direction_from_zone(signal["zone"]),
+            "dry_run": bool(dry_run),
+        })
+    except Exception:
+        pass
+
+
+def _shadow_direction_from_zone(zone: str) -> int:
+    """Legacy zones -> the engine's -1/0/+1 direction, so the comparison is
+    like-for-like. Exact match against trend_score_auto's own zone constants
+    — NOT substring matching. TREND_SCORE_MOVE_ZONE is literally "SHORT_MOVE",
+    the NEUTRAL zone (score between -25 and +25); a naive "SHORT" in zone
+    check would misclassify every neutral reading as bearish and corrupt the
+    whole shadow-window agreement rate. Anything unrecognised is 'no
+    position', never a guess."""
+    if zone == TREND_SCORE_CE_ZONE:
+        return 1
+    if zone == TREND_SCORE_PE_ZONE:
+        return -1
+    return 0
 
 
 def _fetch_live_vanilla_products() -> list:

@@ -114,7 +114,53 @@ print(count, "events")
 PY
 ```
 
-## What Phase 2 does NOT do
+## Kill switches (Phase 4)
 
-No signals, no features, no `/trend/latest` (Phase 3); no private feed, no
-risk state (Phase 4); no order placement (never — ADR 0003).
+A kill switch latches: it survives restarts and clears only when an operator
+resumes it. State lives in `data/risk_kill_switches.json`.
+
+```bash
+# what is currently latched
+curl -H "X-Engine-Token: $ENGINE_TOKEN" http://127.0.0.1:5055/risk/status
+
+# halt entries now (names: manual, max_daily_loss, consecutive_losses,
+# data_quality, reconciliation_mismatch)
+curl -X POST -H "X-Engine-Token: $ENGINE_TOKEN" \
+     -H 'Content-Type: application/json' \
+     -d '{"name":"manual","reason":"operator halt"}' \
+     http://127.0.0.1:5055/admin/kill-switch
+
+# clear one, or omit "name" to clear all
+curl -X POST -H "X-Engine-Token: $ENGINE_TOKEN" \
+     -H 'Content-Type: application/json' \
+     -d '{"name":"manual"}' http://127.0.0.1:5055/admin/resume
+```
+
+The dashboard shows kill-switch state read-only at `/api/engine/risk` and
+**cannot** fire or clear one — that is deliberate, so a browser page cannot
+disarm the safety layer. If the engine is unreachable the dashboard reports
+`any_active: true`, because an unreachable engine cannot prove nothing is
+latched.
+
+## Backtest (Phase 5)
+
+```bash
+python scripts/backtest.py fetch --days 220     # cache public candles
+python scripts/backtest.py run                  # writes docs/backtest-report.md
+```
+
+`fetch` needs no credentials (public endpoint, 4,000 rows per request). The
+cache lands in `data/backtest/` and is gitignored; the report is committed.
+A full `run` over 220 days takes tens of minutes — the sensitivity sweep is
+one whole-series replay per configuration, bounded by
+`--sensitivity-candles`.
+
+Read the report's opening section before quoting any number from it: results
+are candle-level and measured on the perpetual, not on the options actually
+traded ([ADR 0005](adr/0005-backtest-scope.md)).
+
+## What the engine still does NOT do
+
+No order placement, ever (ADR 0003). The private feed exists but ships
+disabled pending an unverified auth shape (assumption A10). Shadow-mode
+comparison and the cutover ladder are Phase 8.
