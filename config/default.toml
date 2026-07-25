@@ -1,0 +1,62 @@
+# BTC Trend Engine — default configuration.
+# Every value can be overridden with an ENGINE_* environment variable using
+# double-underscore path separators, e.g. ENGINE_DATA_QUALITY__STALE_FLOOR_SECONDS=10.
+# TOML instead of YAML is deliberate: tomllib is stdlib, so configuration
+# parsing adds zero dependencies (Trend_Engine.md §20 allows env-var config).
+
+[engine]
+symbol = "BTCUSD"
+base_currency = "BTC"
+quote_currency = "USD"
+# The engine is loopback-only and never proxied (ADR 0001).
+host = "127.0.0.1"
+port = 5055
+
+[market_data]
+websocket_url = "wss://socket.india.delta.exchange"
+rest_url = "https://api.india.delta.exchange"
+# Channels subscribed for engine.symbol. MOVE contracts stay REST-quote-only
+# (assumption A3: 10-level single-maker books are not worth reconstructing).
+channels = ["l2_updates", "all_trades", "v2/ticker", "mark_price", "funding_rate"]
+candle_resolutions = ["5m", "15m", "1h", "4h"]
+candle_bootstrap_limit = 320
+
+[market_data.reconnect]
+initial_backoff_seconds = 1.0
+max_backoff_seconds = 60.0
+jitter_fraction = 0.25
+
+[market_data.rate_limit]
+# Delta India exposes no rate-limit headers (assumption A4); the budget is
+# enforced client-side. Four processes share one key, so the engine's REST
+# share is deliberately small — the WS carries the continuous load.
+requests_per_second = 2.0
+burst = 5
+
+[orderbook]
+# Sequence-gap detection is the primary integrity gate. The l2_updates
+# checksum ('cs') could not be reproduced against 69 candidate formulations
+# (assumption A2b), so checksum validation ships disabled until the algorithm
+# is confirmed against official documentation.
+validate_checksums = false
+# A book this deep (~2,050 levels/side) only needs the top for features.
+feature_depth_levels = 50
+
+[data_quality]
+# warning = stale_multiplier x rolling median inter-message interval;
+# hard threshold = max(warning, stale_floor_seconds).  (§6.5)
+stale_multiplier = 3.0
+stale_floor_seconds = 5.0
+median_window = 64
+max_clock_drift_ms = 500.0
+fail_closed = true
+
+[storage]
+data_dir = "data"
+# Raw events: plain NDJSON for the active hour (crash-safe appends), gzipped
+# on rotation. Retention enforced by scripts/prune_data.py.
+raw_retention_days = 14
+snapshot_retention_days = 180
+market_snapshot_retention_days = 30
+min_free_gb = 2.0
+fsync_interval_seconds = 5.0
