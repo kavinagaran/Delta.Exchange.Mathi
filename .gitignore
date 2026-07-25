@@ -31,3 +31,7 @@ mv_btc_bot/.flutter-plugins*
 # SSH keys — never commit
 *.pem
 *.ppk
+
+# Trend Engine data store
+data/
+ws_probe_samples.json
