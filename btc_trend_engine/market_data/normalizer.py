@@ -61,6 +61,21 @@ def _parse_levels(raw: Any, name: str) -> tuple[Level, ...]:
     return tuple(parse_level(item, f"{name}[{i}]") for i, item in enumerate(raw))
 
 
+def _newest_trade_timestamp(raw: dict[str, Any]) -> int:
+    rows = raw.get("trades")
+    if not isinstance(rows, list) or not rows:
+        raise NormalizationError("all_trades_snapshot: empty or missing trades")
+    stamps: list[int] = []
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            raise NormalizationError(f"all_trades_snapshot: trade[{index}] is not an object")
+        value = row.get("timestamp")
+        if value is None:
+            raise NormalizationError(f"all_trades_snapshot: trade[{index}] has no timestamp")
+        stamps.append(int(value))
+    return max(stamps)
+
+
 def normalize_ws_message(
     raw: dict[str, Any], receive_timestamp: datetime
 ) -> MarketEvent | None:
@@ -78,6 +93,12 @@ def normalize_ws_message(
     timestamp_field = raw.get("timestamp")
     if timestamp_field is None and event_type is EventType.CANDLE:
         timestamp_field = raw.get("last_updated")
+    if timestamp_field is None and message_type == "all_trades_snapshot":
+        # The backfill frame carries no envelope timestamp of its own; the
+        # newest trade it contains is the moment it describes. Rejecting the
+        # frame would silently discard the venue's trade backfill at every
+        # subscribe, including after each reconnect.
+        timestamp_field = _newest_trade_timestamp(raw)
     exchange_ts = parse_exchange_timestamp(timestamp_field)
 
     sequence = raw.get("sequence_no")

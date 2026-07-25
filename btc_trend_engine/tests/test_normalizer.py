@@ -130,6 +130,32 @@ def test_trade_and_snapshot_forms_both_normalize():
     assert [t.buyer_is_taker for t in both] == [False, True]
 
 
+def test_trades_snapshot_has_no_envelope_timestamp_and_uses_newest_trade():
+    """Observed live: the backfill frame carries only symbol/trades/type.
+    Rejecting it would drop 50 real trades at every subscribe and reconnect."""
+    raw = {"type": "all_trades_snapshot", "symbol": "BTCUSD", "trades": [
+        {"buyer_role": "maker", "price": "63895.0", "seller_role": "taker",
+         "size": 1, "timestamp": TS_US},
+        {"buyer_role": "taker", "price": 63896, "seller_role": "maker",
+         "size": 1, "timestamp": TS_US - 82_000_000},
+    ]}
+    event = normalize_ws_message(raw, RECV)
+    assert event is not None
+    assert event.exchange_timestamp == parse_exchange_timestamp(TS_US)
+    trades = to_trades(event)
+    # price arrives as both string and bare int; both must reach Decimal.
+    assert [t.price for t in trades] == [Decimal("63895.0"), Decimal("63896")]
+    assert [t.buyer_is_taker for t in trades] == [False, True]
+
+
+def test_trades_snapshot_without_usable_timestamps_still_fails_closed():
+    for trades in ([], [{"buyer_role": "taker", "price": "1", "size": 1}]):
+        with pytest.raises(NormalizationError):
+            normalize_ws_message(
+                {"type": "all_trades_snapshot", "symbol": "BTCUSD",
+                 "trades": trades}, RECV)
+
+
 def test_rest_candle_epoch_seconds_and_decimal_fields():
     candle = rest_candle(
         {"time": 1784968500, "open": "63900", "high": "64000.5",
