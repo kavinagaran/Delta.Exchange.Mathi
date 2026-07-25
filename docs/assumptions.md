@@ -178,6 +178,29 @@ docs) before trusting the liquidation-buffer column for anything beyond
 
 ---
 
+## A10 — Private WebSocket auth frame shape
+**Status: OPEN — cannot verify from this workstation** · gates the read-only
+private feed only, which ships **disabled**
+
+`market_data/delta_private_ws.py` sends
+`{"type": "auth", "payload": {"api-key", "signature", "timestamp"}}` with
+`signature = HMAC_SHA256(secret, "GET" + timestamp + "/live")`. This mirrors
+`dashboard.py:_sign`'s REST scheme (confirmed working against the venue)
+applied to Delta's documented WS auth convention, but the WS-specific method
+and path strings are unconfirmed. A live probe is impossible from here
+(`ip_not_whitelisted_for_api_key`, same as A9) and WebFetch/WebSearch were
+unavailable (same tooling fault as A2b/A9).
+
+**Consequence, by design:** `[market_data.private] enabled = false` and
+`EngineService` never constructs a `DeltaPrivateWs`. The module is built and
+unit-tested but is not on any production code path, so a wrong auth shape
+costs nothing until someone deliberately enables it. Confirm the frame from
+the EC2 host — a rejected auth is counted in `auth_failures` and logged, never
+retried into a lockout — before setting `enabled = true`. The key used must be
+**read-only**; the trading key stays with `trend_score_live_execution.py`.
+
+---
+
 ## Summary
 
 | # | Assumption | Status | Gates |
@@ -192,6 +215,7 @@ docs) before trusting the liquidation-buffer column for anything beyond
 | A7 | OI / funding on WS | **CONFIRMED** | §9.5 |
 | A8 | nginx unchanged | **OPEN** | — |
 | A9 | positions/margined margin/liquidation_price fields | **OPEN** | Exposure liq-buffer display |
+| A10 | Private WS auth frame shape | **OPEN** | read-only private feed (ships disabled) |
 
 Nothing OPEN blocks the start of Phase 2. A2b narrows one integrity check, A6
 and A8 are operational checks on the deployment host. A9 narrows one display

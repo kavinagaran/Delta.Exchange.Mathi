@@ -20,6 +20,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 
 from .. import __version__
 from ..config import EngineConfig, load_config
+from ..risk.kill_switch import KillSwitchName, KillSwitchStore
 from ..service import EngineService
 
 log = logging.getLogger(__name__)
@@ -53,6 +54,8 @@ def create_app(config: EngineConfig,
     app = FastAPI(title="btc-trend-engine", version=__version__, lifespan=lifespan)
     app.state.token = config.token
     app.state.service = service
+    app.state.kill_switches = KillSwitchStore(
+        config.storage.data_path / "risk_kill_switches.json")
 
     @app.get("/health")
     async def health() -> dict[str, object]:
@@ -118,6 +121,58 @@ def create_app(config: EngineConfig,
                 "feature_set_version": snapshot["feature_set_version"],
                 "components": snapshot["components"],
                 "timeframes": snapshot["timeframes"]}
+
+    def _kill_switches(request: Request) -> KillSwitchStore:
+        return request.app.state.kill_switches
+
+    @app.get("/risk/status", dependencies=[Depends(require_token)])
+    async def risk_status(request: Request) -> dict[str, object]:
+        store = _kill_switches(request)
+        status_map = store.status()
+        return {
+            "any_active": bool(status_map),
+            "active": sorted(status_map.keys()),
+            "switches": {
+                name: {
+                    "fired_at_utc": state.fired_at_utc,
+                    "last_seen_utc": state.last_seen_utc,
+                    "reason": state.reason,
+                    "fired_count": state.fired_count,
+                }
+                for name, state in status_map.items()
+            },
+        }
+
+    @app.post("/admin/kill-switch", dependencies=[Depends(require_token)])
+    async def admin_kill_switch(request: Request) -> dict[str, object]:
+        body = await request.json()
+        name = str(body.get("name") or "")
+        reason = str(body.get("reason") or "manual operator action")
+        valid_names = {n.value for n in KillSwitchName}
+        if name not in valid_names:
+            raise HTTPException(
+                status_code=400,
+                detail=f"name must be one of {sorted(valid_names)}, got {name!r}")
+        state = _kill_switches(request).fire(name, reason)
+        log.warning("kill switch fired: %s (%s)", name, reason)
+        return {"ok": True, "name": state.name, "fired_at_utc": state.fired_at_utc,
+                "reason": state.reason, "fired_count": state.fired_count}
+
+    @app.post("/admin/resume", dependencies=[Depends(require_token)])
+    async def admin_resume(request: Request) -> dict[str, object]:
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        name = str(body.get("name") or "").strip() if isinstance(body, dict) else ""
+        store = _kill_switches(request)
+        if name:
+            cleared = store.resume(name)
+            log.warning("kill switch resumed: %s (cleared=%s)", name, cleared)
+            return {"ok": True, "cleared": [name] if cleared else []}
+        cleared = store.resume_all()
+        log.warning("all kill switches resumed: %s", cleared)
+        return {"ok": True, "cleared": cleared}
 
     return app
 

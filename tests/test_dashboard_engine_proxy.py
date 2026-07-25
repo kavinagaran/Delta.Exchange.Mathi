@@ -76,6 +76,39 @@ def test_status_route_proxies_the_client(tmp_path):
     assert resp.get_json() == {"available": False, "detail": "boom"}
 
 
+def test_risk_route_proxies_the_client(tmp_path):
+    with _authenticated_client(tmp_path) as client, \
+            patch.object(trend_engine_client, "get_risk_status",
+                         return_value={"available": True, "any_active": True,
+                                       "active": ["manual"], "switches": {}}):
+        resp = client.get("/api/engine/risk")
+    assert resp.status_code == 200
+    assert resp.get_json()["active"] == ["manual"]
+
+
+def test_risk_route_reports_active_when_the_engine_is_unreachable(tmp_path):
+    """Fail closed: an unreachable engine cannot prove no switch is latched,
+    so the dashboard must not render 'all clear'."""
+    with _authenticated_client(tmp_path) as client, \
+            patch.object(trend_engine_client, "requests") as mocked_requests:
+        mocked_requests.get.side_effect = OSError("connection refused")
+        resp = client.get("/api/engine/risk")
+    payload = resp.get_json()
+    assert payload["available"] is False
+    assert payload["any_active"] is True
+
+
+def test_no_proxy_route_can_fire_or_resume_a_kill_switch(tmp_path):
+    """Kill-switch mutation is an operator action against the engine's own
+    /admin endpoints. The dashboard exposes visibility only — a page (or an
+    XSS on one) must not be able to disarm the safety layer."""
+    with _authenticated_client(tmp_path) as client:
+        for path in ("/api/engine/kill-switch", "/api/engine/resume",
+                     "/api/engine/admin/kill-switch", "/api/engine/admin/resume"):
+            assert client.post(path).status_code == 404, path
+        assert client.post("/api/engine/risk").status_code == 405
+
+
 def test_engine_proxy_routes_require_authentication(tmp_path):
     """A trading dashboard's /api/* stays behind the login gate — these new
     routes must not be an accidental exception."""
@@ -83,6 +116,7 @@ def test_engine_proxy_routes_require_authentication(tmp_path):
             patch.object(dashboard, "USERS_DIR", tmp_path / "users"):
         (tmp_path / "users").mkdir()
         client = dashboard.app.test_client()
-        for path in ("/api/engine/snapshot", "/api/engine/health", "/api/engine/status"):
+        for path in ("/api/engine/snapshot", "/api/engine/health",
+                     "/api/engine/status", "/api/engine/risk"):
             resp = client.get(path)
             assert resp.status_code == 401, path

@@ -37,6 +37,17 @@ class RateLimitConfig(BaseModel):
     burst: int = Field(ge=1)
 
 
+class PrivateFeedConfig(BaseModel):
+    """Read-only private-feed credentials, by *env var name* only — never a
+    secret value in TOML (security-checklist.md). Disabled by default; the
+    auth-frame shape is unverified (market_data/delta_private_ws.py header)."""
+
+    enabled: bool = False
+    channels: list[str] = Field(default_factory=lambda: ["positions", "orders"])
+    api_key_env: str = "ENGINE_READ_ONLY_API_KEY"
+    api_secret_env: str = "ENGINE_READ_ONLY_API_SECRET"
+
+
 class MarketDataConfig(BaseModel):
     websocket_url: str
     rest_url: str
@@ -45,6 +56,7 @@ class MarketDataConfig(BaseModel):
     candle_bootstrap_limit: int = Field(ge=50, le=2000)
     reconnect: ReconnectConfig
     rate_limit: RateLimitConfig
+    private: PrivateFeedConfig = Field(default_factory=PrivateFeedConfig)
 
     @field_validator("websocket_url")
     @classmethod

@@ -5071,6 +5071,14 @@ def api_engine_status():
     return jsonify(trend_engine_client.get_status())
 
 
+@app.route("/api/engine/risk")
+def api_engine_risk():
+    """Read-only kill-switch visibility. Firing/resuming a switch is
+    deliberately NOT proxied — that is an operator action against the engine's
+    own /admin endpoints, not something a dashboard page can trigger."""
+    return jsonify(trend_engine_client.get_risk_status())
+
+
 def _trend_engine_config_overrides() -> dict:
     """Approved model overrides from account config or process environment.
 

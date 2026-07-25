@@ -6,5 +6,5 @@ computation, regime classification and TrendSnapshot generation.  It holds no
 trading credentials, never touches ``users/``, and cannot place an order.
 """
 
-__version__ = "0.2.0"  # phase 2: market data layer
+__version__ = "0.4.0"  # phase 4: risk manager, kill switches, execution validators
 ENGINE_SCHEMA_VERSION = "1.0.0"  # docs/trend-snapshot-contract.md

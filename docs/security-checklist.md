@@ -7,8 +7,13 @@ decisions with rationale, not oversights.
 
 - [x] **The engine holds no trading credentials.** v1 and the entire shadow
       window use public market data only ([ADR 0001](adr/0001-runtime-topology.md)).
-- [ ] **Phase 4: engine gets a separate read-only key** for the private feed.
-      The trading key stays with `trend_score_live_execution.py`.
+- [~] **Phase 4: engine gets a separate read-only key** for the private feed.
+      The trading key stays with `trend_score_live_execution.py`. *Code path
+      built (`market_data/delta_private_ws.py`) and configured to read
+      `ENGINE_READ_ONLY_API_KEY`/`_SECRET` by env-var name only — never a
+      secret in TOML. Ships `enabled = false`: the auth-frame shape is
+      unverified (assumption A10) and no read-only key has been issued yet.
+      Both remain operator actions before this can be turned on.*
 - [ ] **Confirm withdrawal permission is disabled** on every Delta API key in
       use. Operator action, not code.
 - [x] No hard-coded keys. `dashboard.py` reads `API_KEY`/`API_SECRET` from
@@ -40,7 +45,7 @@ Revisit if the box ever becomes multi-user.
 ## Network exposure
 
 - [x] Engine binds `127.0.0.1:5055` only. Never proxied, never public.
-- [ ] `X-Engine-Token` on every engine endpoint except `/health`. Not a trust
+- [x] `X-Engine-Token` on every engine endpoint except `/health`. Not a trust
       boundary — it exists so a stray `curl` or misconfigured proxy cannot
       become an input to a trading decision.
 - [ ] Verify port 5055 is free on EC2 and that nginx needs no change (A8).
@@ -65,7 +70,11 @@ Revisit if the box ever becomes multi-user.
 - [ ] `data/` gitignored alongside `users/` and `logs/`.
 - [ ] Engine crash-loop stops after 10 restarts in 5 min so trading fails
       closed rather than flapping ([ADR 0001](adr/0001-runtime-topology.md)).
-- [ ] Kill switch tested before any live stage (criterion 11).
+- [x] Kill switch tested before any live stage (criterion 11).
+      `risk/kill_switch.py` latches across restarts and clears only via
+      `POST /admin/resume`; covered by `tests/test_risk_kill_switch.py` and
+      `tests/test_risk_api.py`. Still to be rehearsed end-to-end against a
+      running engine before Stage C.
 - [ ] Rollback is a config flip, never a code change.
 
 ## Pre-live gate

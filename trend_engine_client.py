@@ -204,6 +204,32 @@ def get_status() -> dict[str, Any]:
         return {"available": False, "detail": f"{type(exc).__name__}: {exc}"}
 
 
+def get_risk_status() -> dict[str, Any]:
+    """Kill-switch state for the dashboard. Never raises.
+
+    Fails CLOSED on any error: an unreachable engine cannot *prove* that no
+    kill switch is latched, so ``any_active`` is reported True rather than
+    False. A caller that treated "unknown" as "clear" would resume trading
+    precisely when the safety layer is least observable.
+    """
+    try:
+        response = requests.get(
+            f"{engine_base_url()}/risk/status",
+            headers={"X-Engine-Token": os.getenv("ENGINE_TOKEN", "")},
+            timeout=_timeout(),
+        )
+        if response.status_code != 200:
+            return {"available": False, "any_active": True, "active": [],
+                    "detail": f"HTTP {response.status_code}"}
+        body = response.json()
+    except Exception as exc:
+        return {"available": False, "any_active": True, "active": [],
+                "detail": f"{type(exc).__name__}: {exc}"}
+    return {"available": True, "any_active": bool(body.get("any_active")),
+            "active": list(body.get("active") or []),
+            "switches": body.get("switches") or {}}
+
+
 def _parse_iso(value: Any) -> datetime | None:
     if not isinstance(value, str) or not value:
         return None

@@ -33,6 +33,16 @@ jitter_fraction = 0.25
 requests_per_second = 2.0
 burst = 5
 
+[market_data.private]
+# Phase 4 (security-checklist.md): a read-only key for position/order
+# reconciliation, never the trading key. Disabled until the auth-frame shape
+# (market_data/delta_private_ws.py) is confirmed and a real read-only key
+# exists. Names ENV VARS only -- never a secret value in this file.
+enabled = false
+channels = ["positions", "orders"]
+api_key_env = "ENGINE_READ_ONLY_API_KEY"
+api_secret_env = "ENGINE_READ_ONLY_API_SECRET"
+
 [orderbook]
 # Sequence-gap detection is the primary integrity gate. The l2_updates
 # checksum ('cs') could not be reproduced against 69 candidate formulations
