@@ -1,5 +1,6 @@
 import json
 import inspect
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -32,15 +33,45 @@ def _response_tuple(result):
     return result, result.status_code
 
 
-def test_exposure_routes_reject_invalid_slot_before_exchange_call():
-    with dashboard.app.test_request_context(
-            "/api/manual-entry?slot=typo", method="POST", json={"side": "buy"}), \
-            patch.object(dashboard.req, "post") as post:
-        response, status = _response_tuple(dashboard.api_manual_entry())
-        assert status == 410
-        assert response.get_json()["code"] == "MANUAL_MOVE_DISABLED"
-        post.assert_not_called()
+MANUAL_MOVE_ROUTES = ("/api/manual-entry", "/api/manual-entry/preview")
 
+
+@contextmanager
+def _authenticated_client(tmp_path):
+    """A client past `_auth_gate`, so a 404 proves the route is gone rather
+    than merely proving the request was unauthenticated."""
+    with patch.object(dashboard, "DASH_PASS", ""), \
+            patch.object(dashboard, "USERS_DIR", tmp_path / "no-accounts"):
+        yield dashboard.app.test_client()
+
+
+def test_manual_move_routes_are_unroutable():
+    """Discretionary MOVE entry was retired: the routes must not exist at all.
+
+    A 410 stub still accepts a request and depends on an early return staying
+    first in the body.  An unregistered rule cannot be re-enabled by an edit
+    that moves code above the guard.
+    """
+    registered = {str(rule) for rule in dashboard.app.url_map.iter_rules()}
+    for path in MANUAL_MOVE_ROUTES:
+        assert path not in registered
+    assert not hasattr(dashboard, "api_manual_entry")
+    assert not hasattr(dashboard, "api_manual_entry_preview")
+
+
+@pytest.mark.parametrize("path", MANUAL_MOVE_ROUTES)
+def test_manual_move_routes_cannot_reach_an_order_post(path, tmp_path):
+    with patch.object(dashboard.req, "post") as post, \
+            patch.object(dashboard, "_post_dashboard_order") as submit, \
+            _authenticated_client(tmp_path) as client:
+        for call in (client.get(f"{path}?slot=evening&side=buy"),
+                     client.post(f"{path}?slot=evening", json={"side": "buy"})):
+            assert call.status_code == 404
+    post.assert_not_called()
+    submit.assert_not_called()
+
+
+def test_exposure_routes_reject_invalid_slot_before_exchange_call():
     with dashboard.app.test_request_context(
             "/api/square-off?slot=typo", method="POST"), \
             patch.object(dashboard.req, "post") as post:
@@ -171,65 +202,27 @@ def test_manual_move_selector_uses_safe_defaults_for_nonfinite_tte_config():
             [product], 64000, "evening", now) is None
 
 
-def test_manual_preview_is_disabled_before_strategy_or_exchange_work():
-    contract = {
-        "id": 9, "symbol": "MV-BTC-65000-180726", "contract_value": ".001",
-        "strike_price": "65000", "settlement_time": "2026-07-18T12:00:00Z",
-    }
-    quote = {"entry_price": 10, "entry_depth": 100}
-    with dashboard.app.test_request_context(
-            "/api/manual-entry/preview?slot=evening&side=sell"), \
-            patch.object(dashboard, "_current_atm_mv", return_value=contract) as select, \
-            patch.object(dashboard, "_move_execution_quote", return_value=quote) as pricing, \
-            patch.object(dashboard, "_move_lot_plan",
-                         return_value={"lots": 0, "reason": "No affordable lots"}):
-        response, status = _response_tuple(dashboard.api_manual_entry_preview())
-
-    assert status == 410
-    assert response.get_json()["code"] == "MANUAL_MOVE_DISABLED"
-    select.assert_not_called()
-    pricing.assert_not_called()
-
-
-def test_manual_entry_is_disabled_before_contract_or_exchange_work(isolated_user):
-    selected = {"id": 10, "symbol": "MV-BTC-65500-180726"}
-    with dashboard.app.test_request_context(
-            "/api/manual-entry?slot=evening", method="POST",
-            json={"side": "buy", "product_id": 9,
-                  "symbol": "MV-BTC-65000-180726", "lots": 2, "mark": 10}), \
-            patch.object(dashboard, "_active_creds", return_value=("key", "secret")), \
-            patch.object(dashboard, "_current_atm_mv", return_value=selected), \
+def test_manual_move_routes_never_touch_strategy_or_exchange_helpers(tmp_path):
+    """The retired routes are gone, so no request can reach MOVE selection,
+    pricing, sizing, account validation, or order submission."""
+    with patch.object(dashboard, "_active_creds", return_value=("key", "secret")), \
+            patch.object(dashboard, "_current_atm_mv") as select, \
+            patch.object(dashboard, "_move_execution_quote") as pricing, \
+            patch.object(dashboard, "_move_lot_plan") as sizing, \
+            patch.object(dashboard, "_validate_move_entry_account") as validate, \
             patch.object(dashboard, "_strict_exchange_positions") as positions, \
-            patch.object(dashboard, "_post_dashboard_order") as submit:
-        response, status = _response_tuple(dashboard.api_manual_entry())
-
-    assert status == 410
-    assert response.get_json()["code"] == "MANUAL_MOVE_DISABLED"
-    positions.assert_not_called()
-    submit.assert_not_called()
-
-
-def test_manual_entry_never_revalidates_or_submits_old_preview(isolated_user):
-    selected = {"id": 9, "symbol": "MV-BTC-65000-180726"}
-    with dashboard.app.test_request_context(
-            "/api/manual-entry?slot=evening", method="POST",
+            patch.object(dashboard, "_post_dashboard_order") as submit, \
+            _authenticated_client(tmp_path) as client:
+        preview = client.get("/api/manual-entry/preview?slot=evening&side=sell")
+        entry = client.post(
+            "/api/manual-entry?slot=evening",
             json={"side": "buy", "product_id": 9,
-                  "symbol": selected["symbol"], "lots": 2, "mark": 10}), \
-            patch.object(dashboard, "_active_creds", return_value=("key", "secret")), \
-            patch.object(dashboard, "_current_atm_mv", return_value=selected), \
-            patch.object(dashboard, "_strict_exchange_positions", return_value=[]), \
-            patch.object(dashboard, "_validate_move_entry_account", return_value=0), \
-            patch.object(dashboard, "_move_execution_quote",
-                         return_value={"entry_price": 10, "entry_depth": 100}) as pricing, \
-            patch.object(dashboard, "_move_lot_plan",
-                         return_value={"lots": 3, "reason": "sizing checks passed"}), \
-            patch.object(dashboard, "_post_dashboard_order") as submit:
-        response, status = _response_tuple(dashboard.api_manual_entry())
+                  "symbol": "MV-BTC-65000-180726", "lots": 2, "mark": 10})
 
-    assert status == 410
-    assert response.get_json()["code"] == "MANUAL_MOVE_DISABLED"
-    pricing.assert_not_called()
-    submit.assert_not_called()
+    assert preview.status_code == 404
+    assert entry.status_code == 404
+    for helper in (select, pricing, sizing, validate, positions, submit):
+        helper.assert_not_called()
 
 
 def test_overview_has_no_manual_or_scheduled_move_controls():
@@ -649,16 +642,19 @@ def test_squareoff_blocks_aggregate_size_mismatch_before_post(isolated_user):
     submit.assert_not_called()
 
 
-def test_manual_entry_honors_shared_account_exposure_lock(isolated_user):
+def test_square_off_honors_shared_account_exposure_lock(isolated_user):
+    """The retired manual-entry route used to prove this; the surviving
+    exposure-changing route must honour the same cross-process lock."""
+    _write(isolated_user / "straddle_state.json", _open_state())
     with account_entry_lock(isolated_user, "holder") as held:
         assert held
         with dashboard.app.test_request_context(
-                "/api/manual-entry?slot=evening", method="POST", json={"side": "buy"}), \
+                "/api/square-off?slot=evening", method="POST"), \
                 patch.object(dashboard, "_active_creds", return_value=("key", "secret")), \
                 patch.object(dashboard.req, "post") as post:
-            response, status = _response_tuple(dashboard.api_manual_entry())
-    assert status == 410
-    assert response.get_json()["code"] == "MANUAL_MOVE_DISABLED"
+            response, status = _response_tuple(dashboard.api_square_off())
+    assert status == 409
+    assert "in progress" in response.get_json()["error"]
     post.assert_not_called()
 
 
@@ -696,9 +692,13 @@ def test_monitor_start_exception_also_forces_flatten(isolated_user):
     flatten.assert_called_once()
 
 
-def test_success_response_does_not_use_an_always_true_expression():
-    source = inspect.getsource(dashboard.api_manual_entry)
-    assert "dry_run or True" not in source
+def test_no_order_path_gates_on_an_always_true_expression():
+    """The original guard covered the retired manual-entry route.  Apply it to
+    every surviving dashboard order path instead of dropping the check."""
+    for func in (dashboard.api_square_off, dashboard.api_trend_entry,
+                 dashboard._submit_manual_move_entry,
+                 dashboard._close_move_state_locked):
+        assert "dry_run or True" not in inspect.getsource(func)
 
 
 @pytest.mark.parametrize(

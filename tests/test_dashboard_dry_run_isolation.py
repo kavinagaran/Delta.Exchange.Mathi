@@ -1,7 +1,7 @@
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -371,13 +371,12 @@ def test_manual_move_dry_entry_is_disabled_and_never_writes_or_posts(
         "mode_revision": mode["mode_revision"],
     }
 
-    with dashboard.app.test_request_context(
-            "/api/manual-entry?slot=evening", method="POST", json=body):
-        payload, status = _result(dashboard.api_manual_entry())
+    monkeypatch.setattr(dashboard, "DASH_PASS", "")
+    monkeypatch.setattr(dashboard, "USERS_DIR", account / "no-accounts")
+    response = dashboard.app.test_client().post(
+        "/api/manual-entry?slot=evening", json=body)
 
-    assert status == 410
-    assert payload["ok"] is False
-    assert payload["code"] == "MANUAL_MOVE_DISABLED"
+    assert response.status_code == 404
     assert not (account / "dry_run" / "straddle_state.json").exists()
     assert not (account / "straddle_state.json").exists()
     lot_plan.assert_not_called()
@@ -513,17 +512,18 @@ def test_mode_and_revision_mismatch_fail_before_move_or_trend_strategy_work(
     monkeypatch.setattr(dashboard, "_trend_entry_preview_data", trend_work)
     monkeypatch.setattr(dashboard, "_post_dashboard_order", order_post)
 
-    with dashboard.app.test_request_context(
-            "/api/manual-entry?slot=evening", method="POST",
-            json={"side": "buy", "expected_mode": "live"}):
-        move_payload, move_status = _result(dashboard.api_manual_entry())
+    with patch.object(dashboard, "DASH_PASS", ""), \
+            patch.object(dashboard, "USERS_DIR",
+                         isolated_dashboard / "no-accounts"):
+        move_response = dashboard.app.test_client().post(
+            "/api/manual-entry?slot=evening",
+            json={"side": "buy", "expected_mode": "live"})
     with dashboard.app.test_request_context(
             "/api/trend-entry", method="POST",
             json={"expected_mode": "dry_run", "mode_revision": "stale"}):
         trend_payload, trend_status = _result(dashboard.api_trend_entry())
 
-    assert move_status == 410
-    assert move_payload["code"] == "MANUAL_MOVE_DISABLED"
+    assert move_response.status_code == 404
     assert trend_status == 409
     assert "Configuration changed" in trend_payload["error"]
     move_work.assert_not_called()

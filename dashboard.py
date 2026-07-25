@@ -25,7 +25,7 @@ from urllib.parse import quote, urlencode
 
 import requests as req
 from dotenv import load_dotenv, set_key
-from flask import (Flask, jsonify, request, abort, send_file, session,
+from flask import (Flask, jsonify, request, abort, session,
                    redirect, render_template, has_request_context, g)
 
 from risk_controls import (account_entry_lock, account_file_lock, audit_event,
@@ -1359,25 +1359,6 @@ def health():
     return jsonify({"ok": True})
 
 
-@app.route("/api/me")
-def api_me():
-    acct = _session_account()
-    if acct:
-        primary = acct["username"] == _primary_account_user()
-        return jsonify({"username":     acct["username"],
-                        "display_name": acct.get("display_name", acct["username"]),
-                        "bot":          acct["username"] == _safe_user(BOT_USER),
-                        "primary":      primary,
-                        "role":         "primary" if primary else "coexistent"})
-    username = _safe_user(DASH_USER) or "mathi"
-    primary = username == _primary_account_user()
-    return jsonify({"username": username,
-                    "display_name": os.getenv("ACCOUNT_NAME", username.capitalize()),
-                    "bot": username == _safe_user(BOT_USER),
-                    "primary": primary,
-                    "role": "primary" if primary else "coexistent"})
-
-
 def _mask(s: str) -> str:
     return (s[:4] + "•" * 8 + s[-4:]) if s and len(s) > 8 else ("•" * 8 if s else "")
 
@@ -2691,13 +2672,6 @@ def api_status():
                                   if _cfg_on("MORNING_EXIT_ENABLED", False)
                                   else "TP / settlement only")
     return jsonify(state)
-
-
-@app.route("/api/external-options")
-def api_external_options():
-    _sync_states_from_exchange()
-    return jsonify(_external_options.get(_active_user(), []))
-
 
 
 def _ist_calendar_date(date_str: str, time_str: str) -> str:
@@ -4124,69 +4098,6 @@ def _manual_entry_lots(slot: str, mark: float, cv: float, strike: float = 0.0) -
         return 0
 
 
-@app.route("/api/manual-entry/preview")
-def api_manual_entry_preview():
-    """Manual MOVE direction selection was retired with scheduled AUTO."""
-    return jsonify({
-        "ok": False,
-        "error": (
-            "Manual MOVE BUY/SELL is disabled. Morning and Evening MOVE "
-            "directions are selected only by the scheduled forecast engine."
-        ),
-        "code": "MANUAL_MOVE_DISABLED",
-    }), 410
-
-    # Retained temporarily as rollback-compatible implementation context.
-    # This block is unreachable and may be removed after the AUTO rollout.
-    slot = _strict_slot_arg(move_only=True)
-    if slot is None:
-        return jsonify({"ok": False, "error": "slot must be morning or evening"}), 400
-    side = str(request.args.get("side") or "buy").lower()
-    if side not in {"buy", "sell"}:
-        return jsonify({"ok": False, "error": "side must be buy or sell"}), 400
-    contract = _current_atm_mv(slot)
-    if not contract:
-        return jsonify({
-            "ok": False,
-            "error": (f"No eligible operational MV contract is currently "
-                      f"listed for manual {slot} entry"),
-        }), 502
-    symbol = contract["symbol"]
-    cv     = float(contract.get("contract_value") or 0.001)
-    mode = _trading_mode_payload()
-    try:
-        quote = _move_execution_quote(symbol, side)
-        plan = _move_lot_plan(
-            slot, side, contract, quote, dry_run=mode["dry_run_mode"])
-    except Exception as exc:
-        return jsonify({"ok": False, "error": str(exc)}), 409
-    mark = float(quote.get("entry_price") or 0)
-    lots = int(plan.get("lots") or 0)
-    if lots <= 0:
-        return jsonify({"ok": False, "error": plan.get("reason") or
-                        "No lots pass every safety cap", "sizing": plan}), 409
-    return jsonify({
-        "ok":         True,
-        "slot":       slot,
-        "side":       side,
-        "symbol":     symbol,
-        "product_id": int(contract.get("id") or 0),
-        "strike":     float(contract.get("strike_price") or 0),
-        "mark":       round(mark, 4),
-        "lots":       lots,
-        "est_value":  round(mark * cv * lots, 2),
-        "settlement": contract.get("settlement_time", ""),
-        "dry_run":    mode["dry_run_mode"],
-        "execution_mode": mode["execution_mode"],
-        "mode_revision": mode["mode_revision"],
-        "sizing":     plan,
-        "quote":      quote,
-        "entry_classification": "discretionary_manual",
-        "move_value_gate_evaluated": False,
-        "value_gate_note": plan.get("value_gate_note"),
-    })
-
-
 def _open_state_from_pending(pending: dict, order: dict, filled: int) -> dict:
     fill = float(order.get("average_fill_price") or 0)
     if fill <= 0 or filled <= 0:
@@ -4531,222 +4442,6 @@ def _submit_manual_move_entry(slot: str, side: str, contract: dict,
     return opened, order
 
 
-@app.route("/api/manual-entry", methods=["POST"])
-def api_manual_entry():
-    """Reject discretionary MOVE entries; only scheduled AUTO may open them."""
-    return jsonify({
-        "ok": False,
-        "error": (
-            "Manual MOVE BUY/SELL is disabled. Morning and Evening MOVE "
-            "entries can be opened only by the scheduled forecast engine."
-        ),
-        "code": "MANUAL_MOVE_DISABLED",
-    }), 410
-
-    # Retained temporarily as rollback-compatible implementation context.
-    # This block is unreachable and may be removed after the AUTO rollout.
-    slot = _strict_slot_arg(move_only=True)
-    if slot is None:
-        return jsonify({"ok": False, "error": "slot must be morning or evening"}), 400
-    data = request.get_json(silent=True) or {}
-    side = (data.get("side") or request.args.get("side") or "").lower()
-    if side not in ("buy", "sell"):
-        return jsonify({"ok": False, "error": "side must be buy or sell"}), 400
-    user = _active_user()
-    with account_entry_lock(_user_dir(), f"dashboard-entry:{user}:{slot}") as acquired:
-        if not acquired:
-            return jsonify({"ok": False, "error": "Another account exposure change is in progress"}), 409
-        expectation_error = _mode_expectation_error(data)
-        if expectation_error:
-            return jsonify({"ok": False, "error": expectation_error}), 409
-        mode = _trading_mode_payload()
-        dry_run = mode["dry_run_mode"]
-        key, secret = _active_creds()
-        if not dry_run and (not key or not secret):
-            return jsonify({"ok": False, "error": "API credentials not configured"}), 400
-        try:
-            preview_product_id = int(data.get("product_id") or 0)
-            preview_lots = int(data.get("lots") or 0)
-            preview_price = float(data.get("mark") or 0)
-        except (TypeError, ValueError, OverflowError):
-            preview_product_id = preview_lots = 0
-            preview_price = 0.0
-        preview_symbol = str(data.get("symbol") or "")
-        if (preview_product_id <= 0 or preview_lots <= 0 or preview_price <= 0
-                or not math.isfinite(preview_price) or not preview_symbol):
-            return jsonify({"ok": False,
-                            "error": "A fresh MOVE preview is required before entry"}), 409
-        state_file = _slot_file(slot, dry_run=dry_run)
-        state = _load_json(state_file, {})
-        try:
-            if not dry_run and state.get("status") == "ENTRY_PENDING":
-                state, recovered = _recover_pending_move_entry(slot, state)
-                if state.get("status") == "OPEN":
-                    product_id = int(state.get("product_id") or 0)
-                    expected_size = (-int(state.get("lots") or 0)
-                                     if state.get("side") == "short"
-                                     else int(state.get("lots") or 0))
-                    actual_size = _post_entry_exchange_size(product_id, expected_size)
-                    state["position_verified_at_entry"] = actual_size == expected_size
-                    state["verified_exchange_size_at_entry"] = actual_size
-                    if actual_size != expected_size:
-                        if actual_size and actual_size * expected_size > 0:
-                            state["lots"] = abs(actual_size)
-                            state["position_mismatch_at_recovery"] = {
-                                "terminal_fill": expected_size,
-                                "exchange_size": actual_size,
-                            }
-                            try:
-                                _atomic_write_json(state_file, state)
-                            except Exception:
-                                pass
-                        try:
-                            detail = _force_flatten_move(
-                                slot, state, "recovered_entry_position_mismatch_flatten")
-                            return jsonify({"ok": False,
-                                            "error": "Recovered entry size mismatched and was flattened",
-                                            "flattened": True, **detail}), 502
-                        except Exception as flatten_exc:
-                            return jsonify({"ok": False,
-                                            "error": "Recovered entry size is unverified; duplicate entry blocked",
-                                            "flatten_error": str(flatten_exc),
-                                            "actual_size": actual_size,
-                                            "expected_size": expected_size}), 409
-                    try:
-                        _atomic_write_json(state_file, state)
-                    except Exception:
-                        pass
-                    protected, detail = _protect_or_flatten_move(
-                        slot, state, datetime.now(timezone.utc))
-                    if not protected:
-                        return jsonify({"ok": False, "error": "Recovered entry lacked protection and was flattened",
-                                        **detail}), 502
-                    return jsonify({"ok": True, "recovered": recovered, "slot": slot,
-                                    "side": state["side"], "symbol": state["symbol"],
-                                    "lots": state["lots"], "fill": state["entry_mark"],
-                                    "order_id": state.get("order_id"), "dry_run": False,
-                                    "protection_verified": True})
-            if state.get("status") == "OPEN":
-                return jsonify({"ok": False, "error": f"{slot} already has an open position"}), 400
-
-            contract = _current_atm_mv(slot)
-            if not contract:
-                return jsonify({
-                    "ok": False,
-                    "error": (f"No eligible operational MV contract is currently "
-                              f"listed for manual {slot} entry"),
-                }), 502
-            product_id = int(contract.get("id") or 0)
-            if (product_id != preview_product_id
-                    or str(contract.get("symbol") or "") != preview_symbol):
-                return jsonify({
-                    "ok": False,
-                    "error": ("MOVE contract changed after preview; review the refreshed "
-                              "contract before submitting"),
-                }), 409
-            if dry_run:
-                unrealized = 0.0
-            else:
-                positions = _strict_exchange_positions()
-                unrealized = _validate_move_entry_account(positions, product_id)
-            quote = _move_execution_quote(
-                contract["symbol"], side, reference_price=preview_price)
-            plan = _move_lot_plan(
-                slot, side, contract, quote, dry_run=dry_run)
-            if int(plan.get("lots") or 0) <= 0:
-                return jsonify({"ok": False, "error": plan.get("reason"),
-                                "sizing": plan}), 409
-            if int(plan.get("lots") or 0) != preview_lots:
-                return jsonify({
-                    "ok": False,
-                    "error": "MOVE sizing changed after preview; review the refreshed lots",
-                    "sizing": plan,
-                }), 409
-            decision = evaluate_entry(
-                _mode_data_dir(dry_run), float(plan["proposed_risk_usd"]),
-                _user_cfg(), unrealized_pnl_usd=unrealized,
-                dry_run=dry_run)
-            if not decision.allowed:
-                return jsonify({"ok": False, "error": decision.reason,
-                                "risk": decision_dict(decision), "sizing": plan}), 409
-
-            opened, order = _submit_manual_move_entry(
-                slot, side, contract, quote, plan, dry_run)
-            expected_size = -int(opened["lots"]) if opened["side"] == "short" \
-                else int(opened["lots"])
-            if not dry_run:
-                actual_size = _post_entry_exchange_size(product_id, expected_size)
-                opened["position_verified_at_entry"] = actual_size == expected_size
-                opened["verified_exchange_size_at_entry"] = actual_size
-                try:
-                    _atomic_write_json(state_file, opened)
-                except Exception:
-                    # The essential OPEN record is already durable; continue
-                    # immediately to protection/flatten despite annotation I/O.
-                    pass
-                if actual_size != expected_size:
-                    if actual_size and actual_size * expected_size > 0:
-                        # The selected product was proven flat immediately
-                        # before submit, so track the complete new exposure for
-                        # the emergency reduce-only close instead of abandoning
-                        # an unexplained excess.
-                        opened["lots"] = abs(actual_size)
-                        opened["owned_entry_lots"] = abs(actual_size)
-                        opened["position_mismatch_at_entry"] = {
-                            "terminal_fill": expected_size, "exchange_size": actual_size,
-                        }
-                        try:
-                            _atomic_write_json(state_file, opened)
-                        except Exception:
-                            pass
-                    try:
-                        detail = _force_flatten_move(
-                            slot, opened, "entry_position_mismatch_flatten")
-                        return jsonify({"ok": False,
-                                        "error": "Entry exchange-size mismatch; exposure was flattened",
-                                        "flattened": True, **detail}), 502
-                    except Exception as flatten_exc:
-                        _send_telegram(
-                            f"🚨 <b>MOVE ENTRY RECONCILIATION REQUIRED ({user.upper()})</b>\n"
-                            f"Expected <code>{expected_size}</code>, exchange reported "
-                            f"<code>{actual_size}</code>; flatten failed: "
-                            f"<code>{str(flatten_exc)[:250]}</code>")
-                        return jsonify({"ok": False,
-                                        "error": "Entry exchange-size mismatch and flatten is unresolved",
-                                        "flatten_error": str(flatten_exc),
-                                        "slot": slot, "order_id": order.get("id")}), 409
-                protected, detail = _protect_or_flatten_move(
-                    slot, opened, datetime.now(timezone.utc))
-                if not protected:
-                    return jsonify({"ok": False,
-                                    "error": "Protection was not verified; entry was flattened",
-                                    **detail}), 502
-            else:
-                detail = {"protection_health": {}}
-
-            fill = float(opened["entry_mark"])
-            lots = int(opened["lots"])
-            _send_telegram(
-                f"🖐 <b>MANUAL {side.upper()} — {slot.upper()} ({user.upper()})</b>"
-                f"{' — DRY-RUN' if dry_run else ''}\n"
-                f"<code>DISCRETIONARY (scheduled value gate not claimed)</code>\n"
-                f"<code>{opened['symbol']}</code> · <code>{lots:,}</code> lots · "
-                f"IOC fill <code>${fill:.4f}</code>")
-            return jsonify({"ok": True, "slot": slot, "side": opened["side"],
-                            "symbol": opened["symbol"], "lots": lots,
-                            "requested_lots": plan["lots"], "fill": fill,
-                            "order_id": order.get("id"), "dry_run": dry_run,
-                            "partial_fill": lots < int(plan["lots"]),
-                            "protection_verified": True,
-                            "entry_classification": "discretionary_manual",
-                            "move_value_gate_evaluated": False, **detail})
-        except Exception as exc:
-            _send_telegram(
-                f"🚨 <b>MANUAL MOVE ENTRY ERROR ({user.upper()} / {slot.upper()})</b>\n"
-                f"<code>{str(exc)[:400]}</code>")
-            return jsonify({"ok": False, "error": str(exc)}), 409
-
-
 def _tp_env(slot: str):
     """The active account's TP target / poll / SL / TSL for a slot (their
     config.json, .env defaults as fallback). SL/TSL 0 = disabled."""
@@ -4952,14 +4647,6 @@ def tp_monitor_stop():
     if not stopped:
         return jsonify({"ok": False, "error": f"{slot} monitor is not running"}), 400
     return jsonify({"ok": True, "slot": slot})
-
-
-@app.route("/download/apk")
-def download_apk():
-    apk = BASE / "mv_btc_bot" / "build" / "app" / "outputs" / "flutter-apk" / "app-release.apk"
-    if not apk.exists():
-        abort(404)
-    return send_file(str(apk), as_attachment=True, download_name="nithi-bot.apk")
 
 
 @app.route("/api/logs")
@@ -7961,17 +7648,6 @@ def _trend_entry_preview_data(
             "auto_mode": _trend_auto_mode()}, 200
 
 
-@app.route("/api/trend-entry/preview")
-def api_trend_entry_preview():
-    current_mode = _trading_mode_payload()
-    data, status = _trend_entry_preview_data(
-        dry_run=current_mode["dry_run_mode"])
-    for key, value in _trading_mode_payload().items():
-        data.setdefault(key, value)
-    data.setdefault("dry_run", data.get("dry_run_mode", False))
-    return jsonify(data), status
-
-
 def _trend_audit(event: str, details: dict) -> None:
     try:
         audit_event(_user_dir(), event, details)
@@ -8611,13 +8287,6 @@ def _maybe_auto_trend_entry() -> bool:
         return False
     finally:
         _trend_entry_lock.release()
-
-
-@app.route("/api/trend-auto/status")
-def api_trend_auto_status():
-    user = _active_user()
-    return jsonify({"user": user, "mode": _trend_auto_mode(),
-                    **_trend_auto_health.get(user, {})})
 
 
 def _trend_score_auto_ledger_path(data_dir: Path | None = None) -> Path:
