@@ -123,6 +123,15 @@ class CandleSeries:
     def last_closed(self) -> Candle | None:
         return self._closed[-1] if self._closed else None
 
+    def forming(self) -> Candle | None:
+        """The still-open candle, or None between buckets.
+
+        For the provisional live view ONLY (§7 rule 6: decisions use closed
+        candles). This candle repaints — its high/low/close all still move —
+        so anything derived from it is a preview, never a decision.
+        """
+        return self._open
+
 
 class CandleAggregator:
     """All configured resolutions for one symbol, fed from one trade stream."""

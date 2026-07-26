@@ -86,6 +86,25 @@ def create_app(config: EngineConfig,
                                 detail="no snapshot yet; awaiting a closed 5m candle")
         return snapshot
 
+    @app.get("/trend/live", dependencies=[Depends(require_token)])
+    async def trend_live(request: Request, symbol: str | None = None
+                         ) -> dict[str, object]:
+        """Provisional, continuously-updating score for DISPLAY ONLY.
+
+        Refreshed every housekeeping tick (~5s) from the closed candles plus
+        the still-forming one, so it moves within a bar. It carries no
+        signal_id and no entry_allowed, which is what stops it being usable as
+        a decision — see SnapshotProducer.produce_live.
+        """
+        engine_service = _service(request)
+        _require_symbol(engine_service, symbol)
+        view = engine_service.live_view or engine_service.refresh_live_view(
+            engine_service.clock.now())
+        if view is None:
+            raise HTTPException(status_code=503,
+                                detail="no live view yet; awaiting market data")
+        return view
+
     @app.get("/trend/history", dependencies=[Depends(require_token)])
     async def trend_history(request: Request, symbol: str | None = None,
                             limit: int = 50) -> dict[str, object]:

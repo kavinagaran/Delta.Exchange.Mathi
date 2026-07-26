@@ -14,7 +14,7 @@ facts, and the consumer must be able to tell them apart.
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Callable, Mapping, Sequence
 
 from ..features.pipeline import compute_timeframe_features, derivatives_features
@@ -129,6 +129,66 @@ class SnapshotProducer:
         self._remember(snapshot)
         self.produced += 1
         return snapshot
+
+    # ── provisional live view (display only) ─────────────────────────────
+    def produce_live(
+        self,
+        *,
+        now: datetime,
+        candles: Mapping[str, Sequence[Candle]],
+        forming: Candle | None,
+        data_quality: str,
+    ) -> dict[str, Any] | None:
+        """A continuously-updating score for display. **Never a decision.**
+
+        Deliberately returns a DIFFERENT SHAPE from ``produce`` — no
+        ``signal_id``, no ``entry_allowed``, no ``gates``. The dashboard's
+        order path requires those fields, so it is structurally incapable of
+        consuming this, which is the point: the committed score is idempotent
+        per closed candle (``completed_candle_signal_key`` dedupes on it), and
+        a repainting score in that path would let one candle fire two entries
+        as the score crossed a band and came back.
+
+        The forming candle is appended to the closed trigger series, so this
+        moves within the bar. That is the feature and also exactly why it must
+        not drive orders.
+        """
+        trigger = list(candles.get(TRIGGER) or [])
+        if forming is not None:
+            trigger = [*trigger, forming]
+        if not trigger:
+            return None
+
+        features = {
+            role: compute_timeframe_features(
+                role, trigger if role == TRIGGER else list(candles.get(role) or []))
+            for role in (STRUCTURAL, PRIMARY, SETUP, TRIGGER)
+        }
+        score = compute_score(
+            structural=features[STRUCTURAL], primary=features[PRIMARY],
+            setup=features[SETUP], trigger=features[TRIGGER],
+            derivatives={},
+        )
+        live_score = score.trend_score if score.trend_score is not None else 0.0
+        from . import zones
+
+        committed = self.latest() or {}
+        return {
+            "symbol": self.symbol,
+            "provisional": True,
+            "as_of": now.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "live_score": round(live_score, 1),
+            "live_zone": zones.zone_for_score(live_score),
+            "data_quality": data_quality,
+            "forming_candle_start": (
+                forming.start.strftime("%Y-%m-%dT%H:%M:%SZ") if forming else None),
+            # The committed decision this is previewing away from, so a reader
+            # can always see both numbers and tell which one trades.
+            "committed_signal_id": committed.get("signal_id"),
+            "committed_candle_close_utc": committed.get("candle_close_utc"),
+            "committed_score": committed.get("trend_score"),
+            "committed_zone": committed.get("zone"),
+        }
 
     def _gates(self, *, data_quality: str, book_valid: bool,
                spread_bps: float | None, regime: Regime,

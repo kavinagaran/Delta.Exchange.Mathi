@@ -312,6 +312,31 @@ def reset_shadow_transport_for_test() -> None:
         _shadow_dropped = 0
 
 
+def get_live_view(symbol: str = "BTCUSD") -> dict[str, Any]:
+    """Provisional display score. Never raises.
+
+    Returns ``{"available": False, ...}`` on any failure rather than a
+    degraded *snapshot*, deliberately: a degraded snapshot is shaped like a
+    decision and something could try to trade it. This is display data and is
+    shaped so it cannot be.
+    """
+    try:
+        response = requests.get(
+            f"{engine_base_url()}/trend/live",
+            params={"symbol": symbol},
+            headers={"X-Engine-Token": os.getenv("ENGINE_TOKEN", "")},
+            timeout=_timeout(),
+        )
+        if response.status_code != 200:
+            return {"available": False, "detail": f"HTTP {response.status_code}"}
+        payload = response.json()
+        if not isinstance(payload, dict) or not payload.get("provisional"):
+            return {"available": False, "detail": "malformed live view"}
+        return {"available": True, **payload}
+    except Exception as exc:
+        return {"available": False, "detail": f"{type(exc).__name__}: {exc}"}
+
+
 def get_shadow_summary() -> dict[str, Any]:
     """Agreement statistics for the Trend Engine page. Never raises."""
     try:

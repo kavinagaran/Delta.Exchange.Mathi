@@ -35,6 +35,7 @@ from .market_data.messages import (
 )
 from .market_data.normalizer import decimal_str, resolution_seconds, to_book_delta, to_trades
 from .market_data.orderbook import ApplyResult, OrderBook
+from .signals.producer import TRIGGER as TRIGGER_RESOLUTION
 from .signals.producer import SnapshotProducer, spread_bps_from
 from .storage.db import create_db_engine, init_schema, make_session_factory
 from .storage.event_store import EventStore, finalize_stale_plain_files
@@ -98,6 +99,7 @@ class EngineService:
 
         self.producer = SnapshotProducer(symbol)
         self.last_ticker: dict[str, Any] = {}
+        self.live_view: dict[str, Any] | None = None
         self.raw_capture_enabled = True
         self.dispatch_errors = 0
         self.snapshot_errors = 0
@@ -183,6 +185,22 @@ class EngineService:
             log.exception("trend snapshot write failed")
         return snapshot
 
+    def refresh_live_view(self, now: datetime) -> dict[str, Any] | None:
+        """Recompute the provisional display score (every housekeeping tick,
+        i.e. ~5s). Never raises into the loop, and never touches the committed
+        snapshot — see SnapshotProducer.produce_live."""
+        try:
+            self.live_view = self.producer.produce_live(
+                now=now,
+                candles={resolution: series.closed_candles()
+                         for resolution, series in self.candles.series.items()},
+                forming=self.candles.series[TRIGGER_RESOLUTION].forming(),
+                data_quality=self.current_data_quality(),
+            )
+        except Exception:
+            log.exception("live view refresh failed")
+        return self.live_view
+
     def _on_disconnect(self, reason: str) -> None:
         # Block-entries-first (§6.4 step 1): the book is invalid the moment the
         # feed drops, before any reconnect attempt.
@@ -231,6 +249,7 @@ class EngineService:
             self.candles.roll_clock(now)
             self.event_store.flush()
             self._check_disk()
+            self.refresh_live_view(now)
             mono = self.clock.monotonic()
             if mono - last_snapshot >= snapshot_every:
                 last_snapshot = mono
