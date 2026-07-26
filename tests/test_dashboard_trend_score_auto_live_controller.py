@@ -264,12 +264,15 @@ def test_explicit_live_mode_routes_only_to_live_controller(
 @pytest.mark.parametrize(
     ("score", "expected_zone", "expected_type", "expected_side"),
     (
+        # 2026-07-26 zone spec: directional at |35|, sideways within |25|.
+        # The |25|-|35| hold band is covered separately -- it maps to no
+        # contract class at all, which is the point of it.
         (-100, dashboard.TREND_SCORE_PE_ZONE, "PE", "long"),
-        (-25, dashboard.TREND_SCORE_PE_ZONE, "PE", "long"),
-        (-24.999, dashboard.TREND_SCORE_MOVE_ZONE, "MOVE", "short"),
+        (-35, dashboard.TREND_SCORE_PE_ZONE, "PE", "long"),
+        (-25, dashboard.TREND_SCORE_MOVE_ZONE, "MOVE", "short"),
         (0, dashboard.TREND_SCORE_MOVE_ZONE, "MOVE", "short"),
-        (24.999, dashboard.TREND_SCORE_MOVE_ZONE, "MOVE", "short"),
-        (25, dashboard.TREND_SCORE_CE_ZONE, "CE", "long"),
+        (25, dashboard.TREND_SCORE_MOVE_ZONE, "MOVE", "short"),
+        (35, dashboard.TREND_SCORE_CE_ZONE, "CE", "long"),
         (100, dashboard.TREND_SCORE_CE_ZONE, "CE", "long"),
     ),
 )

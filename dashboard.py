@@ -36,7 +36,7 @@ from trend_engine_live import collect_delta_trend_snapshot
 from trend_score_auto import (
     AUTO_TRADE_LOTS as TREND_SCORE_AUTO_LOTS,
     CE_2_ITM as TREND_SCORE_CE_ZONE,
-    PE_3_ITM as TREND_SCORE_PE_ZONE,
+    PE_2_ITM as TREND_SCORE_PE_ZONE,
     SHORT_MOVE as TREND_SCORE_MOVE_ZONE,
     TrendScoreAutoInputError,
     completed_candle_signal_key,

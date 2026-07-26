@@ -150,28 +150,22 @@ def test_this_model_differs_from_legacy_pe_strike_depth():
     assert zones.strike_index_offset(zones.PE_2_ITM) == 2
 
 
-def test_legacy_takes_a_directional_trade_where_this_model_holds():
-    """The hold band is not a no-op relabelling of legacy behaviour.
-
-    Legacy switches directional at |25|, so at a score of 30 it BUYS CALLS.
-    This model holds flat until 35. Across 25 < |score| < 35 the two engines
-    differ by a real position, not by a label -- the single largest expected
-    source of shadow disagreement, and the reason the sideways band cannot be
-    described as "legacy plus hysteresis".
+def test_trend_score_auto_now_delegates_here_so_there_is_one_source_of_truth():
+    """``trend_score_auto.score_zone`` used to own its own thresholds — a
+    hard switch at |25| with no hold band, and PE_3_ITM for puts. It now
+    delegates to this module, so the old divergence is gone by construction
+    rather than by both copies happening to be edited together.
     """
-    from trend_score_auto import CE_2_ITM as LEGACY_CE
-    from trend_score_auto import PE_3_ITM as LEGACY_PE
-    from trend_score_auto import score_zone as legacy_zone
+    from trend_score_auto import score_zone as legacy_entry_point
 
-    assert legacy_zone(30) == LEGACY_CE       # legacy is long calls
-    assert zones.zone_for_score(30) == zones.HOLD    # this model is flat
+    for score in (-100, -50, -35, -30, -25, 0, 25, 30, 35, 50, 100):
+        assert legacy_entry_point(score) == zones.zone_for_score(float(score))
 
-    assert legacy_zone(-30) == LEGACY_PE      # legacy is long puts
-    assert zones.zone_for_score(-30) == zones.HOLD
-
-    # And where both are directional, legacy's put is one strike deeper.
-    assert legacy_zone(-50) == LEGACY_PE
-    assert zones.zone_for_score(-50) == zones.PE_2_ITM
+    # Specifically: the band that used to be a directional trade is now HOLD,
+    # and puts are 2-step rather than 3-step ITM.
+    assert legacy_entry_point(30) == zones.HOLD
+    assert legacy_entry_point(-30) == zones.HOLD
+    assert legacy_entry_point(-50) == zones.PE_2_ITM
 
 
 # ── zone-level shadow comparison ────────────────────────────────────────

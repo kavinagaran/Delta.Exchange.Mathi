@@ -8,6 +8,8 @@ import pytest
 from trend_score_auto import (
     AUTO_TRADE_LOTS,
     CE_2_ITM,
+    HOLD,
+    PE_2_ITM,
     PE_3_ITM,
     SHORT_MOVE,
     TrendScoreAutoInputError,
@@ -78,17 +80,32 @@ def _move_product(expiry, strike, *, product_id=20_001, **changes):
 @pytest.mark.parametrize(
     ("score", "expected"),
     [
-        (-100, PE_3_ITM),
-        (-25, PE_3_ITM),
-        (-24.999, SHORT_MOVE),
+        # 2026-07-26 spec: directional at |35|, sideways within |25|, and a
+        # HOLD hysteresis band between them (previously a hard switch at 25).
+        (-100, PE_2_ITM),
+        (-35, PE_2_ITM),
+        (-34.999, HOLD),
+        (-25.001, HOLD),
+        (-25, SHORT_MOVE),
         (0, SHORT_MOVE),
-        (24.999, SHORT_MOVE),
-        (25, CE_2_ITM),
+        (25, SHORT_MOVE),
+        (25.001, HOLD),
+        (34.999, HOLD),
+        (35, CE_2_ITM),
         (100, CE_2_ITM),
     ],
 )
 def test_score_zone_uses_inclusive_directional_boundaries(score, expected):
     assert score_zone(score) == expected
+
+
+def test_score_zone_delegates_to_the_engine_so_thresholds_cannot_drift():
+    """The bands are defined once, in btc_trend_engine.signals.zones. Two
+    copies of a trading threshold is how they end up disagreeing."""
+    from btc_trend_engine.signals import zones
+
+    for score in (-100, -35, -30, -25, 0, 25, 30, 35, 100):
+        assert score_zone(score) == zones.zone_for_score(float(score))
 
 
 @pytest.mark.parametrize("score", [None, True, float("nan"), float("inf"), -100.01, 100.01])
@@ -382,7 +399,7 @@ def test_transition_closes_then_opens_new_zone_on_same_signal():
     )
     assert plan["action"] == "CLOSE_THEN_OPEN"
     assert plan["current_zone"] == SHORT_MOVE
-    assert plan["open_zone"] == PE_3_ITM
+    assert plan["open_zone"] == PE_2_ITM
     assert plan["close_position"] == move
 
 
@@ -401,3 +418,34 @@ def test_transition_fails_closed_for_multiple_or_unrecognized_positions():
             signal_key="signal-4",
             owned_positions=[{"symbol": "UNKNOWN", "side": "long"}],
         )
+
+
+def test_pe_2_itm_selects_two_steps_above_atm():
+    """2026-07-26 spec: puts are 2-step ITM, symmetric with calls. The legacy
+    PE_3_ITM path stays alive only so an old position remains closable."""
+    expiry = NOW + timedelta(hours=6)
+    products = _products(
+        expiry, [64200, 64400, 64600, 64800, 65000, 65200, 65400, 65600]
+    )
+    target = next(row for row in products if row["symbol"].startswith("P-BTC-65200-"))
+    selected = select_directional_option(
+        products, [_executable(target)], spot=64850, zone=PE_2_ITM, now=NOW
+    )
+    assert selected["atm_strike"] == 64800
+    assert selected["strike"] == 65200
+    assert selected["itm_steps"] == 2
+
+
+def test_call_and_put_step_depth_are_now_symmetric():
+    expiry = NOW + timedelta(hours=6)
+    strikes = [64200, 64400, 64600, 64800, 65000, 65200, 65400]
+    products = _products(expiry, strikes)
+    call = next(r for r in products if r["symbol"].startswith("C-BTC-64400-"))
+    put = next(r for r in products if r["symbol"].startswith("P-BTC-65200-"))
+    ce = select_directional_option(products, [_executable(call)], spot=64850,
+                                   zone=CE_2_ITM, now=NOW)
+    pe = select_directional_option(products, [_executable(put)], spot=64850,
+                                   zone=PE_2_ITM, now=NOW)
+    assert ce["itm_steps"] == pe["itm_steps"] == 2
+    # Equidistant from ATM, in opposite directions.
+    assert ce["atm_strike"] - ce["strike"] == pe["strike"] - pe["atm_strike"]

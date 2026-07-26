@@ -19,10 +19,12 @@ from datetime import datetime, timezone
 from typing import Any, Collection, Mapping, Sequence
 
 
-PE_3_ITM = "PE_3_ITM"
+PE_3_ITM = "PE_3_ITM"   # legacy strike policy; still closable, never opened
+PE_2_ITM = "PE_2_ITM"   # 2026-07-26 spec
 SHORT_MOVE = "SHORT_MOVE"
 CE_2_ITM = "CE_2_ITM"
-SCORE_ZONES = frozenset({PE_3_ITM, SHORT_MOVE, CE_2_ITM})
+HOLD = "HOLD"
+SCORE_ZONES = frozenset({PE_3_ITM, PE_2_ITM, SHORT_MOVE, CE_2_ITM, HOLD})
 
 AUTO_TRADE_LOTS = 1_000
 MIN_TIME_TO_EXPIRY_SECONDS = 90 * 60
@@ -75,9 +77,17 @@ def _iso_utc(value: datetime) -> str:
 def score_zone(score: Any) -> str:
     """Return the exact approved action zone for a validated engine score.
 
-    ``-25`` belongs to the bearish PE zone and ``+25`` belongs to the bullish
-    CE zone.  A missing/invalid score is never treated as neutral because that
-    would turn a feed failure into permission to short MOVE.
+    Thresholds come from ``btc_trend_engine.signals.zones`` — the single
+    source of truth for the 2026-07-26 operator spec — rather than being
+    duplicated here, so the two modules cannot drift apart:
+
+        |score| >= 35   directional (CE_2_ITM / PE_2_ITM, both 2-step ITM)
+        |score| <= 25   SHORT_MOVE
+        otherwise       HOLD (hysteresis band: no new action, keep any open
+                        position; see zones.should_exit)
+
+    A missing/invalid score is never treated as neutral, because that would
+    turn a feed failure into permission to short MOVE.
     """
 
     value = _finite(score, "direction_score")
@@ -85,11 +95,9 @@ def score_zone(score: Any) -> str:
         raise TrendScoreAutoInputError(
             "direction_score must be between -100 and 100"
         )
-    if value <= -25:
-        return PE_3_ITM
-    if value >= 25:
-        return CE_2_ITM
-    return SHORT_MOVE
+    from btc_trend_engine.signals import zones
+
+    return zones.zone_for_score(value)
 
 
 def completed_candle_signal_key(
@@ -246,18 +254,22 @@ def select_directional_option(
 
     The earliest listed operational expiry with at least 90 minutes remaining
     is authoritative.  CE selects ``ATM index - 2`` and PE selects
-    ``ATM index + 3``.  If that exact product is absent or not executable for
-    all 1,000 lots, the function returns ``None``; it never shifts strike or
-    tries a later expiry.
+    ``ATM index + 2`` (2026-07-26 spec; PE was ``+3`` before, making the
+    policy asymmetric).  ``PE_3_ITM`` is still accepted so a position opened
+    under the old policy can be selected and closed.  If that exact product
+    is absent or not executable for all 1,000 lots, the function returns
+    ``None``; it never shifts strike or tries a later expiry.
     """
 
     if zone == CE_2_ITM:
         option_type, steps, direction = "CE", 2, -1
+    elif zone == PE_2_ITM:
+        option_type, steps, direction = "PE", 2, 1
     elif zone == PE_3_ITM:
         option_type, steps, direction = "PE", 3, 1
     else:
         raise TrendScoreAutoInputError(
-            "zone must be CE_2_ITM or PE_3_ITM for option selection"
+            "zone must be CE_2_ITM, PE_2_ITM or PE_3_ITM for option selection"
         )
     current = _utc_time(now, "now")
     current_spot = _finite(spot, "spot")
