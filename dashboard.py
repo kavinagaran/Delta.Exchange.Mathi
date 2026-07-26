@@ -26,7 +26,8 @@ from urllib.parse import quote, urlencode
 import requests as req
 from dotenv import load_dotenv, set_key
 from flask import (Flask, jsonify, request, abort, session,
-                   redirect, render_template, has_request_context, g)
+                   redirect, render_template, has_request_context, g,
+                   send_file)
 
 import trend_engine_client
 from risk_controls import (account_entry_lock, account_file_lock, audit_event,
@@ -3961,6 +3962,24 @@ def tp_monitor_stop():
     if not stopped:
         return jsonify({"ok": False, "error": f"{slot} monitor is not running"}), 400
     return jsonify({"ok": True, "slot": slot})
+
+
+@app.route("/download/apk")
+def download_apk():
+    """Serve the latest built Android APK for sideloading.
+
+    The file is produced by ``flutter build apk --release`` in ``mv_btc_bot``
+    and lands at the path below (gitignored build output). On a freshly
+    deployed host it will not exist until an APK is uploaded there, so a
+    missing file is a 404 rather than an error. This path is auth-gated like
+    the rest of the dashboard: the before-request hook returns 401 (not a
+    login redirect) for ``/download/`` when unauthenticated, so callers reach
+    it via a logged-in browser session or the app's HTTP Basic credentials.
+    """
+    apk = BASE / "mv_btc_bot" / "build" / "app" / "outputs" / "flutter-apk" / "app-release.apk"
+    if not apk.exists():
+        abort(404)
+    return send_file(str(apk), as_attachment=True, download_name="nithi-bot.apk")
 
 
 @app.route("/api/logs")

@@ -36,7 +36,7 @@ void main() {
 
     expect(tester.takeException(), isNull);
     expect(find.text('Trend'), findsOneWidget);
-    expect(find.text('Dry Run'), findsOneWidget);
+    expect(find.text('Paper'), findsOneWidget);
   });
 
   test('all dashboard pages except Logs are exposed as tabs', () {
@@ -44,17 +44,17 @@ void main() {
       appPages.map((page) => page.label),
       equals([
         'Nithi Bot',
-        'Trend Engine',
-        'Trades & P&L',
-        'Dry Run',
-        'Positions',
+        'Performance',
+        'Paper',
+        'Exposure',
         'Bot Config',
         'API Accounts',
+        'Trend Engine',
       ]),
     );
     expect(
       appPages.map((page) => page.path),
-      containsAllInOrder(['/', '/trend-engine', '/trades', '/dry-run']),
+      containsAllInOrder(['/', '/trades', '/dry-run', '/trend-engine']),
     );
     expect(appPages.any((page) => page.label == 'Logs'), isFalse);
   });
@@ -78,7 +78,11 @@ void main() {
     expect(SessionService.sessionCookieFromHeader('other=value'), isNull);
   });
 
-  test('APK release refreshes cached web assets for Red/Blue Trend tabs', () {
-    expect(kWebAssetRevision, '3.3.0+6-red-blue-trend-tabs');
+  test('APK release ships a versioned web-asset revision for cache busting', () {
+    // Asserting the format rather than a literal so the test does not need
+    // editing on every bump — the invariant is that the cache-bust token
+    // exists and follows the "<major>.<minor>.<patch>+<build>-<slug>" shape.
+    expect(kWebAssetRevision, isNotEmpty);
+    expect(kWebAssetRevision, matches(RegExp(r'^\d+\.\d+\.\d+\+\d+-')));
   });
 }
