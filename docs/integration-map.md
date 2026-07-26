@@ -105,7 +105,7 @@ Modules `trend_engine.py`, `trend_scenario.py`, `trend_score_auto.py`,
 `trend_engine_live.py`; the `dashboard.py` legacy chain (`_trend_snapshot`,
 `/api/trend`, `/api/trend-engine` and its `_trend_engine_*` preview/token
 chain, `_maybe_auto_trend_entry`, `/api/trend-entry`, `_trend_lot_plan`,
-`_debounced_hourly_trend`, the `/trend-engine-legacy` page); and ten legacy
+`_debounced_hourly_trend`, the retired discretionary Trend Engine page); and ten legacy
 trend test files. Only after 14 days at full lots.
 
 ## Already retired (Phase 0)

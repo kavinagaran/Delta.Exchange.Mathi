@@ -97,7 +97,6 @@ _trend_auto_last_attempt: dict[str, float] = {}
 _trend_auto_health: dict[str, dict] = {}
 _trend_debounce: dict[str, dict] = {}
 _trend_shadow_seen: dict[str, str] = {}
-_trend_engine_cache: dict[tuple[str, str, str, str], dict] = {}
 _trend_score_auto_cycle_locks: dict[str, threading.Lock] = {}
 _trend_score_auto_health: dict[str, dict] = {}
 TREND_ENGINE_DRY_PREVIEW_TTL_SECONDS = 120
@@ -1179,11 +1178,6 @@ def _trend_score_auto_config_error(config: dict | None = None) -> str | None:
     if mode == "live":
         if not _config_truthy(cfg.get("SAFE_EXECUTION_ENABLED"), True):
             return "LIVE Trend score automation requires safe IOC execution"
-        if not _config_truthy(cfg.get("ALLOW_SHORT_MOVE"), False):
-            return (
-                "LIVE Trend score automation requires Short MOVE because the "
-                "neutral score zone always sells MOVE"
-            )
         short_cap = number("SHORT_MAX_RISK_USD", 0)
         if not math.isfinite(short_cap) or short_cap < sl:
             return (
@@ -1763,7 +1757,6 @@ def _pnl_stats(trades: list, *, dry_run: bool = False) -> dict:
 _PAGES = {
     "":          ("overview.html",  "Today"),
     "trend-engine": ("trend_engine.html", "Trend Engine"),
-    "trend-engine-legacy": ("trend_engine_legacy.html", "Trend Engine (Legacy)"),
     "dry-run":   ("dry_run.html",   "Paper"),
     "trades":    ("trades.html",    "Performance"),
     "positions": ("positions.html", "Exposure"),
@@ -5049,17 +5042,23 @@ def api_trend():
                         "error": str(e)}), 502
 
 
-# ── btc_trend_engine proxy (Trend Engine page, shadow mode) ────────────────
+# ── btc_trend_engine proxy (Trend Engine page) ─────────────────────────────
 # Read-only pass-through to trend_engine_client.py. This engine holds no
 # trading credentials and cannot place an order (ADR 0001) -- these routes
 # exist purely so the browser doesn't need a second origin/token to display
-# what the engine currently thinks. Never a decision input for the live
-# automation loop below; that stays on the legacy /api/trend-engine chain
-# until the shadow-mode cutover ladder (Trend_Engine.md §8/P8) says otherwise.
+# what the engine currently thinks. /snapshot is the committed candle-close
+# decision used by score automation; /live is provisional display data and has
+# no signal_id or entry permission fields by construction.
 @app.route("/api/engine/snapshot")
 def api_engine_snapshot():
     symbol = request.args.get("symbol", "BTCUSD")
     return jsonify(trend_engine_client.get_snapshot(symbol))
+
+
+@app.route("/api/engine/live")
+def api_engine_live():
+    symbol = request.args.get("symbol", "BTCUSD")
+    return jsonify(trend_engine_client.get_live_view(symbol))
 
 
 @app.route("/api/engine/health")
@@ -5255,67 +5254,6 @@ def _collect_fresh_trend_engine_decision(
         # never permission to fall back to guessed values.
         print(f"Trend Engine collection warning for {_active_user()}: {exc}")
         return _trend_engine_invalid_decision(exc, effective_engine_config), None
-
-
-@app.route("/api/trend-engine")
-def api_trend_engine():
-    """Read-only, account-scoped rules engine; this endpoint cannot trade."""
-    user = _active_user()
-    try:
-        mode = _trading_mode_payload()
-        engine_config = _trend_engine_config_overrides()
-        strategy_config = _trend_engine_strategy_config()
-    except Exception as exc:
-        decision = _trend_engine_invalid_decision(exc)
-        decision["audit"] = {
-            **decision.get("audit", {}), "order_submitted": False,
-        }
-        return jsonify(decision)
-
-    config_fingerprint = hashlib.sha256(json.dumps(
-        {"engine": engine_config, "adapter": strategy_config},
-        sort_keys=True, separators=(",", ":"), default=str,
-    ).encode("utf-8")).hexdigest()[:16]
-    cache_key = (
-        user, mode["execution_mode"], mode["mode_revision"], config_fingerprint,
-    )
-    cached = _trend_engine_cache.get(cache_key, {})
-    force = str(request.args.get("refresh") or "").lower() in {
-        "1", "true", "yes", "on",
-    }
-    if (not force and isinstance(cached.get("decision"), dict)
-            and cached["decision"].get("decision") == "NO_TRADE"
-            and time.time() - float(cached.get("at", 0)) < 15):
-        return jsonify(cached["decision"])
-
-    decision, _ = _collect_fresh_trend_engine_decision(
-        mode=mode,
-        engine_config=engine_config,
-        strategy_config=strategy_config,
-    )
-
-    audit = decision.get("audit") if isinstance(decision.get("audit"), dict) else {}
-    decision["audit"] = {
-        **audit,
-        "execution_mode": mode["execution_mode"],
-        "mode_revision": mode["mode_revision"],
-        "order_submitted": False,
-    }
-    if decision.get("decision") == "NO_TRADE":
-        _trend_engine_cache[cache_key] = {"at": time.time(), "decision": decision}
-    else:
-        _trend_engine_cache.pop(cache_key, None)
-    try:
-        data_dir = _mode_data_dir(mode["dry_run_mode"])
-        with account_file_lock(
-            data_dir, "trend-engine", f"dashboard-trend-engine-{os.getpid()}",
-            stale_after_sec=30, wait_sec=1,
-        ) as acquired:
-            if acquired:
-                _atomic_write_json(data_dir / "trend_engine_decision.json", decision)
-    except Exception as exc:
-        print(f"Trend Engine audit warning for {user}: {exc}")
-    return jsonify(decision)
 
 
 def _trend_engine_signal_fingerprint(
@@ -7742,14 +7680,28 @@ def _collect_trend_score_auto_signal() -> dict:
         raise RuntimeError(
             f"trend engine is not healthy ({engine_quality}); entries fail closed")
     score = float(engine_snapshot["trend_score"])
-    zone = str(engine_snapshot["zone"])
+    expected_zone = score_zone(score)
+    zone = str(engine_snapshot.get("zone") or "").strip().upper()
+    if zone != expected_zone:
+        raise RuntimeError(
+            "trend engine score and zone disagree "
+            f"({score:+.1f} maps to {expected_zone}, received {zone or 'missing'})"
+        )
+    engine_signal_id = str(engine_snapshot.get("signal_id") or "").strip()
+    if not engine_signal_id:
+        raise RuntimeError("trend engine committed signal has no signal_id")
+    zone_action_allowed = engine_snapshot.get("zone_action_allowed") is True
+    zone_reason = str(engine_snapshot.get("zone_reason") or "").strip()
     decision = {
         "direction_score": score,
         "market_regime": engine_snapshot.get("regime") or "UNCLEAR",
-        "engine_signal_id": engine_snapshot.get("signal_id"),
+        "engine_signal_id": engine_signal_id,
         "engine_candle_close_utc": engine_snapshot.get("candle_close_utc"),
-        "zone_action_allowed": bool(engine_snapshot.get("zone_action_allowed")),
-        "zone_reason": engine_snapshot.get("zone_reason"),
+        "zone_action_allowed": zone_action_allowed,
+        "zone_reason": zone_reason,
+        "decision_id": engine_signal_id,
+        "model_version": engine_snapshot.get("model_version"),
+        "schema_version": engine_snapshot.get("schema_version"),
         "source": "btc_trend_engine",
     }
     # HOLD is not an action: no entry, and no exit either (zones.should_exit).
@@ -7757,7 +7709,6 @@ def _collect_trend_score_auto_signal() -> dict:
     if zone == TREND_SCORE_HOLD_ZONE:
         raise RuntimeError(
             f"score {score:+.1f} is in the hold band; no new action")
-    signal_key = completed_candle_signal_key(snapshot)
     complete_rows = [
         row for row in ((snapshot.get("candles") or {}).get("5m") or [])
         if isinstance(row, dict) and row.get("complete") is True
@@ -7773,13 +7724,50 @@ def _collect_trend_score_auto_signal() -> dict:
     )
     if opened_at.tzinfo is None:
         opened_at = opened_at.replace(tzinfo=timezone.utc)
-    bar_close = (opened_at.astimezone(timezone.utc) + timedelta(minutes=5))
+    opened_at = opened_at.astimezone(timezone.utc)
+    try:
+        engine_candle = datetime.fromisoformat(
+            str(engine_snapshot.get("candle_close_utc") or "").replace(
+                "Z", "+00:00"
+            )
+        )
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(
+            "trend engine committed signal has an invalid candle_close_utc"
+        ) from exc
+    if engine_candle.tzinfo is None:
+        engine_candle = engine_candle.replace(tzinfo=timezone.utc)
+    engine_candle = engine_candle.astimezone(timezone.utc)
+    if engine_candle != opened_at:
+        raise RuntimeError(
+            "trend engine and contract snapshot are on different completed "
+            f"5-minute candles ({engine_candle.isoformat()} != "
+            f"{opened_at.isoformat()})"
+        )
+    # Keep the existing durable key format for ledger compatibility, but derive
+    # it only after proving that the dashboard candle is exactly the engine's
+    # committed candle. The engine signal_id is retained separately below.
+    signal_key = (
+        "trend-score-auto|BTCUSD|5m|"
+        f"{engine_candle.isoformat().replace('+00:00', 'Z')}"
+    )
+    if signal_key != completed_candle_signal_key(snapshot):
+        raise RuntimeError(
+            "trend engine symbol/candle identity does not match market evidence"
+        )
+    bar_close = opened_at + timedelta(minutes=5)
     signal = {
         "mode": mode,
         "snapshot": snapshot,
         "decision": decision,
         "score": score,
         "zone": zone,
+        "zone_action_allowed": zone_action_allowed,
+        "zone_reason": zone_reason,
+        "engine_signal_id": engine_signal_id,
+        "engine_candle_close_utc": engine_candle.isoformat().replace(
+            "+00:00", "Z"
+        ),
         "signal_key": signal_key,
         "signal_bar_close_utc": bar_close.isoformat().replace("+00:00", "Z"),
         "market_regime": str(decision.get("market_regime") or "UNCLEAR"),
@@ -7895,6 +7883,12 @@ def _trend_score_auto_move_quote(symbol: str) -> dict:
 
 def _prepare_trend_score_auto_entry(signal: dict) -> dict:
     """Resolve and validate the exact public contract for a score zone."""
+    if signal.get("zone_action_allowed") is not True:
+        reason = str(signal.get("zone_reason") or "").strip()
+        raise RuntimeError(
+            "trend engine blocked entry for this zone"
+            + (f": {reason}" if reason else "")
+        )
     zone = signal["zone"]
     snapshot = signal["snapshot"]
     spot = _trend_score_auto_number(
@@ -7911,7 +7905,7 @@ def _prepare_trend_score_auto_entry(signal: dict) -> dict:
         )
         if not selection:
             label = "2-step ITM CALL" if zone == TREND_SCORE_CE_ZONE \
-                else "3-step ITM PUT"
+                else "2-step ITM PUT"
             raise RuntimeError(
                 f"No exact executable {label} contract is available"
             )
@@ -8208,7 +8202,10 @@ def _trend_score_auto_signal_in_flight(
     if str(transition.get("signal_key") or "") != str(signal_key or ""):
         return False
     phase = str(transition.get("phase") or "").strip().upper()
-    return bool(phase) and phase != "COMPLETE"
+    # REBUILD_REQUIRED is a durable instruction to discard an unsafe pre-POST
+    # intent and rebuild it from current evidence. Treating it as in-flight
+    # deadlocked the very next retry forever.
+    return bool(phase) and phase not in {"COMPLETE", "REBUILD_REQUIRED"}
 
 
 def _trend_score_auto_register_notification(
@@ -8503,8 +8500,6 @@ def _trend_score_auto_live_risk_snapshot(
             raise RuntimeError("available USD balance is invalid")
 
     if is_short:
-        if not _config_truthy(cfg.get("ALLOW_SHORT_MOVE"), False):
-            raise RuntimeError("Short MOVE entries are disabled")
         short_cap = _trend_score_auto_number(
             cfg.get("SHORT_MAX_RISK_USD"), "maximum short risk", positive=True,
         )

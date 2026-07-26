@@ -377,9 +377,10 @@ function dryTrendScoreAutoEnabled() {
 function dryTrendScoreTarget(status) {
   if (dryKnownNumber(status?.direction_score)) {
     const score = Number(status.direction_score);
-    if (score <= -40) return 'Buy 3-step ITM PUT';
-    if (score >= 40) return 'Buy 2-step ITM CALL';
-    return 'Sell MOVE';
+    if (score <= -35) return 'Buy 2-step ITM PUT';
+    if (score >= 35) return 'Buy 2-step ITM CALL';
+    if (Math.abs(score) <= 25) return 'Sell ATM MOVE';
+    return 'HOLD — no new entry';
   }
   const zone = String(status?.engine_zone || '').trim();
   return zone ? dryEngineDecisionLabel(zone) : 'Waiting for a valid closed-bar score';
@@ -452,7 +453,7 @@ function dryTrendScoreAutoHtml() {
     ${reachability}${error}
     <p class="dry-engine-action-copy">No confirmation is required. The older Phase-1 manual “Start simulation” control is disabled while this controller is active.</p>
     <div class="dry-engine-actions">
-      <a href="/trend-engine-legacy" class="btn secondary sm">View full analysis</a>
+      <a href="/trend-engine" class="btn secondary sm">View Trend Engine</a>
     </div>
     <small>Simulation only — no exchange order will be placed and no real balance will be affected.</small>
   </section>`;
@@ -560,7 +561,7 @@ function dryTrendEngineHtml(preview) {
     </dl>
     <p class="dry-engine-action-copy">${esc(actionCopy)}</p>
     <div class="dry-engine-actions">
-      <a href="/trend-engine-legacy" class="btn secondary sm">View full analysis</a>
+      <a href="/trend-engine" class="btn secondary sm">View Trend Engine</a>
       ${canStart ? `<button class="btn ${decision === 'BUY_CE' ? 'success' : 'danger'} sm"
         id="dry-trend-engine-start" type="button" onclick="startDryTrendEngineSimulation()">
         Start ${decision === 'BUY_CE' ? 'CE' : 'PE'} simulation

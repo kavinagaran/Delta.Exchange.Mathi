@@ -577,7 +577,7 @@ async function saveConfig() {
   if (scoreAutoMode === 'dry_run' && window._loadedScoreAutoMode !== 'dry_run' &&
       !confirm(
         'Enable automatic DRY RUN trading from Trend Engine scores?\n\n' +
-        'Every eligible order uses exactly 1,000 lots. Scores from −100 through −40 buy a 3-step ITM PUT; scores above −40 and below +40 sell MOVE immediately; scores from +40 through +100 buy a 2-step ITM CALL.\n\n' +
+        'Every eligible order uses exactly 1,000 lots. Scores from −100 through −35 buy a 2-step ITM PUT; scores from −25 through +25 sell ATM MOVE; scores from +35 through +100 buy a 2-step ITM CALL. The gaps between 25 and 35 are HOLD bands with no new entry.\n\n' +
         'The controller keeps one simulated position, closes and switches it automatically when the score range changes, and also exits on TP, TSL or SL. No LIVE order can be placed by this controller.')) return;
   if (scoreAutoMode === 'live' && window._loadedScoreAutoMode !== 'live' &&
       !confirm(

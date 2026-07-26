@@ -48,6 +48,9 @@ def _score_signal(mode: dict, *, score=60.0, zone=None, suffix="10:00:00Z"):
         },
         "score": score,
         "zone": zone,
+        "zone_action_allowed": True,
+        "zone_reason": "test signal allowed",
+        "engine_signal_id": f"engine-{suffix}",
         "signal_key": f"trend-score-auto|BTCUSD|5m|2026-07-22T{suffix}",
         "signal_bar_close_utc": f"2026-07-22T{suffix}",
         "market_regime": "TRENDING" if zone != dashboard.TREND_SCORE_MOVE_ZONE else "RANGE",
@@ -335,6 +338,101 @@ def test_score_signal_collector_is_dry_public_only_and_never_authenticates(
     sign.assert_not_called()
     raw_post.assert_not_called()
     raw_delete.assert_not_called()
+
+
+def test_score_collector_rejects_a_different_engine_candle(
+        isolated_score_account, monkeypatch):
+    _write(isolated_score_account / "config.json", _safe_score_config())
+    market_snapshot = {
+        "underlying": "BTCUSD",
+        "market": {"spot": 65_850},
+        "candles": {"5m": [{
+            "timestamp": "2026-07-22T10:00:00Z",
+            "open": 65_800,
+            "high": 65_900,
+            "low": 65_750,
+            "close": 65_850,
+            "volume": 10,
+            "complete": True,
+        }]},
+        "option_contracts": [],
+    }
+    monkeypatch.setattr(
+        dashboard,
+        "collect_delta_trend_snapshot",
+        lambda **kwargs: copy.deepcopy(market_snapshot),
+    )
+    monkeypatch.setattr(
+        dashboard.trend_engine_client,
+        "get_snapshot",
+        lambda symbol="BTCUSD": {
+            "schema_version": "1.1.0",
+            "data_quality": "OK",
+            "trend_score": 55.0,
+            "zone": "CE_2_ITM",
+            "regime": "TREND_UP",
+            "signal_id": "engine-previous-candle",
+            "candle_close_utc": "2026-07-22T09:55:00Z",
+            "zone_action_allowed": True,
+            "zone_reason": "bullish",
+        },
+    )
+    monkeypatch.setattr(dashboard, "_trend_engine_config_overrides", lambda: {})
+    monkeypatch.setattr(dashboard, "_trend_engine_strategy_config", lambda: {})
+
+    with pytest.raises(RuntimeError, match="different completed 5-minute candles"):
+        dashboard._collect_trend_score_auto_signal()
+
+
+def test_score_collector_rejects_a_zone_that_disagrees_with_the_score(
+        isolated_score_account, monkeypatch):
+    _write(isolated_score_account / "config.json", _safe_score_config())
+    monkeypatch.setattr(
+        dashboard,
+        "collect_delta_trend_snapshot",
+        lambda **kwargs: {
+            "underlying": "BTCUSD",
+            "market": {"spot": 65_850},
+            "candles": {"5m": [{
+                "timestamp": "2026-07-22T10:00:00Z",
+                "open": 65_800,
+                "high": 65_900,
+                "low": 65_750,
+                "close": 65_850,
+                "volume": 10,
+                "complete": True,
+            }]},
+            "option_contracts": [],
+        },
+    )
+    monkeypatch.setattr(
+        dashboard.trend_engine_client,
+        "get_snapshot",
+        lambda symbol="BTCUSD": {
+            "data_quality": "OK",
+            "trend_score": 55.0,
+            "zone": "PE_2_ITM",
+            "regime": "TREND_UP",
+            "signal_id": "engine-inconsistent",
+            "candle_close_utc": "2026-07-22T10:00:00Z",
+            "zone_action_allowed": True,
+            "zone_reason": "inconsistent",
+        },
+    )
+    monkeypatch.setattr(dashboard, "_trend_engine_config_overrides", lambda: {})
+    monkeypatch.setattr(dashboard, "_trend_engine_strategy_config", lambda: {})
+
+    with pytest.raises(RuntimeError, match="score and zone disagree"):
+        dashboard._collect_trend_score_auto_signal()
+
+
+def test_contract_preparation_honours_engine_zone_action_gate():
+    with pytest.raises(RuntimeError, match="engine blocked entry.*book invalid"):
+        dashboard._prepare_trend_score_auto_entry({
+            "zone": dashboard.TREND_SCORE_CE_ZONE,
+            "zone_action_allowed": False,
+            "zone_reason": "book invalid",
+        })
 
 
 def test_corrupt_score_mode_fails_closed_before_collection(

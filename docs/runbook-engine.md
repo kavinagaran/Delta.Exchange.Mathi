@@ -65,7 +65,7 @@ curl -s -H "X-Engine-Token: $ENGINE_TOKEN" http://127.0.0.1:5055/status | python
 | `data_quality` | `OK` | see table below |
 | `book.state` | `valid` | transient after (re)connect; persistent → check `book.gaps` growth |
 | `feeds.*.freshness` | `fresh` | `stale` on all feeds → venue or network outage |
-| `clock_drift_ms` | \|x\| ≤ 500 | fix NTP/chrony on the host |
+| `clock_drift_ms` | \|x\| ≤ 5000 | verify host time and venue timestamp offset |
 | `raw_capture_enabled` | `true` | disk below floor — prune or grow the volume |
 | `ws_connects` | small, stable | rapid growth → reconnect churn; check venue status |
 
@@ -74,7 +74,7 @@ curl -s -H "X-Engine-Token: $ENGINE_TOKEN" http://127.0.0.1:5055/status | python
 | `STALE_L1` | trades/ticker feed silent | disconnect, venue halt |
 | `STALE_L2` | book feed silent | l2 channel trouble |
 | `BOOK_INVALID` | rebuilding after gap/disconnect | normal for seconds; investigate if persistent |
-| `CLOCK_DRIFT` | host clock vs venue > 500 ms sustained | NTP broken |
+| `CLOCK_DRIFT` | host clock vs venue > 5 seconds sustained | host time or venue timestamp fault |
 
 All of these are *engine-side*; the dashboard client adds its own
 (`ENGINE_UNREACHABLE`, …) per the contract doc.

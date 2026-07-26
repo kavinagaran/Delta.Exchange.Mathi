@@ -162,3 +162,11 @@ def test_config_refuses_non_loopback_bind(tmp_path):
             "ENGINE_TOKEN": "t",
             "ENGINE_ENGINE__HOST": "0.0.0.0",
             "ENGINE_STORAGE__DATA_DIR": str(tmp_path)})
+
+
+def test_default_clock_tolerance_matches_delta_timestamp_window(tmp_path):
+    config = load_config(environ={
+        "ENGINE_TOKEN": "t",
+        "ENGINE_STORAGE__DATA_DIR": str(tmp_path),
+    })
+    assert config.data_quality.max_clock_drift_ms == 5000.0

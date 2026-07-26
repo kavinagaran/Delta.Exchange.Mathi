@@ -5,18 +5,13 @@
 
   <div class="te-page-head">
     <div>
-      <span class="te-kicker">BTC_TREND_ENGINE · TRANSPARENT SCORE</span>
+      <span class="te-kicker">BTC TREND ENGINE</span>
       <h2>Trend Engine</h2>
     </div>
     <button class="btn secondary te-refresh" id="te-refresh" type="button">
       <span aria-hidden="true">↻</span>
       <span id="te-refresh-label">Refresh</span>
     </button>
-  </div>
-
-  <div class="te-readonly-notice" role="note">
-    <strong>Read-only signal</strong>
-    <span>This engine never submits an order — it publishes a market-direction snapshot once per closed 5-minute candle. It holds no trading credentials and cannot place an order. Looking for the live discretionary engine? <a href="/trend-engine-legacy">Trend Engine (Legacy) →</a></span>
   </div>
 
   <div class="te-alert" id="te-error" role="alert" hidden>
@@ -39,18 +34,43 @@
         <div><span>Underlying</span><strong id="te-underlying">—</strong></div>
         <div><span>Direction</span><strong id="te-direction">—</strong></div>
         <div><span>Confidence</span><strong id="te-confidence">—</strong></div>
-        <div><span>Data quality</span><strong id="te-data-quality">—</strong></div>
+        <div class="te-quality-fact">
+          <span>Data quality</span>
+          <strong id="te-data-quality">—</strong>
+          <small id="te-data-quality-detail">Waiting for market data.</small>
+        </div>
       </div>
       <p class="te-asof" id="te-asof"></p>
     </div>
     <div class="te-score-wrap" id="te-score-wrap">
-      <div class="te-score-gauge" id="te-score-gauge" role="meter" aria-label="Trend score" aria-valuemin="-100" aria-valuemax="100" aria-valuenow="0">
-        <div class="te-score-core">
-          <strong id="te-trend-score">—</strong>
-          <span>Trend score</span>
+      <div class="te-score-pair">
+        <div class="te-score-item">
+          <div class="te-score-gauge" id="te-live-score-gauge" role="meter" aria-label="Live preview score" aria-valuemin="-100" aria-valuemax="100" aria-valuenow="0">
+            <div class="te-score-core">
+              <span>Live preview</span>
+              <strong id="te-live-score">—</strong>
+            </div>
+          </div>
+          <div class="te-decision-capsule is-waiting" id="te-live-decision">
+            <span>Preview decision</span>
+            <strong>Waiting</strong>
+          </div>
+          <time id="te-live-time">—</time>
+        </div>
+        <div class="te-score-item">
+          <div class="te-score-gauge" id="te-committed-score-gauge" role="meter" aria-label="Committed decision score" aria-valuemin="-100" aria-valuemax="100" aria-valuenow="0">
+            <div class="te-score-core">
+              <span>Committed decision</span>
+              <strong id="te-committed-score">—</strong>
+            </div>
+          </div>
+          <div class="te-decision-capsule is-waiting" id="te-committed-decision">
+            <span>Trade decision</span>
+            <strong>Waiting</strong>
+          </div>
+          <time id="te-committed-time">—</time>
         </div>
       </div>
-      <div class="te-score-foot"><span>BEARISH −100</span><span>BULLISH +100</span></div>
     </div>
   </section>
 
@@ -140,31 +160,9 @@
             <div><dt>Feature set</dt><dd id="te-meta-features">—</dd></div>
             <div><dt>Model version</dt><dd id="te-meta-model">—</dd></div>
             <div><dt>Signal id</dt><dd id="te-meta-signal-id">—</dd></div>
-            <div><dt>Candle close (UTC)</dt><dd id="te-meta-candle-close">—</dd></div>
+            <div><dt>Candle close (IST)</dt><dd id="te-meta-candle-close">—</dd></div>
           </dl>
         </details>
-      </div>
-    </section>
-  </div>
-
-  <div class="te-two-col">
-    <section class="card" aria-labelledby="te-shadow-title">
-      <div class="card-hd">
-        <div><span class="te-kicker">PHASE 8A · SHADOW MODE</span><strong id="te-shadow-title">Legacy vs. engine agreement</strong></div>
-        <span class="pill idle" id="te-shadow-pill"><span class="dot"></span>Checking…</span>
-      </div>
-      <div class="card-bd">
-        <p class="fld-hint">The legacy engine still drives every live trade. This
-          compares what it decided against what this engine would have decided,
-          per closed candle — agreement rate is only one of the ten criteria
-          Phase 8 requires before any live stage.</p>
-        <dl class="te-fact-list">
-          <div><dt>Candles compared</dt><dd id="te-shadow-total">—</dd></div>
-          <div><dt>Engine coverage</dt><dd id="te-shadow-coverage">—</dd></div>
-          <div><dt>Agreement rate</dt><dd id="te-shadow-rate">—</dd></div>
-          <div><dt>Engine entry-eligible signals</dt><dd id="te-shadow-eligible">—</dd></div>
-        </dl>
-        <div id="te-shadow-histogram" class="te-reason-codes"></div>
       </div>
     </section>
   </div>
@@ -174,13 +172,70 @@
 
 {% block scripts %}
 <script>
-/* TrendSnapshot v1.0.0 (docs/trend-snapshot-contract.md). This page only
+/* TrendSnapshot v1.1.0 (docs/trend-snapshot-contract.md). This page only
  * ever reads /api/engine/* — a thin proxy onto trend_engine_client.py, which
  * never raises and substitutes a DEGRADED/entry_allowed=false snapshot for
- * every failure mode. There is no code path here that can submit an order. */
+ * every committed-decision failure mode. /live is display-only and has no
+ * signal_id, gates, or entry permission fields. There is no write path here. */
 
 const hasValue = value => value !== null && value !== undefined && value !== '';
 const finite = value => hasValue(value) && Number.isFinite(Number(value));
+const IST_TIME_ZONE = 'Asia/Kolkata';
+
+const DATA_QUALITY_COPY = {
+  OK: {
+    label: 'Good',
+    detail: 'Live price and order-book data passed all freshness checks.',
+  },
+  CLOCK_DRIFT: {
+    label: 'Exchange time mismatch',
+    detail: 'Exchange event time differs from engine time by more than five seconds.',
+  },
+  CLOCK_SKEW: {
+    label: 'Decision time mismatch',
+    detail: 'The committed decision timestamp is more than five seconds ahead.',
+  },
+  STALE_L1: {
+    label: 'Price feed delayed',
+    detail: 'The latest traded-price update is too old to trade safely.',
+  },
+  STALE_L2: {
+    label: 'Order book delayed',
+    detail: 'The latest bid-and-ask update is too old to trade safely.',
+  },
+  BOOK_INVALID: {
+    label: 'Order book unavailable',
+    detail: 'A reliable bid-and-ask view is not available yet.',
+  },
+  FEATURES_INCOMPLETE: {
+    label: 'Building history',
+    detail: 'The engine needs more completed candles before it can decide.',
+  },
+  ENGINE_UNREACHABLE: {
+    label: 'Engine offline',
+    detail: 'The dashboard cannot currently reach the Trend Engine.',
+  },
+  ENGINE_HTTP_ERROR: {
+    label: 'Engine request failed',
+    detail: 'The Trend Engine returned an unsuccessful response.',
+  },
+  SCHEMA_MISMATCH: {
+    label: 'Data format mismatch',
+    detail: 'The dashboard rejected an incomplete or incompatible engine response.',
+  },
+  CONTRACT_VERSION_MISMATCH: {
+    label: 'Version mismatch',
+    detail: 'The dashboard and Trend Engine data versions do not match.',
+  },
+  SIGNAL_EXPIRED: {
+    label: 'Decision expired',
+    detail: 'The last committed decision is too old to use.',
+  },
+  PRIVATE_FEED_DOWN: {
+    label: 'Account feed offline',
+    detail: 'Private account updates are not currently available.',
+  },
+};
 
 function heroTone(snapshot) {
   if (!snapshot || snapshot.data_quality !== 'OK') return 'is-error';
@@ -196,11 +251,132 @@ function directionLabel(direction) {
 }
 
 function regimeLabel(regime) {
-  return String(regime || '—').replace(/_/g, ' ');
+  const key = String(regime || '').toUpperCase();
+  const labels = {
+    TREND_UP: 'Bullish Trend',
+    TREND_DOWN: 'Bearish Trend',
+    RANGE: 'Sideways Market',
+    BREAKOUT_UP: 'Bullish Breakout',
+    BREAKOUT_DOWN: 'Bearish Breakout',
+    HIGH_VOL_SHOCK: 'Volatility Spike',
+    LOW_LIQUIDITY: 'Low Liquidity',
+    DEGRADED: 'Waiting for Reliable Data',
+    TRANSITION: 'Market Transition',
+    UNCLEAR: 'Direction Unclear',
+  };
+  return labels[key] || String(regime || '—').replace(/_/g, ' ');
 }
 
 function formatCode(name) {
   return String(name || '').replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+}
+
+function dataQualityCopy(code) {
+  const key = String(code || '').toUpperCase();
+  return DATA_QUALITY_COPY[key] || {
+    label: key ? formatCode(key) : 'Unknown',
+    detail: key
+      ? 'A market-data safety check needs attention before trading.'
+      : 'The engine did not report a data-quality result.',
+  };
+}
+
+function formatIstTimestamp(value) {
+  if (!hasValue(value)) return '—';
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return String(value);
+  const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', {
+    timeZone: IST_TIME_ZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: true,
+  }).formatToParts(parsed).filter(part => part.type !== 'literal')
+    .map(part => [part.type, part.value]));
+  return `${parts.year}-${parts.month}-${parts.day}:${parts.hour}:${parts.minute} ${parts.dayPeriod} IST`;
+}
+
+function scoreColor(value, quality) {
+  if (quality && String(quality).toUpperCase() !== 'OK') return 'var(--neg)';
+  if (!finite(value)) return 'var(--muted)';
+  const score = Math.max(-100, Math.min(100, Number(value)));
+  const t = (score + 100) / 200;
+  const red = Math.round(255 * (1 - t));
+  const green = Math.round(97 * (1 - t) + 194 * t);
+  const blue = Math.round(114 * (1 - t) + 110 * t);
+  return `rgb(${red}, ${green}, ${blue})`;
+}
+
+function updateScoreGauge(id, value, quality) {
+  const gauge = document.getElementById(id);
+  const score = finite(value) ? Math.max(-100, Math.min(100, Number(value))) : 0;
+  gauge.setAttribute('aria-valuenow', String(score));
+  gauge.style.setProperty('--te-score-angle', `${Math.abs(score) * 3.6}deg`);
+  gauge.style.setProperty('--te-score-tone', scoreColor(value, quality));
+}
+
+function signedScore(value) {
+  if (!finite(value)) return '—';
+  const score = Number(value);
+  return `${score > 0 ? '+' : ''}${score.toFixed(1)}`;
+}
+
+function tradeDecisionMeta(zone, actionAllowed = true) {
+  const key = String(zone || '').toUpperCase();
+  if (key === 'HOLD') {
+    return {
+      label: 'HOLD — NO NEW TRADE',
+      tone: 'is-hold',
+      detail: 'The score is in the transition band, so no new position is opened.',
+    };
+  }
+  if (!key) {
+    return {
+      label: 'NO DECISION',
+      tone: 'is-waiting',
+      detail: 'The engine has not produced a score-zone decision yet.',
+    };
+  }
+  if (actionAllowed === false) {
+    return {
+      label: 'WAIT — CHECKS BLOCKED',
+      tone: 'is-blocked',
+      detail: 'The score has a direction, but one or more safety checks block trading.',
+    };
+  }
+  const decisions = {
+    CE_2_ITM: {
+      label: 'BUY 2-STEP ITM CE',
+      tone: 'is-ce',
+      detail: 'Bullish score zone: buy a two-step in-the-money call.',
+    },
+    PE_2_ITM: {
+      label: 'BUY 2-STEP ITM PE',
+      tone: 'is-pe',
+      detail: 'Bearish score zone: buy a two-step in-the-money put.',
+    },
+    SHORT_MOVE: {
+      label: 'SELL ATM MOVE',
+      tone: 'is-move',
+      detail: 'Sideways score zone: sell the at-the-money MOVE contract.',
+    },
+  };
+  return decisions[key] || {
+    label: formatCode(key),
+    tone: 'is-waiting',
+    detail: 'The engine reported an unrecognized decision zone.',
+  };
+}
+
+function renderTradeDecision(id, zone, actionAllowed, caption) {
+  const element = document.getElementById(id);
+  const meta = tradeDecisionMeta(zone, actionAllowed);
+  element.className = `te-decision-capsule ${meta.tone}`;
+  element.querySelector('span').textContent = caption;
+  element.querySelector('strong').textContent = meta.label;
+  element.title = meta.detail;
 }
 
 function freshnessState(snapshot, now) {
@@ -214,7 +390,7 @@ function freshnessState(snapshot, now) {
   return { cls: 'is-stale', text: 'Expired' };
 }
 
-function renderHero(snapshot) {
+function renderHero(snapshot, liveView) {
   const now = Date.now();
   const hero = document.getElementById('te-hero');
   hero.className = `te-hero ${heroTone(snapshot)}`;
@@ -223,22 +399,51 @@ function renderHero(snapshot) {
   document.getElementById('te-direction').textContent = directionLabel(snapshot.direction);
   document.getElementById('te-confidence').textContent = finite(snapshot.confidence)
     ? `${Math.round(snapshot.confidence * 100)}%` : '—';
-  document.getElementById('te-data-quality').textContent = snapshot.data_quality || '—';
+  const quality = dataQualityCopy(snapshot.data_quality);
+  const qualityEl = document.getElementById('te-data-quality');
+  qualityEl.textContent = quality.label;
+  qualityEl.title = snapshot.data_quality || '';
+  document.getElementById('te-data-quality-detail').textContent = quality.detail;
   document.getElementById('te-asof').textContent = snapshot.timestamp
-    ? `As of ${snapshot.timestamp}` : '';
+    ? `Latest engine update · ${formatIstTimestamp(snapshot.timestamp)}` : '';
 
   const fresh = freshnessState(snapshot, now);
   const freshEl = document.getElementById('te-freshness');
   freshEl.className = `te-freshness ${fresh.cls}`;
   freshEl.textContent = fresh.text;
 
-  const score = finite(snapshot.trend_score) ? Number(snapshot.trend_score) : 0;
-  document.getElementById('te-trend-score').textContent = finite(snapshot.trend_score)
-    ? score.toFixed(1) : '—';
-  const gauge = document.getElementById('te-score-gauge');
-  const clamped = Math.max(-100, Math.min(100, score));
-  gauge.setAttribute('aria-valuenow', String(clamped));
-  gauge.style.setProperty('--te-score-angle', `${Math.abs(clamped) * 3.6}deg`);
+  const liveAvailable = liveView?.available !== false && finite(liveView?.live_score);
+  const liveScore = liveAvailable ? Number(liveView.live_score) : null;
+  const committedScore = finite(snapshot.trend_score)
+    ? Number(snapshot.trend_score) : null;
+  document.getElementById('te-live-score').textContent = signedScore(liveScore);
+  renderTradeDecision(
+    'te-live-decision',
+    liveAvailable ? liveView.live_zone : null,
+    true,
+    'Preview decision',
+  );
+  document.getElementById('te-live-time').textContent =
+    liveAvailable ? formatIstTimestamp(liveView.as_of) : 'No live preview';
+  document.getElementById('te-committed-score').textContent = signedScore(committedScore);
+  renderTradeDecision(
+    'te-committed-decision',
+    snapshot.zone,
+    snapshot.zone_action_allowed === true,
+    'Trade decision',
+  );
+  document.getElementById('te-committed-time').textContent =
+    formatIstTimestamp(snapshot.candle_close_utc || snapshot.timestamp);
+  updateScoreGauge(
+    'te-live-score-gauge',
+    liveScore,
+    liveView?.data_quality || snapshot.data_quality,
+  );
+  updateScoreGauge(
+    'te-committed-score-gauge',
+    committedScore,
+    snapshot.data_quality,
+  );
 }
 
 function renderComponents(components) {
@@ -328,16 +533,23 @@ function renderForecast(snapshot) {
   document.getElementById('te-meta-features').textContent = snapshot.feature_set_version || '—';
   document.getElementById('te-meta-model').textContent = snapshot.model_version || '—';
   document.getElementById('te-meta-signal-id').textContent = snapshot.signal_id || '—';
-  document.getElementById('te-meta-candle-close').textContent = snapshot.candle_close_utc || '—';
+  document.getElementById('te-meta-candle-close').textContent =
+    formatIstTimestamp(snapshot.candle_close_utc);
 }
 
 function renderError(snapshot) {
   const box = document.getElementById('te-error');
   const isDegraded = snapshot.data_quality !== 'OK';
-  box.hidden = !isDegraded;
-  if (isDegraded) {
-    document.getElementById('te-error-copy').textContent =
-      snapshot.client_detail || `data_quality: ${snapshot.data_quality}`;
+  // CLOCK_DRIFT already appears in the Data Quality fact and keeps every
+  // trading gate fail-closed. Repeating it as a page-wide alert is noisy,
+  // especially when the venue's event clock is offset from its REST clock.
+  const showAlert = isDegraded && snapshot.data_quality !== 'CLOCK_DRIFT';
+  box.hidden = !showAlert;
+  if (showAlert) {
+    const quality = dataQualityCopy(snapshot.data_quality);
+    const copy = document.getElementById('te-error-copy');
+    copy.textContent = quality.detail;
+    copy.title = snapshot.client_detail || snapshot.data_quality || '';
   }
 }
 
@@ -367,48 +579,15 @@ async function renderEngineHealth() {
   }
 }
 
-function shadowReasonLabel(reason) {
-  const labels = {
-    agree: 'Agreed', engine_no_snapshot: 'No engine snapshot',
-    engine_data_degraded: 'Engine data degraded', engine_gated_entry: 'Engine gate blocked',
-    direction_opposed: 'Direction opposed',
-    engine_flat_legacy_directional: 'Engine flat, legacy directional',
-    engine_directional_legacy_flat: 'Engine directional, legacy flat',
-  };
-  return labels[reason] || reason;
-}
-
-async function renderShadowSummary() {
-  const pill = document.getElementById('te-shadow-pill');
-  try {
-    const summary = await jget('/api/engine/shadow');
-    if (!summary.available) {
-      _setPill(pill, 'idle', 'Unreachable');
-      return;
-    }
-    _setPill(pill, 'live', 'Recording');
-    document.getElementById('te-shadow-total').textContent = fN(summary.total_candles);
-    document.getElementById('te-shadow-coverage').textContent =
-      finite(summary.engine_coverage) ? `${(summary.engine_coverage * 100).toFixed(1)}%` : '—';
-    document.getElementById('te-shadow-rate').textContent =
-      finite(summary.agreement_rate) ? `${(summary.agreement_rate * 100).toFixed(1)}%` : 'n/a (no comparable candles yet)';
-    document.getElementById('te-shadow-eligible').textContent = fN(summary.engine_entry_eligible_signals);
-    const histogram = summary.disagreement_histogram || {};
-    document.getElementById('te-shadow-histogram').innerHTML = Object.keys(histogram).length
-      ? Object.entries(histogram).map(([reason, count]) =>
-          `<span class="badge sim">${esc(shadowReasonLabel(reason))}: ${fN(count)}</span>`).join(' ')
-      : '<div class="te-empty-state">No candles compared yet.</div>';
-  } catch (e) {
-    _setPill(pill, 'idle', 'Unreachable');
-  }
-}
-
 async function load() {
   document.getElementById('trend-engine-page').setAttribute('aria-busy', 'true');
   try {
-    const snapshot = await jget('/api/engine/snapshot');
+    const [snapshot, liveView] = await Promise.all([
+      jget('/api/engine/snapshot'),
+      jget('/api/engine/live').catch(() => ({ available: false })),
+    ]);
     renderError(snapshot);
-    renderHero(snapshot);
+    renderHero(snapshot, liveView);
     renderComponents(snapshot.components);
     renderTimeframes(snapshot.timeframes);
     renderGates(snapshot.gates);
@@ -421,12 +600,11 @@ async function load() {
     document.getElementById('trend-engine-page').setAttribute('aria-busy', 'false');
   }
   renderEngineHealth();
-  renderShadowSummary();
 }
 
 document.getElementById('te-refresh').addEventListener('click', load);
 document.getElementById('te-retry').addEventListener('click', load);
 load();
-setInterval(load, 20_000);
+setInterval(load, 5_000);
 </script>
 {% endblock %}

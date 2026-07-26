@@ -378,13 +378,13 @@ def test_same_completed_signal_is_consumed_once_even_without_state_rewrite(
     )
 
 
-def test_live_signal_ledger_is_isolated_from_dry_run_namespace(
+def test_a_signal_consumed_in_dry_run_cannot_fire_again_in_live_mode(
     live_account,
     monkeypatch,
 ):
     signal = _signal(dashboard._trading_mode_payload(), 75)
     dry_ledger = {
-        "version": 1,
+        "schema_version": 1,
         "signals": {
             signal["signal_key"]: {
                 "action": "OPEN",
@@ -410,15 +410,11 @@ def test_live_signal_ledger_is_isolated_from_dry_run_namespace(
     )
     _, executor = _install_open_cycle(monkeypatch, signal)
 
-    assert dashboard._maybe_auto_trend_score_cycle() is True
-    executor.assert_called_once()
+    assert dashboard._maybe_auto_trend_score_cycle() is False
+    executor.assert_not_called()
     assert json.loads(dry_path.read_text(encoding="utf-8")) == dry_ledger
-    live_ledger = json.loads(
-        (live_account / dashboard.TREND_SCORE_AUTO_LEDGER_FILE).read_text(
-            encoding="utf-8"
-        )
-    )
-    assert signal["signal_key"] in live_ledger["signals"]
+    assert dashboard._trend_score_auto_health["alice"]["status"] \
+        == "signal_consumed"
 
 
 def _pending_state() -> dict:

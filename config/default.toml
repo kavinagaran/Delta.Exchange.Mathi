@@ -58,7 +58,12 @@ feature_depth_levels = 50
 stale_multiplier = 3.0
 stale_floor_seconds = 5.0
 median_window = 64
-max_clock_drift_ms = 500.0
+# Delta accepts authenticated timestamps within a five-second window. Its
+# public WebSocket event clock currently leads the REST/server clock by about
+# 3.6 seconds across all BTCUSD feeds, so a 500 ms absolute comparison falsely
+# labels a synchronized host as CLOCK_DRIFT. Keep the bound aligned to the
+# venue's own safety window; larger offsets still fail closed.
+max_clock_drift_ms = 5000.0
 fail_closed = true
 
 [storage]

@@ -17,6 +17,7 @@ from btc_trend_engine.features.pipeline import (
     derivatives_features,
 )
 from btc_trend_engine.market_data.messages import Candle
+from btc_trend_engine.signals import zones
 from btc_trend_engine.signals.forecast import forecast_from_closes
 from btc_trend_engine.signals.regime import (
     NON_TRADEABLE,
@@ -307,13 +308,15 @@ def test_the_hold_band_is_asymmetric_between_entering_and_holding():
 
 # ── snapshot invariants (contract §invariants, §23.4) ───────────────────
 def _snapshot(regime=Regime.TREND_UP, data_quality="OK", direction=1,
-              gates_ok=True, score_value=80.0):
+              gates_ok=True, score_value=80.0, gates=None):
     inputs = _full_bull_inputs()
     score = compute_score(**inputs)
     if score_value is not None:
         object.__setattr__(score, "trend_score", score_value)
-    gates = [{"name": "data_fresh", "passed": gates_ok, "detail": None},
-             {"name": "risk_lock_clear", "passed": True, "detail": None}]
+    gates = gates or [
+        {"name": "data_fresh", "passed": gates_ok, "detail": None},
+        {"name": "risk_lock_clear", "passed": True, "detail": None},
+    ]
     return build_snapshot(
         symbol="BTCUSD", now=T0 + timedelta(minutes=10),
         candle_close=T0 + timedelta(minutes=10),
@@ -357,6 +360,51 @@ def test_invariant_failed_gate_blocks_entry_and_emits_code():
     snapshot = _snapshot(gates_ok=False)
     assert snapshot["entry_allowed"] is False
     assert "GATE_DATA_FRESH_FAILED" in snapshot["reason_codes"]
+
+
+def test_sideways_zone_ignores_only_directional_entry_gates():
+    gates = [
+        {"name": "data_fresh", "passed": True, "detail": None},
+        {"name": "book_valid", "passed": True, "detail": None},
+        {"name": "features_complete", "passed": True, "detail": None},
+        {"name": "spread_acceptable", "passed": True, "detail": None},
+        {"name": "regime_tradeable", "passed": False, "detail": "regime is RANGE"},
+        {
+            "name": "score_beyond_entry_threshold",
+            "passed": False,
+            "detail": "|score| 0.0 < 35.0",
+        },
+        {"name": "risk_lock_clear", "passed": True, "detail": None},
+    ]
+    snapshot = _snapshot(
+        regime=Regime.RANGE,
+        direction=0,
+        score_value=0.0,
+        gates=gates,
+    )
+    assert snapshot["zone"] == zones.SHORT_MOVE
+    assert snapshot["zone_action_allowed"] is True
+
+
+def test_sideways_zone_still_obeys_shared_safety_gates():
+    gates = [
+        {"name": "data_fresh", "passed": True, "detail": None},
+        {"name": "book_valid", "passed": False, "detail": "book invalid"},
+        {"name": "regime_tradeable", "passed": False, "detail": "regime is RANGE"},
+        {
+            "name": "score_beyond_entry_threshold",
+            "passed": False,
+            "detail": "|score| 0.0 < 35.0",
+        },
+    ]
+    snapshot = _snapshot(
+        regime=Regime.RANGE,
+        direction=0,
+        score_value=0.0,
+        gates=gates,
+    )
+    assert snapshot["zone"] == zones.SHORT_MOVE
+    assert snapshot["zone_action_allowed"] is False
 
 
 def test_invariant_score_bounds_and_weights():

@@ -27,6 +27,15 @@ from .score import ScoreResult
 SCHEMA_VERSION = "1.1.0"
 MODEL_VERSION = "trend-rules-v1.0.0"
 
+# These two v1 gates describe whether a *directional* entry is available. They
+# remain in the public gate matrix for backward compatibility, but they are not
+# applicable to SHORT_MOVE: RANGE and a score inside +/-25 are the definition
+# of that zone rather than reasons to reject it.
+_DIRECTIONAL_ONLY_GATE_NAMES = frozenset({
+    "regime_tradeable",
+    "score_beyond_entry_threshold",
+})
+
 
 @dataclass(frozen=True, slots=True)
 class SignalConfig:
@@ -201,11 +210,21 @@ def build_snapshot(
     # keep their v1.0.0 meaning for existing consumers. The two can legitimately
     # differ -- `entry_allowed` additionally requires a tradeable regime, and
     # RANGE blocks it, whereas RANGE is precisely the sell-MOVE setup.
+    score_value = score.trend_score if score.trend_score is not None else 0.0
+    zone = zones.zone_for_score(score_value)
+    zone_gates_passed = all(
+        gate["passed"]
+        for gate in gates
+        if not (
+            zone == zones.SHORT_MOVE
+            and gate.get("name") in _DIRECTIONAL_ONLY_GATE_NAMES
+        )
+    )
     zone_decision = zones.decide(
-        score=score.trend_score if score.trend_score is not None else 0.0,
+        score=score_value,
         regime=regime.value,
         data_quality=data_quality,
-        gates_passed=gates_passed,
+        gates_passed=zone_gates_passed,
         stop_loss_configured=stop_loss_configured,
     )
 

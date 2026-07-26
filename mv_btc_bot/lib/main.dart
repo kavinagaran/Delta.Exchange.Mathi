@@ -411,12 +411,6 @@ const appPages = <AppPageSpec>[
     path: '/trend-engine',
     icon: Icons.insights_rounded,
   ),
-  AppPageSpec(
-    label: 'Trend Engine (Legacy)',
-    navLabel: 'Legacy',
-    path: '/trend-engine-legacy',
-    icon: Icons.history_rounded,
-  ),
 ];
 
 class SessionService {

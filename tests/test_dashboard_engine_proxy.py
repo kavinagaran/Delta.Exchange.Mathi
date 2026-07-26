@@ -1,4 +1,4 @@
-"""/api/engine/{snapshot,health,status} — read-only proxy onto
+"""/api/engine/{snapshot,live,health,status} — read-only proxy onto
 trend_engine_client.py for the rebuilt Trend Engine page (UI-3).
 
 These routes carry no side effects and cannot reach any order-placement
@@ -40,6 +40,23 @@ def test_snapshot_route_defaults_to_btcusd(tmp_path):
                          return_value={"symbol": "BTCUSD"}) as mocked:
         resp = client.get("/api/engine/snapshot")
     assert resp.status_code == 200
+    mocked.assert_called_once_with("BTCUSD")
+
+
+def test_live_route_proxies_display_only_view(tmp_path):
+    view = {
+        "available": True,
+        "provisional": True,
+        "live_score": 18.4,
+        "committed_score": 12.1,
+    }
+    with _authenticated_client(tmp_path) as client, \
+            patch.object(
+                trend_engine_client, "get_live_view", return_value=view
+            ) as mocked:
+        resp = client.get("/api/engine/live?symbol=BTCUSD")
+    assert resp.status_code == 200
+    assert resp.get_json() == view
     mocked.assert_called_once_with("BTCUSD")
 
 
@@ -137,7 +154,8 @@ def test_engine_proxy_routes_require_authentication(tmp_path):
             patch.object(dashboard, "USERS_DIR", tmp_path / "users"):
         (tmp_path / "users").mkdir()
         client = dashboard.app.test_client()
-        for path in ("/api/engine/snapshot", "/api/engine/health",
+        for path in ("/api/engine/snapshot", "/api/engine/live",
+                     "/api/engine/health",
                      "/api/engine/status", "/api/engine/risk",
                      "/api/engine/shadow"):
             resp = client.get(path)

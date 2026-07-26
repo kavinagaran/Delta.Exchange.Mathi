@@ -29,7 +29,7 @@ def test_page_has_filter_chips_and_honest_empty_states():
     # trades carry a recorded regime/signal tag (Phase 7/8) -- the page must
     # say so plainly rather than showing a fabricated or silently blank cell.
     assert "Not available yet" in TEMPLATE
-    assert "populated after shadow-mode cutover" in TEMPLATE
+    assert "committed engine signal" in TEMPLATE
     assert '<th title="Links this trade to the snapshot/model/risk decision' in TEMPLATE
 
 

@@ -61,7 +61,6 @@
       <div class="nav-gap" aria-hidden="true"></div>
       {% set trend_items = [
         ('trend-engine', '/trend-engine', 'Trend Engine', 'M3 17l5-6 4 3 6-8M14 6h4v4'),
-        ('trend-engine-legacy', '/trend-engine-legacy', 'Trend Engine (Legacy)', 'M6 3h9l5 5v13H6zM14 3v6h6M9 13h6M9 17h6'),
       ] %}
       {% for key, href, label, d in trend_items %}
       <a href="{{ href }}" class="{{ 'active' if page == key else '' }}">
