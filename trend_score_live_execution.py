@@ -204,6 +204,39 @@ def score_close_client_id(user: str, transition_id: str, sequence: int = 0) -> s
     return f"trend-{clean_user}-{digest}-x"[:32]
 
 
+@dataclass(frozen=True)
+class ZoneExecutionPolicy:
+    """How one score zone maps onto an executable instrument.
+
+    ``instrument_match`` is the (instrument_kind, option_type, side,
+    symbol_prefix) tuple an order must satisfy before this module will place
+    it — the last check standing between a signal and an irreversible order.
+    """
+
+    instrument_match: tuple[str, str, str, str]
+    direction: str
+    policy_decision: str
+
+
+# Canonical table of executable zones. PE_2_ITM joined PE_3_ITM on 2026-07-26
+# when the zone spec moved puts from 3-step to 2-step ITM; both are listed
+# because a position opened under the old policy must still be closable.
+#
+# Lookups are strict: an unlisted zone raises. This previously fell through an
+# `else` that labelled ANY unrecognised zone as neutral/SELL_MOVE, which would
+# have booked a long put as a short straddle in the order audit trail.
+ZONE_EXECUTION: dict[str, ZoneExecutionPolicy] = {
+    "CE_2_ITM": ZoneExecutionPolicy(
+        ("BTC_OPTION", "CE", "long", "C-BTC-"), "up", "BUY_CE"),
+    "PE_2_ITM": ZoneExecutionPolicy(
+        ("BTC_OPTION", "PE", "long", "P-BTC-"), "down", "BUY_PE"),
+    "PE_3_ITM": ZoneExecutionPolicy(
+        ("BTC_OPTION", "PE", "long", "P-BTC-"), "down", "BUY_PE"),
+    "SHORT_MOVE": ZoneExecutionPolicy(
+        ("BTC_MOVE", "MOVE", "short", "MV-BTC-"), "neutral", "SELL_MOVE"),
+}
+
+
 def validate_fixed_entry(prepared: Mapping[str, Any]) -> dict[str, Any]:
     """Validate the selected contract and normalize its LIVE order direction."""
 
@@ -222,14 +255,10 @@ def validate_fixed_entry(prepared: Mapping[str, Any]) -> dict[str, Any]:
     instrument = str(row.get("instrument_kind") or "").strip().upper()
     option_type = str(row.get("option_type") or "").strip().upper()
 
-    if zone == "CE_2_ITM":
-        expected = ("BTC_OPTION", "CE", "long", "C-BTC-")
-    elif zone == "PE_3_ITM":
-        expected = ("BTC_OPTION", "PE", "long", "P-BTC-")
-    elif zone == "SHORT_MOVE":
-        expected = ("BTC_MOVE", "MOVE", "short", "MV-BTC-")
-    else:
+    execution_policy = ZONE_EXECUTION.get(zone)
+    if execution_policy is None:
         raise LiveScoreExecutionError("prepared score zone is unsupported")
+    expected = execution_policy.instrument_match
     if (instrument, option_type, side) != expected[:3] or not symbol.startswith(
         expected[3]
     ):
@@ -461,20 +490,15 @@ def build_pending_entry_state(
     if not signal_key:
         raise LiveScoreExecutionError("signal_key is required")
     score = _finite(signal.get("score"), "direction score")
-    direction = (
-        "up"
-        if entry["zone"] == "CE_2_ITM"
-        else "down"
-        if entry["zone"] == "PE_3_ITM"
-        else "neutral"
-    )
-    policy_decision = (
-        "BUY_CE"
-        if entry["zone"] == "CE_2_ITM"
-        else "BUY_PE"
-        if entry["zone"] == "PE_3_ITM"
-        else "SELL_MOVE"
-    )
+    entry_policy = ZONE_EXECUTION.get(entry["zone"])
+    if entry_policy is None:
+        # Never guess. The previous `else` branch labelled any unrecognised
+        # zone neutral/SELL_MOVE, so a long put would have been recorded as a
+        # short straddle in the durable order audit trail.
+        raise LiveScoreExecutionError(
+            f"cannot label an order for unsupported zone {entry['zone']!r}")
+    direction = entry_policy.direction
+    policy_decision = entry_policy.policy_decision
     proposed_risk = None
     if isinstance(risk_snapshot, Mapping):
         for key in ("proposed_risk_usd", "risk_at_entry_usd"):

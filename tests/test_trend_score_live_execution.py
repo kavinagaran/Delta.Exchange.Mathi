@@ -1301,3 +1301,65 @@ def test_missing_entry_fee_marks_accounting_pending_and_blocks_switch():
     )
     assert allowed is False
     assert "accounting" in reason.lower()
+
+
+# ── zone execution table (2026-07-26 zone spec) ─────────────────────────
+def test_pe_2_itm_is_executable_alongside_the_legacy_pe_3_itm():
+    """The zone spec moved puts from 3-step to 2-step ITM. Before this, the
+    validator rejected PE_2_ITM outright, so the bearish leg could not place
+    an order at all."""
+    from trend_score_live_execution import ZONE_EXECUTION
+
+    assert "PE_2_ITM" in ZONE_EXECUTION
+    # PE_3_ITM stays executable: a position opened under the old policy must
+    # remain closable.
+    assert "PE_3_ITM" in ZONE_EXECUTION
+    assert ZONE_EXECUTION["PE_2_ITM"].instrument_match == \
+           ZONE_EXECUTION["PE_3_ITM"].instrument_match
+
+
+def test_both_pe_zones_are_labelled_down_and_buy_pe():
+    from trend_score_live_execution import ZONE_EXECUTION
+
+    for zone in ("PE_2_ITM", "PE_3_ITM"):
+        assert ZONE_EXECUTION[zone].direction == "down", zone
+        assert ZONE_EXECUTION[zone].policy_decision == "BUY_PE", zone
+
+
+def test_an_unknown_zone_is_refused_rather_than_booked_as_a_short_straddle():
+    """Regression guard. The old `else` fallthrough labelled ANY unrecognised
+    zone neutral/SELL_MOVE, so a mislabelled long put would have been written
+    into the durable order audit trail as a short straddle."""
+    from trend_score_live_execution import ZONE_EXECUTION
+
+    assert ZONE_EXECUTION.get("PE_9_ITM") is None
+    assert ZONE_EXECUTION.get("") is None
+    # And the only zone that may ever be labelled SELL_MOVE is SHORT_MOVE.
+    sellers = [z for z, p in ZONE_EXECUTION.items()
+               if p.policy_decision == "SELL_MOVE"]
+    assert sellers == ["SHORT_MOVE"]
+
+
+def test_every_executable_zone_has_a_consistent_instrument_and_side():
+    from trend_score_live_execution import ZONE_EXECUTION
+
+    for zone, policy in ZONE_EXECUTION.items():
+        instrument, option_type, side, prefix = policy.instrument_match
+        if zone == "SHORT_MOVE":
+            assert (instrument, option_type, side) == ("BTC_MOVE", "MOVE", "short")
+            assert prefix == "MV-BTC-"
+        else:
+            assert instrument == "BTC_OPTION" and side == "long"
+            assert option_type in ("CE", "PE")
+            assert prefix == ("C-BTC-" if option_type == "CE" else "P-BTC-")
+
+
+def test_validate_fixed_entry_rejects_an_unsupported_zone():
+    from trend_score_live_execution import LiveScoreExecutionError, validate_fixed_entry
+
+    with pytest.raises(LiveScoreExecutionError, match="unsupported"):
+        validate_fixed_entry({
+            "product_id": 1, "symbol": "P-BTC-64000-260726", "zone": "PE_9_ITM",
+            "side": "long", "instrument_kind": "BTC_OPTION", "option_type": "PE",
+            "lots": 1000, "entry_price": "100", "contract_value": "0.001",
+        })
