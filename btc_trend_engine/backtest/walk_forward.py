@@ -23,7 +23,10 @@ from ..signals.snapshot import SignalConfig
 from .event_replay import ReplayConfig, replay
 from .performance import Performance, evaluate
 
-DEFAULT_ENTRY_SCORES = (55.0, 65.0, 75.0)
+# Bracketed around the 2026-07-26 operator spec's |35| directional entry, so
+# the sweep answers "is 35 a cliff or a plateau?" rather than re-testing the
+# superseded 65. Was (55, 65, 75).
+DEFAULT_ENTRY_SCORES = (30.0, 35.0, 45.0)
 DEFAULT_MIN_CONFIDENCE = (0.55, 0.62, 0.70)
 
 

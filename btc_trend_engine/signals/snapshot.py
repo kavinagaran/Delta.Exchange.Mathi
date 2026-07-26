@@ -155,7 +155,7 @@ def build_snapshot(
     data_quality: str,
     config: SignalConfig,
     forecast: Mapping[str, float | None] | None = None,
-    allow_short_move: bool = False,
+    stop_loss_configured: bool = True,
 ) -> dict[str, Any]:
     timeframe_features = {"4h": structural, "1h": primary,
                           "15m": setup, "5m": trigger}
@@ -206,7 +206,7 @@ def build_snapshot(
         regime=regime.value,
         data_quality=data_quality,
         gates_passed=gates_passed,
-        allow_short_move=allow_short_move,
+        stop_loss_configured=stop_loss_configured,
     )
 
     return {

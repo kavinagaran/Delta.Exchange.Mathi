@@ -14,7 +14,7 @@ from btc_trend_engine.signals.zones import ZonePolicy
 
 def _decide(score, **kw):
     params = dict(score=score, regime="TREND_UP", data_quality="OK",
-                  gates_passed=True, allow_short_move=True)
+                  gates_passed=True, stop_loss_configured=True)
     params.update(kw)
     return zones.decide(**params)
 
@@ -70,11 +70,28 @@ def test_every_score_in_range_maps_to_exactly_one_known_zone():
 
 
 # ── safety gating ───────────────────────────────────────────────────────
-def test_selling_move_is_off_by_default():
-    """ALLOW_SHORT_MOVE defaults false in the dashboard; a signal engine must
-    never be the thing that enables an unbounded-loss short-vol position."""
+def test_selling_move_is_now_default_behaviour():
+    """Operator decision 2026-07-26: MOVE selling is always on, no opt-in."""
     assert zones.decide(score=0.0, regime="RANGE", data_quality="OK",
-                        gates_passed=True).action_allowed is False
+                        gates_passed=True).action_allowed is True
+
+
+def test_selling_move_is_refused_without_a_stop_loss():
+    """The stop replaces ALLOW_SHORT_MOVE as the control. An unstopped short
+    straddle is the only position here that can lose more than the account."""
+    decision = zones.decide(score=0.0, regime="RANGE", data_quality="OK",
+                            gates_passed=True, stop_loss_configured=False)
+    assert decision.action_allowed is False
+    assert "stop loss" in decision.reason
+
+
+def test_a_missing_stop_does_not_block_the_directional_zones():
+    """Long options have bounded loss (the premium), so the stop requirement
+    is specific to the short-vol leg."""
+    for score in (85.0, -85.0):
+        assert zones.decide(score=score, regime="TREND_UP", data_quality="OK",
+                            gates_passed=True,
+                            stop_loss_configured=False).action_allowed is True
 
 
 def test_range_does_not_block_the_move_action():
@@ -195,3 +212,30 @@ def test_directional_versus_sideways_is_a_full_opposition():
 
     agreed, reason = shadow.zone_agreement("CE_2_ITM", "SHORT_MOVE")
     assert agreed is False and reason == shadow.ZONE_OPPOSED
+
+
+# ── exit rule: zone change only, never mid-zone ─────────────────────────
+def test_no_exit_while_still_in_the_entry_zone():
+    assert zones.should_exit("CE_2_ITM", "CE_2_ITM")[0] is False
+
+
+def test_a_real_zone_change_exits():
+    assert zones.should_exit("CE_2_ITM", "PE_2_ITM")[0] is True
+    assert zones.should_exit("CE_2_ITM", "SHORT_MOVE")[0] is True
+    assert zones.should_exit("SHORT_MOVE", "CE_2_ITM")[0] is True
+
+
+def test_drifting_into_the_hold_band_does_not_exit():
+    """If HOLD forced an exit, the hysteresis band would cause exactly the
+    churn it exists to prevent."""
+    for held in ("CE_2_ITM", "PE_2_ITM", "SHORT_MOVE"):
+        exits, reason = zones.should_exit(held, "HOLD")
+        assert exits is False
+        assert "hold band" in reason
+
+
+def test_score_drift_within_a_zone_never_exits():
+    """+40 -> +90 -> +36 is all one CE zone: no exit, no re-entry, no churn."""
+    open_zone = zones.zone_for_score(40.0)
+    for score in (90.0, 36.0, 100.0, 35.0):
+        assert zones.should_exit(open_zone, zones.zone_for_score(score))[0] is False

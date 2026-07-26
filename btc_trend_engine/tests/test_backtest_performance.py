@@ -121,7 +121,8 @@ def test_regime_breakdown_groups_trades():
 def test_default_candidates_cover_the_threshold_grid():
     labels = {c.label() for c in default_candidates()}
     assert len(labels) == 9
-    assert "entry=65,conf=0.62" in labels  # the shipped production default
+    # The shipped default under the 2026-07-26 zone spec.
+    assert "entry=35,conf=0.62" in labels
 
 
 def test_a_candidate_overrides_only_its_own_thresholds():

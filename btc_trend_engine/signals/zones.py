@@ -88,16 +88,17 @@ def decide(
     regime: str,
     data_quality: str,
     gates_passed: bool,
-    allow_short_move: bool = False,
+    stop_loss_configured: bool = True,
     policy: ZonePolicy | None = None,
 ) -> ZoneDecision:
     """Zone plus whether its action may actually be taken.
 
-    ``allow_short_move`` defaults to **False** deliberately, matching the
-    dashboard's ``ALLOW_SHORT_MOVE`` config default. Selling a MOVE straddle
-    is a short-volatility position whose loss is unbounded in a large move;
-    it must stay opt-in, and a signal engine must never be the thing that
-    turns it on.
+    Selling ATM MOVE is default behaviour (operator decision 2026-07-26), so
+    there is no ``ALLOW_SHORT_MOVE`` opt-in any more. The stop loss replaces
+    it as the control: a short straddle's loss is unbounded in a large move,
+    so ``stop_loss_configured=False`` blocks the sideways zone outright. That
+    is not a policy preference — an unstopped short straddle is the one
+    position in this system that can lose more than the account holds.
     """
     zone = zone_for_score(score, policy)
 
@@ -114,16 +115,38 @@ def decide(
     if not gates_passed:
         return ZoneDecision(zone, False, "one or more execution gates failed")
     if zone == SHORT_MOVE:
-        if not allow_short_move:
+        if not stop_loss_configured:
             return ZoneDecision(
                 zone, False,
-                "selling MOVE is disabled (ALLOW_SHORT_MOVE is off)")
-        return ZoneDecision(zone, True, "sideways: sell ATM MOVE")
+                "refusing to sell MOVE with no stop loss configured "
+                "(unbounded loss)")
+        return ZoneDecision(zone, True, "sideways: sell ATM MOVE (stop required)")
     if zone == CE_2_ITM:
         return ZoneDecision(zone, True, "bullish: buy 2-step ITM CE",
                             option_type="CE", itm_steps=2)
     return ZoneDecision(zone, True, "bearish: buy 2-step ITM PE",
                         option_type="PE", itm_steps=2)
+
+
+def should_exit(open_zone: str, current_zone: str) -> tuple[bool, str]:
+    """Signal-driven exit rule (operator spec 2026-07-26).
+
+    A position is closed on a **zone change only** — never part-way through a
+    zone because the score drifted within it. Protective exits (SL / TSL / TP)
+    are handled by ``tp_monitor.py`` and are deliberately outside this
+    function: they act on price, continuously, and must not be gated on a
+    candle close or on the signal engine being healthy.
+
+    HOLD is not a zone change. The hold band exists precisely so a score
+    oscillating around a boundary does not close and reopen a position; if
+    HOLD forced an exit, the band would cause the churn it was added to
+    prevent.
+    """
+    if open_zone == current_zone:
+        return False, "still in the entry zone"
+    if current_zone == HOLD:
+        return False, "hold band is not a zone change; position is kept"
+    return True, f"zone changed {open_zone} -> {current_zone}"
 
 
 def strike_index_offset(zone: str) -> int | None:
