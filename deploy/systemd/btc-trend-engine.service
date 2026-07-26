@@ -32,7 +32,12 @@ Type=simple
 # Adjust User/paths to the deploy host.
 User=ubuntu
 WorkingDirectory=/home/ubuntu/mathi
-EnvironmentFile=/home/ubuntu/mathi/.env
+# Deliberately NO EnvironmentFile=. The host's .env is written in
+# "KEY   = value" style (spaces around =), which systemd's EnvironmentFile
+# parser does not accept the way a shell or python-dotenv does — it would
+# either fail the unit or import keys with trailing spaces. The engine reads
+# .env itself via api/app.py::_load_dotenv_stdlib, which strips whitespace,
+# so the token arrives correctly without systemd's parser in the path.
 ExecStart=/home/ubuntu/mathi/.venv-engine/bin/python -m btc_trend_engine.api.app
 Restart=always
 RestartSec=5
