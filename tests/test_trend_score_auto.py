@@ -449,3 +449,55 @@ def test_call_and_put_step_depth_are_now_symmetric():
     assert ce["itm_steps"] == pe["itm_steps"] == 2
     # Equidistant from ATM, in opposite directions.
     assert ce["atm_strike"] - ce["strike"] == pe["strike"] - pe["atm_strike"]
+
+
+def test_hold_band_keeps_an_open_position_instead_of_closing_it():
+    """The hold band means 'no new action, keep what is open'.
+
+    Without an explicit guard an open position falls through to
+    CLOSE_THEN_OPEN (current != HOLD), and that path CLOSES FIRST -- so a
+    score drifting into 25..35 would flatten the position and only then fail
+    to open a 'HOLD' contract. Net effect: the hysteresis band would cause
+    the exact churn it exists to prevent, plus a real exit.
+    """
+    position = {"trend_score_zone": CE_2_ITM, "symbol": "C-BTC-64000-260726",
+                "side": "long"}
+    plan = plan_score_transition(
+        score=30, signal_key="sig-hold", owned_positions=[position])
+    assert plan["action"] == "NOOP"
+    assert plan["reason"] == "SCORE_IN_HOLD_BAND"
+    assert plan["close_position"] is None
+    assert plan["open_zone"] is None
+    # The signal is NOT consumed: the same candle must stay actionable if the
+    # score leaves the band on a later evaluation.
+    assert plan["consume_signal"] is False
+
+
+def test_hold_band_opens_nothing_when_flat():
+    plan = plan_score_transition(
+        score=-30, signal_key="sig-hold-flat", owned_positions=[])
+    assert plan["action"] == "NOOP"
+    assert plan["open_zone"] is None
+
+
+def test_a_persisted_pe_2_itm_zone_is_not_misread_as_the_legacy_pe_3():
+    """Both PE zones share the P-BTC- symbol prefix, so symbol inference
+    alone cannot tell them apart. If a PE_2_ITM position were read back as
+    PE_3_ITM the planner would see a zone change on the very next candle and
+    close/reopen the same put every 5 minutes. The persisted
+    trend_score_zone (written by trend_score_live_execution) prevents that.
+    """
+    from trend_score_auto import position_score_zone
+
+    live = {"trend_score_zone": PE_2_ITM, "symbol": "P-BTC-65200-260726",
+            "side": "long"}
+    assert position_score_zone(live) == PE_2_ITM
+
+    plan = plan_score_transition(score=-60, signal_key="k", owned_positions=[live])
+    assert plan["action"] == "HOLD"          # already matches, no churn
+    assert plan["close_position"] is None
+
+    # A position predating the zone field falls back to the symbol, and
+    # PE_3_ITM is the right guess there -- it was opened under that policy.
+    legacy = {"symbol": "P-BTC-65400-260726", "side": "long"}
+    assert position_score_zone(legacy) == PE_3_ITM

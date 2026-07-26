@@ -123,11 +123,37 @@ body.native-app .toast { left: 12px; right: 12px; bottom: 16px; max-width: none;
   border-bottom: 1px solid var(--sidebar-border);
 }
 .brand img.logo {
-  width: 38px; height: 38px; border-radius: 10px;
+  width: 38px; height: 38px; border-radius: 50%;
   object-fit: cover; display: block; flex-shrink: 0;
+  /* Matches the .brand text glow: a tight ring, then widening halos. The
+     first shadow is a hard 3px ring (0 blur) so the circle keeps a crisp
+     edge instead of dissolving into its own halo. */
+  border: 1px solid rgba(57, 255, 20, .55);
+  box-shadow:
+    0 0 0 3px rgba(57, 255, 20, .10),
+    0 0 8px  rgba(57, 255, 20, .60),
+    0 0 18px rgba(57, 255, 20, .40),
+    0 0 34px rgba(57, 255, 20, .20);
 }
-.brand .name { color: #fff; font-weight: 700; letter-spacing: .06em; font-size: 15px; }
-.brand .sub  { color: var(--sidebar-text); font-size: 10px; letter-spacing: .02em; white-space: nowrap; }
+/* Neon green brand lock-up. The glow is layered rather than one big blur:
+   a tight bright core keeps the glyphs legible, and the wider faint halos do
+   the actual "neon" work. A single large shadow just looks smeared. */
+.brand .name {
+  color: #eaffe4; font-weight: 700; letter-spacing: .06em; font-size: 15px;
+  text-shadow:
+    0 0 4px  rgba(57, 255, 20, .95),
+    0 0 11px rgba(57, 255, 20, .70),
+    0 0 24px rgba(57, 255, 20, .45),
+    0 0 44px rgba(57, 255, 20, .22);
+}
+.brand .sub {
+  color: #6dff4d; font-size: 10px; letter-spacing: .02em; white-space: nowrap;
+  /* Deliberately a tighter glow than the title: at 10px a wide halo bleeds
+     across the letterforms and the line stops being readable. */
+  text-shadow:
+    0 0 4px  rgba(57, 255, 20, .55),
+    0 0 10px rgba(57, 255, 20, .28);
+}
 
 .nav { padding: 12px 10px; display: flex; flex-direction: column; gap: 2px; flex: 1; }
 /* Two nav-row heights of empty space ahead of Trend Engine — visually
@@ -135,7 +161,9 @@ body.native-app .toast { left: 12px; right: 12px; bottom: 16px; max-width: none;
 .nav-gap { height: calc(2 * (9px + 9px + 17px)); flex-shrink: 0; }
 .nav a {
   display: flex; align-items: center; gap: 11px;
-  padding: 9px 12px; border-radius: 8px;
+  /* Pill: a radius larger than half the element height stays fully rounded
+     at any height, so this survives a font-size or padding change. */
+  padding: 9px 14px; border-radius: 999px;
   color: var(--sidebar-text); font-weight: 500; font-size: 13.5px;
 }
 .nav a svg { width: 17px; height: 17px; flex-shrink: 0; }
@@ -876,14 +904,30 @@ body.login-body {
   background: linear-gradient(135deg, rgba(255, 52, 78, .1), transparent 60%);
 }
 :root:not([data-theme="dark"]) .brand img.logo {
-  border: 1px solid rgba(255, 125, 139, .48);
-  box-shadow: 0 0 0 3px rgba(255, 44, 70, .09), 0 8px 24px rgba(255, 24, 55, .22);
+  /* Green logo glow wins in both themes -- see the base .brand img.logo
+     rule. Without this the theme accent (red/blue) would override it. */
+  border: 1px solid rgba(57, 255, 20, .55);
+  box-shadow:
+    0 0 0 3px rgba(57, 255, 20, .10),
+    0 0 8px  rgba(57, 255, 20, .60),
+    0 0 18px rgba(57, 255, 20, .40),
+    0 0 34px rgba(57, 255, 20, .20);
 }
 :root:not([data-theme="dark"]) .brand .name {
-  text-shadow: 0 0 16px rgba(255, 67, 89, .38);
+  /* Green brand glow wins in both themes -- see the base .brand .name rule.
+     Without this the theme accent (red/blue) would override it. */
+  text-shadow:
+    0 0 4px  rgba(57, 255, 20, .95),
+    0 0 11px rgba(57, 255, 20, .70),
+    0 0 24px rgba(57, 255, 20, .45),
+    0 0 44px rgba(57, 255, 20, .22);
 }
 :root:not([data-theme="dark"]) .nav a {
-  border: 1px solid transparent;
+  /* Visible at rest so every item reads as a pill, not just the selected
+     one. Kept low-contrast: it has to outline the capsule without competing
+     with the gradient fill on .active. */
+  border: 1px solid rgba(255, 130, 148, .20);
+  background: rgba(255, 130, 148, .04);
   transition: color .18s ease, background .18s ease, border-color .18s ease, transform .18s ease, box-shadow .18s ease;
 }
 :root:not([data-theme="dark"]) .nav a:hover {
@@ -894,9 +938,14 @@ body.login-body {
 }
 :root:not([data-theme="dark"]) .nav a.active {
   color: #fff;
-  background: linear-gradient(110deg, rgba(255, 51, 76, .84), rgba(136, 5, 25, .58));
-  border-color: rgba(255, 139, 151, .4);
-  box-shadow: 0 9px 24px rgba(198, 8, 37, .24), inset 0 1px 0 rgba(255, 255, 255, .2);
+  /* Three stops rather than two: on a pill the lit edge reads as a highlight
+     running along the capsule, which a flat two-stop ramp loses. */
+  background: linear-gradient(100deg,
+    rgba(255, 78, 100, .96) 0%,
+    rgba(226, 24, 54, .90) 48%,
+    rgba(136, 5, 25, .72) 100%);
+  border-color: rgba(255, 139, 151, .45);
+  box-shadow: 0 8px 22px rgba(198, 8, 37, .30), inset 0 1px 0 rgba(255, 255, 255, .26);
 }
 :root:not([data-theme="dark"]) .sidebar-foot {
   border-top-color: rgba(255, 81, 101, .2);
@@ -1037,14 +1086,30 @@ body.login-body {
   background: linear-gradient(135deg, rgba(52, 160, 255, .11), transparent 60%);
 }
 :root[data-theme="dark"] .brand img.logo {
-  border: 1px solid rgba(125, 198, 255, .5);
-  box-shadow: 0 0 0 3px rgba(44, 155, 255, .1), 0 8px 24px rgba(24, 128, 255, .24);
+  /* Green logo glow wins in both themes -- see the base .brand img.logo
+     rule. Without this the theme accent (red/blue) would override it. */
+  border: 1px solid rgba(57, 255, 20, .55);
+  box-shadow:
+    0 0 0 3px rgba(57, 255, 20, .10),
+    0 0 8px  rgba(57, 255, 20, .60),
+    0 0 18px rgba(57, 255, 20, .40),
+    0 0 34px rgba(57, 255, 20, .20);
 }
 :root[data-theme="dark"] .brand .name {
-  text-shadow: 0 0 16px rgba(67, 173, 255, .42);
+  /* Green brand glow wins in both themes -- see the base .brand .name rule.
+     Without this the theme accent (red/blue) would override it. */
+  text-shadow:
+    0 0 4px  rgba(57, 255, 20, .95),
+    0 0 11px rgba(57, 255, 20, .70),
+    0 0 24px rgba(57, 255, 20, .45),
+    0 0 44px rgba(57, 255, 20, .22);
 }
 :root[data-theme="dark"] .nav a {
-  border: 1px solid transparent;
+  /* Visible at rest so every item reads as a pill, not just the selected
+     one. Kept low-contrast: it has to outline the capsule without competing
+     with the gradient fill on .active. */
+  border: 1px solid rgba(120, 190, 255, .20);
+  background: rgba(120, 190, 255, .04);
   transition: color .18s ease, background .18s ease, border-color .18s ease, transform .18s ease, box-shadow .18s ease;
 }
 :root[data-theme="dark"] .nav a:hover {
@@ -1055,9 +1120,12 @@ body.login-body {
 }
 :root[data-theme="dark"] .nav a.active {
   color: #fff;
-  background: linear-gradient(110deg, rgba(51, 160, 255, .86), rgba(5, 56, 136, .62));
-  border-color: rgba(139, 210, 255, .42);
-  box-shadow: 0 9px 24px rgba(8, 101, 198, .27), inset 0 1px 0 rgba(255, 255, 255, .22);
+  background: linear-gradient(100deg,
+    rgba(84, 180, 255, .97) 0%,
+    rgba(24, 132, 246, .91) 48%,
+    rgba(5, 56, 136, .74) 100%);
+  border-color: rgba(139, 210, 255, .47);
+  box-shadow: 0 8px 22px rgba(8, 101, 198, .32), inset 0 1px 0 rgba(255, 255, 255, .28);
 }
 :root[data-theme="dark"] .sidebar-foot {
   border-top-color: rgba(81, 176, 255, .21);

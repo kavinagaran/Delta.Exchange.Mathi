@@ -35,7 +35,7 @@ const kBlueBackgroundAsset = 'assets/sparkling-blue-dashboard-bg.png';
 
 final appTheme = AppThemeController();
 
-const kWebAssetRevision = '4.1.0+12-trend-engine-shadow-panel';
+const kWebAssetRevision = '4.4.0+15-neon-brand-logo';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();

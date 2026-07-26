@@ -564,6 +564,27 @@ def plan_score_transition(
             "consume_signal": False,
         }
 
+    if target == HOLD:
+        # The hold band is "no new action, keep whatever is open". Without
+        # this guard an open position would fall through to CLOSE_THEN_OPEN
+        # below (current != HOLD), which CLOSES FIRST -- so a score drifting
+        # into 25..35 would flatten the position and only then fail to open a
+        # "HOLD" contract. The caller also refuses HOLD before reaching here;
+        # this makes the rule structural rather than caller-dependent.
+        return {
+            "action": "NOOP",
+            "reason": "SCORE_IN_HOLD_BAND",
+            "signal_key": key,
+            "target_zone": target,
+            "current_zone": (
+                position_score_zone(owned_positions[0])
+                if owned_positions else None
+            ),
+            "close_position": None,
+            "open_zone": None,
+            "consume_signal": False,
+        }
+
     if not owned_positions:
         return {
             "action": "OPEN",
