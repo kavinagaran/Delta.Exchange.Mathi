@@ -161,6 +161,38 @@ def test_history_is_bounded_and_ordered():
     assert producer.latest() == producer.history(100)[-1]
 
 
+def test_short_move_requires_three_consecutive_closed_neutral_bars():
+    """±15 is only a candidate; three adjacent closed 5m scores confirm it."""
+    producer = SnapshotProducer("BTCUSD")
+    producer._history.extend([
+        {
+            "candle_close_utc": T0.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "trend_score": 0.0,
+            "data_quality": "OK",
+        },
+        {
+            "candle_close_utc": (T0 + timedelta(minutes=5)).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            ),
+            "trend_score": 14.9,
+            "data_quality": "OK",
+        },
+    ])
+    assert producer._short_move_confirmed(
+        score=-15.0,
+        candle_close=T0 + timedelta(minutes=10),
+        data_quality="OK",
+    ) is True
+
+    # A missing completed candle breaks the 15-minute continuity guarantee.
+    producer._history.pop()
+    assert producer._short_move_confirmed(
+        score=0.0,
+        candle_close=T0 + timedelta(minutes=10),
+        data_quality="OK",
+    ) is False
+
+
 def test_spread_bps_helper_handles_missing_and_zero_sides():
     assert spread_bps_from(None, 100.0) is None
     assert spread_bps_from(0.0, 100.0) is None

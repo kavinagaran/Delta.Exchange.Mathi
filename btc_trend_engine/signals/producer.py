@@ -14,7 +14,7 @@ facts, and the consumer must be able to tell them apart.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Mapping, Sequence
 
 from ..features.pipeline import compute_timeframe_features, derivatives_features
@@ -29,6 +29,7 @@ log = logging.getLogger(__name__)
 # Contract timeframe roles (§30 production baseline).
 STRUCTURAL, PRIMARY, SETUP, TRIGGER = "4h", "1h", "15m", "5m"
 MIN_CANDLES = 60  # enough for EMA50 + ATR14 to be meaningful
+SHORT_MOVE_CONFIRMATION_BARS = 3  # three closed 5m bars = 15 minutes
 
 
 class SnapshotProducer:
@@ -111,6 +112,11 @@ class SnapshotProducer:
         closes = [float(c.close) for c in trigger_series]
         forecast = forecast_from_closes(
             closes, horizon_seconds=self.config.forecast_horizon_seconds)
+        short_move_confirmed = self._short_move_confirmed(
+            score=trend_score,
+            candle_close=candle_close,
+            data_quality=effective_quality,
+        )
 
         snapshot = build_snapshot(
             symbol=self.symbol, now=now, candle_close=candle_close,
@@ -125,6 +131,7 @@ class SnapshotProducer:
             },
             gates=gates, data_quality=effective_quality,
             config=self.config, forecast=forecast,
+            short_move_confirmed=short_move_confirmed,
         )
         self._remember(snapshot)
         self.produced += 1
@@ -226,6 +233,62 @@ class SnapshotProducer:
             {"name": "risk_lock_clear", "passed": True,
              "detail": "not evaluated here; the consumer applies risk/ at entry"},
         ]
+
+    def _short_move_confirmed(
+        self,
+        *,
+        score: float,
+        candle_close: datetime,
+        data_quality: str,
+    ) -> bool:
+        """Require three consecutive healthy closed 5m scores in ±15.
+
+        The producer emits decisions only from completed five-minute candles.
+        Counting the current completed bar plus the preceding two therefore
+        verifies the neutral condition across a full 15-minute window.  Any
+        missing bar, degraded sample, duplicate candle, or score outside the
+        neutral band resets the confirmation rather than guessing continuity.
+        """
+        from . import zones
+
+        if data_quality != "OK" or zones.zone_for_score(score) != zones.SHORT_MOVE:
+            return False
+
+        expected = candle_close.astimezone(timezone.utc)
+        seen: set[datetime] = set()
+        confirmed_bars = 0
+        observations: list[tuple[datetime, float, str]] = [
+            (expected, score, data_quality),
+        ]
+        for snapshot in reversed(self._history):
+            try:
+                prior_close = datetime.fromisoformat(
+                    str(snapshot.get("candle_close_utc") or "").replace(
+                        "Z", "+00:00"
+                    )
+                ).astimezone(timezone.utc)
+                prior_score = float(snapshot["trend_score"])
+                prior_quality = str(snapshot.get("data_quality") or "")
+            except (KeyError, TypeError, ValueError):
+                break
+            observations.append((prior_close, prior_score, prior_quality))
+
+        for observed_close, observed_score, observed_quality in observations:
+            if observed_close in seen:
+                continue
+            seen.add(observed_close)
+            if observed_close != expected:
+                break
+            if (
+                observed_quality != "OK"
+                or zones.zone_for_score(observed_score) != zones.SHORT_MOVE
+            ):
+                break
+            confirmed_bars += 1
+            if confirmed_bars >= SHORT_MOVE_CONFIRMATION_BARS:
+                return True
+            expected -= timedelta(minutes=5)
+        return False
 
     # ── history ──────────────────────────────────────────────────────────
     def _remember(self, snapshot: dict[str, Any]) -> None:

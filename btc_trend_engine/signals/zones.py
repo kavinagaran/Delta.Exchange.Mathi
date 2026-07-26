@@ -2,15 +2,15 @@
 
     +35 .. +100   BULLISH    buy 2-step ITM CE
     -35 .. -100   BEARISH    buy 2-step ITM PE
-    -25 .. +25    SIDEWAYS   sell ATM MOVE
-    the two gaps   HOLD      no new action
+    -15 .. +15    SIDEWAYS   sell ATM MOVE after 15 minutes of confirmation
+    all other gaps HOLD      no new action
 
-**The gaps are deliberate, not an oversight in the spec.** 25 < |score| < 35
-is a hysteresis band: entering a directional trade needs |score| >= 35, but
-an open one is only given up once |score| decays to <= 25. Without it a score
-oscillating around a single threshold would thrash between "buy CE" and "sell
-MOVE" on consecutive candles, paying both spreads each time. This mirrors the
-entry/hold split the engine already uses for ``direction``.
+**The gaps are deliberate, not an oversight in the spec.** The only neutral
+entry range is ``-15 <= score <= +15``. Scores between 15 and 35 (or -35 and
+-15) are HOLD bands: entering a directional trade needs |score| >= 35, while
+an open position is kept rather than churned through an inferred intermediate
+trade. This prevents a score oscillating around a boundary from paying both
+spreads on consecutive candles.
 
 Two deliberate differences from the legacy ``trend_score_auto.score_zone``,
 both of which change real behaviour and are called out rather than absorbed
@@ -18,9 +18,9 @@ silently:
 
 1. **Legacy PE is 3 steps ITM (`PE_3_ITM`), this is 2** (`PE_2_ITM`), per the
    spec. Legacy was asymmetric — CE at ATM-2, PE at ATM+3. This is symmetric.
-2. **Legacy has no hold band.** It switches directional/MOVE hard at |25|, so
-   legacy will disagree with this model for any |score| in (25, 35) — expected,
-   and visible in shadow comparison rather than hidden.
+2. **Legacy has no 15-minute confirmation.** It switches directional/MOVE hard
+   at |25|, so legacy will disagree with this model for every non-action gap
+   and until the new neutral-range confirmation completes.
 
 A "step" is an index offset in the expiry's sorted strike list, matching
 ``trend_score_auto.select_policy_contract``: ITM for a call is a *lower*
@@ -52,7 +52,7 @@ UNSAFE_REGIMES = frozenset({"HIGH_VOL_SHOCK", "LOW_LIQUIDITY", "DEGRADED"})
 @dataclass(frozen=True, slots=True)
 class ZonePolicy:
     directional_entry_abs: float = 35.0
-    sideways_max_abs: float = 25.0
+    sideways_max_abs: float = 15.0
 
     def __post_init__(self) -> None:
         if self.sideways_max_abs >= self.directional_entry_abs:
@@ -89,6 +89,7 @@ def decide(
     data_quality: str,
     gates_passed: bool,
     stop_loss_configured: bool = True,
+    short_move_confirmed: bool = False,
     policy: ZonePolicy | None = None,
 ) -> ZoneDecision:
     """Zone plus whether its action may actually be taken.
@@ -115,12 +116,19 @@ def decide(
     if not gates_passed:
         return ZoneDecision(zone, False, "one or more execution gates failed")
     if zone == SHORT_MOVE:
+        if not short_move_confirmed:
+            return ZoneDecision(
+                zone, False,
+                "waiting for 15-minute confirmation: three consecutive "
+                "completed 5-minute scores must remain inside -15 to +15")
         if not stop_loss_configured:
             return ZoneDecision(
                 zone, False,
                 "refusing to sell MOVE with no stop loss configured "
                 "(unbounded loss)")
-        return ZoneDecision(zone, True, "sideways: sell ATM MOVE (stop required)")
+        return ZoneDecision(
+            zone, True,
+            "sideways confirmed for 15 minutes: sell ATM MOVE (stop required)")
     if zone == CE_2_ITM:
         return ZoneDecision(zone, True, "bullish: buy 2-step ITM CE",
                             option_type="CE", itm_steps=2)

@@ -47,6 +47,8 @@ def _signal(mode, *, key, score, zone):
         },
         "score": score,
         "zone": zone,
+        "zone_action_allowed": True,
+        "zone_reason": "test signal allowed",
         "signal_key": key,
         "signal_bar_close_utc": "2026-07-23T10:05:00Z",
         "market_regime": "TRENDING",
@@ -563,7 +565,7 @@ def test_config_api_blocks_score_mode_change_while_live_entry_is_pending(
     assert saved["TREND_ENGINE_SCORE_AUTO_MODE"] == "live"
 
 
-def test_legacy_trend_enabled_alias_is_normalized_before_score_validation(
+def test_legacy_trend_enabled_alias_is_forced_off_without_blocking_score_mode(
         live_recovery_account):
     config = _live_config()
     config["TREND_ENGINE_SCORE_AUTO_MODE"] = "disabled"
@@ -582,17 +584,17 @@ def test_legacy_trend_enabled_alias_is_normalized_before_score_validation(
         response, response.status_code,
     )
 
-    assert status == 400
+    assert status == 200
     payload = body.get_json()
-    assert payload["ok"] is False
-    assert "legacy Trend auto-entry mode" in payload["error"]
+    assert payload["ok"] is True
     saved = json.loads(
         (live_recovery_account / "config.json").read_text(
             encoding="utf-8"
         )
     )
-    assert saved["TREND_ENGINE_SCORE_AUTO_MODE"] == "disabled"
+    assert saved["TREND_ENGINE_SCORE_AUTO_MODE"] == "live"
     assert saved["TREND_AUTO_ENTRY_MODE"] == "disabled"
+    assert saved["TREND_AUTO_ENTRY_ENABLED"] == "false"
 
 
 def test_legacy_trend_enabled_alias_change_uses_account_entry_lock(

@@ -323,7 +323,7 @@ function signedScore(value) {
   return `${score > 0 ? '+' : ''}${score.toFixed(1)}`;
 }
 
-function tradeDecisionMeta(zone, actionAllowed = true) {
+function tradeDecisionMeta(zone, actionAllowed = true, reason = '') {
   const key = String(zone || '').toUpperCase();
   if (key === 'HOLD') {
     return {
@@ -340,6 +340,13 @@ function tradeDecisionMeta(zone, actionAllowed = true) {
     };
   }
   if (actionAllowed === false) {
+    if (key === 'SHORT_MOVE' && String(reason).includes('15-minute confirmation')) {
+      return {
+        label: 'WAIT — 15-MIN CONFIRMATION',
+        tone: 'is-blocked',
+        detail: 'The score must stay between −15 and +15 for three completed five-minute candles before an ATM MOVE straddle can be sold.',
+      };
+    }
     return {
       label: 'WAIT — CHECKS BLOCKED',
       tone: 'is-blocked',
@@ -370,9 +377,9 @@ function tradeDecisionMeta(zone, actionAllowed = true) {
   };
 }
 
-function renderTradeDecision(id, zone, actionAllowed, caption) {
+function renderTradeDecision(id, zone, actionAllowed, caption, reason = '') {
   const element = document.getElementById(id);
-  const meta = tradeDecisionMeta(zone, actionAllowed);
+  const meta = tradeDecisionMeta(zone, actionAllowed, reason);
   element.className = `te-decision-capsule ${meta.tone}`;
   element.querySelector('span').textContent = caption;
   element.querySelector('strong').textContent = meta.label;
@@ -431,6 +438,7 @@ function renderHero(snapshot, liveView) {
     snapshot.zone,
     snapshot.zone_action_allowed === true,
     'Trade decision',
+    snapshot.zone_reason,
   );
   document.getElementById('te-committed-time').textContent =
     formatIstTimestamp(snapshot.candle_close_utc || snapshot.timestamp);
@@ -499,7 +507,7 @@ function renderGates(gates) {
   el.innerHTML = gates.map(g => `
     <div class="te-gate ${g.passed ? 'is-pass' : 'is-fail'}">
       <span class="te-gate-icon" aria-hidden="true">${g.passed ? '✓' : '✕'}</span>
-      <strong>${esc(formatCode(g.name))}</strong>
+      <strong>${esc(g.label || formatCode(g.name))}</strong>
       ${g.detail ? `<small>${esc(g.detail)}</small>` : ''}
     </div>`).join('');
 }

@@ -29,7 +29,7 @@ MODEL_VERSION = "trend-rules-v1.0.0"
 
 # These two v1 gates describe whether a *directional* entry is available. They
 # remain in the public gate matrix for backward compatibility, but they are not
-# applicable to SHORT_MOVE: RANGE and a score inside +/-25 are the definition
+# applicable to SHORT_MOVE: RANGE and a score inside +/-15 are the definition
 # of that zone rather than reasons to reject it.
 _DIRECTIONAL_ONLY_GATE_NAMES = frozenset({
     "regime_tradeable",
@@ -39,13 +39,13 @@ _DIRECTIONAL_ONLY_GATE_NAMES = frozenset({
 
 @dataclass(frozen=True, slots=True)
 class SignalConfig:
-    # Operator spec 2026-07-26: directional entry at |score| >= 35, give the
-    # position up only once |score| decays to <= 25. The 25-35 gap is the
-    # hysteresis band -- see signals/zones.py. Was 65/25 (§12.3 / §30); the
+    # Operator spec: directional entry at |score| >= 35; the neutral candidate
+    # range is only |score| <= 15 and must persist for three closed 5m candles.
+    # Every intermediate score is HOLD -- see signals/zones.py. Was 65/25;
     # entry threshold moved to match the zone spec so `direction` and `zone`
     # can never disagree about whether a directional trade is on.
     entry_score: float = 35.0
-    hold_score: float = 25.0
+    hold_score: float = 15.0
     minimum_confidence: float = 0.62
     ttl_seconds: int = 300
     forecast_horizon_seconds: int = 900
@@ -134,6 +134,82 @@ def build_reason_codes(*, regime: Regime, direction: int,
     return codes
 
 
+def _zone_entry_gates(
+    gates: list[dict[str, Any]],
+    *,
+    zone: str,
+    score: float,
+    regime: Regime,
+    short_move_confirmed: bool,
+) -> list[dict[str, Any]]:
+    """Return the gate matrix in terms of the zone that can actually trade.
+
+    The original two directional gates are accurate for CE/PE entries but
+    misleading for a neutral SHORT_MOVE candidate: RANGE is valid there and a
+    score of +10 should not be displayed as a failed ``|score| >= 35`` test.
+    Keep the raw gates for the stable reason-code contract; this is the
+    operator-facing entry matrix shown by the dashboard.
+    """
+    if zone in {zones.CE_2_ITM, zones.PE_2_ITM}:
+        return [dict(gate) for gate in gates]
+
+    shared = [
+        dict(gate)
+        for gate in gates
+        if gate.get("name") not in _DIRECTIONAL_ONLY_GATE_NAMES
+    ]
+    if zone == zones.HOLD:
+        policy = zones.ZonePolicy()
+        return [
+            *shared,
+            {
+                "name": "hold_band",
+                "label": "HOLD BAND — NO ENTRY",
+                "passed": False,
+                "detail": (
+                    f"score {score:+.1f} is between "
+                    f"±{policy.sideways_max_abs:g} and ±"
+                    f"{policy.directional_entry_abs:g}; keep the open position"
+                ),
+            },
+        ]
+
+    policy = zones.ZonePolicy()
+    regime_safe = regime.value not in zones.UNSAFE_REGIMES
+    return [
+        *shared,
+        {
+            "name": "regime_safe_for_move",
+            "label": "REGIME SAFE FOR MOVE",
+            "passed": regime_safe,
+            "detail": (
+                "regime permits an ATM MOVE straddle"
+                if regime_safe
+                else f"regime is {regime.value}; MOVE entry is blocked"
+            ),
+        },
+        {
+            "name": "score_in_neutral_range",
+            "label": "NEUTRAL SCORE RANGE",
+            "passed": abs(score) <= policy.sideways_max_abs,
+            "detail": (
+                f"score {score:+.1f} is inside −{policy.sideways_max_abs:g} to "
+                f"+{policy.sideways_max_abs:g}"
+            ),
+        },
+        {
+            "name": "short_move_15m_confirmed",
+            "label": "15-MIN MOVE CONFIRMATION",
+            "passed": short_move_confirmed,
+            "detail": (
+                "three consecutive completed 5-minute scores stayed in the neutral range"
+                if short_move_confirmed
+                else "waiting for three consecutive completed 5-minute scores in the neutral range"
+            ),
+        },
+    ]
+
+
 def signal_id_for(symbol: str, candle_close_utc: str) -> str:
     """Deterministic per contract: same inputs, same id (invariant 7)."""
     payload = json.dumps(
@@ -165,6 +241,7 @@ def build_snapshot(
     config: SignalConfig,
     forecast: Mapping[str, float | None] | None = None,
     stop_loss_configured: bool = True,
+    short_move_confirmed: bool = False,
 ) -> dict[str, Any]:
     timeframe_features = {"4h": structural, "1h": primary,
                           "15m": setup, "5m": trigger}
@@ -201,10 +278,6 @@ def build_snapshot(
     if volatility_bps is not None:
         suggested_stop_bps = round(1.5 * volatility_bps, 1)  # §13.2 mid-range
 
-    reason_codes = build_reason_codes(
-        regime=regime, direction=direction, timeframe_biases=biases,
-        setup=setup, gates=gates)
-
     # Zone is the operator-facing decision surface (signals/zones.py). It is
     # reported alongside, not instead of, `direction`/`entry_allowed`: those
     # keep their v1.0.0 meaning for existing consumers. The two can legitimately
@@ -212,21 +285,38 @@ def build_snapshot(
     # RANGE blocks it, whereas RANGE is precisely the sell-MOVE setup.
     score_value = score.trend_score if score.trend_score is not None else 0.0
     zone = zones.zone_for_score(score_value)
-    zone_gates_passed = all(
-        gate["passed"]
-        for gate in gates
-        if not (
-            zone == zones.SHORT_MOVE
-            and gate.get("name") in _DIRECTIONAL_ONLY_GATE_NAMES
-        )
+    zone_gates = _zone_entry_gates(
+        gates,
+        zone=zone,
+        score=score_value,
+        regime=regime,
+        short_move_confirmed=short_move_confirmed,
     )
+    zone_gates_passed = all(gate["passed"] for gate in zone_gates)
     zone_decision = zones.decide(
         score=score_value,
         regime=regime.value,
         data_quality=data_quality,
         gates_passed=zone_gates_passed,
         stop_loss_configured=stop_loss_configured,
+        short_move_confirmed=short_move_confirmed,
     )
+    reason_codes = build_reason_codes(
+        regime=regime, direction=direction, timeframe_biases=biases,
+        setup=setup, gates=gates)
+    if zone == zones.SHORT_MOVE:
+        # These raw directional failures are expected for a neutral MOVE setup
+        # and would contradict its zone-specific gate matrix if displayed.
+        reason_codes = [
+            code for code in reason_codes
+            if code not in {
+                "GATE_REGIME_TRADEABLE_FAILED",
+                "GATE_SCORE_BEYOND_ENTRY_THRESHOLD_FAILED",
+                "SCORE_BELOW_ENTRY_THRESHOLD",
+            }
+        ]
+        if not short_move_confirmed:
+            reason_codes.append("SHORT_MOVE_15M_CONFIRMATION_PENDING")
 
     return {
         "schema_version": SCHEMA_VERSION,
@@ -264,7 +354,7 @@ def build_snapshot(
              "closed_candle_utc": _iso(timeframe_closes[tf])}
             for tf in ("4h", "1h", "15m", "5m")
         ],
-        "gates": gates,
+        "gates": zone_gates,
         "reason_codes": reason_codes,
         "data_quality": data_quality,
         "feature_set_version": FEATURE_SET_VERSION,

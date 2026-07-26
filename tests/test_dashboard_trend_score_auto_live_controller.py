@@ -39,7 +39,14 @@ def _live_config(**updates) -> dict:
     return config
 
 
-def _signal(mode: dict, score: float, *, suffix: str = "10:00:00Z") -> dict:
+def _signal(
+    mode: dict,
+    score: float,
+    *,
+    suffix: str = "10:00:00Z",
+    zone_action_allowed: bool = True,
+    zone_reason: str = "test signal allowed",
+) -> dict:
     zone = dashboard.score_zone(score)
     return {
         "mode": copy.deepcopy(mode),
@@ -51,6 +58,8 @@ def _signal(mode: dict, score: float, *, suffix: str = "10:00:00Z") -> dict:
         },
         "score": score,
         "zone": zone,
+        "zone_action_allowed": zone_action_allowed,
+        "zone_reason": zone_reason,
         "signal_key": f"trend-score-auto|BTCUSD|5m|2026-07-23T{suffix}",
         "signal_bar_close_utc": f"2026-07-23T{suffix}",
         "market_regime": (
@@ -264,14 +273,13 @@ def test_explicit_live_mode_routes_only_to_live_controller(
 @pytest.mark.parametrize(
     ("score", "expected_zone", "expected_type", "expected_side"),
     (
-        # 2026-07-26 zone spec: directional at |35|, sideways within |25|.
-        # The |25|-|35| hold band is covered separately -- it maps to no
-        # contract class at all, which is the point of it.
+        # Directional at |35|; +/-15 is the confirmed short-MOVE candidate.
+        # Every intermediate score is HOLD and maps to no contract class.
         (-100, dashboard.TREND_SCORE_PE_ZONE, "PE", "long"),
         (-35, dashboard.TREND_SCORE_PE_ZONE, "PE", "long"),
-        (-25, dashboard.TREND_SCORE_MOVE_ZONE, "MOVE", "short"),
+        (-15, dashboard.TREND_SCORE_MOVE_ZONE, "MOVE", "short"),
         (0, dashboard.TREND_SCORE_MOVE_ZONE, "MOVE", "short"),
-        (25, dashboard.TREND_SCORE_MOVE_ZONE, "MOVE", "short"),
+        (15, dashboard.TREND_SCORE_MOVE_ZONE, "MOVE", "short"),
         (35, dashboard.TREND_SCORE_CE_ZONE, "CE", "long"),
         (100, dashboard.TREND_SCORE_CE_ZONE, "CE", "long"),
     ),
@@ -345,6 +353,43 @@ def test_matching_live_zone_holds_partial_fill_without_topping_up(
     assert ledger["signals"][signal["signal_key"]]["action"] == "HOLD"
 
 
+def test_unconfirmed_short_move_does_not_close_or_replace_a_live_position(
+    live_account,
+    monkeypatch,
+):
+    """A pending 15-minute neutral confirmation is explicitly a no-op."""
+    old_state = _owned_state(dashboard.TREND_SCORE_CE_ZONE)
+    _write(live_account / "trend_state.json", old_state)
+    signal = _signal(
+        dashboard._trading_mode_payload(),
+        0.0,
+        suffix="10:10:00Z",
+        zone_action_allowed=False,
+        zone_reason=(
+            "waiting for 15-minute confirmation: three consecutive completed "
+            "5-minute scores must remain inside -15 to +15"
+        ),
+    )
+    prepare = Mock(side_effect=AssertionError("pending MOVE must not prepare"))
+    close = Mock(side_effect=AssertionError("pending MOVE must not close"))
+    execute = Mock(side_effect=AssertionError("pending MOVE must not enter"))
+    monkeypatch.setattr(
+        dashboard, "_collect_trend_score_auto_signal", Mock(return_value=signal),
+    )
+    monkeypatch.setattr(dashboard, "_prepare_trend_score_auto_entry", prepare)
+    monkeypatch.setattr(dashboard, "_close_move_state_locked", close)
+    monkeypatch.setattr(dashboard, "_trend_score_auto_live_execute", execute)
+
+    assert dashboard._maybe_auto_trend_score_cycle() is False
+    assert json.loads((live_account / "trend_state.json").read_text("utf-8")) == old_state
+    prepare.assert_not_called()
+    close.assert_not_called()
+    execute.assert_not_called()
+    assert dashboard._trend_score_auto_health["alice"]["status"] == (
+        "awaiting_confirmation"
+    )
+
+
 @pytest.mark.parametrize(
     ("updates", "message"),
     (
@@ -376,6 +421,118 @@ def test_same_completed_signal_is_consumed_once_even_without_state_rewrite(
         dashboard._trend_score_auto_health["alice"]["status"]
         == "signal_consumed"
     )
+
+
+def test_no_fill_blocks_same_zone_until_the_score_zone_changes(
+    live_account,
+    monkeypatch,
+):
+    first = _signal(
+        dashboard._trading_mode_payload(), -75, suffix="10:00:00Z",
+    )
+    same_zone_next_bar = _signal(
+        dashboard._trading_mode_payload(), -60, suffix="10:05:00Z",
+    )
+    changed_zone = _signal(
+        dashboard._trading_mode_payload(), 60, suffix="10:10:00Z",
+    )
+    collector = Mock(side_effect=[first, same_zone_next_bar, changed_zone])
+    prepare = Mock(side_effect=lambda value: copy.deepcopy(_prepared(value["zone"])))
+
+    def execute(**kwargs):
+        signal = kwargs["signal"]
+        if signal["signal_key"] == first["signal_key"]:
+            return {
+                "ok": False,
+                "status": "NO_FILL",
+                "consume_signal": True,
+                "order_submitted": True,
+                "filled_lots": 0,
+                "state": {
+                    "slot": "trend", "status": "IDLE", "dry_run": False,
+                    "execution_mode": "live",
+                },
+            }
+        return _open_result(signal, kwargs["prepared"])
+
+    executor = Mock(side_effect=execute)
+    monkeypatch.setattr(dashboard, "_collect_trend_score_auto_signal", collector)
+    monkeypatch.setattr(dashboard, "_prepare_trend_score_auto_entry", prepare)
+    monkeypatch.setattr(dashboard, "_trend_score_auto_live_execute", executor)
+
+    assert dashboard._maybe_auto_trend_score_cycle() is True
+    assert dashboard._maybe_auto_trend_score_cycle() is False
+    assert prepare.call_count == 1
+    assert executor.call_count == 1
+    dashboard._trend_score_auto_notify.assert_called_once()
+
+    ledger_path = live_account / dashboard.TREND_SCORE_AUTO_LEDGER_FILE
+    ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+    assert ledger["no_fill_setup"]["target_zone"] == dashboard.TREND_SCORE_PE_ZONE
+    assert ledger["signals"][same_zone_next_bar["signal_key"]]["action"] == (
+        "NO_FILL_SUPPRESSED"
+    )
+    assert dashboard._trend_score_auto_health["alice"]["status"] == (
+        "no_fill_suppressed"
+    )
+
+    # A different score zone is a new setup: the block is released and one
+    # fresh attempt is allowed (with the normal single-candle idempotency).
+    assert dashboard._maybe_auto_trend_score_cycle() is True
+    assert prepare.call_count == 2
+    assert executor.call_count == 2
+    ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+    assert ledger["no_fill_setup"] is None
+
+
+def test_no_fill_block_can_be_explicitly_rearmed_by_a_saved_config_change(
+    live_account,
+    monkeypatch,
+):
+    first = _signal(
+        dashboard._trading_mode_payload(), -75, suffix="10:00:00Z",
+    )
+    blocked_follow_on = _signal(
+        dashboard._trading_mode_payload(), -60, suffix="10:05:00Z",
+    )
+    collector = Mock(side_effect=[first, blocked_follow_on])
+    prepare = Mock(side_effect=lambda value: copy.deepcopy(_prepared(value["zone"])))
+
+    def execute(**kwargs):
+        signal = kwargs["signal"]
+        if signal["signal_key"] == first["signal_key"]:
+            return {
+                "ok": False, "status": "NO_FILL", "consume_signal": True,
+                "order_submitted": True, "filled_lots": 0,
+                "state": {"slot": "trend", "status": "IDLE", "dry_run": False,
+                          "execution_mode": "live"},
+            }
+        return _open_result(signal, kwargs["prepared"])
+
+    executor = Mock(side_effect=execute)
+    monkeypatch.setattr(dashboard, "_collect_trend_score_auto_signal", collector)
+    monkeypatch.setattr(dashboard, "_prepare_trend_score_auto_entry", prepare)
+    monkeypatch.setattr(dashboard, "_trend_score_auto_live_execute", executor)
+
+    assert dashboard._maybe_auto_trend_score_cycle() is True
+
+    # Saving a changed, valid Bot Config intentionally produces a new mode
+    # revision.  That is the explicit operator re-arm for the same zone.
+    _write(live_account / "config.json", _live_config(TP_TARGET_PNL_TREND="501"))
+    rearmed = _signal(
+        dashboard._trading_mode_payload(), -60, suffix="10:05:00Z",
+    )
+    collector.side_effect = [rearmed]
+
+    assert dashboard._maybe_auto_trend_score_cycle() is True
+    assert prepare.call_count == 2
+    assert executor.call_count == 2
+    ledger = json.loads(
+        (live_account / dashboard.TREND_SCORE_AUTO_LEDGER_FILE).read_text(
+            encoding="utf-8"
+        )
+    )
+    assert ledger["no_fill_setup"] is None
 
 
 def test_a_signal_consumed_in_dry_run_cannot_fire_again_in_live_mode(

@@ -288,6 +288,41 @@ def test_dry_status_keeps_trend_ce_pe_in_third_frame(
     assert displayed["evening"]["status"] == "IDLE"
 
 
+def test_dry_status_exposes_one_score_zone_position_without_time_bucketing(
+        isolated_dashboard, monkeypatch):
+    account = isolated_dashboard
+    score_position = _dry_state(
+        "trend",
+        entry_time_utc="01:50:00",
+        symbol="MV-BTC-65800-230726",
+        option_type="MOVE",
+        instrument_kind="BTC_MOVE",
+        ownership=dashboard.TREND_SCORE_AUTO_OWNERSHIP,
+        trend_score_zone="SHORT_MOVE",
+    )
+    _write(account / "dry_run" / "trend_state.json", score_position)
+    _write(account / "dry_run" / "morning_state.json", {
+        **_dry_state("morning", symbol="MV-BTC-LEGACY"),
+        "status": "ENTRY_PENDING",
+    })
+    monkeypatch.setattr(
+        dashboard, "_enrich_dry_state", lambda value: dict(value),
+    )
+
+    with dashboard.app.test_request_context("/api/dry-run/status"):
+        payload = dashboard.api_dry_run_status().get_json()
+
+    position = payload["score_zone_position"]
+    assert position["symbol"] == score_position["symbol"]
+    assert position["source_slot"] == "trend"
+    assert position["control_slot"] == "trend"
+    assert position["display_slot"] == "score_zone"
+    assert position["display_instrument_group"] == "move"
+    assert payload["legacy_position_blockers"] == [
+        "legacy morning state is ENTRY_PENDING",
+    ]
+
+
 def test_open_dry_pnl_refreshes_from_mark_price_while_close_uses_book(
         isolated_dashboard, monkeypatch):
     state = _dry_state(
@@ -719,7 +754,7 @@ def test_dry_run_live_status_refresh_is_fast_uncached_and_non_overlapping():
     assert "setInterval(() => loadDryStatus(true), 20_000);" in template
 
 
-def test_dry_run_cards_are_equal_sized_and_every_open_slot_has_manual_exit():
+def test_dry_run_has_one_score_zone_position_and_manual_exit():
     root = Path(dashboard.__file__).resolve().parent
     template = (root / "templates" / "dry_run.html").read_text(
         encoding="utf-8")
@@ -728,19 +763,17 @@ def test_dry_run_cards_are_equal_sized_and_every_open_slot_has_manual_exit():
     styles = (root / "static" / "css" / "app.css").read_text(
         encoding="utf-8")
 
-    assert "grid-auto-rows: 1fr" in styles
-    assert ".dry-slot-grid > .card {" in styles
-    assert (
-        ".grid > .card, .dry-slot-grid > .card { margin-top: 0; }"
-        in styles
-    )
-    assert ".dry-slot-card {" in styles
-    assert "min-height: 420px; flex: 1 1 auto" in styles
+    assert ".score-zone-trade-card {" in styles
+    assert ".score-zone-trade-body {" in styles
+    assert ".grid > .card, .score-zone-trade-card { margin-top: 0; }" in styles
+    assert ".score-zone-position-pane" in styles
+    assert ".score-zone-decision-pane" in styles
+    assert "min-height: 365px" in styles
     assert "dry-slot-footer-panel" in template
-    assert "min-height: 86px" in styles
+    assert "height: 100%" in styles
     assert "\n          Exit\n" in template
     assert ">Exit</button>" in overview
-    assert "endDrySimulation('${controlSlot}', '${slot}')" in template
+    assert "endDrySimulation('${controlSlot}')" in template
     assert (
         "function dryProtectionHtml(state, displaySlot, controlSlot = displaySlot)"
         in template
@@ -750,11 +783,13 @@ def test_dry_run_cards_are_equal_sized_and_every_open_slot_has_manual_exit():
         "function saveDryProtection(displaySlot, controlSlot = displaySlot)"
         in template
     )
-    assert "dryProtectionSaving.has(slot)" in template
+    assert "dryProtectionSaving.has('trend')" in template
     assert ".dry-protection-grid {" in styles
     assert "Paper-only monitor · always active" in template
-    for slot in ("morning", "evening", "trend"):
-        assert f"dryPositionDetails(displaySlots.{slot} || {{}}, '{slot}'" in template
+    assert "dryStatus.score_zone_position || dryStatus.trend || {}" in template
+    assert "dryStatus.legacy_position_blockers || []" in template
+    for legacy_slot in ("dry-slot-morning", "dry-slot-evening", "dry-slot-trend"):
+        assert legacy_slot not in template
 
     # UI-4: Overview's unified position card is live-only now -- dry-run
     # simulated positions moved exclusively to the Dry Run page's own card,

@@ -3,7 +3,7 @@
 {% block content %}
 <div class="card">
   <div class="card-hd">
-    Bot Log
+    Account activity
     <span class="spacer"></span>
     <label class="fld" style="width:130px">
       <select id="log-lines" onchange="loadLogs()">
@@ -15,6 +15,7 @@
     <button class="btn secondary sm" onclick="loadLogs()">Refresh</button>
   </div>
   <div class="card-bd">
+    <p class="log-context" id="log-context">Loading account activity…</p>
     <div class="log-wrap" id="log-wrap">Loading…</div>
   </div>
 </div>
@@ -26,13 +27,15 @@ async function loadLogs() {
   const n = document.getElementById('log-lines').value;
   const data = await jget('/api/logs?n=' + n);
   const wrap = document.getElementById('log-wrap');
+  const context = document.getElementById('log-context');
+  context.textContent = data.message || 'Account-scoped controller activity.';
   wrap.innerHTML = (data.lines || []).slice().reverse().map(line => {
     let cls = '';
-    if (/WARNING/.test(line)) cls = 'warn';
+    if (/WARNING|BLOCKED/.test(line)) cls = 'warn';
     else if (/ERROR|CRITICAL/.test(line)) cls = 'error';
-    else if (/ENTRY|EXIT|Filled|ORDER/.test(line)) cls = 'trade';
+    else if (/TRADE OPENED|TRADE EXIT|ENTRY|EXIT|Filled|ORDER/.test(line)) cls = 'trade';
     return `<div class="log-line ${cls}">${esc(line)}</div>`;
-  }).join('') || '<div class="log-line">No log lines</div>';
+  }).join('') || '<div class="log-line">No account activity yet. New score-zone decisions, entries, exits, and safety notices will appear here.</div>';
   wrap.scrollTop = 0;
 }
 loadLogs();

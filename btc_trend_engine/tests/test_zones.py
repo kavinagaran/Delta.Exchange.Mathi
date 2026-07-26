@@ -1,7 +1,7 @@
 """Score -> action zone mapping against the operator spec (2026-07-26):
 
     +35..+100 bullish CE 2-step ITM · -35..-100 bearish PE 2-step ITM
-    -25..+25 sideways sell ATM MOVE · the gaps are a hysteresis hold band
+    -15..+15 sideways sell ATM MOVE after 15 minutes · all other gaps HOLD
 """
 
 from __future__ import annotations
@@ -14,7 +14,8 @@ from btc_trend_engine.signals.zones import ZonePolicy
 
 def _decide(score, **kw):
     params = dict(score=score, regime="TREND_UP", data_quality="OK",
-                  gates_passed=True, stop_loss_configured=True)
+                  gates_passed=True, stop_loss_configured=True,
+                  short_move_confirmed=True)
     params.update(kw)
     return zones.decide(**params)
 
@@ -37,7 +38,7 @@ def test_bearish_band_buys_two_step_itm_pe(score):
     assert zones.strike_index_offset(decision.zone) == +2
 
 
-@pytest.mark.parametrize("score", [-25.0, -24.9, 0.0, 12.0, 24.9, 25.0])
+@pytest.mark.parametrize("score", [-15.0, -14.9, 0.0, 12.0, 14.9, 15.0])
 def test_sideways_band_sells_atm_move(score):
     decision = _decide(score)
     assert decision.zone == zones.SHORT_MOVE
@@ -46,9 +47,9 @@ def test_sideways_band_sells_atm_move(score):
     assert zones.strike_index_offset(decision.zone) is None
 
 
-@pytest.mark.parametrize("score", [25.1, 30.0, 34.9, -25.1, -30.0, -34.9])
+@pytest.mark.parametrize("score", [15.1, 25.0, 34.9, -15.1, -25.0, -34.9])
 def test_the_gap_between_the_bands_is_a_hold_not_an_action(score):
-    """The spec leaves 25<|s|<35 undefined; treating it as either neighbour
+    """The spec makes 15<|s|<35 HOLD; treating it as either neighbour
     would make the engine thrash across a single threshold."""
     decision = _decide(score)
     assert decision.zone == zones.HOLD
@@ -59,8 +60,15 @@ def test_the_gap_between_the_bands_is_a_hold_not_an_action(score):
 def test_the_boundaries_are_inclusive_exactly_as_written():
     assert zones.zone_for_score(35.0) == zones.CE_2_ITM
     assert zones.zone_for_score(-35.0) == zones.PE_2_ITM
-    assert zones.zone_for_score(25.0) == zones.SHORT_MOVE
-    assert zones.zone_for_score(-25.0) == zones.SHORT_MOVE
+    assert zones.zone_for_score(15.0) == zones.SHORT_MOVE
+    assert zones.zone_for_score(-15.0) == zones.SHORT_MOVE
+
+
+def test_short_move_waits_for_the_full_15_minute_confirmation():
+    decision = _decide(0.0, short_move_confirmed=False)
+    assert decision.zone == zones.SHORT_MOVE
+    assert decision.action_allowed is False
+    assert "15-minute confirmation" in decision.reason
 
 
 def test_every_score_in_range_maps_to_exactly_one_known_zone():
@@ -73,14 +81,15 @@ def test_every_score_in_range_maps_to_exactly_one_known_zone():
 def test_selling_move_is_now_default_behaviour():
     """Operator decision 2026-07-26: MOVE selling is always on, no opt-in."""
     assert zones.decide(score=0.0, regime="RANGE", data_quality="OK",
-                        gates_passed=True).action_allowed is True
+                        gates_passed=True, short_move_confirmed=True).action_allowed is True
 
 
 def test_selling_move_is_refused_without_a_stop_loss():
     """The stop replaces ALLOW_SHORT_MOVE as the control. An unstopped short
     straddle is the only position here that can lose more than the account."""
     decision = zones.decide(score=0.0, regime="RANGE", data_quality="OK",
-                            gates_passed=True, stop_loss_configured=False)
+                            gates_passed=True, stop_loss_configured=False,
+                            short_move_confirmed=True)
     assert decision.action_allowed is False
     assert "stop loss" in decision.reason
 
@@ -158,11 +167,11 @@ def test_trend_score_auto_now_delegates_here_so_there_is_one_source_of_truth():
     """
     from trend_score_auto import score_zone as legacy_entry_point
 
-    for score in (-100, -50, -35, -30, -25, 0, 25, 30, 35, 50, 100):
+    for score in (-100, -50, -35, -30, -15, 0, 15, 30, 35, 50, 100):
         assert legacy_entry_point(score) == zones.zone_for_score(float(score))
 
-    # Specifically: the band that used to be a directional trade is now HOLD,
-    # and puts are 2-step rather than 3-step ITM.
+    # Specifically: all scores from 15 to 35 are HOLD (the only neutral entry
+    # band is +/-15), and puts are 2-step rather than 3-step ITM.
     assert legacy_entry_point(30) == zones.HOLD
     assert legacy_entry_point(-30) == zones.HOLD
     assert legacy_entry_point(-50) == zones.PE_2_ITM

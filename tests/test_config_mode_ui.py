@@ -12,9 +12,9 @@ NODE = shutil.which("node")
 def test_score_auto_selector_offers_explicit_live_mode_with_warning():
     source = (ROOT / "templates" / "config.html").read_text(encoding="utf-8")
 
-    assert '<option value="live">LIVE AUTO' in source
-    assert "irreversible exchange orders without manual confirmation" in source
-    assert "exactly 1,000 requested lots" in source
+    assert '<option value="live">LIVE — place real orders automatically</option>' in source
+    assert "place real exchange orders without manual confirmation" in source
+    assert "Every eligible trade uses 1,000 lots" in source
     assert "only after the previous exit is proven" in source
 
 
@@ -67,7 +67,7 @@ const source = fs.readFileSync('templates/config.html', 'utf8');
 const varsStart = source.indexOf('let configReady = false;');
 const varsEnd = source.indexOf('const DEFAULTS =');
 const functionsStart = source.indexOf('function dryBanner()');
-const functionsEnd = source.indexOf('function shortMoveUi()');
+const functionsEnd = source.indexOf('function rememberSavedPreservedValues(', functionsStart);
 if (varsStart < 0 || varsEnd <= varsStart ||
     functionsStart < 0 || functionsEnd <= functionsStart) {
   throw new Error('Trading Mode JavaScript was not found');
@@ -82,12 +82,15 @@ const modeSelect = {
 };
 const modeHint = { textContent: '' };
 const dryBannerElement = { style: {} };
+const scoreConfigSummary = { className: '', textContent: '' };
 global.document = {
   getElementById(id) {
     return {
       'c-DRY_RUN': modeSelect,
       'mode-lock-hint': modeHint,
       'dry-banner': dryBannerElement,
+      'c-TREND_ENGINE_SCORE_AUTO_MODE': { value: 'disabled' },
+      'score-config-summary': scoreConfigSummary,
     }[id];
   },
 };

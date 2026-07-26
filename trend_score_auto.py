@@ -82,9 +82,10 @@ def score_zone(score: Any) -> str:
     duplicated here, so the two modules cannot drift apart:
 
         |score| >= 35   directional (CE_2_ITM / PE_2_ITM, both 2-step ITM)
-        |score| <= 25   SHORT_MOVE
-        otherwise       HOLD (hysteresis band: no new action, keep any open
-                        position; see zones.should_exit)
+        |score| <= 15   SHORT_MOVE candidate (the engine must then confirm
+                        three consecutive completed 5m scores)
+        otherwise       HOLD (no new action, keep any open position; see
+                        zones.should_exit)
 
     A missing/invalid score is never treated as neutral, because that would
     turn a feed failure into permission to short MOVE.
@@ -568,7 +569,7 @@ def plan_score_transition(
         # The hold band is "no new action, keep whatever is open". Without
         # this guard an open position would fall through to CLOSE_THEN_OPEN
         # below (current != HOLD), which CLOSES FIRST -- so a score drifting
-        # into 25..35 would flatten the position and only then fail to open a
+        # into 15..35 would flatten the position and only then fail to open a
         # "HOLD" contract. The caller also refuses HOLD before reaching here;
         # this makes the rule structural rather than caller-dependent.
         return {

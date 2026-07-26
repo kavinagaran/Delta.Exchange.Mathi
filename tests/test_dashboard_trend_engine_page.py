@@ -63,6 +63,7 @@ def test_trade_decisions_are_colored_capsules_below_the_circles():
     assert "BUY 2-STEP ITM PE" in TEMPLATE
     assert "SELL ATM MOVE" in TEMPLATE
     assert "HOLD — NO NEW TRADE" in TEMPLATE
+    assert "g.label || formatCode(g.name)" in TEMPLATE
     assert "BEARISH / PE −100" not in TEMPLATE
     assert "BULLISH / CE +100" not in TEMPLATE
     for tone in ("is-ce", "is-pe", "is-move", "is-hold", "is-blocked"):

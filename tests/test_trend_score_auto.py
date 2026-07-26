@@ -80,16 +80,16 @@ def _move_product(expiry, strike, *, product_id=20_001, **changes):
 @pytest.mark.parametrize(
     ("score", "expected"),
     [
-        # 2026-07-26 spec: directional at |35|, sideways within |25|, and a
-        # HOLD hysteresis band between them (previously a hard switch at 25).
+        # Directional at |35|; only +/-15 is a SHORT_MOVE candidate.  Every
+        # intermediate score is HOLD (the engine separately confirms 15 min).
         (-100, PE_2_ITM),
         (-35, PE_2_ITM),
         (-34.999, HOLD),
-        (-25.001, HOLD),
-        (-25, SHORT_MOVE),
+        (-15.001, HOLD),
+        (-15, SHORT_MOVE),
         (0, SHORT_MOVE),
-        (25, SHORT_MOVE),
-        (25.001, HOLD),
+        (15, SHORT_MOVE),
+        (15.001, HOLD),
         (34.999, HOLD),
         (35, CE_2_ITM),
         (100, CE_2_ITM),

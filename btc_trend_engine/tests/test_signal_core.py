@@ -261,8 +261,8 @@ def test_regime_hysteresis_enter_hold_exit():
     # decays below enter but above exit → held
     assert classifier.classify(data_quality_ok=True, trend_score=40.0,
                                setup=quiet).regime is Regime.TREND_UP
-    # below exit → released to RANGE
-    decision = classifier.classify(data_quality_ok=True, trend_score=20.0,
+    # below the ±15 neutral candidate boundary → released to RANGE
+    decision = classifier.classify(data_quality_ok=True, trend_score=10.0,
                                    setup=quiet)
     assert decision.regime is Regime.RANGE
     assert decision.changed
@@ -283,12 +283,13 @@ def test_breakout_requires_body():
 # ── signal hysteresis ───────────────────────────────────────────────────
 def test_signal_hysteresis_matrix():
     """Thresholds are the 2026-07-26 operator spec: enter at |35|, hold to
-    |25|. The 25-35 gap is the hold band (see signals/zones.py)."""
+    |15|. Scores between 15 and 35 are HOLD (see signals/zones.py)."""
     h = SignalHysteresis(SignalConfig())
     assert h.update(30.0) == 0        # inside the hold band, never entered
     assert h.update(40.0) == 1        # enter long at >= 35
     assert h.update(30.0) == 1        # hold band keeps an OPEN position
-    assert h.update(20.0) == 0        # exit at <= 25
+    assert h.update(20.0) == 1        # intermediate HOLD keeps direction
+    assert h.update(15.0) == 0        # exit at <= 15
     assert h.update(-40.0) == -1      # enter short at <= -35
     assert h.update(-26.0) == -1      # hold
     assert h.update(-10.0) == 0       # exit
@@ -308,7 +309,8 @@ def test_the_hold_band_is_asymmetric_between_entering_and_holding():
 
 # ── snapshot invariants (contract §invariants, §23.4) ───────────────────
 def _snapshot(regime=Regime.TREND_UP, data_quality="OK", direction=1,
-              gates_ok=True, score_value=80.0, gates=None):
+              gates_ok=True, score_value=80.0, gates=None,
+              short_move_confirmed=False):
     inputs = _full_bull_inputs()
     score = compute_score(**inputs)
     if score_value is not None:
@@ -327,7 +329,8 @@ def _snapshot(regime=Regime.TREND_UP, data_quality="OK", direction=1,
         gates=gates, data_quality=data_quality, config=SignalConfig(),
         forecast={"expected_return_bps": None,
                   "expected_absolute_move_bps": 43.0,
-                  "forecast_volatility_bps": 39.0, "jump_probability": 0.02})
+                  "forecast_volatility_bps": 39.0, "jump_probability": 0.02},
+        short_move_confirmed=short_move_confirmed)
 
 
 def test_snapshot_matches_contract_shape():
@@ -381,9 +384,49 @@ def test_sideways_zone_ignores_only_directional_entry_gates():
         direction=0,
         score_value=0.0,
         gates=gates,
+        short_move_confirmed=True,
     )
     assert snapshot["zone"] == zones.SHORT_MOVE
     assert snapshot["zone_action_allowed"] is True
+    names = {gate["name"] for gate in snapshot["gates"]}
+    assert "regime_tradeable" not in names
+    assert "score_beyond_entry_threshold" not in names
+    assert {
+        "regime_safe_for_move",
+        "score_in_neutral_range",
+        "short_move_15m_confirmed",
+    } <= names
+    assert all(gate["passed"] for gate in snapshot["gates"])
+
+
+def test_unconfirmed_short_move_matrix_names_the_wait_instead_of_a_failed_ce_pe_gate():
+    snapshot = _snapshot(
+        regime=Regime.RANGE,
+        direction=0,
+        score_value=10.0,
+        short_move_confirmed=False,
+    )
+    confirmation = next(
+        gate for gate in snapshot["gates"]
+        if gate["name"] == "short_move_15m_confirmed"
+    )
+    assert snapshot["zone"] == zones.SHORT_MOVE
+    assert snapshot["zone_action_allowed"] is False
+    assert confirmation["label"] == "15-MIN MOVE CONFIRMATION"
+    assert confirmation["passed"] is False
+    assert "three consecutive" in confirmation["detail"]
+    assert "GATE_SCORE_BEYOND_ENTRY_THRESHOLD_FAILED" not in snapshot["reason_codes"]
+
+
+def test_hold_band_matrix_explains_that_an_entry_is_not_intended():
+    snapshot = _snapshot(score_value=20.0)
+    hold_gate = next(
+        gate for gate in snapshot["gates"] if gate["name"] == "hold_band"
+    )
+    assert snapshot["zone"] == zones.HOLD
+    assert snapshot["zone_action_allowed"] is False
+    assert hold_gate["label"] == "HOLD BAND — NO ENTRY"
+    assert hold_gate["passed"] is False
 
 
 def test_sideways_zone_still_obeys_shared_safety_gates():

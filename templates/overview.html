@@ -5,7 +5,8 @@
 {% endblock %}
 
 {% block content %}
-<div class="greeting">
+<div class="overview-page">
+<div class="greeting overview-hero">
   <div class="greeting-txt">
     <h2>Welcome Back, {{ display_name }} 👋</h2>
     <p>Trend Engine-driven MOVE and CE/PE positions, at a glance.</p>
@@ -13,9 +14,9 @@
 </div>
 
 <div class="stats" id="status-tiles">
-  <div class="stat"><div class="lbl">Trading mode</div><div class="val" id="tile-mode">—</div></div>
-  <div class="stat"><div class="lbl">Engine health</div><div class="val" id="tile-engine">—</div></div>
-  <div class="stat"><div class="lbl">Day P&amp;L</div><div class="val" id="tile-day-pnl">—</div><div class="sub" id="tile-day-pnl-note"></div></div>
+  <div class="stat performance-stat neutral"><div class="lbl">Trading mode</div><div class="val" id="tile-mode">—</div></div>
+  <div class="stat performance-stat neutral"><div class="lbl">Engine health</div><div class="val" id="tile-engine">—</div></div>
+  <div class="stat performance-stat neutral"><div class="lbl">Day P&amp;L</div><div class="val" id="tile-day-pnl">—</div><div class="sub" id="tile-day-pnl-note"></div></div>
 </div>
 
 <div class="section-title">
@@ -33,7 +34,7 @@
 
 <div class="stats" id="stats"></div>
 
-<div class="card">
+<div class="card overview-positions-card">
   <div class="card-hd">Open Positions <span class="spacer"></span><span class="hint">Bot-managed and external, in one place</span></div>
   <div class="card-bd" id="positions-body"><div class="no-pos">Loading…</div></div>
 </div>
@@ -64,7 +65,7 @@
   </div>
 </div>
 
-<div class="card">
+<div class="card overview-today-card">
   <div class="card-hd">Today's Trades</div>
   <div class="tbl-wrap">
     <table>
@@ -75,16 +76,22 @@
     </table>
   </div>
 </div>
+</div>
 {% endblock %}
 
 {% block scripts %}
 <script>
 /* ── Status tiles ───────────────────────────────────────── */
 async function loadStatusTiles(st, todayRows) {
+  const setTone = (elementId, tone) => {
+    const card = document.getElementById(elementId).closest('.stat');
+    card.className = `stat performance-stat ${tone}`;
+  };
   const modeEl = document.getElementById('tile-mode');
   const known = st.dry_run_mode === true || st.dry_run_mode === false;
   modeEl.textContent = known ? (st.dry_run_mode ? 'DRY RUN' : 'LIVE') : '—';
   modeEl.className = 'val ' + (known ? (st.dry_run_mode ? 'c-warn' : 'c-pos') : 'c-muted');
+  setTone('tile-mode', known ? (st.dry_run_mode ? 'warning' : 'positive') : 'neutral');
 
   const dayPnl = (todayRows || []).reduce((sum, t) => {
     if (t.dry_run) return sum;
@@ -93,6 +100,7 @@ async function loadStatusTiles(st, todayRows) {
   const pnlEl = document.getElementById('tile-day-pnl');
   pnlEl.textContent = f$(dayPnl);
   pnlEl.className = 'val ' + pnlCls(dayPnl);
+  setTone('tile-day-pnl', dayPnl > 0 ? 'positive' : dayPnl < 0 ? 'negative' : 'neutral');
   document.getElementById('tile-day-pnl-note').textContent =
     `${(todayRows || []).filter(t => !t.dry_run).length} trade(s) today`;
 
@@ -101,10 +109,12 @@ async function loadStatusTiles(st, todayRows) {
     const el = document.getElementById('tile-engine');
     el.textContent = health.ok ? 'Reachable' : 'Unreachable';
     el.className = 'val ' + (health.ok ? 'c-pos' : 'c-muted');
+    setTone('tile-engine', health.ok ? 'positive' : 'negative');
   } catch (e) {
     const el = document.getElementById('tile-engine');
     el.textContent = 'Unreachable';
     el.className = 'val c-muted';
+    setTone('tile-engine', 'negative');
   }
 }
 

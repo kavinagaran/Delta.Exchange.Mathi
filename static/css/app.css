@@ -312,26 +312,82 @@ body.native-app .toast { left: 12px; right: 12px; bottom: 16px; max-width: none;
 }
 .dry-separation-notice strong { display: block; font-size: 13px; }
 .dry-separation-notice p { margin-top: 2px; color: var(--muted); font-size: 11.5px; font-weight: 500; }
-.dry-slot-grid {
-  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
-  grid-auto-rows: 1fr; gap: 16px; align-items: stretch;
+.score-config-hero {
+  display: flex; align-items: center; justify-content: space-between; gap: 18px;
+  margin-bottom: 14px; padding: 18px 20px; border: 1px solid var(--border);
+  border-radius: var(--radius); background:
+    radial-gradient(circle at 100% 0%, color-mix(in srgb, var(--accent) 17%, transparent), transparent 43%),
+    linear-gradient(135deg, var(--surface), var(--surface-subtle)); box-shadow: var(--shadow);
 }
-.dry-slot-grid > .card {
-  align-self: stretch;
+.score-config-hero > div { min-width: 0; }
+.score-config-hero h2 { margin-top: 3px; font-size: 22px; line-height: 1.25; }
+.score-config-hero p { max-width: 760px; margin-top: 4px; color: var(--muted); font-size: 12.5px; line-height: 1.55; }
+.score-config-hero > .pill { flex: 0 0 auto; }
+.config-static-value {
+  display: grid; gap: 3px; min-height: 39px; padding: 8px 10px;
+  border: 1px solid var(--border); border-radius: 8px; background: var(--surface-subtle);
 }
-.dry-slot-card {
-  min-width: 0; height: 100%; overflow: hidden;
-  display: flex; flex-direction: column;
+.config-static-value strong { color: var(--text); font-size: 13px; }
+.config-static-value small { color: var(--muted); font-size: 10.5px; font-weight: 500; }
+.score-zone-band-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 9px; }
+.score-zone-band {
+  display: grid; gap: 4px; min-width: 0; padding: 11px;
+  border: 1px solid var(--border); border-radius: 9px; background: var(--surface-subtle);
 }
-.dry-slot-card > .card-hd { min-height: 50px; box-sizing: border-box; }
-.dry-slot-body {
-  min-height: 420px; flex: 1 1 auto;
-  display: flex; flex-direction: column;
+.score-zone-band strong { font-size: 11px; font-variant-numeric: tabular-nums; }
+.score-zone-band span { font-size: 10px; font-weight: 850; letter-spacing: .065em; }
+.score-zone-band small { color: var(--muted); font-size: 10.5px; line-height: 1.35; }
+.score-zone-band.is-call { border-color: color-mix(in srgb, var(--pos) 38%, var(--border)); background: var(--pos-soft); }
+.score-zone-band.is-call span { color: var(--pos); }
+.score-zone-band.is-put { border-color: color-mix(in srgb, var(--neg) 38%, var(--border)); background: var(--neg-soft); }
+.score-zone-band.is-put span { color: var(--neg); }
+.score-zone-band.is-move { border-color: color-mix(in srgb, var(--warn) 38%, var(--border)); background: var(--warn-soft); }
+.score-zone-band.is-move span { color: var(--warn); }
+.score-zone-band.is-hold span { color: var(--muted); }
+.config-copy { margin: 0 0 14px; color: var(--muted); font-size: 12px; line-height: 1.55; }
+.score-zone-band-grid + .config-copy { margin: 13px 0 0; }
+.score-config-pair { align-items: stretch; }
+.score-config-pair > .card { min-width: 0; }
+.score-execution-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+.score-execution-grid > section { min-width: 0; padding: 13px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface-subtle); }
+.score-execution-grid h3 { margin: 0 0 11px; color: var(--text); font-size: 12px; }
+.score-execution-grid .form-grid { grid-template-columns: 1fr; gap: 10px; }
+.score-zone-trade-card { min-width: 0; overflow: hidden; }
+.score-zone-trade-card > .card-hd { min-height: 50px; box-sizing: border-box; }
+.score-zone-trade-body {
+  display: grid; grid-template-columns: minmax(300px, .84fr) minmax(400px, 1.16fr);
+  gap: 24px; min-height: 365px;
 }
-.dry-slot-body > .btn-row:last-child { margin-top: auto; padding-top: 14px; }
-.dry-slot-body > .dry-slot-footer-panel {
-  min-height: 86px; box-sizing: border-box; margin-top: auto;
+.score-zone-position-pane,
+.score-zone-decision-pane { min-width: 0; display: flex; flex-direction: column; }
+.score-zone-decision-pane {
+  padding-left: 24px; border-left: 1px solid var(--border);
 }
+.score-zone-position-pane > h3,
+.score-zone-decision-pane > h3 {
+  margin: 0 0 12px; color: var(--muted); font-size: 10px; font-weight: 850;
+  letter-spacing: .08em; text-transform: uppercase;
+}
+.score-zone-position-pane > #dry-score-zone-position,
+.score-zone-decision-pane > #dry-score-zone-decision { flex: 1 1 auto; display: flex; flex-direction: column; }
+.score-zone-position-pane > #dry-score-zone-position > .btn-row:last-child { margin-top: auto; padding-top: 14px; }
+.score-zone-decision-pane .dry-slot-footer-panel {
+  height: 100%; box-sizing: border-box; margin-top: 0;
+}
+.score-zone-empty {
+  display: grid; place-content: center; justify-items: center; gap: 7px;
+  min-height: 185px; text-align: center;
+}
+.score-zone-empty .icon { margin-bottom: 0; }
+.score-zone-empty strong { color: var(--text); font-size: 14px; }
+.score-zone-empty small { max-width: 390px; color: var(--muted); font-size: 11.5px; line-height: 1.5; }
+.dry-legacy-blocker {
+  display: grid; gap: 3px; max-width: 430px; margin-top: 12px; padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--warn) 35%, var(--border));
+  border-radius: 8px; background: var(--warn-soft); color: var(--warn); text-align: left;
+}
+.dry-legacy-blocker strong { font-size: 11px; }
+.dry-legacy-blocker span { color: var(--text); font-size: 10.5px; line-height: 1.4; }
 .dry-state-line {
   display: flex; align-items: center; justify-content: center; gap: 8px;
   min-height: 26px; flex-wrap: wrap; color: var(--muted); font-size: 10.5px;
@@ -540,14 +596,17 @@ body.native-app .toast { left: 12px; right: 12px; bottom: 16px; max-width: none;
 /* Cards INSIDE a grid are laid out by the grid alone — the sibling-margin
    rule above must never shift the second card of a pair down, and stretch
    alignment keeps both frames of a row exactly the same height. */
-.grid > .card, .dry-slot-grid > .card { margin-top: 0; }
+.grid > .card, .score-zone-trade-card { margin-top: 0; }
 
 .grid { display: grid; gap: 18px; align-items: stretch; }
 .grid.cols-2 { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
 @media (max-width: 900px) {
   .grid.cols-2 { grid-template-columns: 1fr; }
-  .dry-slot-grid { grid-template-columns: 1fr; grid-auto-rows: auto; }
-  .dry-slot-body { min-height: 0; }
+  .score-config-hero { align-items: flex-start; flex-direction: column; }
+  .score-zone-band-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .score-execution-grid { grid-template-columns: 1fr; }
+  .score-zone-trade-body { grid-template-columns: 1fr; min-height: 0; gap: 20px; }
+  .score-zone-decision-pane { padding: 20px 0 0; border-left: 0; border-top: 1px solid var(--border); }
   .trend-frames { grid-template-columns: 1fr; }
   .trend-action { align-items: stretch; flex-direction: column; }
   .trend-buy-btn { width: 100%; min-width: 0; }
@@ -746,6 +805,7 @@ input.mono { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; fon
   max-height: 560px; overflow: auto;
   font: 12px/1.65 ui-monospace, SFMono-Regular, Consolas, monospace;
 }
+.log-context { margin: 0 0 10px; color: var(--muted); font-size: 12px; }
 .log-line { white-space: pre-wrap; word-break: break-all; color: #9fb0c8; }
 .log-line.warn  { color: #e5b567; }
 .log-line.error { color: #f47067; }
@@ -877,6 +937,99 @@ body.login-body {
 .filter-chip:hover { color: var(--text); }
 .filter-chip.active { background: var(--accent-soft); color: var(--accent-dark); border-color: color-mix(in srgb, var(--accent) 30%, var(--border)); }
 .chart-view-toggle { display: flex; gap: 6px; }
+
+/* ── Performance: complete Delta Exchange fill history ────── */
+.performance-source {
+  display: flex; align-items: center; justify-content: space-between; gap: 14px;
+  margin-bottom: 18px; padding: 11px 14px; border: 1px solid var(--border);
+  border-radius: var(--radius); background: var(--surface);
+  box-shadow: var(--shadow);
+}
+.performance-source > div { min-width: 0; display: grid; gap: 2px; }
+.performance-source strong { font-size: 13px; letter-spacing: .01em; }
+.performance-source span { color: var(--muted); font-size: 12px; }
+.performance-source.ready { border-color: color-mix(in srgb, var(--pos) 38%, var(--border)); }
+.performance-source.ready strong { color: var(--pos); }
+.performance-source.error { border-color: color-mix(in srgb, var(--neg) 48%, var(--border)); }
+.performance-source.error strong,
+.performance-source.error span { color: var(--neg); }
+.performance-source.loading strong { color: var(--warn); }
+.performance-source .btn { margin: 0; flex: 0 0 auto; }
+.exchange-history-table td { vertical-align: top; }
+.badge.closed { background: var(--surface-subtle); color: var(--muted); }
+.exchange-fees { font-size: 14px !important; overflow-wrap: anywhere; }
+.content:has(.performance-page) { max-width: none; }
+.performance-history-card .tbl-wrap { width: 100%; overflow-x: visible; }
+.performance-history-card .exchange-history-table { table-layout: fixed; font-size: clamp(10px, .7vw, 12px); }
+.performance-history-card .exchange-history-table th {
+  padding: 11px 7px; white-space: normal; line-height: 1.25;
+  color: #f5fbff; background: linear-gradient(135deg, rgba(31, 108, 173, .92), rgba(16, 47, 85, .96));
+  text-shadow: 0 1px 5px rgba(0, 0, 0, .46);
+}
+.performance-history-card .exchange-history-table td {
+  padding: 10px 7px; white-space: normal; overflow-wrap: anywhere; line-height: 1.3;
+}
+.performance-history-card .exchange-history-table .numeric { text-align: right; }
+.performance-history-card .exchange-history-table th:nth-child(1),
+.performance-history-card .exchange-history-table th:nth-child(6) { width: 13%; }
+.performance-history-card .exchange-history-table th:nth-child(2) { width: 11%; }
+.performance-history-card .exchange-history-table th:nth-child(3),
+.performance-history-card .exchange-history-table th:nth-child(4),
+.performance-history-card .exchange-history-table th:nth-child(5),
+.performance-history-card .exchange-history-table th:nth-child(7),
+.performance-history-card .exchange-history-table th:nth-child(8),
+.performance-history-card .exchange-history-table th:nth-child(9),
+.performance-history-card .exchange-history-table th:nth-child(11) { width: 7%; }
+.performance-history-card .exchange-history-table th:nth-child(10) { width: 14%; }
+.performance-stat {
+  position: relative; overflow: hidden; isolation: isolate;
+  border-width: 1px;
+}
+.performance-stat::after {
+  content: ""; position: absolute; inset: auto -16px -38px auto; z-index: -1;
+  width: 104px; height: 104px; border-radius: 50%; opacity: .48;
+  background: currentColor; filter: blur(22px);
+}
+.performance-stat.positive {
+  color: #52e8ab; border-color: rgba(56, 217, 154, .48);
+  background: linear-gradient(135deg, rgba(15, 74, 56, .94), rgba(7, 30, 28, .91));
+}
+.performance-stat.negative {
+  color: #ff7888; border-color: rgba(255, 97, 114, .52);
+  background: linear-gradient(135deg, rgba(91, 22, 38, .94), rgba(39, 11, 22, .91));
+}
+.performance-stat.accent {
+  color: var(--accent-dark); border-color: color-mix(in srgb, var(--accent) 58%, var(--border));
+  background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 24%, var(--surface)), var(--surface));
+}
+.performance-stat.warning {
+  color: #ffcf7d; border-color: rgba(255, 194, 103, .5);
+  background: linear-gradient(135deg, rgba(91, 59, 20, .93), rgba(39, 25, 13, .91));
+}
+.performance-stat.neutral {
+  color: var(--muted); border-color: var(--border);
+  background: linear-gradient(135deg, var(--surface-hover), var(--surface));
+}
+.performance-stat .lbl,
+.performance-stat .sub { color: color-mix(in srgb, currentColor 72%, var(--text)); }
+.performance-stat .val { color: var(--text); text-shadow: 0 1px 12px color-mix(in srgb, currentColor 40%, transparent); }
+@media (prefers-reduced-motion: no-preference) {
+  .performance-stat { transition: transform .2s ease, filter .2s ease; }
+  .performance-stat:hover { transform: translateY(-2px); filter: brightness(1.08); }
+}
+@media (max-width: 620px) {
+  .performance-source { align-items: stretch; flex-direction: column; }
+  .performance-source .btn { width: 100%; }
+}
+@media (max-width: 960px) {
+  /* Wide desktop layouts keep every trade column in view.  Smaller displays
+     retain an intentional horizontal scroll instead of reducing timestamps
+     and monetary values below a readable size. */
+  .performance-history-card .tbl-wrap { overflow-x: auto; }
+  .performance-history-card .exchange-history-table { min-width: 1030px; table-layout: auto; font-size: 12px; }
+  .performance-history-card .exchange-history-table th,
+  .performance-history-card .exchange-history-table td { white-space: nowrap; }
+}
 
 /* ── Polished Red theme finish ───────────────────────────
    The default/light preference is presented to people as the Red theme. */
@@ -1952,3 +2105,113 @@ body.login-body {
 @media (prefers-reduced-motion: reduce) {
   .te-decision-dot { animation: none; }
 }
+
+/* Performance: retain a visibly separate header row in both Red and Blue
+   themes. This intentionally overrides the page-theme table header tint. */
+:root .performance-history-card .exchange-history-table thead th {
+  color: #f4fbff;
+  background: linear-gradient(135deg, #12658f 0%, #0b3f72 52%, #092a56 100%);
+  border-bottom-color: rgba(115, 215, 255, .52);
+  box-shadow: inset 0 1px 0 rgba(180, 237, 255, .26);
+}
+
+/* Overview: use the same high-contrast data hierarchy as Performance while
+   retaining the selected Red/Blue theme as the page accent. */
+.overview-hero {
+  margin-bottom: 18px; padding: 18px 20px; border: 1px solid color-mix(in srgb, var(--accent) 38%, var(--border));
+  border-radius: var(--radius);
+  background:
+    radial-gradient(circle at 100% 0%, color-mix(in srgb, var(--accent) 20%, transparent), transparent 46%),
+    linear-gradient(135deg, color-mix(in srgb, var(--accent-soft) 48%, var(--surface)), var(--surface));
+  box-shadow: var(--shadow);
+}
+.overview-hero .greeting-txt { padding-left: 12px; border-left: 3px solid var(--accent); }
+.overview-page .next-action {
+  position: relative; overflow: hidden;
+  border-color: color-mix(in srgb, var(--accent) 28%, var(--border));
+  background: linear-gradient(135deg, color-mix(in srgb, var(--accent-soft) 55%, var(--surface-subtle)), var(--surface));
+}
+.overview-page .next-action::before {
+  content: ""; position: absolute; inset: 0 auto 0 0; width: 3px; background: var(--accent);
+  box-shadow: 0 0 14px color-mix(in srgb, var(--accent) 70%, transparent);
+}
+.overview-page .next-action .val { color: var(--text); }
+:root .performance-stat.positive {
+  color: #52e8ab; border-color: rgba(56, 217, 154, .48);
+  background: linear-gradient(135deg, rgba(15, 74, 56, .94), rgba(7, 30, 28, .91));
+}
+:root .performance-stat.negative {
+  color: #ff7888; border-color: rgba(255, 97, 114, .52);
+  background: linear-gradient(135deg, rgba(91, 22, 38, .94), rgba(39, 11, 22, .91));
+}
+:root .performance-stat.accent {
+  color: var(--accent-dark); border-color: color-mix(in srgb, var(--accent) 58%, var(--border));
+  background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 24%, var(--surface)), var(--surface));
+}
+:root .performance-stat.warning {
+  color: #ffcf7d; border-color: rgba(255, 194, 103, .5);
+  background: linear-gradient(135deg, rgba(91, 59, 20, .93), rgba(39, 25, 13, .91));
+}
+:root .performance-stat.neutral {
+  color: var(--muted); border-color: var(--border);
+  background: linear-gradient(135deg, var(--surface-hover), var(--surface));
+}
+:root .overview-page .overview-today-card thead th {
+  color: #f4fbff;
+  background: linear-gradient(135deg, #12658f 0%, #0b3f72 52%, #092a56 100%);
+  border-bottom-color: rgba(115, 215, 255, .52);
+  box-shadow: inset 0 1px 0 rgba(180, 237, 255, .26);
+}
+
+/* ── Shared Performance visual system ──────────────────────
+   Every dashboard view uses the same card hierarchy: the selected Red/Blue
+   theme lights operational surfaces, P/L states stay semantic, and tables
+   receive the same high-contrast header strip as Performance. */
+:root:not([data-theme="dark"]) .card-hd {
+  color: #fff8f9;
+  border-bottom-color: rgba(255, 118, 134, .34);
+  background:
+    linear-gradient(90deg, rgba(255, 50, 78, .25), rgba(112, 17, 33, .16) 48%, rgba(10, 5, 7, .06)),
+    var(--surface);
+  box-shadow: inset 0 1px 0 rgba(255, 235, 239, .10);
+}
+:root[data-theme="dark"] .card-hd {
+  color: #f4fbff;
+  border-bottom-color: rgba(104, 195, 255, .35);
+  background:
+    linear-gradient(90deg, rgba(41, 157, 255, .27), rgba(14, 74, 140, .17) 48%, rgba(2, 8, 15, .06)),
+    var(--surface);
+  box-shadow: inset 0 1px 0 rgba(222, 245, 255, .10);
+}
+:root .card-hd::before {
+  content: ""; width: 3px; height: 17px; flex: 0 0 auto; border-radius: 999px;
+  background: var(--accent); box-shadow: 0 0 12px color-mix(in srgb, var(--accent) 64%, transparent);
+}
+:root:not([data-theme="dark"]) .stats .stat:not(.performance-stat) {
+  border-color: rgba(255, 105, 123, .34);
+  background:
+    radial-gradient(circle at 100% 0%, rgba(255, 55, 82, .16), transparent 48%),
+    linear-gradient(135deg, rgba(52, 17, 24, .94), rgba(12, 6, 9, .90));
+}
+:root[data-theme="dark"] .stats .stat:not(.performance-stat) {
+  border-color: rgba(101, 194, 255, .35);
+  background:
+    radial-gradient(circle at 100% 0%, rgba(45, 157, 255, .17), transparent 48%),
+    linear-gradient(135deg, rgba(10, 42, 78, .94), rgba(3, 12, 24, .90));
+}
+:root .stats .stat:not(.performance-stat)::before {
+  content: ""; display: block; width: 34px; height: 2px; margin-bottom: 10px;
+  border-radius: 999px; background: var(--accent); box-shadow: 0 0 10px color-mix(in srgb, var(--accent) 60%, transparent);
+}
+:root table thead th {
+  color: #f4fbff;
+  background: linear-gradient(135deg, #12658f 0%, #0b3f72 52%, #092a56 100%);
+  border-bottom-color: rgba(115, 215, 255, .52);
+  box-shadow: inset 0 1px 0 rgba(180, 237, 255, .26);
+}
+:root .section-title {
+  padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--border));
+  border-radius: 9px;
+  background: linear-gradient(90deg, color-mix(in srgb, var(--accent-soft) 70%, transparent), transparent 68%);
+}
+:root .section-title span { color: var(--accent-dark); }

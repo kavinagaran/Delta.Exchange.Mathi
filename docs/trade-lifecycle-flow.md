@@ -86,13 +86,14 @@ raising. Protection is never gated on a candle close or on engine health.
 | Score | Zone | Action | Instrument |
 |---|---|---|---|
 | `+35 … +100` | `CE_2_ITM` | buy | 2-step ITM call (ATM − 2) |
-| `+25 … +35` | `HOLD` | none — keep open position | — |
-| `−25 … +25` | `SHORT_MOVE` | sell | ATM MOVE straddle |
-| `−35 … −25` | `HOLD` | none — keep open position | — |
+| `+15 < score < +35` | `HOLD` | none — keep open position | — |
+| `−15 … +15` for three completed 5m candles | `SHORT_MOVE` | sell | ATM MOVE straddle |
+| `−35 < score < −15` | `HOLD` | none — keep open position | — |
 | `−100 … −35` | `PE_2_ITM` | buy | 2-step ITM put (ATM + 2) |
 
-Boundaries are inclusive at ±35 and ±25. Bands live in exactly one place,
-`btc_trend_engine/signals/zones.py`; `trend_score_auto.score_zone` delegates
+At ±35 the directional zones apply; at ±15 the SHORT_MOVE candidate zone
+applies. Bands live in exactly one place, `btc_trend_engine/signals/zones.py`;
+`trend_score_auto.score_zone` delegates
 to it so the two cannot drift.
 
 ## Idempotency and repaint safety

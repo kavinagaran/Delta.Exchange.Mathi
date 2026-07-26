@@ -146,17 +146,18 @@ GET  /shadow/summary?days=N         Phase 8
 
 All bind `127.0.0.1:5055` and require `X-Engine-Token` except `/health`.
 
-## Mapping to the existing zone model
+## Mapping to the current zone model
 
-During shadow and until cutover, `trend_score` maps to the legacy zones so the
-two can be compared on one axis:
+`trend_score` maps directly to the executable zone policy:
 
-| `direction` | Legacy zone | Meaning |
+| Score | Zone | Action |
 |---:|---|---|
-| `-1` | `PE_3_ITM` | bearish |
-| `0` | `SHORT_MOVE` | neutral |
-| `+1` | `CE_2_ITM` | bullish |
+| `+35 … +100` | `CE_2_ITM` | Buy a 2-step ITM call |
+| `+15 < score < +35` | `HOLD` | Keep the existing position |
+| `−15 … +15` for three closed 5m candles | `SHORT_MOVE` | Sell the ATM MOVE straddle |
+| `−35 < score < −15` | `HOLD` | Keep the existing position |
+| `−100 … −35` | `PE_2_ITM` | Buy a 2-step ITM put |
 
-Note the legacy zone thresholds (±25) and the spec's entry thresholds (±65) are
-different scales measuring different things. The shadow comparison records both
-and does not assume they should agree numerically — only directionally.
+At exactly ±15 the score is a `SHORT_MOVE` candidate. The engine keeps
+`zone_action_allowed=false` until it has observed the full 15-minute
+confirmation, so a dashboard consumer cannot switch or enter early.
