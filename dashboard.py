@@ -36,6 +36,7 @@ from trend_engine_live import collect_delta_trend_snapshot
 from trend_score_auto import (
     AUTO_TRADE_LOTS as TREND_SCORE_AUTO_LOTS,
     CE_2_ITM as TREND_SCORE_CE_ZONE,
+    HOLD as TREND_SCORE_HOLD_ZONE,
     PE_2_ITM as TREND_SCORE_PE_ZONE,
     SHORT_MOVE as TREND_SCORE_MOVE_ZONE,
     TrendScoreAutoInputError,
@@ -7724,9 +7725,37 @@ def _collect_trend_score_auto_signal() -> dict:
         mode_revision=mode["mode_revision"],
         strategy_config=strategy_config,
     )
-    decision = _trend_score_auto_market_decision(snapshot, engine_config)
-    score = float(decision["direction_score"])
-    zone = score_zone(score)
+    # The SCORE now comes from btc_trend_engine, not from the legacy
+    # in-dashboard scorer. `snapshot` above is still fetched, but only for
+    # market data the engine does not carry (spot, the listed option ladder)
+    # which contract selection needs.
+    #
+    # Fail closed, hard: trend_engine_client never raises and substitutes a
+    # DEGRADED snapshot on any failure, so an unreachable or stale engine
+    # must be turned into a refusal here. Without this, an engine outage
+    # would silently fall through to a score of 0 -- which is the SHORT_MOVE
+    # band, i.e. an outage would start selling straddles.
+    engine_snapshot = trend_engine_client.get_snapshot("BTCUSD")
+    engine_quality = str(engine_snapshot.get("data_quality") or "")
+    if engine_quality != "OK":
+        raise RuntimeError(
+            f"trend engine is not healthy ({engine_quality}); entries fail closed")
+    score = float(engine_snapshot["trend_score"])
+    zone = str(engine_snapshot["zone"])
+    decision = {
+        "direction_score": score,
+        "market_regime": engine_snapshot.get("regime") or "UNCLEAR",
+        "engine_signal_id": engine_snapshot.get("signal_id"),
+        "engine_candle_close_utc": engine_snapshot.get("candle_close_utc"),
+        "zone_action_allowed": bool(engine_snapshot.get("zone_action_allowed")),
+        "zone_reason": engine_snapshot.get("zone_reason"),
+        "source": "btc_trend_engine",
+    }
+    # HOLD is not an action: no entry, and no exit either (zones.should_exit).
+    # Raising keeps it out of the transition planner entirely.
+    if zone == TREND_SCORE_HOLD_ZONE:
+        raise RuntimeError(
+            f"score {score:+.1f} is in the hold band; no new action")
     signal_key = completed_candle_signal_key(snapshot)
     complete_rows = [
         row for row in ((snapshot.get("candles") or {}).get("5m") or [])

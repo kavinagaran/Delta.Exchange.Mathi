@@ -299,6 +299,17 @@ def test_score_signal_collector_is_dry_public_only_and_never_authenticates(
     monkeypatch.setattr(dashboard, "_sign", sign)
     monkeypatch.setattr(dashboard.req, "post", raw_post)
     monkeypatch.setattr(dashboard.req, "delete", raw_delete)
+    # The score now comes from btc_trend_engine. Stubbed healthy so this test
+    # keeps testing what it is about -- that the collector never authenticates
+    # -- rather than the (separately tested) engine fail-closed guard.
+    monkeypatch.setattr(
+        dashboard.trend_engine_client, "get_snapshot",
+        lambda symbol="BTCUSD": {
+            "data_quality": "OK", "trend_score": 55.0, "zone": "CE_2_ITM",
+            "regime": "TREND_UP", "signal_id": "engine-public-only",
+            "candle_close_utc": "2026-07-22T10:00:00Z",
+            "zone_action_allowed": True, "zone_reason": "bullish",
+        })
     monkeypatch.setattr(dashboard, "_trend_engine_config_overrides", lambda: {})
     monkeypatch.setattr(dashboard, "_trend_engine_strategy_config", lambda: {})
     monkeypatch.setattr(
