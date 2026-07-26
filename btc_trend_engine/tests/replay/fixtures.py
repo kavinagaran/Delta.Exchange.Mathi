@@ -189,9 +189,16 @@ SCENARIOS: dict[str, Scenario] = {
     "bearish_trend": Scenario(
         "bearish_trend", "Sustained downward trend; the engine should be able to go short.",
         _trend(N, -0.38), expect_entry_allowed=True),
+    # expect_entry_allowed was False under the old |60| entry threshold. Under
+    # the 2026-07-26 spec's |35| it is no longer true and the fixture must not
+    # pretend otherwise: this deliberately sideways series reaches -59..+44 and
+    # crosses |35| on ~30% of decisions, classifying as TREND_UP/TREND_DOWN for
+    # 92 of 249 bars. That is a real property of the lower threshold -- a range
+    # now reads as a trend nearly a third of the time -- and is the mechanism
+    # behind the backtest's "more trades at a worse win rate" result.
     "range_bound": Scenario(
-        "range_bound", "Oscillating market; RANGE is non-tradeable, so no entry.",
-        _range(N), expect_entry_allowed=False),
+        "range_bound", "Oscillating market; at |35| it still reads directional ~30% of the time.",
+        _range(N), expect_entry_allowed=None),
     "false_breakout": Scenario(
         "false_breakout", "A thrust out of a range that fully retraces.",
         _false_breakout(N)),

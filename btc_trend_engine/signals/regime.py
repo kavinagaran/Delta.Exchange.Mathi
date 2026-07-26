@@ -37,8 +37,14 @@ NON_TRADEABLE = frozenset({Regime.RANGE, Regime.HIGH_VOL_SHOCK,
 
 @dataclass(frozen=True, slots=True)
 class RegimeConfig:
-    trend_enter_score: float = 60.0   # §8.2 example: enter at ±60
-    trend_exit_score: float = 30.0    # hold until |score| < 30
+    # Aligned to the 2026-07-26 zone spec (signals/zones.py): directional at
+    # |35|, hold to |25|. These MUST track the zone bands. When they did not
+    # (regime entered at 60 while zones entered at 35) every score in 35..60
+    # produced a directional zone that the regime_tradeable gate then blocked,
+    # so the whole band was silently untradeable -- visible in production only
+    # as "the engine rarely trades", not as an error.
+    trend_enter_score: float = 35.0   # was 60.0 (§8.2 example)
+    trend_exit_score: float = 25.0    # was 30.0; matches zones' hold band
     breakout_body_atr_min: float = 1.2
     vol_shock_ratio: float = 2.5      # short vol vs long vol
     jump_shock_score: float = 4.0     # standardised last-bar move
