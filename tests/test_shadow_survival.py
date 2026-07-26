@@ -132,12 +132,15 @@ def test_dropped_records_are_counted_so_the_gap_is_visible():
 
 
 # ── the live decision path itself ───────────────────────────────────────
-def test_the_reporter_is_wrapped_so_even_an_enqueue_bug_cannot_propagate():
-    """post_legacy_decision is defensive internally, but the call site must
-    ALSO be wrapped: a future refactor that makes enqueueing raise must not
-    take the trading loop with it."""
+def test_the_dashboard_no_longer_posts_shadow_decisions():
+    """Shadow comparison was removed when the engine became the sole score
+    source: the dashboard was posting the engine's own score back to the
+    engine, so the agreement rate was the engine agreeing with itself.
+
+    The client transport above stays tested because the engine-side
+    /shadow endpoints still serve the history recorded before cutover.
+    """
     import dashboard
 
-    source = dashboard._collect_trend_score_auto_signal.__doc__ or ""
-    assert "shadow" in source.lower(), (
-        "the decision collector should document its shadow hook")
+    assert not hasattr(dashboard, "_report_legacy_decision_to_shadow")
+    assert not hasattr(dashboard, "_shadow_direction_from_zone")
