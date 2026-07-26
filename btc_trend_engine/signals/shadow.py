@@ -26,10 +26,40 @@ DIRECTION_OPPOSED = "direction_opposed"
 ENGINE_FLAT_LEGACY_DIRECTIONAL = "engine_flat_legacy_directional"
 ENGINE_DIRECTIONAL_LEGACY_FLAT = "engine_directional_legacy_flat"
 
+# Zone-level classes (2026-07-26 spec). Kept separate from the direction
+# classes above so the summary can report both views without conflating them.
+ZONE_OPPOSED = "zone_opposed"
+ZONE_SAME_SIDE_DIFFERENT_STRIKE = "zone_same_side_different_strike"
+ZONE_ENGINE_HOLDS = "zone_engine_holds_legacy_acts"
+
 DISAGREEMENT_CLASSES = (
     ENGINE_MISSING, ENGINE_DEGRADED, ENGINE_GATED, DIRECTION_OPPOSED,
     ENGINE_FLAT_LEGACY_DIRECTIONAL, ENGINE_DIRECTIONAL_LEGACY_FLAT,
+    ZONE_OPPOSED, ZONE_SAME_SIDE_DIFFERENT_STRIKE, ZONE_ENGINE_HOLDS,
 )
+
+
+def zone_agreement(legacy_zone: str, engine_zone: str | None) -> tuple[bool | None, str]:
+    """Compare the *action* each engine would take, not just its direction.
+
+    Direction agreement hides the two changes that matter most under the
+    2026-07-26 zone spec: legacy buys a 3-step ITM put where this engine buys
+    a 2-step one (same direction, different instrument), and legacy takes a
+    directional trade in 25<|score|<35 where this engine holds flat (same
+    "not sideways", opposite position).
+    """
+    if not engine_zone:
+        return None, ENGINE_MISSING
+    if engine_zone == "HOLD":
+        return False, ZONE_ENGINE_HOLDS
+    if legacy_zone == engine_zone:
+        return True, AGREE
+    # PE_3_ITM vs PE_2_ITM is the same directional call at a different strike.
+    if legacy_zone.startswith("PE") and engine_zone.startswith("PE"):
+        return False, ZONE_SAME_SIDE_DIFFERENT_STRIKE
+    if legacy_zone.startswith("CE") and engine_zone.startswith("CE"):
+        return False, ZONE_SAME_SIDE_DIFFERENT_STRIKE
+    return False, ZONE_OPPOSED
 
 
 def classify(legacy_direction: int,

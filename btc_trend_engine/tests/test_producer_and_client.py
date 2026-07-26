@@ -73,7 +73,7 @@ def test_produces_schema_valid_snapshot_from_closed_candles():
                   "components", "timeframes", "gates", "reason_codes",
                   "data_quality", "feature_set_version", "model_version"):
         assert field in snapshot, field
-    assert snapshot["schema_version"] == "1.0.0"
+    assert snapshot["schema_version"] == "1.1.0"
     assert -100.0 <= snapshot["trend_score"] <= 100.0
     assert snapshot["signal_ttl_seconds"] > 0
     assert abs(sum(c["weight"] for c in snapshot["components"]) - 1.0) < 1e-9
@@ -216,7 +216,7 @@ def test_trend_endpoints_require_token_and_serve_the_contract(config, service):
         assert http.get("/trend/latest").status_code == 401
         latest = http.get("/trend/latest", headers=headers)
         assert latest.status_code == 200
-        assert latest.json()["schema_version"] == "1.0.0"
+        assert latest.json()["schema_version"] == "1.1.0"
         assert http.get("/trend/history?limit=5",
                         headers=headers).json()["snapshots"]
         assert http.get("/regime/latest", headers=headers).json()["regime"]
@@ -409,3 +409,17 @@ def test_degraded_snapshot_is_shaped_like_the_contract():
         assert field in snapshot, field
     assert snapshot["entry_allowed"] is False
     assert snapshot["regime"] == "DEGRADED"
+
+
+def test_the_minor_bump_to_1_1_0_is_not_a_breaking_change():
+    """The client compares MAJOR only, so an engine emitting 1.1.0 and a
+    consumer written against 1.0.0 must both work. If this ever fails, the
+    zone fields were added as a breaking change by accident."""
+    for version in ("1.0.0", "1.1.0", "1.9.3"):
+        snapshot = client._validate(_good(schema_version=version), "BTCUSD", T0)
+        assert snapshot["data_quality"] == "OK", version
+        assert snapshot["entry_allowed"] is True, version
+
+    rejected = client._validate(_good(schema_version="2.0.0"), "BTCUSD", T0)
+    assert rejected["data_quality"] == client.CONTRACT_VERSION_MISMATCH
+    assert rejected["entry_allowed"] is False

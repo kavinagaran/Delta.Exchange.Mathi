@@ -1,0 +1,197 @@
+"""Score -> action zone mapping against the operator spec (2026-07-26):
+
+    +35..+100 bullish CE 2-step ITM · -35..-100 bearish PE 2-step ITM
+    -25..+25 sideways sell ATM MOVE · the gaps are a hysteresis hold band
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from btc_trend_engine.signals import zones
+from btc_trend_engine.signals.zones import ZonePolicy
+
+
+def _decide(score, **kw):
+    params = dict(score=score, regime="TREND_UP", data_quality="OK",
+                  gates_passed=True, allow_short_move=True)
+    params.update(kw)
+    return zones.decide(**params)
+
+
+# ── the three specified bands, including their exact boundaries ─────────
+@pytest.mark.parametrize("score", [35.0, 36.0, 65.0, 99.9, 100.0])
+def test_bullish_band_buys_two_step_itm_ce(score):
+    decision = _decide(score)
+    assert decision.zone == zones.CE_2_ITM
+    assert decision.option_type == "CE" and decision.itm_steps == 2
+    assert zones.strike_index_offset(decision.zone) == -2
+
+
+@pytest.mark.parametrize("score", [-35.0, -36.0, -65.0, -100.0])
+def test_bearish_band_buys_two_step_itm_pe(score):
+    decision = _decide(score)
+    assert decision.zone == zones.PE_2_ITM
+    assert decision.option_type == "PE" and decision.itm_steps == 2
+    # ITM for a put is a HIGHER strike -- opposite sign to the call.
+    assert zones.strike_index_offset(decision.zone) == +2
+
+
+@pytest.mark.parametrize("score", [-25.0, -24.9, 0.0, 12.0, 24.9, 25.0])
+def test_sideways_band_sells_atm_move(score):
+    decision = _decide(score)
+    assert decision.zone == zones.SHORT_MOVE
+    # Selling a straddle picks no vanilla strike.
+    assert decision.option_type is None
+    assert zones.strike_index_offset(decision.zone) is None
+
+
+@pytest.mark.parametrize("score", [25.1, 30.0, 34.9, -25.1, -30.0, -34.9])
+def test_the_gap_between_the_bands_is_a_hold_not_an_action(score):
+    """The spec leaves 25<|s|<35 undefined; treating it as either neighbour
+    would make the engine thrash across a single threshold."""
+    decision = _decide(score)
+    assert decision.zone == zones.HOLD
+    assert decision.action_allowed is False
+    assert "hold band" in decision.reason
+
+
+def test_the_boundaries_are_inclusive_exactly_as_written():
+    assert zones.zone_for_score(35.0) == zones.CE_2_ITM
+    assert zones.zone_for_score(-35.0) == zones.PE_2_ITM
+    assert zones.zone_for_score(25.0) == zones.SHORT_MOVE
+    assert zones.zone_for_score(-25.0) == zones.SHORT_MOVE
+
+
+def test_every_score_in_range_maps_to_exactly_one_known_zone():
+    for tenth in range(-1000, 1001):
+        zone = zones.zone_for_score(tenth / 10.0)
+        assert zone in zones.ZONES
+
+
+# ── safety gating ───────────────────────────────────────────────────────
+def test_selling_move_is_off_by_default():
+    """ALLOW_SHORT_MOVE defaults false in the dashboard; a signal engine must
+    never be the thing that enables an unbounded-loss short-vol position."""
+    assert zones.decide(score=0.0, regime="RANGE", data_quality="OK",
+                        gates_passed=True).action_allowed is False
+
+
+def test_range_does_not_block_the_move_action():
+    """RANGE is non-tradeable for directional entries, but under this spec a
+    sideways market IS the sell-MOVE setup -- blocking it would make the
+    sideways band unreachable."""
+    assert _decide(0.0, regime="RANGE").action_allowed is True
+
+
+@pytest.mark.parametrize("regime", ["HIGH_VOL_SHOCK", "LOW_LIQUIDITY", "DEGRADED"])
+@pytest.mark.parametrize("score", [85.0, 0.0, -85.0])
+def test_unsafe_regimes_block_every_zone_including_sideways(regime, score):
+    """Selling MOVE into a volatility shock is the worst possible moment to
+    be short volatility, so the sideways band gets no exemption."""
+    assert _decide(score, regime=regime).action_allowed is False
+
+
+@pytest.mark.parametrize("score", [85.0, 0.0, -85.0])
+def test_degraded_data_blocks_every_zone(score):
+    assert _decide(score, data_quality="STALE_L1").action_allowed is False
+
+
+@pytest.mark.parametrize("score", [85.0, 0.0, -85.0])
+def test_a_failed_gate_blocks_every_zone(score):
+    assert _decide(score, gates_passed=False).action_allowed is False
+
+
+def test_the_zone_is_still_reported_when_the_action_is_blocked():
+    """Blocking must not erase what the engine thought -- 'bullish but
+    blocked' and 'not bullish' are different facts."""
+    decision = _decide(85.0, data_quality="STALE_L1")
+    assert decision.zone == zones.CE_2_ITM
+    assert decision.action_allowed is False
+
+
+# ── policy validation ───────────────────────────────────────────────────
+def test_overlapping_thresholds_are_rejected_rather_than_silently_inverted():
+    with pytest.raises(ValueError):
+        ZonePolicy(directional_entry_abs=25.0, sideways_max_abs=35.0)
+
+
+def test_a_custom_policy_moves_both_boundaries():
+    policy = ZonePolicy(directional_entry_abs=60.0, sideways_max_abs=20.0)
+    assert zones.zone_for_score(50.0, policy) == zones.HOLD
+    assert zones.zone_for_score(60.0, policy) == zones.CE_2_ITM
+    assert zones.zone_for_score(20.0, policy) == zones.SHORT_MOVE
+
+
+# ── divergence from legacy, stated explicitly ───────────────────────────
+def test_this_model_differs_from_legacy_pe_strike_depth():
+    """Legacy trend_score_auto uses PE_3_ITM (ATM+3); this spec says 2 steps.
+    Pinned so the change is deliberate rather than drifted into."""
+    from trend_score_auto import PE_3_ITM
+
+    assert zones.PE_2_ITM != PE_3_ITM
+    assert zones.strike_index_offset(zones.PE_2_ITM) == 2
+
+
+def test_legacy_takes_a_directional_trade_where_this_model_holds():
+    """The hold band is not a no-op relabelling of legacy behaviour.
+
+    Legacy switches directional at |25|, so at a score of 30 it BUYS CALLS.
+    This model holds flat until 35. Across 25 < |score| < 35 the two engines
+    differ by a real position, not by a label -- the single largest expected
+    source of shadow disagreement, and the reason the sideways band cannot be
+    described as "legacy plus hysteresis".
+    """
+    from trend_score_auto import CE_2_ITM as LEGACY_CE
+    from trend_score_auto import PE_3_ITM as LEGACY_PE
+    from trend_score_auto import score_zone as legacy_zone
+
+    assert legacy_zone(30) == LEGACY_CE       # legacy is long calls
+    assert zones.zone_for_score(30) == zones.HOLD    # this model is flat
+
+    assert legacy_zone(-30) == LEGACY_PE      # legacy is long puts
+    assert zones.zone_for_score(-30) == zones.HOLD
+
+    # And where both are directional, legacy's put is one strike deeper.
+    assert legacy_zone(-50) == LEGACY_PE
+    assert zones.zone_for_score(-50) == zones.PE_2_ITM
+
+
+# ── zone-level shadow comparison ────────────────────────────────────────
+def test_zone_agreement_flags_the_pe_strike_difference_as_a_disagreement():
+    """Same direction, different instrument. Direction-only comparison would
+    score this as agreement and hide a real execution difference."""
+    from btc_trend_engine.signals import shadow
+
+    agreed, reason = shadow.zone_agreement("PE_3_ITM", "PE_2_ITM")
+    assert agreed is False
+    assert reason == shadow.ZONE_SAME_SIDE_DIFFERENT_STRIKE
+
+
+def test_zone_agreement_flags_the_hold_band_divergence():
+    from btc_trend_engine.signals import shadow
+
+    agreed, reason = shadow.zone_agreement("CE_2_ITM", "HOLD")
+    assert agreed is False
+    assert reason == shadow.ZONE_ENGINE_HOLDS
+
+
+def test_zone_agreement_matches_on_identical_zones():
+    from btc_trend_engine.signals import shadow
+
+    assert shadow.zone_agreement("CE_2_ITM", "CE_2_ITM") == (True, shadow.AGREE)
+    assert shadow.zone_agreement("SHORT_MOVE", "SHORT_MOVE") == (True, shadow.AGREE)
+
+
+def test_zone_agreement_reports_a_missing_engine_zone_as_incomparable():
+    from btc_trend_engine.signals import shadow
+
+    agreed, reason = shadow.zone_agreement("CE_2_ITM", None)
+    assert agreed is None and reason == shadow.ENGINE_MISSING
+
+
+def test_directional_versus_sideways_is_a_full_opposition():
+    from btc_trend_engine.signals import shadow
+
+    agreed, reason = shadow.zone_agreement("CE_2_ITM", "SHORT_MOVE")
+    assert agreed is False and reason == shadow.ZONE_OPPOSED

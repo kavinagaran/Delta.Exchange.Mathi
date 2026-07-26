@@ -281,15 +281,28 @@ def test_breakout_requires_body():
 
 # ── signal hysteresis ───────────────────────────────────────────────────
 def test_signal_hysteresis_matrix():
+    """Thresholds are the 2026-07-26 operator spec: enter at |35|, hold to
+    |25|. The 25-35 gap is the hold band (see signals/zones.py)."""
     h = SignalHysteresis(SignalConfig())
-    assert h.update(50.0) == 0        # below entry
-    assert h.update(70.0) == 1        # enter long
-    assert h.update(30.0) == 1        # hold while > 25
+    assert h.update(30.0) == 0        # inside the hold band, never entered
+    assert h.update(40.0) == 1        # enter long at >= 35
+    assert h.update(30.0) == 1        # hold band keeps an OPEN position
     assert h.update(20.0) == 0        # exit at <= 25
-    assert h.update(-70.0) == -1      # enter short
+    assert h.update(-40.0) == -1      # enter short at <= -35
     assert h.update(-26.0) == -1      # hold
     assert h.update(-10.0) == 0       # exit
     assert h.update(None) == 0        # no score → flat, always
+
+
+def test_the_hold_band_is_asymmetric_between_entering_and_holding():
+    """A score of 30 must NOT open a position but must not close one either.
+    This is the whole point of the gap in the spec."""
+    entering = SignalHysteresis(SignalConfig())
+    assert entering.update(30.0) == 0
+
+    holding = SignalHysteresis(SignalConfig())
+    holding.update(40.0)
+    assert holding.update(30.0) == 1
 
 
 # ── snapshot invariants (contract §invariants, §23.4) ───────────────────
@@ -319,9 +332,11 @@ def test_snapshot_matches_contract_shape():
     for key in ("schema_version", "signal_id", "regime", "direction",
                 "trend_score", "confidence", "entry_allowed",
                 "signal_ttl_seconds", "components", "timeframes", "gates",
-                "reason_codes", "data_quality", "invalidation_price"):
+                "reason_codes", "data_quality", "invalidation_price",
+                "zone", "zone_action_allowed", "zone_reason"):
         assert key in snapshot, key
-    assert snapshot["schema_version"] == "1.0.0"
+    # 1.1.0 added the zone fields additively; the client compares major only.
+    assert snapshot["schema_version"] == "1.1.0"
     assert snapshot["entry_allowed"] is True
     assert snapshot["invalidation_price"] == "63000.0"
     assert snapshot["suggested_stop_bps"] == pytest.approx(58.5)

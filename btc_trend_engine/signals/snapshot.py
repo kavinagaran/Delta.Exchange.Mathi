@@ -17,16 +17,25 @@ from datetime import datetime, timezone
 from typing import Any, Mapping
 
 from ..features.pipeline import FEATURE_SET_VERSION, TimeframeFeatures
+from . import zones
 from .regime import NON_TRADEABLE, Regime
 from .score import ScoreResult
 
-SCHEMA_VERSION = "1.0.0"
+# 1.1.0: additive zone fields (zone, zone_action_allowed, zone_reason,
+# zone_option_type, zone_itm_steps). Minor bump -- the client compares major
+# only, so existing consumers are unaffected.
+SCHEMA_VERSION = "1.1.0"
 MODEL_VERSION = "trend-rules-v1.0.0"
 
 
 @dataclass(frozen=True, slots=True)
 class SignalConfig:
-    entry_score: float = 65.0       # §12.3 / §30
+    # Operator spec 2026-07-26: directional entry at |score| >= 35, give the
+    # position up only once |score| decays to <= 25. The 25-35 gap is the
+    # hysteresis band -- see signals/zones.py. Was 65/25 (§12.3 / §30); the
+    # entry threshold moved to match the zone spec so `direction` and `zone`
+    # can never disagree about whether a directional trade is on.
+    entry_score: float = 35.0
     hold_score: float = 25.0
     minimum_confidence: float = 0.62
     ttl_seconds: int = 300
@@ -146,6 +155,7 @@ def build_snapshot(
     data_quality: str,
     config: SignalConfig,
     forecast: Mapping[str, float | None] | None = None,
+    allow_short_move: bool = False,
 ) -> dict[str, Any]:
     timeframe_features = {"4h": structural, "1h": primary,
                           "15m": setup, "5m": trigger}
@@ -186,6 +196,19 @@ def build_snapshot(
         regime=regime, direction=direction, timeframe_biases=biases,
         setup=setup, gates=gates)
 
+    # Zone is the operator-facing decision surface (signals/zones.py). It is
+    # reported alongside, not instead of, `direction`/`entry_allowed`: those
+    # keep their v1.0.0 meaning for existing consumers. The two can legitimately
+    # differ -- `entry_allowed` additionally requires a tradeable regime, and
+    # RANGE blocks it, whereas RANGE is precisely the sell-MOVE setup.
+    zone_decision = zones.decide(
+        score=score.trend_score if score.trend_score is not None else 0.0,
+        regime=regime.value,
+        data_quality=data_quality,
+        gates_passed=gates_passed,
+        allow_short_move=allow_short_move,
+    )
+
     return {
         "schema_version": SCHEMA_VERSION,
         "symbol": symbol,
@@ -205,6 +228,11 @@ def build_snapshot(
         "invalidation_price": invalidation_price,
         "suggested_stop_bps": suggested_stop_bps,
         "entry_allowed": entry_allowed,
+        "zone": zone_decision.zone,
+        "zone_action_allowed": zone_decision.action_allowed,
+        "zone_reason": zone_decision.reason,
+        "zone_option_type": zone_decision.option_type,
+        "zone_itm_steps": zone_decision.itm_steps,
         "signal_ttl_seconds": config.ttl_seconds,
         "components": [
             {"name": c.name, "weight": c.weight, "score": c.score,

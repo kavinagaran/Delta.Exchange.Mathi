@@ -1,11 +1,20 @@
-# TrendSnapshot contract — v1.0.0 (FROZEN)
+# TrendSnapshot contract — v1.1.0
 
-**Frozen:** 2026-07-25 · **Source:** `Trend_Engine.md` §5.3
+**Frozen at v1.0.0:** 2026-07-25 · **Source:** `Trend_Engine.md` §5.3
 **Producer:** `btc_trend_engine` · **Consumer:** `trend_engine_client.py` → `dashboard.py`
 
 Freezing this unblocks the UI track to proceed in parallel with Phases 2–4.
 Breaking changes require a major bump and a new document; the client rejects a
 mismatched major with `CONTRACT_VERSION_MISMATCH`.
+
+## Changelog
+
+**v1.1.0 (2026-07-26)** — additive only, no consumer changes required. Adds
+the zone decision surface (`zone`, `zone_action_allowed`, `zone_reason`,
+`zone_option_type`, `zone_itm_steps`) for the operator score-band spec; see
+`btc_trend_engine/signals/zones.py`. The client compares major only, so a
+v1.0.0 consumer keeps working unchanged against a v1.1.0 producer — pinned by
+`test_the_minor_bump_to_1_1_0_is_not_a_breaking_change`.
 
 ## Payload
 
@@ -80,6 +89,9 @@ mismatched major with `CONTRACT_VERSION_MISMATCH`.
 | `confidence` | `0.0 … 1.0` |
 | `invalidation_price` | **string**, parsed with `Decimal`. Never a float |
 | `entry_allowed` | `false` whenever `data_quality != "OK"` — invariant, tested |
+| `zone` | `CE_2_ITM` \| `PE_2_ITM` \| `SHORT_MOVE` \| `HOLD` (v1.1.0) |
+| `zone_action_allowed` | whether the zone's action may be taken now. **Can differ from `entry_allowed`**: that field additionally requires a tradeable regime and so is `false` in `RANGE`, whereas `RANGE` is precisely the sell-MOVE setup |
+| `zone_itm_steps` | strike-index offset magnitude from ATM; `2` for both CE and PE under the 2026-07-26 spec (legacy used 3 for PE) |
 | `signal_ttl_seconds` | `> 0`. Consumer rejects `timestamp + ttl < now` |
 | `components[].score` | `null` when `available: false`; weights sum to 1.0 |
 | `components[].weight` | v1 weighting per [ADR 0004](adr/0004-order-flow-weight.md) |
