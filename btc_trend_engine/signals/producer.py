@@ -29,7 +29,7 @@ log = logging.getLogger(__name__)
 # Contract timeframe roles (§30 production baseline).
 STRUCTURAL, PRIMARY, SETUP, TRIGGER = "4h", "1h", "15m", "5m"
 MIN_CANDLES = 60  # enough for EMA50 + ATR14 to be meaningful
-SHORT_MOVE_CONFIRMATION_BARS = 3  # three closed 5m bars = 15 minutes
+SHORT_MOVE_CONFIRMATION_BARS = 6  # six closed 5m bars = 30 minutes
 
 
 class SnapshotProducer:
@@ -242,11 +242,11 @@ class SnapshotProducer:
         candle_close: datetime,
         data_quality: str,
     ) -> bool:
-        """Require three consecutive healthy closed 5m scores in ±15.
+        """Require six consecutive healthy closed 5m scores in ±15.
 
         The producer emits decisions only from completed five-minute candles.
-        Counting the current completed bar plus the preceding two therefore
-        verifies the neutral condition across a full 15-minute window.  Any
+        Counting the current completed bar plus the preceding five therefore
+        verifies the neutral condition across a full 30-minute window.  Any
         missing bar, degraded sample, duplicate candle, or score outside the
         neutral band resets the confirmation rather than guessing continuity.
         """

@@ -19,7 +19,11 @@ from btc_trend_engine.clock import FixedClock
 from btc_trend_engine.config import load_config
 from btc_trend_engine.market_data.messages import Candle
 from btc_trend_engine.service import EngineService
-from btc_trend_engine.signals.producer import SnapshotProducer, spread_bps_from
+from btc_trend_engine.signals.producer import (
+    SHORT_MOVE_CONFIRMATION_BARS,
+    SnapshotProducer,
+    spread_bps_from,
+)
 from btc_trend_engine.signals.regime import Regime
 
 T0 = datetime(2026, 7, 25, 12, 0, tzinfo=timezone.utc)
@@ -161,36 +165,35 @@ def test_history_is_bounded_and_ordered():
     assert producer.latest() == producer.history(100)[-1]
 
 
-def test_short_move_requires_three_consecutive_closed_neutral_bars():
-    """±15 is only a candidate; three adjacent closed 5m scores confirm it."""
+def test_short_move_requires_a_full_window_of_closed_neutral_bars():
+    """±15 is only a candidate; a full run of adjacent closed 5m scores
+    confirms it.
+
+    Built from SHORT_MOVE_CONFIRMATION_BARS rather than a literal count, so
+    retuning the window (15m -> 30m on 2026-07-27) cannot leave this test
+    quietly asserting the old behaviour.
+    """
     producer = SnapshotProducer("BTCUSD")
+    prior_bars = SHORT_MOVE_CONFIRMATION_BARS - 1   # the rest is the current bar
     producer._history.extend([
         {
-            "candle_close_utc": T0.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "trend_score": 0.0,
-            "data_quality": "OK",
-        },
-        {
-            "candle_close_utc": (T0 + timedelta(minutes=5)).strftime(
+            "candle_close_utc": (T0 + timedelta(minutes=5 * i)).strftime(
                 "%Y-%m-%dT%H:%M:%SZ"
             ),
-            "trend_score": 14.9,
+            "trend_score": 14.9 if i % 2 else 0.0,   # inside ±15 throughout
             "data_quality": "OK",
-        },
+        }
+        for i in range(prior_bars)
     ])
+    confirm_at = T0 + timedelta(minutes=5 * prior_bars)
     assert producer._short_move_confirmed(
-        score=-15.0,
-        candle_close=T0 + timedelta(minutes=10),
-        data_quality="OK",
-    ) is True
+        score=-15.0, candle_close=confirm_at, data_quality="OK") is True
 
-    # A missing completed candle breaks the 15-minute continuity guarantee.
+    # Dropping the most recent prior bar leaves a gap immediately before the
+    # decision, which breaks the continuity guarantee.
     producer._history.pop()
     assert producer._short_move_confirmed(
-        score=0.0,
-        candle_close=T0 + timedelta(minutes=10),
-        data_quality="OK",
-    ) is False
+        score=0.0, candle_close=confirm_at, data_quality="OK") is False
 
 
 def test_spread_bps_helper_handles_missing_and_zero_sides():

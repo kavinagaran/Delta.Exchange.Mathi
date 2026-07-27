@@ -366,7 +366,7 @@ def test_unconfirmed_short_move_does_not_close_or_replace_a_live_position(
         suffix="10:10:00Z",
         zone_action_allowed=False,
         zone_reason=(
-            "waiting for 15-minute confirmation: three consecutive completed "
+            "waiting for 30-minute confirmation: six consecutive completed "
             "5-minute scores must remain inside -15 to +15"
         ),
     )

@@ -187,7 +187,7 @@ def build_report(symbol: str, candles, folds: int, warmup: int,
     add("")
     add(f"- Directional entry-eligible signals: {zone_baseline.entry_eligible_signals:,}")
     add(f"- Directional invalidation exits: {zone_baseline.directional_invalidation_exits:,}")
-    add(f"- SHORT_MOVE candidates after 15-minute confirmation: {zone_baseline.short_move_candidates:,}")
+    add(f"- SHORT_MOVE candidates after 30-minute confirmation: {zone_baseline.short_move_candidates:,}")
     add(f"- SHORT_MOVE candidates excluded from P&L for missing historical premium/quote data: {zone_baseline.short_move_unpriced:,}")
     add("")
     add("**Interpretation:** this section validates the current directional "

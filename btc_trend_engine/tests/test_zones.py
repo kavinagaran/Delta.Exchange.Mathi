@@ -1,7 +1,7 @@
 """Score -> action zone mapping against the operator spec (2026-07-26):
 
     +35..+100 bullish CE 2-step ITM · -35..-100 bearish PE 2-step ITM
-    -15..+15 sideways sell ATM MOVE after 15 minutes · all other gaps HOLD
+    -15..+15 sideways sell ATM MOVE after 30 minutes · all other gaps HOLD
 """
 
 from __future__ import annotations
@@ -64,11 +64,11 @@ def test_the_boundaries_are_inclusive_exactly_as_written():
     assert zones.zone_for_score(-15.0) == zones.SHORT_MOVE
 
 
-def test_short_move_waits_for_the_full_15_minute_confirmation():
+def test_short_move_waits_for_the_full_confirmation_window():
     decision = _decide(0.0, short_move_confirmed=False)
     assert decision.zone == zones.SHORT_MOVE
     assert decision.action_allowed is False
-    assert "15-minute confirmation" in decision.reason
+    assert "30-minute confirmation" in decision.reason
 
 
 def test_every_score_in_range_maps_to_exactly_one_known_zone():

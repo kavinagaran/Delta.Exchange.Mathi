@@ -83,7 +83,7 @@ def score_zone(score: Any) -> str:
 
         |score| >= 35   directional (CE_2_ITM / PE_2_ITM, both 2-step ITM)
         |score| <= 15   SHORT_MOVE candidate (the engine must then confirm
-                        three consecutive completed 5m scores)
+                        six consecutive completed 5m scores)
         otherwise       HOLD (no new action, keep any open position; see
                         zones.should_exit)
 

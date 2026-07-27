@@ -225,13 +225,17 @@ def _zone_entry_gates(
             ),
         },
         {
-            "name": "short_move_15m_confirmed",
-            "label": "15-MIN MOVE CONFIRMATION",
+            # The machine-readable name carries no minute count on purpose:
+            # the confirmation window is a tuned parameter (15m -> 30m on
+            # 2026-07-27) and a name baking it in has to be renamed, and every
+            # consumer updated, each time it moves.
+            "name": "short_move_confirmed",
+            "label": "30-MIN MOVE CONFIRMATION",
             "passed": short_move_confirmed,
             "detail": (
-                "three consecutive completed 5-minute scores stayed in the neutral range"
+                "six consecutive completed 5-minute scores stayed in the neutral range"
                 if short_move_confirmed
-                else "waiting for three consecutive completed 5-minute scores in the neutral range"
+                else "waiting for six consecutive completed 5-minute scores in the neutral range"
             ),
         },
     ]

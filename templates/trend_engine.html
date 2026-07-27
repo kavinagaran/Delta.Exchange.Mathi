@@ -340,11 +340,14 @@ function tradeDecisionMeta(zone, actionAllowed = true, reason = '') {
     };
   }
   if (actionAllowed === false) {
-    if (key === 'SHORT_MOVE' && String(reason).includes('15-minute confirmation')) {
+    // Matched on the bare word rather than the minute count: the confirmation
+    // window is a tuned parameter (15m -> 30m on 2026-07-27) and pinning the
+    // number here would silently stop matching the next time it changes.
+    if (key === 'SHORT_MOVE' && String(reason).includes('confirmation')) {
       return {
-        label: 'WAIT — 15-MIN CONFIRMATION',
+        label: 'WAIT — 30-MIN CONFIRMATION',
         tone: 'is-blocked',
-        detail: 'The score must stay between −15 and +15 for three completed five-minute candles before an ATM MOVE straddle can be sold.',
+        detail: 'The score must stay between −15 and +15 for six completed five-minute candles before an ATM MOVE straddle can be sold.',
       };
     }
     return {

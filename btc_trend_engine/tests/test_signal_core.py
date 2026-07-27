@@ -394,7 +394,7 @@ def test_sideways_zone_ignores_only_directional_entry_gates():
     assert {
         "regime_safe_for_move",
         "score_in_neutral_range",
-        "short_move_15m_confirmed",
+        "short_move_confirmed",
     } <= names
     assert all(gate["passed"] for gate in snapshot["gates"])
 
@@ -408,13 +408,13 @@ def test_unconfirmed_short_move_matrix_names_the_wait_instead_of_a_failed_ce_pe_
     )
     confirmation = next(
         gate for gate in snapshot["gates"]
-        if gate["name"] == "short_move_15m_confirmed"
+        if gate["name"] == "short_move_confirmed"
     )
     assert snapshot["zone"] == zones.SHORT_MOVE
     assert snapshot["zone_action_allowed"] is False
-    assert confirmation["label"] == "15-MIN MOVE CONFIRMATION"
+    assert confirmation["label"] == "30-MIN MOVE CONFIRMATION"
     assert confirmation["passed"] is False
-    assert "three consecutive" in confirmation["detail"]
+    assert "six consecutive" in confirmation["detail"]
     assert "GATE_SCORE_BEYOND_ENTRY_THRESHOLD_FAILED" not in snapshot["reason_codes"]
 
 

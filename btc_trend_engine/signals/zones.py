@@ -2,7 +2,7 @@
 
     +35 .. +100   BULLISH    buy 2-step ITM CE
     -35 .. -100   BEARISH    buy 2-step ITM PE
-    -15 .. +15    SIDEWAYS   sell ATM MOVE after 15 minutes of confirmation
+    -15 .. +15    SIDEWAYS   sell ATM MOVE after 30 minutes of confirmation
     all other gaps HOLD      no new action
 
 **The gaps are deliberate, not an oversight in the spec.** The only neutral
@@ -18,7 +18,7 @@ silently:
 
 1. **Legacy PE is 3 steps ITM (`PE_3_ITM`), this is 2** (`PE_2_ITM`), per the
    spec. Legacy was asymmetric — CE at ATM-2, PE at ATM+3. This is symmetric.
-2. **Legacy has no 15-minute confirmation.** It switches directional/MOVE hard
+2. **Legacy has no 30-minute confirmation.** It switches directional/MOVE hard
    at |25|, so legacy will disagree with this model for every non-action gap
    and until the new neutral-range confirmation completes.
 
@@ -139,7 +139,7 @@ def decide(
         if not short_move_confirmed:
             return ZoneDecision(
                 zone, False,
-                "waiting for 15-minute confirmation: three consecutive "
+                "waiting for 30-minute confirmation: six consecutive "
                 "completed 5-minute scores must remain inside -15 to +15")
         if not stop_loss_configured:
             return ZoneDecision(
@@ -148,7 +148,7 @@ def decide(
                 "(unbounded loss)")
         return ZoneDecision(
             zone, True,
-            "sideways confirmed for 15 minutes: sell ATM MOVE (stop required)")
+            "sideways confirmed for 30 minutes: sell ATM MOVE (stop required)")
     if zone == CE_2_ITM:
         return ZoneDecision(zone, True, "bullish: buy 2-step ITM CE",
                             option_type="CE", itm_steps=2)

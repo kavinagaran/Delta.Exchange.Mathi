@@ -1846,10 +1846,14 @@ body.login-body {
 .te-page .card { overflow: hidden; }
 .te-page .card-hd {
   min-height: 52px;
-  justify-content: space-between;
   background: linear-gradient(90deg, color-mix(in srgb, var(--accent-soft) 42%, transparent), transparent 60%);
 }
-.te-page .card-hd > div { display: grid; gap: 2px; min-width: 0; }
+/* The ::before accent bar is itself a flex item, so `justify-content:
+   space-between` (used here before) pushed the title block away from it —
+   to the far right on cards with no status chip, and to the middle on cards
+   that have one. Growing the title block instead keeps every title flush
+   left against the bar, and any trailing chip still parks on the right. */
+.te-page .card-hd > div { display: grid; gap: 2px; min-width: 0; flex: 1 1 auto; }
 .te-page .card-hd > div > strong { font-size: 12.5px; }
 .te-empty-state {
   grid-column: 1 / -1;

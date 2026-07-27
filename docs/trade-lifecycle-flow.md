@@ -101,7 +101,7 @@ to it so the two cannot drift.
 Directional entries also require the score to agree with the classified
 structure (`TREND_UP`/`BREAKOUT_UP` for CE, `TREND_DOWN`/`BREAKOUT_DOWN` for
 PE) and to meet the engine's minimum confidence. A `SHORT_MOVE` additionally
-needs its 15-minute confirmation, a fresh executable quote, positive
+needs its 30-minute confirmation, a fresh executable quote, positive
 premium-versus-forecast net edge, and jump probability below the configured
 limit. Missing evidence blocks the entry.
 
