@@ -3644,6 +3644,7 @@ def api_square_off():
             if _is_dry_record(state):
                 closed = _close_dry_simulation_locked(
                     slot, state, trigger="manual_squareoff_simulated")
+                _notify_dry_run_close_once(slot, closed)
                 return jsonify({"ok": True, "pnl": closed["pnl_usd"],
                                 "fill": closed["exit_mark"],
                                 "order_id": None, "dry_run": True,
@@ -8134,6 +8135,7 @@ def _trend_score_auto_ledger(data_dir: Path) -> dict:
             "current_transition": None,
             "no_fill_setup": None,
             "setup_lock": None,
+            "legacy_setup_lock_migration_v1": False,
         }
     if ledger.get("schema_version") != 1:
         raise RuntimeError("Trend score-auto ledger schema is unsupported")
@@ -8150,10 +8152,14 @@ def _trend_score_auto_ledger(data_dir: Path) -> dict:
     setup_lock = ledger.get("setup_lock")
     if setup_lock is not None and not isinstance(setup_lock, dict):
         raise RuntimeError("Trend score-auto setup lock ledger is invalid")
+    migration_checked = ledger.get("legacy_setup_lock_migration_v1", False)
+    if not isinstance(migration_checked, bool):
+        raise RuntimeError("Trend score-auto setup-lock migration marker is invalid")
     ledger.setdefault("notifications", {})
     ledger.setdefault("current_transition", None)
     ledger.setdefault("no_fill_setup", None)
     ledger.setdefault("setup_lock", None)
+    ledger.setdefault("legacy_setup_lock_migration_v1", False)
     return ledger
 
 
@@ -8360,7 +8366,7 @@ def _trend_score_auto_engine_action_ready(
     """Do not mutate a position until the engine has approved this zone.
 
     In particular, a SHORT_MOVE candidate remains non-actionable until the
-    engine has seen three consecutive closed 5m scores inside ±15.  Treating
+    engine has seen six consecutive closed 5m scores inside ±15.  Treating
     that pending confirmation as a zone switch would close an existing Trend
     position before a replacement is permitted, so it is an explicit no-op.
     The same fail-safe rule applies to any other engine action gate.
@@ -8373,16 +8379,20 @@ def _trend_score_auto_engine_action_ready(
     if signal.get("zone_action_allowed") is True:
         return True
     reason = str(signal.get("zone_reason") or "engine action gate is closed")
+    # Matched on the bare word, not "30-minute confirmation": the window is a
+    # tuned parameter (15m -> 30m on 2026-07-27) and pinning the minute count
+    # here means a silent behaviour change the next time it moves. No other
+    # zone_reason the engine emits contains "confirmation".
     is_confirmation = (
         signal.get("zone") == TREND_SCORE_MOVE_ZONE
-        and "15-minute confirmation" in reason
+        and "confirmation" in reason
     )
     _trend_score_auto_health_update(
         user,
         status=("awaiting_confirmation" if is_confirmation else "blocked"),
         last_cycle_utc=cycle_at,
         last_action=(
-            "waiting for 15-minute SHORT_MOVE confirmation"
+            "waiting for 30-minute SHORT_MOVE confirmation"
             if is_confirmation
             else f"{execution_mode} score action is blocked by the Trend Engine"
         ),
@@ -9061,6 +9071,64 @@ def _trend_score_auto_lock_setup(
     }
 
 
+def _trend_score_auto_backfill_legacy_setup_lock(
+    ledger: dict,
+    state: dict,
+    *,
+    mode: dict,
+    dry_run: bool,
+) -> tuple[dict | None, bool]:
+    """Create one durable lock for a verified pre-lock controller position.
+
+    The first deployed setup-lock version cannot have recorded a lock for a
+    position it opened before the upgrade.  This one-time migration adopts
+    only an explicitly score-controller-owned OPEN/CLOSED state.  It never
+    touches a trade, and its marker prevents a later manual reset from being
+    silently undone by another migration pass.
+    """
+    if ledger.get("legacy_setup_lock_migration_v1") is True:
+        return None, False
+    ledger["legacy_setup_lock_migration_v1"] = True
+    if _trend_score_auto_setup_lock(ledger) is not None:
+        return None, True
+
+    expected_mode = "dry_run" if dry_run else "live"
+    expected_ownership = _trend_score_auto_ownership(expected_mode)
+    zone = str(state.get("trend_score_zone") or "").strip()
+    signal_key = str(state.get("score_auto_signal_key") or "").strip()
+    if not (
+        str(state.get("status") or "").upper() in {"OPEN", "CLOSED"}
+        and state.get("ownership") == expected_ownership
+        and state.get("entry_trigger") == TREND_SCORE_AUTO_TRIGGER
+        and str(state.get("execution_mode") or "").lower() == expected_mode
+        and state.get("dry_run") is dry_run
+        and zone in {
+            TREND_SCORE_CE_ZONE,
+            TREND_SCORE_PE_ZONE,
+            TREND_SCORE_MOVE_ZONE,
+        }
+        and signal_key
+    ):
+        return None, True
+
+    migration_signal = {
+        "zone": zone,
+        "signal_key": signal_key,
+        "mode": mode,
+    }
+    _trend_score_auto_lock_setup(
+        ledger,
+        migration_signal,
+        transition_id=f"legacy-backfill:{signal_key}",
+        action="LEGACY_BACKFILL",
+    )
+    lock = _trend_score_auto_setup_lock(ledger)
+    if lock is None:  # Defensive: the helper above must have produced a lock.
+        raise RuntimeError("legacy score-zone setup lock was not recorded")
+    lock["backfilled_from_legacy_state"] = True
+    return lock, True
+
+
 def _trend_score_auto_entry_is_setup_locked(
     ledger: dict,
     signal: dict,
@@ -9106,6 +9174,56 @@ def _trend_score_auto_suppress_setup_locked_entry(
 def _trend_score_auto_notify(text: str) -> None:
     if _cfg_bool("TELEGRAM_ALERTS", True):
         _send_telegram(text)
+
+
+def _notify_dry_run_close_once(slot: str, state: dict) -> bool:
+    """Alert one completed paper close once, including TP/SL/TSL exits.
+
+    DRY RUN protection is executed locally, so it does not pass through the
+    LIVE ``tp_monitor`` alert path.  Persisting the event id in the closed
+    state before sending avoids recurring Telegram messages if a caller or
+    supervisor observes the same completed close again.
+    """
+    if not _cfg_bool("TELEGRAM_ALERTS", True):
+        return False
+    trigger = str(state.get("exit_trigger") or "paper_close")
+    simulation_id = str(
+        state.get("simulation_id")
+        or f"{slot}:{state.get('entry_at_utc') or state.get('entry_time_utc')}"
+    )
+    event_id = f"dry-close:{simulation_id}:{trigger}"
+    if state.get("telegram_close_alert_event_id") == event_id:
+        return False
+
+    state["telegram_close_alert_event_id"] = event_id
+    state["telegram_close_alerted_at_utc"] = datetime.now(
+        timezone.utc
+    ).isoformat()
+    _atomic_write_json(_slot_file(slot, dry_run=True), state)
+
+    reason = {
+        "take_profit_simulated": "Take profit reached",
+        "stop_loss_simulated": "Stop loss reached",
+        "trailing_stop_simulated": "Trailing stop reached",
+        "settlement_simulated": "Contract settled",
+        "manual_squareoff_simulated": "Manually closed",
+        "trend_engine_directional_invalidation": "Trend signal invalidated",
+        "trend_engine_score_zone_switch": "Score zone switched",
+    }.get(trigger, "Position closed")
+    try:
+        pnl = float(state.get("pnl_usd") or 0)
+        pnl_text = f"{pnl:+,.2f}"
+    except (TypeError, ValueError):
+        pnl_text = "—"
+    _trend_score_auto_notify(
+        f"🤖 <b>PAPER TRADE CLOSED — {_active_user().upper()}</b>\n"
+        f"{reason}\n"
+        f"Symbol » <code>{state.get('symbol', '')}</code>\n"
+        f"Lots » <code>{int(state.get('lots') or 0):,}</code>\n"
+        f"P&amp;L » <code>${pnl_text}</code>\n"
+        "No exchange order was submitted."
+    )
+    return True
 
 
 def _trend_score_auto_health_update(user: str, **fields) -> dict:
@@ -10915,6 +11033,25 @@ def _maybe_auto_trend_score_live_cycle(
                     _slot_file("trend"), {},
                 )
                 ledger = _trend_score_auto_ledger(data_dir)
+                legacy_setup_lock, migration_checked = (
+                    _trend_score_auto_backfill_legacy_setup_lock(
+                        ledger,
+                        latest_trend,
+                        mode=boundary_mode,
+                        dry_run=False,
+                    )
+                )
+                if migration_checked:
+                    _trend_score_auto_write_ledger(data_dir, ledger)
+                if legacy_setup_lock is not None:
+                    _trend_audit("trend_score_auto_live_setup_lock_backfilled", {
+                        "zone": legacy_setup_lock["target_zone"],
+                        "source_signal_key": legacy_setup_lock.get(
+                            "source_signal_key"
+                        ),
+                        "order_submitted": False,
+                        "exchange_api_called": False,
+                    })
                 if _trend_score_auto_signal_in_flight(
                     ledger, current_signal["signal_key"],
                 ):
@@ -11700,6 +11837,25 @@ def _maybe_auto_trend_score_cycle() -> bool:
                 )
                 owned = _trend_score_auto_owned_position(states["trend"])
                 ledger = _trend_score_auto_ledger(data_dir)
+                legacy_setup_lock, migration_checked = (
+                    _trend_score_auto_backfill_legacy_setup_lock(
+                        ledger,
+                        states["trend"],
+                        mode=boundary_mode,
+                        dry_run=True,
+                    )
+                )
+                if migration_checked:
+                    _trend_score_auto_write_ledger(data_dir, ledger)
+                if legacy_setup_lock is not None:
+                    _trend_audit("trend_score_auto_setup_lock_backfilled", {
+                        "zone": legacy_setup_lock["target_zone"],
+                        "source_signal_key": legacy_setup_lock.get(
+                            "source_signal_key"
+                        ),
+                        "order_submitted": False,
+                        "exchange_api_called": False,
+                    })
                 if _trend_score_auto_signal_in_flight(
                     ledger, signal["signal_key"],
                 ):
@@ -13069,7 +13225,10 @@ def _dry_run_protection_cycle(
                     round(tsl_floor, 8) if tsl_floor is not None else None),
             })
             if trigger:
-                _close_dry_simulation_locked(slot, latest, trigger=trigger)
+                closed_state = _close_dry_simulation_locked(
+                    slot, latest, trigger=trigger,
+                )
+                _notify_dry_run_close_once(slot, closed_state)
                 closed += 1
             else:
                 _atomic_write_json(state_path, latest)
