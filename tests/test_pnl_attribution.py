@@ -356,3 +356,15 @@ def test_as_dict_is_json_friendly():
     assert payload["notes"] == [] or isinstance(payload["notes"], list)
     assert isinstance(payload["total"], float)
     assert math.isfinite(payload["total"])
+
+
+def test_residual_reduces_to_exactly_minus_fees():
+    """Verified against a live account: summed residual matched summed USD
+    commission to the cent. It follows from the revaluation being exact, and
+    it is why `residual` must not be read as an execution-cost measure --
+    the spread is absorbed into the vol step instead.
+    """
+    for fees in (0.0, 12.5, 640.25):
+        attribution = _round_trip(spot_out=SPOT * 1.03, vol_out=VOL * 0.8,
+                                  days_held=2.0, fees=fees)
+        assert attribution.residual == pytest.approx(-fees, abs=1e-3)

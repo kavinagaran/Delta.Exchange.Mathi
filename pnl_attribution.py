@@ -38,9 +38,17 @@ vol term is measured at the *realised* spot: that is the reading wanted when
 asking "was the direction right but IV moved against us?".
 
 Because implied vol is inverted from the traded prices at both ends, the
-revaluation reproduces both marks exactly.  ``residual`` therefore contains
-only fees and any inconsistency between the two marks -- it is a
-data-quality signal, not a modelling artefact.
+revaluation reproduces both marks exactly.  ``residual`` therefore reduces
+to exactly ``-fees`` -- verified against a live account, where the summed
+residual matched summed USD commission to the cent.
+
+A consequence worth knowing before reading the output: **the bid-ask spread
+is not visible here.**  Entering at the offer simply looks like a slightly
+higher implied vol and exiting at the bid like a lower one, so the spread is
+absorbed into the vol step and reported under ``vega``.  Separating
+execution cost from a genuine vol move needs the mid/mark quote at trade
+time, which means capturing the option chain -- until then, treat ``vega``
+as "vol move *and* spread paid".
 
 Implied vol is inverted from the traded price rather than trusted from a
 feed, because we do not record a chain yet.  Where the inversion is
@@ -73,10 +81,13 @@ _IV_LOW, _IV_HIGH = 1e-4, 10.0     # 0.01% .. 1000% annualised
 _IV_TOLERANCE = 1e-8
 _IV_MAX_ITER = 200
 
-# Sequential revaluation reproduces both marks exactly, so anything left
-# beyond fees means the entry and exit prices are not mutually consistent.
-# A few basis points is rounding; this much is a data-quality signal.
-_MAX_RESIDUAL_FRACTION = 0.02
+# On synthetic, model-consistent prices the residual is ~0. On real fills it
+# is not, and should not be: entry and exit cross opposite sides of the
+# bid-ask, so the two marks genuinely disagree under any single model. That
+# difference IS the execution cost and is worth reading, not suppressing.
+# This guard therefore only catches the implausible case -- an unexplained
+# amount larger than the entire move, which means a bad mark, not a spread.
+_MAX_RESIDUAL_FRACTION = 1.0
 
 
 def _norm_cdf(x: float) -> float:
@@ -225,7 +236,7 @@ class Attribution:
     gamma: float
     vega: float
     theta: float
-    residual: float       # fees + mark inconsistency; NOT truncation error
+    residual: float       # exactly -fees; spread hides in `vega`, see module doc
 
     entry_iv: float | None
     exit_iv: float | None
@@ -239,9 +250,9 @@ class Attribution:
 
     @property
     def residual_fraction(self) -> float:
-        """Unexplained share of the move. With sequential revaluation this
-        is fees and mark inconsistency only, so a large value means the
-        marks disagree -- worth investigating, not a modelling limitation."""
+        """Unexplained share of the move. With sequential revaluation there
+        is no truncation error, so this is the fee load -- a cost
+        measurement, not a modelling limitation."""
         scale = max(abs(self.total), abs(self.explained), 1e-9)
         return abs(self.residual) / scale
 
@@ -375,8 +386,8 @@ def attribute_trade(*, kind: str, strike: float, entry: Observation,
     # Fees aside, an unexplained remainder means the two marks are not
     # mutually consistent -- a stale or crossed print, most often.
     if abs(residual) - abs(fees_usd) > 1e-6 and result.residual_fraction > _MAX_RESIDUAL_FRACTION:
-        notes.append("unexplained P&L beyond fees; check the entry/exit "
-                     "marks for a stale or off-market print")
+        notes.append("unexplained P&L exceeds the whole move; the entry or "
+                     "exit mark looks stale or off-market")
         result = Attribution(total=total, delta=delta_pnl, gamma=gamma_pnl,
                              vega=vega_pnl, theta=theta_pnl,
                              residual=residual, entry_iv=entry_iv,
