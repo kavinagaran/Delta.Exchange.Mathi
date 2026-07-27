@@ -30,6 +30,7 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from ..market_data.messages import Candle
 from ..market_data.normalizer import resolution_seconds
+from ..signals import zones
 from ..signals.producer import PRIMARY, SETUP, STRUCTURAL, TRIGGER, SnapshotProducer
 from ..signals.snapshot import SignalConfig
 from .fill_simulator import FillConfig, simulate_fill
@@ -79,6 +80,9 @@ class ReplayResult:
     entry_eligible_signals: int = 0
     rejected_fills: int = 0
     skipped_no_entry: int = 0
+    short_move_candidates: int = 0
+    short_move_unpriced: int = 0
+    directional_invalidation_exits: int = 0
 
     @property
     def entries(self) -> int:
@@ -94,6 +98,7 @@ class _OpenPosition:
     entry_fee: Decimal
     signal_id: str
     regime: str
+    zone: str = ""
 
 
 def _resample(base: Sequence[Candle], resolution: str, symbol: str) -> list[Candle]:
@@ -274,6 +279,143 @@ def replay(
         result.trades.append(_close(position, price, fee, last.start,
                                     "end of window"))
 
+    return result
+
+
+def replay_score_zones(
+    base_candles: Sequence[Candle],
+    config: ReplayConfig | None = None,
+    *,
+    warmup: int = 320,
+    risk_check: Callable[[Mapping[str, Any]], bool] | None = None,
+    ticker: Mapping[str, Any] | None = None,
+    data_quality: str = "OK",
+    book_valid: bool = True,
+    spread_bps: float | None = None,
+    feature_window: int = 400,
+) -> ReplayResult:
+    """Replay the shipped CE/PE/HOLD score-zone lifecycle.
+
+    CE and PE are measured as a BTC perpetual *directional proxy*, because an
+    historical option chain is unavailable.  SHORT_MOVE is deliberately not
+    assigned fabricated P&L: historical MOVE bids/asks are required to test a
+    premium-vs-realised-volatility edge.  The result counts those valid
+    candidates explicitly, so a report cannot accidentally present a
+    directional-only result as evidence for the complete live strategy.
+    """
+    config = config or ReplayConfig()
+    result = ReplayResult()
+    if len(base_candles) <= warmup + 1:
+        return result
+
+    ordered = sorted(base_candles, key=lambda c: c.start)
+    producer = SnapshotProducer(config.symbol, config=config.signal)
+    position: _OpenPosition | None = None
+    full_series = {role: _resample(ordered, role, config.symbol) for role in ROLES}
+    series_starts = {
+        role: [c.start for c in candles]
+        for role, candles in full_series.items()
+    }
+    base_step = resolution_seconds(TRIGGER)
+
+    for index in range(warmup, len(ordered) - 1):
+        decision_candle = ordered[index]
+        next_candle = ordered[index + 1]
+        decision_time = decision_candle.start
+        decision_close = decision_time + timedelta(seconds=base_step)
+        candles = {}
+        for role in ROLES:
+            step = resolution_seconds(role)
+            cutoff = decision_close - timedelta(seconds=step)
+            end = bisect_right(series_starts[role], cutoff)
+            candles[role] = full_series[role][max(0, end - feature_window):end]
+        snapshot = producer.produce(
+            now=decision_time,
+            candles=candles,
+            ticker=dict(ticker or {}),
+            data_quality=data_quality,
+            book_valid=book_valid,
+            spread_bps=(float(config.fill.spread_bps) if spread_bps is None
+                        else spread_bps),
+        )
+        if snapshot is None:
+            continue
+        result.snapshots.append(snapshot)
+        zone = str(snapshot.get("zone") or "")
+        action_allowed = snapshot.get("zone_action_allowed") is True
+        reference = next_candle.open
+        fill_time = next_candle.start
+
+        # HOLD can carry an exit-only directional invalidation. Every other
+        # zone must first be action-approved; an unconfirmed SHORT_MOVE is a
+        # no-op in production and therefore a no-op here too.
+        may_plan = zone == zones.HOLD or action_allowed
+        if position is not None and may_plan:
+            exit_now, reason = zones.should_exit(
+                position.zone, zone,
+                score=float(snapshot["trend_score"]),
+            )
+            if exit_now:
+                exit_side = "short" if position.side == "long" else "long"
+                exit_fill = simulate_fill(
+                    side=exit_side, lots=position.lots,
+                    reference_price=reference,
+                    limit_price=_limit_for(exit_side, reference, config),
+                    config=config.fill,
+                )
+                if exit_fill.filled:
+                    result.trades.append(_close(
+                        position, exit_fill.price, exit_fill.fee, fill_time,
+                        reason,
+                    ))
+                    if zone == zones.HOLD:
+                        result.directional_invalidation_exits += 1
+                    position = None
+                else:
+                    result.rejected_fills += 1
+
+        if position is not None or not action_allowed:
+            continue
+        if zone == zones.SHORT_MOVE:
+            result.short_move_candidates += 1
+            result.short_move_unpriced += 1
+            continue
+        if zone not in {zones.CE_2_ITM, zones.PE_2_ITM}:
+            continue
+        result.entry_eligible_signals += 1
+        if risk_check is not None and not risk_check(snapshot):
+            result.skipped_no_entry += 1
+            continue
+        side = "long" if zone == zones.CE_2_ITM else "short"
+        entry_fill = simulate_fill(
+            side=side, lots=config.lots, reference_price=reference,
+            limit_price=_limit_for(side, reference, config),
+            config=config.fill,
+        )
+        if entry_fill.filled:
+            position = _OpenPosition(
+                side=side, lots=entry_fill.filled_lots,
+                entry_price=entry_fill.price, entered_at=fill_time,
+                entry_fee=entry_fill.fee, signal_id=snapshot["signal_id"],
+                regime=str(snapshot["regime"]), zone=zone,
+            )
+        else:
+            result.rejected_fills += 1
+
+    if position is not None:
+        last = ordered[-1]
+        exit_side = "short" if position.side == "long" else "long"
+        exit_fill = simulate_fill(
+            side=exit_side, lots=position.lots, reference_price=last.close,
+            limit_price=_limit_for(exit_side, last.close, config),
+            config=config.fill,
+        )
+        result.trades.append(_close(
+            position,
+            exit_fill.price if exit_fill.filled else last.close,
+            exit_fill.fee if exit_fill.filled else Decimal(0),
+            last.start, "end of window",
+        ))
     return result
 
 

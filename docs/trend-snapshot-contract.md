@@ -1,4 +1,4 @@
-# TrendSnapshot contract — v1.1.0
+# TrendSnapshot contract — v1.2.0
 
 **Frozen at v1.0.0:** 2026-07-25 · **Source:** `Trend_Engine.md` §5.3
 **Producer:** `btc_trend_engine` · **Consumer:** `trend_engine_client.py` → `dashboard.py`
@@ -16,11 +16,17 @@ the zone decision surface (`zone`, `zone_action_allowed`, `zone_reason`,
 v1.0.0 consumer keeps working unchanged against a v1.1.0 producer — pinned by
 `test_the_minor_bump_to_1_1_0_is_not_a_breaking_change`.
 
+**v1.2.0 (2026-07-27)** — additive gate detail for the deployed policy:
+directional-zone confidence and regime-alignment gates are included in the
+matrix. `risk_lock_clear` is now explicitly `status: "DEFERRED"` and
+`required: false`: account risk is checked by the per-user execution
+controller, not falsely reported as an engine pass.
+
 ## Payload
 
 ```json
 {
-  "schema_version": "1.0.0",
+  "schema_version": "1.2.0",
   "symbol": "BTCUSD",
   "timestamp": "2026-07-25T10:15:00Z",
   "candle_close_utc": "2026-07-25T10:15:00Z",
@@ -66,7 +72,9 @@ v1.0.0 consumer keeps working unchanged against a v1.1.0 producer — pinned by
     {"name": "depth_sufficient",  "passed": true,  "detail": null},
     {"name": "edge_exceeds_cost", "passed": true,  "detail": null},
     {"name": "regime_tradeable",  "passed": true,  "detail": null},
-    {"name": "risk_lock_clear",   "passed": true,  "detail": null}
+    {"name": "directional_confidence", "passed": true, "detail": "confidence meets the minimum"},
+    {"name": "regime_matches_directional_zone", "passed": true, "detail": "TREND_UP agrees with CE_2_ITM"},
+    {"name": "risk_lock_clear", "passed": false, "required": false, "status": "DEFERRED", "detail": "verified per account at entry"}
   ],
 
   "reason_codes": ["1H_TREND_UP", "15M_BREAKOUT_CONFIRMED", "5M_PULLBACK_RECOVERY"],
@@ -90,13 +98,13 @@ v1.0.0 consumer keeps working unchanged against a v1.1.0 producer — pinned by
 | `invalidation_price` | **string**, parsed with `Decimal`. Never a float |
 | `entry_allowed` | `false` whenever `data_quality != "OK"` — invariant, tested |
 | `zone` | `CE_2_ITM` \| `PE_2_ITM` \| `SHORT_MOVE` \| `HOLD` (v1.1.0) |
-| `zone_action_allowed` | whether the zone's action may be taken now. **Can differ from `entry_allowed`**: that field additionally requires a tradeable regime and so is `false` in `RANGE`, whereas `RANGE` is precisely the sell-MOVE setup |
+| `zone_action_allowed` | whether the zone's action may be taken now. Directional zones require minimum confidence and score/regime alignment; `SHORT_MOVE` requires neutral confirmation. It can differ from `entry_allowed`: `RANGE` is valid for a MOVE setup but not a legacy directional entry |
 | `zone_itm_steps` | strike-index offset magnitude from ATM; `2` for both CE and PE under the 2026-07-26 spec (legacy used 3 for PE) |
 | `signal_ttl_seconds` | `> 0`. Consumer rejects `timestamp + ttl < now` |
 | `components[].score` | `null` when `available: false`; weights sum to 1.0 |
 | `components[].weight` | v1 weighting per [ADR 0004](adr/0004-order-flow-weight.md) |
 | `timeframes[].bias` | `-1` \| `0` \| `+1` |
-| `gates[]` | complete list always present; a failed gate carries a human-readable `detail` |
+| `gates[]` | complete list always present; a failed required gate carries a human-readable `detail`. A `required: false, status: "DEFERRED"` gate is intentionally checked by the account execution path |
 | `reason_codes` | stable machine-readable identifiers, §12.5. Treated as a public contract — snapshot-tested |
 
 ## Enumerations
@@ -161,3 +169,7 @@ All bind `127.0.0.1:5055` and require `X-Engine-Token` except `/health`.
 At exactly ±15 the score is a `SHORT_MOVE` candidate. The engine keeps
 `zone_action_allowed=false` until it has observed the full 15-minute
 confirmation, so a dashboard consumer cannot switch or enter early.
+
+`HOLD` prevents a new entry and normally preserves the open position. The
+execution controller makes one exit-only exception: a CE is closed below −15,
+and a PE is closed above +15. It never reverses directly from that HOLD.

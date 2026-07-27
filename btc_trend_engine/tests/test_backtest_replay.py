@@ -9,7 +9,7 @@ from decimal import Decimal
 
 import pytest
 
-from btc_trend_engine.backtest.event_replay import ReplayConfig, replay
+from btc_trend_engine.backtest.event_replay import ReplayConfig, replay, replay_score_zones
 from btc_trend_engine.backtest.fill_simulator import FillConfig, simulate_fill
 from btc_trend_engine.backtest.latency_model import ZERO_LATENCY, LatencyModel
 from btc_trend_engine.backtest.performance import evaluate
@@ -80,6 +80,26 @@ def test_a_degraded_feed_never_permits_entry_even_on_a_perfect_trend():
     assert clean.entry_eligible_signals > 0
     for degraded in ("data_outage", "exchange_maintenance", "private_feed_outage"):
         assert _run(degraded).entry_eligible_signals == 0, degraded
+
+
+def test_score_zone_replay_uses_the_shipped_zone_lifecycle_without_faking_move_pnl():
+    """The deployed policy is zones, not the legacy direction-only loop.
+
+    Range-bound replay creates confirmed neutral candidates, but no historical
+    MOVE bid/ask archive exists.  Those candidates must therefore be reported
+    as unpriced rather than turned into invented short-vol profits.
+    """
+    spec = scenario("range_bound")
+    result = replay_score_zones(
+        spec.candles(), ReplayConfig(), warmup=WARMUP,
+        data_quality=spec.data_quality, book_valid=spec.book_valid,
+        spread_bps=spec.spread_bps,
+    )
+    assert result.snapshots
+    assert result.short_move_candidates > 0
+    assert result.short_move_unpriced == result.short_move_candidates
+    assert result.entry_eligible_signals >= 0
+    assert all(trade.side in {"long", "short"} for trade in result.trades)
 
 
 # ── invariants ──────────────────────────────────────────────────────────

@@ -532,7 +532,8 @@ def plan_score_transition(
     ledger atomically with the resulting state.
     """
 
-    target = score_zone(score)
+    value = _finite(score, "direction_score")
+    target = score_zone(value)
     key = str(signal_key or "").strip()
     if not key:
         raise TrendScoreAutoInputError("signal_key is required")
@@ -566,21 +567,41 @@ def plan_score_transition(
         }
 
     if target == HOLD:
-        # The hold band is "no new action, keep whatever is open". Without
-        # this guard an open position would fall through to CLOSE_THEN_OPEN
-        # below (current != HOLD), which CLOSES FIRST -- so a score drifting
-        # into 15..35 would flatten the position and only then fail to open a
-        # "HOLD" contract. The caller also refuses HOLD before reaching here;
-        # this makes the rule structural rather than caller-dependent.
+        # A HOLD band normally keeps the position.  There is one deliberate
+        # exception: an existing directional position is closed when the score
+        # crossed through the *opposite* neutral boundary.  That is an exit,
+        # never a guessed replacement, so a CE cannot remain open at -30 just
+        # because -30 is inside the PE hold band.
+        current = (
+            position_score_zone(owned_positions[0]) if owned_positions else None
+        )
+        if current is not None:
+            from btc_trend_engine.signals import zones
+
+            exit_now, exit_reason = zones.should_exit(
+                current, target, score=value,
+            )
+            if exit_now:
+                return {
+                    "action": "CLOSE",
+                    "reason": exit_reason,
+                    "signal_key": key,
+                    "target_zone": target,
+                    "current_zone": current,
+                    "close_position": dict(owned_positions[0]),
+                    "open_zone": None,
+                    "consume_signal": True,
+                }
+
+        # This guard prevents an ordinary HOLD reading from falling through to
+        # CLOSE_THEN_OPEN below, where it would flatten a valid position and
+        # then fail to select a nonexistent HOLD contract.
         return {
             "action": "NOOP",
             "reason": "SCORE_IN_HOLD_BAND",
             "signal_key": key,
             "target_zone": target,
-            "current_zone": (
-                position_score_zone(owned_positions[0])
-                if owned_positions else None
-            ),
+            "current_zone": current,
             "close_position": None,
             "open_zone": None,
             "consume_signal": False,

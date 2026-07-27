@@ -501,15 +501,22 @@ function renderGates(gates) {
     tally.className = 'te-gate-tally';
     return;
   }
-  const passed = gates.filter(g => g.passed).length;
-  tally.textContent = `${passed}/${gates.length} passed`;
-  tally.className = `te-gate-tally ${passed === gates.length ? 'all-passed' : 'has-failures'}`;
-  el.innerHTML = gates.map(g => `
-    <div class="te-gate ${g.passed ? 'is-pass' : 'is-fail'}">
-      <span class="te-gate-icon" aria-hidden="true">${g.passed ? '✓' : '✕'}</span>
+  const required = gates.filter(g => g.required !== false);
+  const passed = required.filter(g => g.passed).length;
+  const deferred = gates.filter(g => g.status === 'DEFERRED').length;
+  tally.textContent = `${passed}/${required.length} required passed${deferred ? ` · ${deferred} deferred` : ''}`;
+  tally.className = `te-gate-tally ${passed === required.length ? 'all-passed' : 'has-failures'}`;
+  el.innerHTML = gates.map(g => {
+    const deferredGate = g.status === 'DEFERRED';
+    const gateClass = deferredGate ? 'is-na' : (g.passed ? 'is-pass' : 'is-fail');
+    const icon = deferredGate ? '•' : (g.passed ? '✓' : '✕');
+    return `
+    <div class="te-gate ${gateClass}">
+      <span class="te-gate-icon" aria-hidden="true">${icon}</span>
       <strong>${esc(g.label || formatCode(g.name))}</strong>
       ${g.detail ? `<small>${esc(g.detail)}</small>` : ''}
-    </div>`).join('');
+    </div>`;
+  }).join('');
 }
 
 function renderReasonCodes(codes) {

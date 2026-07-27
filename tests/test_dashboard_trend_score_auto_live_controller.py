@@ -423,6 +423,48 @@ def test_same_completed_signal_is_consumed_once_even_without_state_rewrite(
     )
 
 
+def test_live_setup_lock_blocks_later_same_zone_after_a_completed_position(
+    live_account,
+    monkeypatch,
+):
+    """A real fill locks the setup beyond its single candle identity."""
+    first = _signal(
+        dashboard._trading_mode_payload(), 75, suffix="10:00:00Z",
+    )
+    same_zone_next_bar = _signal(
+        dashboard._trading_mode_payload(), 60, suffix="10:05:00Z",
+    )
+    collector = Mock(side_effect=[first, same_zone_next_bar])
+    prepare = Mock(side_effect=lambda value: copy.deepcopy(_prepared(value["zone"])))
+
+    def execute(**kwargs):
+        return _open_result(kwargs["signal"], kwargs["prepared"])
+
+    executor = Mock(side_effect=execute)
+    monkeypatch.setattr(dashboard, "_collect_trend_score_auto_signal", collector)
+    monkeypatch.setattr(dashboard, "_prepare_trend_score_auto_entry", prepare)
+    monkeypatch.setattr(dashboard, "_trend_score_auto_live_execute", executor)
+
+    assert dashboard._maybe_auto_trend_score_cycle() is True
+    ledger_path = live_account / dashboard.TREND_SCORE_AUTO_LEDGER_FILE
+    ledger = dashboard._trend_score_auto_ledger(live_account)
+    assert ledger["setup_lock"]["target_zone"] == dashboard.TREND_SCORE_CE_ZONE
+
+    # This represents a completed TP/SL/TSL/settlement. The lock is account
+    # durable and deliberately remains after the owned position is flat.
+    _write(live_account / "trend_state.json", {
+        "status": "CLOSED", "execution_mode": "live", "dry_run": False,
+    })
+    assert dashboard._maybe_auto_trend_score_cycle() is False
+    assert prepare.call_count == 1
+    assert executor.call_count == 1
+    persisted = json.loads(ledger_path.read_text(encoding="utf-8"))
+    assert persisted["signals"][same_zone_next_bar["signal_key"]]["action"] == (
+        "SETUP_LOCKED"
+    )
+    assert dashboard._trend_score_auto_health["alice"]["status"] == "setup_locked"
+
+
 def test_no_fill_blocks_same_zone_until_the_score_zone_changes(
     live_account,
     monkeypatch,

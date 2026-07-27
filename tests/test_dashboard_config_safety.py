@@ -221,6 +221,13 @@ def test_config_page_is_fail_safe_until_verified_load():
     assert "Configuration could not be verified — Save remains locked" in html
     assert "function scoreAutoModeError(" in html
     assert "Morning, Evening, and legacy Trend strategies are permanently disabled" in html
+    assert re.search(
+        r'<button[^>]+id="score-setup-lock-reset"[^>]+\bdisabled\b', html,
+    )
+    assert 'id="score-setup-lock-hint"' in html
+    assert 'class="btn setup-lock-reset"' in html
+    assert "function refreshScoreZoneSetupLock()" in html
+    assert "lock.active === true" in html
 
 
 def test_config_reset_profile_covers_every_page_field_and_is_fail_safe():
@@ -228,7 +235,7 @@ def test_config_reset_profile_covers_every_page_field_and_is_fail_safe():
         encoding="utf-8")
     page_keys = set(re.findall(r'id="c-([A-Z0-9_]+)"', html))
     preserved = set(dashboard.CONFIG_PAGE_PRESERVED_KEYS)
-    assert len(page_keys) == 29
+    assert len(page_keys) == 32
     assert preserved == {"TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"}
     assert page_keys - preserved == set(dashboard.CONFIG_PAGE_DEFAULTS)
     assert set(dashboard.CONFIG_PAGE_DEFAULTS) <= set(dashboard.CONFIG_KEYS)
@@ -259,6 +266,9 @@ def test_config_reset_profile_covers_every_page_field_and_is_fail_safe():
     assert "MOVE_AUTO_ENTRY_MODE" not in page_keys
     assert "TREND_AUTO_ENTRY_MODE" not in page_keys
     assert defaults["SHORT_MAX_RISK_USD"] == "50"
+    assert defaults["TREND_DRY_RUN_CAPITAL_USD"] == "1000"
+    assert defaults["TREND_MOVE_MIN_EDGE_PCT"] == "15"
+    assert defaults["TREND_MOVE_MAX_JUMP_PROBABILITY"] == "0.05"
     assert defaults["RISK_FAIL_CLOSED"] == "true"
     assert defaults["SAFE_EXECUTION_ENABLED"] == "true"
     assert defaults["ALLOW_EXTERNAL_POSITIONS_WITH_BOT"] == "false"

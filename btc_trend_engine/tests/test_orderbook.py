@@ -13,6 +13,7 @@ from btc_trend_engine.market_data.orderbook import (
     ApplyResult,
     BookState,
     OrderBook,
+    delta_checksum,
 )
 
 TS = datetime(2026, 7, 25, 10, 0, tzinfo=timezone.utc)
@@ -95,11 +96,22 @@ def test_wrong_symbol_raises():
                              exchange_timestamp=TS))
 
 
-def test_checksum_flag_without_verifier_is_a_configuration_error():
-    # A2b: enabling validation without a confirmed algorithm must fail loudly
-    # at construction, not silently skip validation at runtime.
-    with pytest.raises(ValueError, match="A2b"):
-        OrderBook("BTCUSD", validate_checksums=True)
+def test_documented_delta_checksum_matches_top_ten_material():
+    book = OrderBook("BTCUSD")
+    assert book.apply(_delta(
+        "snapshot", 100,
+        asks=[("100.00", "23"), ("100.05", "34")],
+        bids=[("99.04", "87"), ("98.65", "102"), ("98.30", "16")],
+    )) is ApplyResult.SNAPSHOT_APPLIED
+    # Delta documentation's asks|bids example, evaluated with unsigned CRC32.
+    assert delta_checksum(book) == 3_599_895_312
+
+
+def test_checksum_validation_requires_checksum_on_every_book_message():
+    book = OrderBook("BTCUSD", validate_checksums=True)
+    result = book.apply(_delta("snapshot", 100, bids=[("1", "1")]))
+    assert result is ApplyResult.REJECTED_CHECKSUM
+    assert book.state is BookState.INVALID
 
 
 def test_checksum_mismatch_invalidates_when_verifier_supplied():

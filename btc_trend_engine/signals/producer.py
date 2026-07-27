@@ -227,11 +227,12 @@ class SnapshotProducer:
              else f"|score| {abs(score):.1f} < {self.config.entry_score}"},
             # The risk lock is genuinely not evaluable here: risk/ needs an
             # account's data_dir and kill-switch state, and the engine holds
-            # neither (ADR 0001 — it never reads users/). The consumer applies
-            # risk_manager.evaluate_entry at entry time. This gate reports
-            # "not evaluated by the engine" rather than implying a pass.
-            {"name": "risk_lock_clear", "passed": True,
-             "detail": "not evaluated here; the consumer applies risk/ at entry"},
+            # neither (ADR 0001 — it never reads users/).  Mark it deferred
+            # rather than green: the dashboard must show the final per-user
+            # result immediately before a paper or LIVE mutation.
+            {"name": "risk_lock_clear", "label": "RISK CHECK AT EXECUTION",
+             "passed": False, "required": False, "status": "DEFERRED",
+             "detail": "not evaluated by the engine; verified per account at entry"},
         ]
 
     def _short_move_confirmed(
@@ -301,6 +302,36 @@ class SnapshotProducer:
 
     def history(self, limit: int = 100) -> list[dict[str, Any]]:
         return self._history[-limit:]
+
+    def restore_history(self, snapshots: Sequence[Mapping[str, Any]]) -> int:
+        """Rehydrate only validated committed state after an engine restart.
+
+        The neutral MOVE confirmation deliberately still requires adjacent
+        five-minute timestamps, so old/stale rows cannot confirm a new entry.
+        Restoring the last valid regime and hysteresis direction prevents a
+        harmless process restart from changing a current directional reading.
+        """
+        restored = [dict(row) for row in snapshots if isinstance(row, Mapping)]
+        restored.sort(key=lambda row: str(row.get("candle_close_utc") or ""))
+        self._history = restored[-self._max_history:]
+        if not self._history:
+            return 0
+
+        latest = self._history[-1]
+        direction = latest.get("direction")
+        if direction in (-1, 0, 1):
+            self.hysteresis.direction = int(direction)
+        try:
+            self.classifier.restore(str(latest["regime"]))
+        except (KeyError, ValueError):
+            pass
+        try:
+            self._regime_since = datetime.fromisoformat(
+                str(latest.get("regime_since") or "").replace("Z", "+00:00")
+            ).astimezone(timezone.utc)
+        except ValueError:
+            self._regime_since = None
+        return len(self._history)
 
 
 def spread_bps_from(best_bid: float | None, best_ask: float | None) -> float | None:

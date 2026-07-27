@@ -21,9 +21,7 @@ flowchart TD
     G -->|"no — unreachable / stale /<br/>schema or clock mismatch"| Z2["RAISE — fail closed<br/>(score 0.0 would be SHORT_MOVE,<br/>so an outage must not fall through)"]
     G -->|yes| H["score = snapshot.trend_score<br/>zone  = snapshot.zone"]
 
-    H --> I{"zone"}
-    I -->|HOLD<br/>25 &lt; abs&#40;score&#41; &lt; 35| Z3["RAISE — no new action.<br/>Open position is KEPT"]
-    I -->|"CE_2_ITM / PE_2_ITM / SHORT_MOVE"| J["plan_score_transition&#40;score, signal_key&#41;"]
+    H --> J["plan_score_transition&#40;score, signal_key&#41;"]
 
     J --> K{"signal_key already consumed?"}
     K -->|yes| Z4["NOOP — idempotent per closed candle<br/>(one candle cannot fire twice)"]
@@ -31,9 +29,11 @@ flowchart TD
 
     L -->|none| M["action = OPEN"]
     L -->|"zone == position zone"| Z5["HOLD — already correct, no churn"]
-    L -->|"zone != position zone"| N["action = CLOSE_THEN_OPEN"]
+    L -->|"opposite HOLD invalidates CE/PE"| N0["action = CLOSE (exit only)"]
+    L -->|"actionable zone differs"| N["action = CLOSE_THEN_OPEN"]
 
-    N --> O["close existing position"]
+    N0 --> O["close existing position"]
+    N --> O
     O --> M
     M --> P{"target zone"}
     P -->|CE_2_ITM| Q["select_directional_option<br/>ATM index − 2 → C-BTC-*"]
@@ -45,9 +45,9 @@ flowchart TD
     S --> T
     T --> U{"zone ↔ instrument/side/prefix<br/>consistent?"}
     U -->|no| Z6["RAISE — unsupported zone.<br/>Never guesses a label"]
-    U -->|yes| V["risk_controls.evaluate_entry<br/>daily cap · loss lock · open risk"]
+    U -->|yes| V["per-account risk + affordability<br/>daily cap · loss lock · open risk"]
     V -->|refused| Z7["no order"]
-    V -->|allowed| W["place bounded IOC limit order<br/>(LIVE) / simulate (PAPER)"]
+    V -->|allowed| W["LIVE: wallet-backed IOC<br/>PAPER: virtual-capital simulation"]
     W --> X["persist state + trend_score_zone<br/>spawn tp_monitor"]
 ```
 
@@ -61,7 +61,8 @@ flowchart LR
     subgraph SIG["Path 1 — signal (candle close, every 5m)"]
       A1["new committed snapshot"] --> A2{"zone vs position zone"}
       A2 -->|same| A3["hold"]
-      A2 -->|"HOLD band"| A4["hold — NOT an exit"]
+      A2 -->|"ordinary HOLD"| A4["hold — NOT an exit"]
+      A2 -->|"CE below −15 / PE above +15"| A6["CLOSE — invalidated, no replacement"]
       A2 -->|different| A5["CLOSE_THEN_OPEN"]
     end
 
@@ -73,6 +74,7 @@ flowchart LR
     end
 
     A5 --> C1["position flat"]
+    A6 --> C1
     B3 --> C1
 ```
 
@@ -96,11 +98,24 @@ applies. Bands live in exactly one place, `btc_trend_engine/signals/zones.py`;
 `trend_score_auto.score_zone` delegates
 to it so the two cannot drift.
 
+Directional entries also require the score to agree with the classified
+structure (`TREND_UP`/`BREAKOUT_UP` for CE, `TREND_DOWN`/`BREAKOUT_DOWN` for
+PE) and to meet the engine's minimum confidence. A `SHORT_MOVE` additionally
+needs its 15-minute confirmation, a fresh executable quote, positive
+premium-versus-forecast net edge, and jump probability below the configured
+limit. Missing evidence blocks the entry.
+
 ## Idempotency and repaint safety
 
 - The decision score is committed **only at candle close**. `signal_id` is a
   deterministic hash of that closed candle, and `completed_candle_signal_key`
   dedupes on it, so one candle can never produce two entries.
+- A successful entry also creates a durable **score-zone setup lock**. A TP,
+  SL, trailing stop, settlement, restart, or a later candle in the same zone
+  does not release it. The controller can enter again only after the score has
+  moved to a different zone, or after the operator deliberately resets the
+  current lock in Bot Config. The reset never closes a position or submits an
+  order.
 - `/trend/live` updates every ~5s and *does* repaint within the bar. It
   carries no `signal_id`, no `entry_allowed` and no `gates`, so the order
   path structurally cannot consume it. Display only.
@@ -114,4 +129,5 @@ to it so the two cannot drift.
 | Exit rules | identical | identical |
 | State namespace | `users/<u>/dry_run/` | `users/<u>/` |
 | Risk ledger | dry-run history only | real history only |
+| Affordability | configured virtual capital | revalidated USD wallet balance |
 | Order | simulated | bounded IOC to the venue |

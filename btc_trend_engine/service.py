@@ -13,6 +13,7 @@ read-only state for the API layer; it produces no signals in Phase 2.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import shutil
 from datetime import datetime, timezone
@@ -98,12 +99,38 @@ class EngineService:
         )
 
         self.producer = SnapshotProducer(symbol)
+        self._restore_signal_state()
         self.last_ticker: dict[str, Any] = {}
         self.live_view: dict[str, Any] | None = None
         self.raw_capture_enabled = True
         self.dispatch_errors = 0
         self.snapshot_errors = 0
         self._tasks: list[asyncio.Task[None]] = []
+
+    def _restore_signal_state(self) -> None:
+        """Continue committed signal state across a controlled restart.
+
+        Snapshot rows are append-only and already validate the engine's
+        history.  Bad historical JSON is ignored rather than preventing market
+        capture from starting; the producer then warms up fail-closed.
+        """
+        try:
+            rows = self.repos.recent_trend_snapshots(
+                self.config.engine.symbol, limit=500,
+            )
+            snapshots = []
+            for row in reversed(rows):
+                try:
+                    parsed = json.loads(row.snapshot_json)
+                except (TypeError, ValueError):
+                    continue
+                if isinstance(parsed, dict):
+                    snapshots.append(parsed)
+            restored = self.producer.restore_history(snapshots)
+            if restored:
+                log.info("restored %d committed trend snapshots", restored)
+        except Exception:
+            log.exception("trend signal state restore failed; starting fail-closed")
 
     # ── wiring ───────────────────────────────────────────────────────────
     def _channel_spec(self) -> list[dict[str, Any]]:

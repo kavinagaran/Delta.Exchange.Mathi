@@ -27,6 +27,7 @@ from btc_trend_engine.backtest.event_replay import (  # noqa: E402
     ReplayConfig,
     candles_from_rows,
     replay,
+    replay_score_zones,
 )
 from btc_trend_engine.backtest.performance import Performance, by_regime, evaluate  # noqa: E402
 from btc_trend_engine.backtest.walk_forward import run_walk_forward  # noqa: E402
@@ -109,13 +110,23 @@ PERF_HEADER = ("| Window | Trades | Win rate | Total P&L | Expectancy | "
 
 
 def build_report(symbol: str, candles, folds: int, warmup: int,
-                 sensitivity_candles: int | None = None) -> str:
+                 sensitivity_candles: int | None = None,
+                 include_legacy_analysis: bool = True) -> str:
     first, last = candles[0].start, candles[-1].start
-    baseline = replay(candles, ReplayConfig(), warmup=warmup)
-    baseline_performance = evaluate(baseline.trades)
-    report = run_walk_forward(candles, folds=folds, warmup=warmup,
-                              sensitivity_candles=sensitivity_candles,
-                              progress=lambda line: print(f"  {line}", flush=True))
+    baseline = None
+    baseline_performance = None
+    if include_legacy_analysis:
+        baseline = replay(candles, ReplayConfig(), warmup=warmup)
+        baseline_performance = evaluate(baseline.trades)
+    zone_baseline = replay_score_zones(candles, ReplayConfig(), warmup=warmup)
+    zone_performance = evaluate(zone_baseline.trades)
+    report = None
+    if include_legacy_analysis:
+        report = run_walk_forward(
+            candles, folds=folds, warmup=warmup,
+            sensitivity_candles=sensitivity_candles,
+            progress=lambda line: print(f"  {line}", flush=True),
+        )
 
     out: list[str] = []
     add = out.append
@@ -135,6 +146,9 @@ def build_report(symbol: str, candles, folds: int, warmup: int,
         "measures the transparent score as it would actually ship today.")
     add("- Costs applied: taker fee, assumed spread, decision-to-arrival "
         "latency, and IOC cancellation when the market moves beyond the limit.\n")
+    add("- **The score-zone replay below is the current CE/PE/HOLD lifecycle.** "
+        "It deliberately reports SHORT_MOVE candidates as unpriced rather than "
+        "inventing historical MOVE premiums.\n")
 
     add("## Data\n")
     add(f"- Symbol: `{symbol}` · resolution `{RESOLUTION}`")
@@ -144,34 +158,59 @@ def build_report(symbol: str, candles, folds: int, warmup: int,
     add(f"- Warmup per window: {warmup:,} candles "
         f"(the 4h timeframe needs 60 closed candles)\n")
 
-    add("## Baseline — shipped defaults, whole period, no selection\n")
-    add("This is in-sample in the weak sense that the shipped thresholds were "
-        "not chosen from this data, but it involves no walk-forward "
-        "discipline either. It is context, not evidence.\n")
-    add(PERF_HEADER)
-    add(_perf_row("Full period", baseline_performance))
-    add("")
-    add(f"- Entry-eligible signals: {baseline.entry_eligible_signals:,}")
-    add(f"- Signals skipped by gates: {baseline.skipped_no_entry:,}")
-    add(f"- Fills rejected (IOC cancelled): {baseline.rejected_fills:,}\n")
-
-    if baseline.trades:
-        add("### Baseline by regime at entry\n")
-        add(PERF_HEADER.replace("| Window |", "| Regime |"))
-        for regime, performance in by_regime(baseline.trades).items():
-            add(_perf_row(regime, performance))
+    if baseline is not None and baseline_performance is not None:
+        add("## Baseline — retired direction-only defaults\n")
+        add("This is in-sample in the weak sense that the shipped thresholds were "
+            "not chosen from this data, but it involves no walk-forward "
+            "discipline either. It is context, not evidence.\n")
+        add(PERF_HEADER)
+        add(_perf_row("Full period", baseline_performance))
         add("")
+        add(f"- Entry-eligible signals: {baseline.entry_eligible_signals:,}")
+        add(f"- Signals skipped by gates: {baseline.skipped_no_entry:,}")
+        add(f"- Fills rejected (IOC cancelled): {baseline.rejected_fills:,}\n")
 
-    add("## Walk-forward\n")
-    add("Thresholds are selected on each training window and measured on the "
-        "untouched window that follows. Training and out-of-sample are always "
-        "shown side by side; a large gap between them is the finding.\n")
-    if report.warnings:
+        if baseline.trades:
+            add("### Baseline by regime at entry\n")
+            add(PERF_HEADER.replace("| Window |", "| Regime |"))
+            for regime, performance in by_regime(baseline.trades).items():
+                add(_perf_row(regime, performance))
+            add("")
+
+    add("## Score-zone policy replay — current execution logic\n")
+    add("Directional entries require the current zone's confidence and regime "
+        "alignment gates. CE/PE positions stay open through a supportive HOLD "
+        "band, but exit in an opposite-direction HOLD band. This remains a "
+        "perpetual directional proxy, not option P&L.\n")
+    add(PERF_HEADER)
+    add(_perf_row("CE/PE directional proxy", zone_performance))
+    add("")
+    add(f"- Directional entry-eligible signals: {zone_baseline.entry_eligible_signals:,}")
+    add(f"- Directional invalidation exits: {zone_baseline.directional_invalidation_exits:,}")
+    add(f"- SHORT_MOVE candidates after 15-minute confirmation: {zone_baseline.short_move_candidates:,}")
+    add(f"- SHORT_MOVE candidates excluded from P&L for missing historical premium/quote data: {zone_baseline.short_move_unpriced:,}")
+    add("")
+    add("**Interpretation:** this section validates the current directional "
+        "state machine and its anti-churn/exit behaviour. It does **not** "
+        "validate short-MOVE profitability or option P&L; an archived MOVE/"
+        "option quote series is required before either can be presented as "
+        "backtested account returns.\n")
+
+    add("## Legacy directional walk-forward\n")
+    if report is None:
+        add("Not run for this score-zone validation. The legacy direction-only "
+            "policy is retired and its prior report is not evidence for the "
+            "current CE/PE/HOLD/SHORT_MOVE lifecycle.\n")
+    else:
+        add("Thresholds are selected on each training window and measured on the "
+            "untouched window that follows. Training and out-of-sample are always "
+            "shown side by side; a large gap between them is the finding.\n")
+    if report is not None and report.warnings:
         add("**Warnings**\n")
         for warning in report.warnings:
             add(f"- {warning}")
         add("")
-    if report.folds:
+    if report is not None and report.folds:
         add("| Fold | Train range | Selected | Train P&L | Train trades | "
             "OOS range | OOS P&L | OOS trades |")
         add("|---|---|---|---|---|---|---|---|")
@@ -196,26 +235,28 @@ def build_report(symbol: str, candles, folds: int, warmup: int,
                            "data does not demonstrate an edge.** More data, or a "
                            "different configuration, is needed before Stage C.")
             add(f"{verdict}\n")
-    else:
+    elif report is not None:
         add("_No fold produced a usable train/test split. See warnings above._\n")
 
     add("## Threshold sensitivity\n")
-    add("Each configuration run over the whole period. A result that survives "
-        "only at one threshold is a result to distrust.\n")
-    add("| Config | Trades | Win rate | Total P&L | Expectancy | Max DD |")
-    add("|---|---|---|---|---|---|")
-    for label, performance in report.sensitivity.items():
-        add(f"| `{label}` | {performance.trades} | {_pct(performance.win_rate)} "
-            f"| {performance.total_pnl:+.2f} | {performance.expectancy:+.2f} "
-            f"| {performance.max_drawdown:+.2f} |")
-    add("")
+    if report is None:
+        add("Not run: sensitivity over the retired direction-only thresholds is "
+            "not a substitute for option/MOVE quote history.\n")
+    else:
+        add("Each configuration run over the whole period. A result that survives "
+            "only at one threshold is a result to distrust.\n")
+        add("| Config | Trades | Win rate | Total P&L | Expectancy | Max DD |")
+        add("|---|---|---|---|---|---|")
+        for label, performance in report.sensitivity.items():
+            add(f"| `{label}` | {performance.trades} | {_pct(performance.win_rate)} "
+                f"| {performance.total_pnl:+.2f} | {performance.expectancy:+.2f} "
+                f"| {performance.max_drawdown:+.2f} |")
+        add("")
 
     add("## Cutover relevance\n")
-    add("Plan Phase 8 requires *walk-forward positive OOS on ≥3/4 folds* before "
-        "Stage C. This report supplies that input; it does not by itself "
-        "authorise a stage change, and the remaining criteria (uptime, data "
-        "quality, agreement rate, ≥20 entry-eligible engine signals) are "
-        "measured live during the shadow window, not here.\n")
+    add("Do not enable LIVE until the score-zone directional proxy is positive "
+        "out-of-sample and a historical MOVE/option quote archive supports "
+        "end-to-end replay.\n")
     return "\n".join(out)
 
 
@@ -237,6 +278,14 @@ def main() -> int:
         "--sensitivity-candles", type=int, default=20_000,
         help="bound the sensitivity sweep to the most recent N candles "
              "(0 = whole series; the sweep costs one full replay per config)")
+    run_parser.add_argument(
+        "--skip-legacy-analysis", action="store_true",
+        help="write the full current score-zone replay without the retired "
+            "directional walk-forward/sensitivity sweep")
+    run_parser.add_argument(
+        "--max-candles", type=int, default=0,
+        help="limit the replay to the most recent N cached candles (includes "
+             "warmup; 0 = all cached candles)")
     run_parser.add_argument("--report", type=Path,
                             default=REPO_ROOT / "docs" / "backtest-report.md")
 
@@ -249,9 +298,14 @@ def main() -> int:
         return 0
 
     candles = load_cached(args.symbol, args.resolution)
+    if args.max_candles:
+        if args.max_candles <= args.warmup + 1:
+            raise SystemExit("--max-candles must exceed warmup + 1")
+        candles = candles[-args.max_candles:]
     print(f"loaded {len(candles):,} candles; running backtest...", flush=True)
     report = build_report(args.symbol, candles, args.folds, args.warmup,
-                          args.sensitivity_candles or None)
+                          args.sensitivity_candles or None,
+                          include_legacy_analysis=not args.skip_legacy_analysis)
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(report, encoding="utf-8")
     print(f"wrote {args.report}")

@@ -31,6 +31,12 @@ def _safe_score_config(**updates) -> dict:
         "TSL_ARM_PNL_TREND": "100",
         "TSL_TRAIL_PNL_TREND": "50",
         "ALLOW_SHORT_MOVE": "false",
+        # The new DRY RUN preflight uses the exact same fixed-size risk caps
+        # as LIVE.  Make this fixture an intentionally funded 1,000-lot
+        # account rather than relying on unrelated environment defaults.
+        "TREND_RISK_BUDGET_USD": "500",
+        "SHORT_MAX_RISK_USD": "500",
+        "TREND_DRY_RUN_CAPITAL_USD": "1000",
     }
     config.update(updates)
     return config
@@ -615,8 +621,63 @@ def test_score_cycle_opens_once_and_never_reuses_same_bar_after_protection_exit(
     assert len(history) == 1
     assert history[0]["exit_trigger"] == "take_profit_simulated"
     assert first["score_auto_signal_key"] in ledger["signals"]
+    assert ledger["setup_lock"]["target_zone"] == dashboard.TREND_SCORE_CE_ZONE
+    assert ledger["setup_lock"]["source_signal_key"] == first["score_auto_signal_key"]
     assert score_cycle["prepare"].call_count == 1
     assert score_cycle["notify"].call_count == 1
+    for mock in score_cycle["forbidden"].values():
+        mock.assert_not_called()
+
+
+def test_score_cycle_blocks_same_zone_after_protection_until_zone_changes(
+        score_cycle, monkeypatch):
+    """A protection exit must not turn a continuing CE zone into re-entries."""
+    state_path = score_cycle["dry"] / "trend_state.json"
+    assert dashboard._maybe_auto_trend_score_cycle() is True
+    opened = json.loads(state_path.read_text(encoding="utf-8"))
+
+    monkeypatch.setattr(
+        dashboard, "_dry_run_mark_and_pnl",
+        lambda state: (230.0, 9.98, 10.0, 0.01),
+    )
+    with dashboard.account_file_lock(
+        score_cycle["dry"], "close-trend", "test-setup-lock-close",
+    ) as acquired:
+        assert acquired
+        assert dashboard._close_dry_simulation_locked(
+            "trend", opened, trigger="take_profit_simulated",
+        )["status"] == "CLOSED"
+
+    # A different completed CE candle is a new signal, but not a new setup.
+    score_cycle["holder"]["signal"] = _score_signal(
+        score_cycle["mode"], score=60,
+        zone=dashboard.TREND_SCORE_CE_ZONE, suffix="10:05:00Z",
+    )
+    assert dashboard._maybe_auto_trend_score_cycle() is False
+    ledger = dashboard._trend_score_auto_ledger(score_cycle["dry"])
+    repeat_key = score_cycle["holder"]["signal"]["signal_key"]
+    assert ledger["signals"][repeat_key]["action"] == "SETUP_LOCKED"
+    assert ledger["current_transition"]["action"] == "SETUP_LOCKED"
+    assert ledger["setup_lock"]["target_zone"] == dashboard.TREND_SCORE_CE_ZONE
+    assert score_cycle["prepare"].call_count == 1
+    assert score_cycle["notify"].call_count == 1
+
+    # A confirmed different zone releases the old setup lock. HOLD itself
+    # opens nothing, but a later CE is now a fresh setup and may enter once.
+    score_cycle["holder"]["signal"] = _score_signal(
+        score_cycle["mode"], score=20,
+        zone=dashboard.TREND_SCORE_HOLD_ZONE, suffix="10:10:00Z",
+    )
+    assert dashboard._maybe_auto_trend_score_cycle() is False
+    assert dashboard._trend_score_auto_ledger(score_cycle["dry"])["setup_lock"] is None
+
+    score_cycle["holder"]["signal"] = _score_signal(
+        score_cycle["mode"], score=60,
+        zone=dashboard.TREND_SCORE_CE_ZONE, suffix="10:15:00Z",
+    )
+    assert dashboard._maybe_auto_trend_score_cycle() is True
+    assert score_cycle["prepare"].call_count == 2
+    assert score_cycle["notify"].call_count == 2
     for mock in score_cycle["forbidden"].values():
         mock.assert_not_called()
 
@@ -667,6 +728,43 @@ def test_score_cycle_closes_and_switches_on_the_same_new_signal_exactly_once(
         score_cycle["dry"] / "trade_history.json"
     ).read_text(encoding="utf-8"))) == 1
     assert score_cycle["prepare"].call_count == 2
+    assert score_cycle["notify"].call_count == 2
+    for mock in score_cycle["forbidden"].values():
+        mock.assert_not_called()
+
+
+def test_score_cycle_exits_a_directional_trade_on_opposite_hold_without_reversal(
+        score_cycle, monkeypatch):
+    state_path = score_cycle["dry"] / "trend_state.json"
+    assert dashboard._maybe_auto_trend_score_cycle() is True
+    opened = json.loads(state_path.read_text(encoding="utf-8"))
+
+    # -30 is deliberately inside the PE HOLD band rather than a PE entry. It
+    # invalidates the CE but must not manufacture a replacement trade.
+    score_cycle["holder"]["signal"] = _score_signal(
+        score_cycle["mode"], score=-30,
+        zone=dashboard.TREND_SCORE_HOLD_ZONE,
+        suffix="10:05:00Z",
+    )
+    monkeypatch.setattr(
+        dashboard, "_dry_run_mark_and_pnl",
+        lambda state: (210.0, -10.02, -10.0, 0.01),
+    )
+
+    assert dashboard._maybe_auto_trend_score_cycle() is True
+    closed = json.loads(state_path.read_text(encoding="utf-8"))
+    history = json.loads((score_cycle["dry"] / "trade_history.json").read_text(
+        encoding="utf-8"
+    ))
+    ledger = json.loads((
+        score_cycle["dry"] / dashboard.TREND_SCORE_AUTO_LEDGER_FILE
+    ).read_text(encoding="utf-8"))
+
+    assert closed["status"] == "CLOSED"
+    assert closed["simulation_id"] == opened["simulation_id"]
+    assert history[-1]["exit_trigger"] == "trend_engine_directional_invalidation"
+    assert ledger["current_transition"]["action"] == "EXIT"
+    assert score_cycle["prepare"].call_count == 1
     assert score_cycle["notify"].call_count == 2
     for mock in score_cycle["forbidden"].values():
         mock.assert_not_called()
@@ -843,3 +941,26 @@ def test_score_auto_status_reports_server_mode_and_controller_position(
     assert payload["current_zone"] == dashboard.TREND_SCORE_CE_ZONE
     assert payload["symbol"].startswith("C-BTC-")
     assert payload["lots"] == 1000
+    assert payload["setup_lock"]["active"] is True
+    assert payload["setup_lock"]["zone"] == dashboard.TREND_SCORE_CE_ZONE
+
+
+def test_setup_lock_reset_endpoint_clears_only_the_lock(score_cycle):
+    assert dashboard._maybe_auto_trend_score_cycle() is True
+    state_path = score_cycle["dry"] / "trend_state.json"
+    before = json.loads(state_path.read_text(encoding="utf-8"))
+
+    with dashboard.app.test_request_context(
+            "/api/trend-engine/score-auto/setup-lock/reset", method="POST"):
+        response = dashboard.api_trend_engine_score_auto_setup_lock_reset()
+    payload = response.get_json()
+
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert payload["released"] is True
+    assert payload["zone"] == dashboard.TREND_SCORE_CE_ZONE
+    assert dashboard._trend_score_auto_ledger(score_cycle["dry"])["setup_lock"] is None
+    assert json.loads(state_path.read_text(encoding="utf-8")) == before
+    assert score_cycle["notify"].call_count == 1
+    for mock in score_cycle["forbidden"].values():
+        mock.assert_not_called()

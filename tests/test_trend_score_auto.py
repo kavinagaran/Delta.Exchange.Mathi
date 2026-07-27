@@ -480,6 +480,19 @@ def test_hold_band_opens_nothing_when_flat():
     assert plan["open_zone"] is None
 
 
+def test_opposite_hold_band_closes_directional_position_without_reversal():
+    position = {"trend_score_zone": CE_2_ITM, "symbol": "C-BTC-64000-260726",
+                "side": "long"}
+    plan = plan_score_transition(
+        score=-30, signal_key="sig-directional-invalidation",
+        owned_positions=[position])
+    assert plan["action"] == "CLOSE"
+    assert plan["current_zone"] == CE_2_ITM
+    assert plan["target_zone"] == HOLD
+    assert plan["open_zone"] is None
+    assert plan["consume_signal"] is True
+
+
 def test_a_persisted_pe_2_itm_zone_is_not_misread_as_the_legacy_pe_3():
     """Both PE zones share the P-BTC- symbol prefix, so symbol inference
     alone cannot tell them apart. If a PE_2_ITM position were read back as

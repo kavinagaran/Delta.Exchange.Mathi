@@ -1,6 +1,6 @@
 # Backtest & walk-forward report
 
-Generated 2026-07-26 04:22 UTC · `scripts/backtest.py`
+Generated 2026-07-27 03:58 UTC · `scripts/backtest.py`
 
 ## What this does and does not measure
 
@@ -10,6 +10,8 @@ Generated 2026-07-26 04:22 UTC · `scripts/backtest.py`
 - **Measured on the perpetual, not on the options actually traded.** The live system converts a direction into an ITM option purchase. These figures measure *directional edge*; they are not a forecast of the live account's P&L.
 - **The order-flow score component is weighted 0** (ADR 0004), so this measures the transparent score as it would actually ship today.
 - Costs applied: taker fee, assumed spread, decision-to-arrival latency, and IOC cancellation when the market moves beyond the limit.
+
+- **The score-zone replay below is the current CE/PE/HOLD lifecycle.** It deliberately reports SHORT_MOVE candidates as unpriced rather than inventing historical MOVE premiums.
 
 ## Data
 
@@ -24,62 +26,44 @@ This is in-sample in the weak sense that the shipped thresholds were not chosen 
 
 | Window | Trades | Win rate | Total P&L | Expectancy | Expectancy 95% CI | Max DD | Profit factor |
 |---|---|---|---|---|---|---|---|
-| Full period | 442 | 22.4% | -37633.47 | -85.14 | [-155.19, -4.43] | -43171.99 | 0.68 |
+| Full period | 745 | 21.7% | -72296.87 | -97.04 | [-149.35, -38.00] | -73587.08 | 0.62 |
 
-- Entry-eligible signals: 16,389
-- Signals skipped by gates: 11,059
+- Entry-eligible signals: 25,495
+- Signals skipped by gates: 735
 - Fills rejected (IOC cancelled): 0
 
 ### Baseline by regime at entry
 
 | Regime | Trades | Win rate | Total P&L | Expectancy | Expectancy 95% CI | Max DD | Profit factor |
 |---|---|---|---|---|---|---|---|
-| BREAKOUT_DOWN | 122 | 20.5% | -10001.86 | -81.98 | [-193.63, +59.21] | -13478.93 | 0.66 |
-| BREAKOUT_UP | 131 | 19.8% | -16768.56 | -128.00 | [-205.30, -37.80] | -17093.56 | 0.46 |
-| TREND_DOWN | 101 | 26.7% | +2605.48 | +25.80 | [-191.88, +315.18] | -6525.83 | 1.08 |
-| TREND_UP | 88 | 23.9% | -13468.53 | -153.05 | [-257.16, -39.47] | -14928.20 | 0.47 |
+| BREAKOUT_DOWN | 56 | 21.4% | -12586.55 | -224.76 | [-340.50, -110.55] | -12586.55 | 0.25 |
+| BREAKOUT_UP | 63 | 23.8% | -5934.36 | -94.20 | [-224.77, +51.32] | -7459.15 | 0.61 |
+| TREND_DOWN | 301 | 23.9% | -7678.73 | -25.51 | [-132.29, +99.03] | -18704.02 | 0.90 |
+| TREND_UP | 325 | 19.4% | -46097.22 | -141.84 | [-196.15, -85.49] | -47451.19 | 0.44 |
 
-## Walk-forward
+## Score-zone policy replay — current execution logic
 
-Thresholds are selected on each training window and measured on the untouched window that follows. Training and out-of-sample are always shown side by side; a large gap between them is the finding.
-
-**Warnings**
-
-- sensitivity sweep covers the most recent 20,000 candles, not the full 63,351 (runtime bound)
-
-| Fold | Train range | Selected | Train P&L | Train trades | OOS range | OOS P&L | OOS trades |
-|---|---|---|---|---|---|---|---|
-| 0 | 2025-12-17→2026-01-25 | `entry=35,conf=0.55` | -9468.29 | 66 | 2026-01-25→2026-02-10 | +5928.23 | 9 |
-| 1 | 2026-02-10→2026-03-21 | `entry=45,conf=0.62` | +2674.33 | 44 | 2026-03-21→2026-04-06 | -1012.13 | 10 |
-| 2 | 2026-04-06→2026-05-15 | `entry=30,conf=0.7` | -10532.92 | 55 | 2026-05-15→2026-05-31 | -1713.86 | 12 |
-| 3 | 2026-05-31→2026-07-09 | `entry=45,conf=0.7` | -9413.38 | 54 | 2026-07-09→2026-07-25 | -2748.87 | 13 |
-
-**Folds with positive OOS P&L: 1 / 4**
-
-### Pooled out-of-sample
+Directional entries require the current zone's confidence and regime alignment gates. CE/PE positions stay open through a supportive HOLD band, but exit in an opposite-direction HOLD band. This remains a perpetual directional proxy, not option P&L.
 
 | Window | Trades | Win rate | Total P&L | Expectancy | Expectancy 95% CI | Max DD | Profit factor |
 |---|---|---|---|---|---|---|---|
-| All OOS trades | 44 | 18.2% | +453.38 | +10.30 | [-227.12, +317.60] | -6835.89 | 1.04 |
+| CE/PE directional proxy | 650 | 21.7% | -62126.06 | -95.58 | [-157.25, -26.47] | -64021.49 | 0.66 |
 
-**The pooled OOS expectancy CI includes zero — this data does not demonstrate an edge.** More data, or a different configuration, is needed before Stage C.
+- Directional entry-eligible signals: 650
+- Directional invalidation exits: 36
+- SHORT_MOVE candidates after 15-minute confirmation: 9,572
+- SHORT_MOVE candidates excluded from P&L for missing historical premium/quote data: 9,572
+
+**Interpretation:** this section validates the current directional state machine and its anti-churn/exit behaviour. It does **not** validate short-MOVE profitability or option P&L; an archived MOVE/option quote series is required before either can be presented as backtested account returns.
+
+## Legacy directional walk-forward
+
+Not run for this score-zone validation. The legacy direction-only policy is retired and its prior report is not evidence for the current CE/PE/HOLD/SHORT_MOVE lifecycle.
 
 ## Threshold sensitivity
 
-Each configuration run over the whole period. A result that survives only at one threshold is a result to distrust.
-
-| Config | Trades | Win rate | Total P&L | Expectancy | Max DD |
-|---|---|---|---|---|---|
-| `entry=30,conf=0.55` | 145 | 20.0% | -15391.02 | -106.14 | -23005.32 |
-| `entry=30,conf=0.62` | 137 | 19.7% | -15282.08 | -111.55 | -22965.53 |
-| `entry=30,conf=0.7` | 109 | 23.9% | -11726.46 | -107.58 | -19434.15 |
-| `entry=35,conf=0.55` | 132 | 21.2% | -14518.30 | -109.99 | -22132.59 |
-| `entry=35,conf=0.62` | 129 | 20.9% | -14356.32 | -111.29 | -22039.77 |
-| `entry=35,conf=0.7` | 109 | 23.9% | -11726.46 | -107.58 | -19434.15 |
-| `entry=45,conf=0.55` | 115 | 23.5% | -12158.80 | -105.73 | -19797.33 |
-| `entry=45,conf=0.62` | 114 | 23.7% | -12089.65 | -106.05 | -19797.33 |
-| `entry=45,conf=0.7` | 106 | 24.5% | -11183.23 | -105.50 | -18890.91 |
+Not run: sensitivity over the retired direction-only thresholds is not a substitute for option/MOVE quote history.
 
 ## Cutover relevance
 
-Plan Phase 8 requires *walk-forward positive OOS on ≥3/4 folds* before Stage C. This report supplies that input; it does not by itself authorise a stage change, and the remaining criteria (uptime, data quality, agreement rate, ≥20 entry-eligible engine signals) are measured live during the shadow window, not here.
+Do not enable LIVE until the score-zone directional proxy is positive out-of-sample and a historical MOVE/option quote archive supports end-to-end replay.

@@ -1392,6 +1392,62 @@ body.login-body {
   backdrop-filter: blur(18px);
 }
 
+/* Deliberate operator action: this control is visibly distinct from regular
+   configuration buttons. Its layered edge and inset highlight read as a
+   raised, 3D-embossed control; the disabled treatment becomes recessed. */
+#score-setup-lock-reset.setup-lock-reset {
+  position: relative;
+  min-height: 36px;
+  padding: 8px 16px 9px;
+  border: 1px solid rgba(234, 205, 255, .72);
+  border-bottom-color: rgba(55, 16, 111, .96);
+  border-radius: 9px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, .24), transparent 34%),
+    linear-gradient(135deg, #bc6dff 0%, #8435d6 53%, #51159d 100%);
+  color: #fff;
+  font-weight: 800;
+  letter-spacing: .01em;
+  text-shadow: 0 1px 1px rgba(31, 4, 66, .72);
+  box-shadow:
+    0 4px 0 #3e117d,
+    0 8px 18px rgba(117, 45, 201, .32),
+    inset 0 1px 1px rgba(255, 255, 255, .55),
+    inset 0 -2px 3px rgba(48, 8, 103, .38);
+  transition: transform .14s ease, box-shadow .14s ease, filter .14s ease;
+}
+#score-setup-lock-reset.setup-lock-reset:hover:not(:disabled) {
+  filter: brightness(1.08) saturate(1.08);
+  transform: translateY(-1px);
+  box-shadow:
+    0 5px 0 #3e117d,
+    0 11px 22px rgba(117, 45, 201, .42),
+    inset 0 1px 1px rgba(255, 255, 255, .6),
+    inset 0 -2px 3px rgba(48, 8, 103, .38);
+}
+#score-setup-lock-reset.setup-lock-reset:active:not(:disabled) {
+  transform: translateY(3px);
+  box-shadow:
+    0 1px 0 #3e117d,
+    0 3px 9px rgba(117, 45, 201, .28),
+    inset 0 2px 4px rgba(48, 8, 103, .46);
+}
+#score-setup-lock-reset.setup-lock-reset:focus-visible {
+  outline: 2px solid #e6c8ff;
+  outline-offset: 3px;
+}
+#score-setup-lock-reset.setup-lock-reset:disabled {
+  border-color: rgba(122, 95, 146, .42);
+  border-top-color: rgba(42, 24, 59, .82);
+  background: linear-gradient(145deg, #1c1730, #0d0a17);
+  color: #958aa4;
+  text-shadow: 0 1px 0 rgba(0, 0, 0, .8);
+  box-shadow:
+    inset 0 2px 5px rgba(0, 0, 0, .68),
+    inset 0 1px 0 rgba(255, 255, 255, .035);
+  opacity: .9;
+}
+
 @media (max-width: 720px) {
   :root:not([data-theme="dark"]) body,
   :root[data-theme="dark"] body { background-attachment: scroll; }

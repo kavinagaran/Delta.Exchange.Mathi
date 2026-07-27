@@ -73,7 +73,7 @@ def test_produces_schema_valid_snapshot_from_closed_candles():
                   "components", "timeframes", "gates", "reason_codes",
                   "data_quality", "feature_set_version", "model_version"):
         assert field in snapshot, field
-    assert snapshot["schema_version"] == "1.1.0"
+    assert snapshot["schema_version"] == "1.2.0"
     assert -100.0 <= snapshot["trend_score"] <= 100.0
     assert snapshot["signal_ttl_seconds"] > 0
     assert abs(sum(c["weight"] for c in snapshot["components"]) - 1.0) < 1e-9
@@ -248,7 +248,7 @@ def test_trend_endpoints_require_token_and_serve_the_contract(config, service):
         assert http.get("/trend/latest").status_code == 401
         latest = http.get("/trend/latest", headers=headers)
         assert latest.status_code == 200
-        assert latest.json()["schema_version"] == "1.1.0"
+        assert latest.json()["schema_version"] == "1.2.0"
         assert http.get("/trend/history?limit=5",
                         headers=headers).json()["snapshots"]
         assert http.get("/regime/latest", headers=headers).json()["regime"]

@@ -24,7 +24,7 @@ from .score import ScoreResult
 # 1.1.0: additive zone fields (zone, zone_action_allowed, zone_reason,
 # zone_option_type, zone_itm_steps). Minor bump -- the client compares major
 # only, so existing consumers are unaffected.
-SCHEMA_VERSION = "1.1.0"
+SCHEMA_VERSION = "1.2.0"
 MODEL_VERSION = "trend-rules-v1.0.0"
 
 # These two v1 gates describe whether a *directional* entry is available. They
@@ -127,7 +127,7 @@ def build_reason_codes(*, regime: Regime, direction: int,
     if regime is Regime.DEGRADED:
         codes.append("DATA_DEGRADED")
     for gate in gates:
-        if not gate["passed"]:
+        if gate.get("required", True) and not gate["passed"]:
             codes.append(f"GATE_{gate['name'].upper()}_FAILED")
     if direction == 0 and regime not in NON_TRADEABLE:
         codes.append("SCORE_BELOW_ENTRY_THRESHOLD")
@@ -141,6 +141,8 @@ def _zone_entry_gates(
     score: float,
     regime: Regime,
     short_move_confirmed: bool,
+    confidence: float,
+    config: SignalConfig,
 ) -> list[dict[str, Any]]:
     """Return the gate matrix in terms of the zone that can actually trade.
 
@@ -151,7 +153,32 @@ def _zone_entry_gates(
     operator-facing entry matrix shown by the dashboard.
     """
     if zone in {zones.CE_2_ITM, zones.PE_2_ITM}:
-        return [dict(gate) for gate in gates]
+        matching_regime = zones.directional_regime_matches(zone, regime.value)
+        return [
+            *(dict(gate) for gate in gates),
+            {
+                "name": "directional_confidence",
+                "label": "DIRECTIONAL CONFIDENCE",
+                "passed": confidence >= config.minimum_confidence,
+                "detail": (
+                    f"confidence {confidence:.0%} meets the minimum "
+                    f"{config.minimum_confidence:.0%}"
+                    if confidence >= config.minimum_confidence else
+                    f"confidence {confidence:.0%} is below the required "
+                    f"{config.minimum_confidence:.0%}"
+                ),
+            },
+            {
+                "name": "regime_matches_directional_zone",
+                "label": "DIRECTIONAL REGIME ALIGNMENT",
+                "passed": matching_regime,
+                "detail": (
+                    f"{regime.value} agrees with {zone}"
+                    if matching_regime else
+                    f"{regime.value} conflicts with {zone}; directional entry is blocked"
+                ),
+            },
+        ]
 
     shared = [
         dict(gate)
@@ -210,6 +237,17 @@ def _zone_entry_gates(
     ]
 
 
+def _required_gates_pass(gates: list[dict[str, Any]]) -> bool:
+    """Ignore explicit execution-deferred checks in the engine decision.
+
+    Account risk belongs to the per-user consumer and is deliberately absent
+    from the credential-free engine.  It must be visible as deferred, never
+    painted as an engine pass or allowed to block every public snapshot.
+    """
+    return all(gate.get("passed") for gate in gates
+               if gate.get("required", True))
+
+
 def signal_id_for(symbol: str, candle_close_utc: str) -> str:
     """Deterministic per contract: same inputs, same id (invariant 7)."""
     payload = json.dumps(
@@ -252,7 +290,7 @@ def build_snapshot(
                else 0)
     confidence = confidence_from(score, aligned)
 
-    gates_passed = all(g["passed"] for g in gates)
+    gates_passed = _required_gates_pass(gates)
     entry_allowed = bool(
         data_quality == "OK"
         and regime not in NON_TRADEABLE
@@ -291,8 +329,10 @@ def build_snapshot(
         score=score_value,
         regime=regime,
         short_move_confirmed=short_move_confirmed,
+        confidence=confidence,
+        config=config,
     )
-    zone_gates_passed = all(gate["passed"] for gate in zone_gates)
+    zone_gates_passed = _required_gates_pass(zone_gates)
     zone_decision = zones.decide(
         score=score_value,
         regime=regime.value,

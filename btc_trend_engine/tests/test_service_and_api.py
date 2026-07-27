@@ -4,6 +4,7 @@ disk-floor capture stop) and the /health + /status API surface."""
 from __future__ import annotations
 
 import json
+import zlib
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -44,8 +45,9 @@ def _feed(service: EngineService, raw: dict) -> None:
 
 
 def _l2(action: str, seq: int) -> dict:
+    checksum = zlib.crc32(b"63936.0:5|63935.0:10") & 0xFFFFFFFF
     return {"type": "l2_updates", "action": action, "symbol": "BTCUSD",
-            "sequence_no": seq, "cs": 1, "timestamp": TS_US,
+            "sequence_no": seq, "cs": checksum, "timestamp": TS_US,
             "bids": [["63935.0", "10"]], "asks": [["63936.0", "5"]]}
 
 

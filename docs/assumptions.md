@@ -27,7 +27,7 @@ Endpoint `wss://socket.india.delta.exchange`. A 35-second subscription to
 Timestamps are microseconds since epoch.
 
 ## A2 — `l2_updates` is incremental with sequence number and checksum
-**Status: CONFIRMED (checksum algorithm OPEN — see A2b)** · gates §6.3, criterion 4
+**Status: CONFIRMED** · gates §6.3, criterion 4
 
 ```
 keys: action, asks, bids, cs, sequence_no, spot_index, symbol, timestamp, type
@@ -47,23 +47,14 @@ scientific notation (`"3.38E+3"`). Normalise both into one internal form and
 parse every numeric with `Decimal`, never `float`.
 
 ### A2b — checksum formulation
-**Status: OPEN** · gates checksum validation only, **not** Phase 2 as a whole
+**Status: CONFIRMED (2026-07-27)** · gates checksum validation
 
-`cs` is present and changes per update, but 69 candidate formulations failed to
-reproduce it against a live snapshot: CRC32 over top-{10,20,25,50,100,all}
-levels, bids-then-asks / asks-then-bids / interleaved, `:` / `,` / no
-separator, `price:size` and `size:price`, and integer-normalised prices.
-
-Documentation lookup was unavailable at the time of writing (tooling fault, not
-a docs gap). **Resolve before implementing checksum validation.**
-
-Decision: Phase 2 ships **sequence-gap detection as the primary integrity
-gate** — a gap triggers resubscribe-and-rebuild, and order-flow features are
-marked unavailable until the book is valid again. Checksum validation is added
-behind a config flag once the algorithm is confirmed. A missed sequence number
-catches every dropped or reordered message; the checksum additionally catches
-silent corruption, which is the rarer failure. Shipping seq-gap first is
-defensible; claiming checksum validation we cannot compute would not be.
+Delta documents the exact material as `asks|bids`, each side limited to the
+top 10 price levels (asks ascending, bids descending), rendered as
+`price:size` and checked with unsigned CRC32. The engine's default order-book
+configuration validates it on every snapshot and incremental update; a missing
+or mismatched checksum invalidates the book and requires a fresh snapshot.
+Sequence-gap detection remains a separate integrity gate.
 
 ## A3 — MOVE contracts have book depth worth reconstructing
 **Status: REFUTED — MOVE stays quote-only** · gates §9.4 scope, criterion 4
@@ -207,7 +198,7 @@ retried into a lockout — before setting `enabled = true`. The key used must be
 |---|---|---|---|
 | A1 | Public WS with required channels | **CONFIRMED** | Phase 2 |
 | A2 | Incremental L2 + sequence + checksum | **CONFIRMED** | §6.3, criterion 4 |
-| A2b | Checksum formulation reproducible | **OPEN** | checksum validation only |
+| A2b | Checksum formulation reproducible | **CONFIRMED** | checksum validation |
 | A3 | MOVE book worth reconstructing | **REFUTED** | §9.4 → perp only |
 | A4 | Rate-limit budget | **PARTIAL** | P2 design |
 | A5 | Python 3.14 wheels | **CONFIRMED** | P2 pins |

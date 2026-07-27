@@ -38,6 +38,7 @@ from trend_score_auto import (
     AUTO_TRADE_LOTS as TREND_SCORE_AUTO_LOTS,
     CE_2_ITM as TREND_SCORE_CE_ZONE,
     HOLD as TREND_SCORE_HOLD_ZONE,
+    MIN_TIME_TO_EXPIRY_SECONDS,
     PE_2_ITM as TREND_SCORE_PE_ZONE,
     SHORT_MOVE as TREND_SCORE_MOVE_ZONE,
     TrendScoreAutoInputError,
@@ -422,7 +423,8 @@ CONFIG_KEYS = [
     "TREND_MAX_MARK_IV", "TREND_RISK_BUDGET_USD",
     "TREND_MAX_SLIPPAGE_PCT", "TREND_ORDER_CHUNK_LOTS",
     "TREND_MARKET_FALLBACK_ENABLED", "TREND_REENTRY_COOLDOWN_MIN",
-    "TREND_ALLOW_MISSING_BOOK",
+    "TREND_ALLOW_MISSING_BOOK", "TREND_DRY_RUN_CAPITAL_USD",
+    "TREND_MOVE_MIN_EDGE_PCT", "TREND_MOVE_MAX_JUMP_PROBABILITY",
     "TREND_ENGINE_SCORE_AUTO_MODE",
     "MAX_TRADES_PER_DAY", "MAX_TRADES_PER_DAY_GLOBAL",
     "MAX_DAILY_LOSS_USD", "MAX_OPEN_RISK_USD", "MAX_CONSECUTIVE_LOSSES",
@@ -477,6 +479,11 @@ CONFIG_PAGE_DEFAULTS = {
     "ALLOW_EXTERNAL_POSITIONS_WITH_BOT": "false",
     "TREND_RISK_BUDGET_USD": "100",
     "SHORT_MAX_RISK_USD": "50",
+    "TREND_DRY_RUN_CAPITAL_USD": "1000",
+    # A neutral direction is not automatically positive short-vol edge. The
+    # MOVE premium must cover forecast movement, fees, and this extra buffer.
+    "TREND_MOVE_MIN_EDGE_PCT": "15",
+    "TREND_MOVE_MAX_JUMP_PROBABILITY": "0.05",
     # Safe execution and fresh-quote requirements. The controller chooses
     # the matching option or MOVE settings for the active score zone.
     "SAFE_EXECUTION_ENABLED": "true",
@@ -1178,6 +1185,15 @@ def _trend_score_auto_config_error(config: dict | None = None) -> str | None:
             return (
                 "LIVE Trend risk budget must cover the configured Trend stop loss"
             )
+    dry_capital = number("TREND_DRY_RUN_CAPITAL_USD", 1000)
+    min_move_edge = number("TREND_MOVE_MIN_EDGE_PCT", 15)
+    max_move_jump = number("TREND_MOVE_MAX_JUMP_PROBABILITY", 0.05)
+    if not math.isfinite(dry_capital) or dry_capital <= 0:
+        return "Trend DRY RUN capital must be positive"
+    if not math.isfinite(min_move_edge) or min_move_edge < 0:
+        return "Trend MOVE minimum edge must be zero or greater"
+    if not math.isfinite(max_move_jump) or not 0 <= max_move_jump <= 1:
+        return "Trend MOVE maximum jump probability must be between 0 and 1"
     return None
 
 
@@ -8117,6 +8133,7 @@ def _trend_score_auto_ledger(data_dir: Path) -> dict:
             "notifications": {},
             "current_transition": None,
             "no_fill_setup": None,
+            "setup_lock": None,
         }
     if ledger.get("schema_version") != 1:
         raise RuntimeError("Trend score-auto ledger schema is unsupported")
@@ -8130,9 +8147,13 @@ def _trend_score_auto_ledger(data_dir: Path) -> dict:
     no_fill_setup = ledger.get("no_fill_setup")
     if no_fill_setup is not None and not isinstance(no_fill_setup, dict):
         raise RuntimeError("Trend score-auto NO_FILL setup ledger is invalid")
+    setup_lock = ledger.get("setup_lock")
+    if setup_lock is not None and not isinstance(setup_lock, dict):
+        raise RuntimeError("Trend score-auto setup lock ledger is invalid")
     ledger.setdefault("notifications", {})
     ledger.setdefault("current_transition", None)
     ledger.setdefault("no_fill_setup", None)
+    ledger.setdefault("setup_lock", None)
     return ledger
 
 
@@ -8254,11 +8275,6 @@ def _collect_trend_score_auto_signal() -> dict:
         "schema_version": engine_snapshot.get("schema_version"),
         "source": "btc_trend_engine",
     }
-    # HOLD is not an action: no entry, and no exit either (zones.should_exit).
-    # Raising keeps it out of the transition planner entirely.
-    if zone == TREND_SCORE_HOLD_ZONE:
-        raise RuntimeError(
-            f"score {score:+.1f} is in the hold band; no new action")
     complete_rows = [
         row for row in ((snapshot.get("candles") or {}).get("5m") or [])
         if isinstance(row, dict) and row.get("complete") is True
@@ -8321,6 +8337,15 @@ def _collect_trend_score_auto_signal() -> dict:
         "signal_key": signal_key,
         "signal_bar_close_utc": bar_close.isoformat().replace("+00:00", "Z"),
         "market_regime": str(decision.get("market_regime") or "UNCLEAR"),
+        "forecast": {
+            "forecast_horizon_seconds": engine_snapshot.get(
+                "forecast_horizon_seconds"),
+            "forecast_volatility_bps": engine_snapshot.get(
+                "forecast_volatility_bps"),
+            "expected_absolute_move_bps": engine_snapshot.get(
+                "expected_absolute_move_bps"),
+            "jump_probability": engine_snapshot.get("jump_probability"),
+        },
     }
     return signal
 
@@ -8340,6 +8365,11 @@ def _trend_score_auto_engine_action_ready(
     position before a replacement is permitted, so it is an explicit no-op.
     The same fail-safe rule applies to any other engine action gate.
     """
+    if signal.get("zone") == TREND_SCORE_HOLD_ZONE:
+        # HOLD can still carry an exit-only invalidation for an existing CE/PE
+        # position. The planner decides that under the account lock; it never
+        # opens a position from this branch.
+        return True
     if signal.get("zone_action_allowed") is True:
         return True
     reason = str(signal.get("zone_reason") or "engine action gate is closed")
@@ -8472,6 +8502,96 @@ def _trend_score_auto_move_quote(symbol: str) -> dict:
     }
 
 
+def _trend_score_auto_short_move_edge(
+    signal: dict,
+    selection: dict,
+    quote: dict,
+) -> dict:
+    """Prove that a neutral score has positive *short-vol* economics.
+
+    ``SHORT_MOVE`` is not justified merely because BTC has no directional
+    bias.  Premium must exceed a horizon-scaled realised-volatility estimate
+    plus both-side costs and an explicit edge buffer.  Missing forecast data
+    blocks the order rather than being treated as zero movement.
+    """
+    forecast = signal.get("forecast") if isinstance(signal, dict) else None
+    if not isinstance(forecast, dict):
+        raise RuntimeError("SHORT MOVE forecast is unavailable")
+    horizon = _trend_score_auto_number(
+        forecast.get("forecast_horizon_seconds"),
+        "SHORT MOVE forecast horizon", positive=True,
+    )
+    forecast_vol_bps = _trend_score_auto_number(
+        forecast.get("forecast_volatility_bps"),
+        "SHORT MOVE forecast volatility", positive=True,
+    )
+    jump_probability = _trend_score_auto_number(
+        forecast.get("jump_probability"),
+        "SHORT MOVE jump probability",
+    )
+    if not 0 <= jump_probability <= 1:
+        raise RuntimeError("SHORT MOVE jump probability is invalid")
+    now = datetime.now(timezone.utc)
+    expiry = datetime.fromisoformat(
+        str(selection.get("expiry") or "").replace("Z", "+00:00")
+    )
+    if expiry.tzinfo is None:
+        expiry = expiry.replace(tzinfo=timezone.utc)
+    tte_seconds = (expiry.astimezone(timezone.utc) - now).total_seconds()
+    if tte_seconds < MIN_TIME_TO_EXPIRY_SECONDS:
+        raise RuntimeError("SHORT MOVE contract is too close to expiry")
+
+    spot = _trend_score_auto_number(selection.get("spot"), "BTC spot", positive=True)
+    bid = _trend_score_auto_number(quote.get("bid"), "MOVE bid", positive=True)
+    contract_value = _trend_score_auto_number(
+        selection.get("contract_value"), "MOVE contract value", positive=True,
+    )
+    strike = _trend_score_auto_number(selection.get("strike"), "MOVE strike", positive=True)
+    # The engine forecast is for its stated horizon (normally 15 minutes).
+    # Scale a volatility estimate, not a directional return, to remaining TTE.
+    expected_move_bps = forecast_vol_bps * math.sqrt(tte_seconds / horizon)
+    expected_payout_per_lot = spot * expected_move_bps / 10_000 * contract_value
+    premium_per_lot = bid * contract_value
+    round_trip_fees = 2 * _option_fee_per_lot(bid, contract_value, strike)
+    net_edge_per_lot = premium_per_lot - expected_payout_per_lot - round_trip_fees
+    net_edge_pct = 100 * net_edge_per_lot / premium_per_lot
+    cfg = _user_cfg()
+    min_edge_pct = _trend_score_auto_number(
+        cfg.get("TREND_MOVE_MIN_EDGE_PCT") or 15,
+        "SHORT MOVE minimum net edge",
+    )
+    max_jump_probability = _trend_score_auto_number(
+        cfg.get("TREND_MOVE_MAX_JUMP_PROBABILITY") or 0.05,
+        "SHORT MOVE maximum jump probability",
+    )
+    if not 0 <= max_jump_probability <= 1:
+        raise RuntimeError("SHORT MOVE maximum jump probability is invalid")
+    if net_edge_pct < min_edge_pct:
+        raise RuntimeError(
+            "SHORT MOVE premium does not cover forecast movement and costs "
+            f"({net_edge_pct:.1f}% < {min_edge_pct:.1f}% required)"
+        )
+    if jump_probability > max_jump_probability:
+        raise RuntimeError(
+            "SHORT MOVE tail-risk gate blocked entry "
+            f"({jump_probability:.1%} > {max_jump_probability:.1%})"
+        )
+    return {
+        "forecast_horizon_seconds": round(horizon, 3),
+        "forecast_volatility_bps": round(forecast_vol_bps, 4),
+        "expected_move_to_expiry_bps": round(expected_move_bps, 4),
+        "expected_payout_per_lot_usd": round(expected_payout_per_lot, 8),
+        "premium_per_lot_usd": round(premium_per_lot, 8),
+        "round_trip_fees_per_lot_usd": round(round_trip_fees, 8),
+        "net_edge_per_lot_usd": round(net_edge_per_lot, 8),
+        "net_edge_pct": round(net_edge_pct, 4),
+        "minimum_edge_pct": round(min_edge_pct, 4),
+        "jump_probability": round(jump_probability, 6),
+        "maximum_jump_probability": round(max_jump_probability, 6),
+        "time_to_expiry_seconds": round(tte_seconds, 3),
+    }
+
+
 def _prepare_trend_score_auto_entry(signal: dict) -> dict:
     """Resolve and validate the exact public contract for a score zone."""
     if signal.get("zone_action_allowed") is not True:
@@ -8537,6 +8657,7 @@ def _prepare_trend_score_auto_entry(signal: dict) -> dict:
             "No operational ATM MOVE contract with at least 90 minutes remains"
         )
     quote = _trend_score_auto_move_quote(selection["symbol"])
+    move_edge = _trend_score_auto_short_move_edge(signal, selection, quote)
     return {
         **selection,
         "side": "short",
@@ -8547,6 +8668,7 @@ def _prepare_trend_score_auto_entry(signal: dict) -> dict:
         "quote_timestamp": datetime.now(timezone.utc).isoformat(),
         "entry_depth": quote["entry_depth"],
         "quote_snapshot": quote,
+        "move_edge": move_edge,
     }
 
 
@@ -8561,6 +8683,7 @@ def _trend_score_auto_open_state(
     signal: dict,
     prepared: dict,
     transition_id: str,
+    risk_snapshot: dict | None = None,
 ) -> dict:
     """Create the isolated paper record; never submit an order."""
     if int(prepared.get("lots") or 0) != TREND_SCORE_AUTO_LOTS:
@@ -8666,6 +8789,12 @@ def _trend_score_auto_open_state(
         "position_composition": "simulated_only",
         "selected_contract_snapshot": copy.deepcopy(prepared),
         "quote_snapshot": copy.deepcopy(prepared.get("quote_snapshot") or {}),
+        "risk_decision": copy.deepcopy(risk_snapshot or {}),
+        "risk_at_entry_usd": (
+            (risk_snapshot or {}).get(
+                "risk_at_entry_usd", float(policy["sl_target_pnl"])
+            )
+        ),
         "entry_decision_snapshot": copy.deepcopy(signal["decision"]),
         "signal_snapshot": {
             "signal_key": signal["signal_key"],
@@ -8866,6 +8995,112 @@ def _trend_score_auto_release_no_fill_setup_if_reset(
     released = dict(setup)
     ledger["no_fill_setup"] = None
     return released
+
+
+def _trend_score_auto_setup_lock(ledger: dict) -> dict | None:
+    """Read the durable one-trade-per-unchanged-zone lock."""
+    lock = ledger.get("setup_lock")
+    if lock is None:
+        return None
+    if not isinstance(lock, dict):
+        raise RuntimeError("Trend score-auto setup lock ledger is invalid")
+    zone = str(lock.get("target_zone") or "").strip()
+    if not zone:
+        raise RuntimeError("Trend score-auto setup lock has no target zone")
+    return lock
+
+
+def _trend_score_auto_setup_lock_matches(ledger: dict, signal: dict) -> bool:
+    """Whether a later candle is still the already-traded zone setup."""
+    lock = _trend_score_auto_setup_lock(ledger)
+    if lock is None:
+        return False
+    return (
+        str(lock.get("target_zone") or "") == str(signal["zone"])
+        and str(lock.get("mode_revision") or "")
+        == str((signal.get("mode") or {}).get("mode_revision") or "")
+    )
+
+
+def _trend_score_auto_release_setup_lock_if_reset(
+    ledger: dict,
+    signal: dict,
+) -> dict | None:
+    """Release a setup lock only after a zone or saved-config reset.
+
+    The lock intentionally survives TP, SL, TSL, settlement, dashboard
+    restart, and later completed candles in the same zone. A different zone is
+    a new setup. Saving a configuration change creates a new mode revision and
+    is the deliberate operator reset path for an otherwise unchanged zone.
+    """
+    lock = _trend_score_auto_setup_lock(ledger)
+    if lock is None or _trend_score_auto_setup_lock_matches(ledger, signal):
+        return None
+    released = dict(lock)
+    ledger["setup_lock"] = None
+    return released
+
+
+def _trend_score_auto_lock_setup(
+    ledger: dict,
+    signal: dict,
+    *,
+    transition_id: str,
+    action: str,
+) -> None:
+    """Persist that this zone setup has already opened one position."""
+    ledger["setup_lock"] = {
+        "recorded_at_utc": datetime.now(timezone.utc).isoformat(),
+        "target_zone": signal["zone"],
+        "mode_revision": str(
+            (signal.get("mode") or {}).get("mode_revision") or ""
+        ),
+        "source_signal_key": signal["signal_key"],
+        "source_transition_id": transition_id,
+        "source_action": action,
+    }
+
+
+def _trend_score_auto_entry_is_setup_locked(
+    ledger: dict,
+    signal: dict,
+    plan: dict,
+) -> bool:
+    """Block a fresh entry, never an exit, while its setup remains unchanged."""
+    return (
+        plan.get("action") in {"OPEN", "CLOSE_THEN_OPEN"}
+        and _trend_score_auto_setup_lock_matches(ledger, signal)
+    )
+
+
+def _trend_score_auto_suppress_setup_locked_entry(
+    ledger: dict,
+    signal: dict,
+    state: dict | None,
+    *,
+    user: str,
+) -> tuple[dict, str]:
+    """Consume one candle as setup-locked without submitting an order."""
+    lock = _trend_score_auto_setup_lock(ledger)
+    if lock is None:
+        raise RuntimeError("score-zone setup lock disappeared during suppression")
+    transition_id = _trend_score_auto_transition_id(
+        user, signal["signal_key"], signal["zone"],
+    )
+    ledger["signals"][signal["signal_key"]] = _trend_score_auto_signal_record(
+        signal, action="SETUP_LOCKED", state=state,
+    )
+    ledger["current_transition"] = {
+        "transition_id": transition_id,
+        "signal_key": signal["signal_key"],
+        "signal_bar_close_utc": signal["signal_bar_close_utc"],
+        "target_zone": signal["zone"],
+        "phase": "COMPLETE",
+        "action": "SETUP_LOCKED",
+        "locked_by_signal_key": lock.get("source_signal_key"),
+        "updated_at_utc": datetime.now(timezone.utc).isoformat(),
+    }
+    return lock, transition_id
 
 
 def _trend_score_auto_notify(text: str) -> None:
@@ -9101,14 +9336,20 @@ def _trend_score_auto_live_available_usd(
     raise RuntimeError("LIVE score USD wallet balance is unavailable")
 
 
-def _trend_score_auto_live_risk_snapshot(
+def _trend_score_auto_risk_snapshot(
     prepared: dict,
     quote: dict,
     *,
+    dry_run: bool,
     unrealized_pnl_usd: float = 0.0,
     available_usd: float | None = None,
 ) -> dict:
-    """Prove that the fixed 1,000-lot request fits every configured risk cap."""
+    """Prove that the fixed 1,000-lot request fits every configured risk cap.
+
+    The calculation is deliberately shared by DRY RUN and LIVE.  Paper uses a
+    configured virtual USD balance, while LIVE revalidates the exchange wallet;
+    all fixed-size, premium, short-stop, and account-ledger limits are identical.
+    """
     cfg = _user_cfg()
     protection = _tp_policy("trend")
     sl_target = _trend_score_auto_number(
@@ -9132,7 +9373,13 @@ def _trend_score_auto_live_risk_snapshot(
         positive=True,
     )
     if available_usd is None:
-        available_usd = _trend_score_auto_live_available_usd()
+        if dry_run:
+            available_usd = _trend_score_auto_number(
+                cfg.get("TREND_DRY_RUN_CAPITAL_USD") or 1000,
+                "Trend DRY RUN capital", positive=True,
+            )
+        else:
+            available_usd = _trend_score_auto_live_available_usd()
     else:
         available_usd = _trend_score_auto_number(
             available_usd, "available USD balance",
@@ -9196,11 +9443,11 @@ def _trend_score_auto_live_risk_snapshot(
         )
 
     decision = evaluate_entry(
-        _mode_data_dir(False),
+        _mode_data_dir(dry_run),
         proposed_risk,
         cfg,
         unrealized_pnl_usd=unrealized_pnl_usd,
-        dry_run=False,
+        dry_run=dry_run,
     )
     if not decision.allowed:
         raise RuntimeError(decision.reason)
@@ -9217,7 +9464,30 @@ def _trend_score_auto_live_risk_snapshot(
         ),
         "requested_lots": lots,
         "fixed_size_policy": True,
+        "risk_mode": "dry_run" if dry_run else "live",
     }
+
+
+def _trend_score_auto_live_risk_snapshot(
+    prepared: dict,
+    quote: dict,
+    *,
+    unrealized_pnl_usd: float = 0.0,
+    available_usd: float | None = None,
+) -> dict:
+    """LIVE wrapper retained as the explicit wallet-backed execution seam."""
+    return _trend_score_auto_risk_snapshot(
+        prepared, quote, dry_run=False,
+        unrealized_pnl_usd=unrealized_pnl_usd, available_usd=available_usd,
+    )
+
+
+def _trend_score_auto_dry_risk_snapshot(
+    prepared: dict,
+    quote: dict,
+) -> dict:
+    """Paper equivalent of the LIVE fixed-lot entry preflight."""
+    return _trend_score_auto_risk_snapshot(prepared, quote, dry_run=True)
 
 
 def _trend_score_auto_live_execution_limits(
@@ -10006,6 +10276,17 @@ def _trend_score_auto_live_entry_result(
             )
         )
         transition["completed_at_utc"] = now
+        try:
+            filled_lots = int(float(result.get("filled_lots") or 0))
+        except (TypeError, ValueError, OverflowError):
+            filled_lots = 0
+        if (status == "OPEN" and result.get("ok")) or filled_lots > 0:
+            _trend_score_auto_lock_setup(
+                ledger,
+                signal,
+                transition_id=handled_transition_id,
+                action=record_action,
+            )
         if status == "NO_FILL":
             # One bounded IOC attempt has already been made for this setup.
             # Keep the block durable so later completed candles in the same
@@ -10538,6 +10819,9 @@ def _maybe_auto_trend_score_live_cycle(
         guessed_same_no_fill_setup = _trend_score_auto_no_fill_setup_matches(
             guessed_ledger, current_signal,
         )
+        guessed_setup_locked = _trend_score_auto_setup_lock_matches(
+            guessed_ledger, current_signal,
+        )
         guessed_consumed = set(guessed_ledger["signals"])
         guessed_consumed |= set(
             _trend_score_auto_ledger(_mode_data_dir(True)).get(
@@ -10567,6 +10851,7 @@ def _maybe_auto_trend_score_live_cycle(
                 if (
                     guessed_plan["action"] in {"OPEN", "CLOSE_THEN_OPEN"}
                     and not guessed_same_no_fill_setup
+                    and not guessed_setup_locked
                 ):
                     prepared = _prepare_trend_score_auto_entry(
                         current_signal,
@@ -10675,6 +10960,27 @@ def _maybe_auto_trend_score_live_cycle(
                             "exchange_api_called": False,
                         },
                     )
+
+                released_setup_lock = _trend_score_auto_release_setup_lock_if_reset(
+                    ledger, current_signal,
+                )
+                if released_setup_lock is not None:
+                    _trend_score_auto_write_ledger(data_dir, ledger)
+                    _trend_audit("trend_score_auto_live_setup_lock_released", {
+                        "previous_zone": released_setup_lock.get("target_zone"),
+                        "new_zone": current_signal["zone"],
+                        "source_signal_key": released_setup_lock.get(
+                            "source_signal_key"
+                        ),
+                        "reset_by": (
+                            "zone_change"
+                            if str(released_setup_lock.get("target_zone") or "")
+                            != str(current_signal["zone"])
+                            else "configuration_change"
+                        ),
+                        "order_submitted": False,
+                        "exchange_api_called": False,
+                    })
 
                 # Crash/response-loss recovery owns this complete cycle.  Its
                 # original signal—not today's newest bar—is the only key that
@@ -10949,6 +11255,39 @@ def _maybe_auto_trend_score_live_cycle(
                         )
                         return False
 
+                    if _trend_score_auto_entry_is_setup_locked(
+                        ledger, current_signal, plan,
+                    ):
+                        setup_lock, suppressed_transition_id = (
+                            _trend_score_auto_suppress_setup_locked_entry(
+                                ledger, current_signal, owned, user=user,
+                            )
+                        )
+                        _trend_score_auto_write_ledger(data_dir, ledger)
+                        _trend_audit("trend_score_auto_live_setup_locked", {
+                            "signal_key": current_signal["signal_key"],
+                            "target_zone": current_signal["zone"],
+                            "source_signal_key": setup_lock.get(
+                                "source_signal_key"
+                            ),
+                            "order_submitted": False,
+                            "exchange_api_called": False,
+                        })
+                        _trend_score_auto_health_update(
+                            user,
+                            status="setup_locked",
+                            last_action=(
+                                "this score zone already opened one LIVE trade; "
+                                "waiting for a different zone or an explicit reset"
+                            ),
+                            last_error=None,
+                            current_zone=None,
+                            symbol=None,
+                            lots=0,
+                            last_transition_id=suppressed_transition_id,
+                        )
+                        return False
+
                     transition_id = _trend_score_auto_transition_id(
                         user,
                         current_signal["signal_key"],
@@ -10976,7 +11315,7 @@ def _maybe_auto_trend_score_live_cycle(
                     _trend_score_auto_write_ledger(data_dir, ledger)
 
                     closed_state = None
-                    if plan["action"] == "CLOSE_THEN_OPEN":
+                    if plan["action"] in {"CLOSE", "CLOSE_THEN_OPEN"}:
                         final_mode = _trading_mode_payload()
                         if (
                             final_mode.get("dry_run_mode")
@@ -10989,7 +11328,11 @@ def _maybe_auto_trend_score_live_cycle(
                         _close_move_state_locked(
                             "trend",
                             owned,
-                            reason="trend_engine_score_zone_switch",
+                            reason=(
+                                "trend_engine_directional_invalidation"
+                                if plan["action"] == "CLOSE"
+                                else "trend_engine_score_zone_switch"
+                            ),
                         )
                         closed_state = _trend_score_auto_strict_json(
                             _slot_file("trend"), {},
@@ -11026,7 +11369,7 @@ def _maybe_auto_trend_score_live_cycle(
 
                 # All close-* locks are released here.  If a switch occurred,
                 # independently prove flat/accounting/cleanup before entry.
-                if plan["action"] == "CLOSE_THEN_OPEN":
+                if plan["action"] in {"CLOSE", "CLOSE_THEN_OPEN"}:
                     old_product_id = int(
                         (closed_state or {}).get("product_id") or 0
                     )
@@ -11061,6 +11404,48 @@ def _maybe_auto_trend_score_live_cycle(
                             lots=0,
                         )
                         return True
+
+                if plan["action"] == "CLOSE":
+                    ledger["signals"][current_signal["signal_key"]] = (
+                        _trend_score_auto_signal_record(
+                            current_signal, action="EXIT", state=closed_state,
+                        )
+                    )
+                    transition.update({
+                        "phase": "COMPLETE",
+                        "action": "EXIT",
+                        "completed_at_utc": datetime.now(timezone.utc).isoformat(),
+                    })
+                    event_id = f"{transition_id}:exit-complete"
+                    should_notify = _trend_score_auto_register_notification(
+                        ledger, event_id, action="EXIT", signal=current_signal,
+                    )
+                    ledger["current_transition"] = transition
+                    _trend_score_auto_write_ledger(data_dir, ledger)
+                    _trend_audit(
+                        "trend_score_auto_live_directional_invalidation_exit",
+                        {
+                            "transition_id": transition_id,
+                            "signal_key": current_signal["signal_key"],
+                            "from_zone": plan.get("current_zone"),
+                            "score": current_signal["score"],
+                            "order_submitted": True,
+                            "exchange_api_called": True,
+                        },
+                    )
+                    _trend_score_auto_health_update(
+                        user, status="flat",
+                        last_action="exited the invalidated directional LIVE position",
+                        last_error=None, current_zone=None, symbol=None, lots=0,
+                        last_transition_id=transition_id,
+                    )
+                    if should_notify:
+                        _trend_score_auto_notify(
+                            f"🤖 <b>TREND ENGINE LIVE — {user.upper()}</b>\n"
+                            f"Exited <code>{closed_state.get('symbol', '')}</code> "
+                            "after directional invalidation. No replacement was opened."
+                        )
+                    return True
 
                 if prepared is None:
                     transition.update({
@@ -11235,7 +11620,13 @@ def _maybe_auto_trend_score_cycle() -> bool:
                 guess_owned
                 and position_score_zone(guess_owned) == signal["zone"]
             )
-            if not already and not same_zone:
+            setup_locked = _trend_score_auto_setup_lock_matches(
+                guess_ledger, signal,
+            )
+            if (
+                signal["zone"] != TREND_SCORE_HOLD_ZONE
+                and not already and not same_zone and not setup_locked
+            ):
                 prepared = _prepare_trend_score_auto_entry(signal)
         except Exception as exc:
             preparation_error = str(exc)
@@ -11324,6 +11715,26 @@ def _maybe_auto_trend_score_cycle() -> bool:
                         lots=(owned or {}).get("lots"),
                     )
                     return False
+                released_setup_lock = _trend_score_auto_release_setup_lock_if_reset(
+                    ledger, signal,
+                )
+                if released_setup_lock is not None:
+                    _trend_score_auto_write_ledger(data_dir, ledger)
+                    _trend_audit("trend_score_auto_setup_lock_released", {
+                        "previous_zone": released_setup_lock.get("target_zone"),
+                        "new_zone": signal["zone"],
+                        "source_signal_key": released_setup_lock.get(
+                            "source_signal_key"
+                        ),
+                        "reset_by": (
+                            "zone_change"
+                            if str(released_setup_lock.get("target_zone") or "")
+                            != str(signal["zone"])
+                            else "configuration_change"
+                        ),
+                        "order_submitted": False,
+                        "exchange_api_called": False,
+                    })
                 consumed = set(ledger["signals"])
                 consumed |= set(
                     _trend_score_auto_ledger(_mode_data_dir(False)).get(
@@ -11343,6 +11754,37 @@ def _maybe_auto_trend_score_cycle() -> bool:
                     owned_positions=[owned] if owned else [],
                     consumed_signal_keys=consumed,
                 )
+
+                if _trend_score_auto_entry_is_setup_locked(
+                    ledger, signal, plan,
+                ):
+                    setup_lock, suppressed_transition_id = (
+                        _trend_score_auto_suppress_setup_locked_entry(
+                            ledger, signal, owned, user=user,
+                        )
+                    )
+                    _trend_score_auto_write_ledger(data_dir, ledger)
+                    _trend_audit("trend_score_auto_setup_locked", {
+                        "signal_key": signal["signal_key"],
+                        "target_zone": signal["zone"],
+                        "source_signal_key": setup_lock.get("source_signal_key"),
+                        "order_submitted": False,
+                        "exchange_api_called": False,
+                    })
+                    _trend_score_auto_health_update(
+                        user,
+                        status="setup_locked",
+                        last_action=(
+                            "this score zone already opened one paper trade; "
+                            "waiting for a different zone or an explicit reset"
+                        ),
+                        last_error=None,
+                        current_zone=None,
+                        symbol=None,
+                        lots=0,
+                        last_transition_id=suppressed_transition_id,
+                    )
+                    return False
 
                 if plan["action"] == "NOOP":
                     _trend_score_auto_health_update(
@@ -11401,14 +11843,18 @@ def _maybe_auto_trend_score_cycle() -> bool:
                 _trend_score_auto_write_ledger(data_dir, ledger)
 
                 closed = None
-                if plan["action"] == "CLOSE_THEN_OPEN":
+                if plan["action"] in {"CLOSE", "CLOSE_THEN_OPEN"}:
                     # The config lock remains held across the close and open;
                     # a DRY/LIVE or controller toggle cannot split the switch.
                     if _trading_mode_payload()["mode_revision"] != initial_revision:
                         raise RuntimeError("Configuration changed before score-zone exit")
                     closed = _close_dry_simulation_locked(
                         "trend", owned,
-                        trigger="trend_engine_score_zone_switch",
+                        trigger=(
+                            "trend_engine_directional_invalidation"
+                            if plan["action"] == "CLOSE"
+                            else "trend_engine_score_zone_switch"
+                        ),
                     )
                     transition.update({
                         "phase": "EXIT_COMMITTED",
@@ -11429,6 +11875,37 @@ def _maybe_auto_trend_score_cycle() -> bool:
                         "order_submitted": False,
                         "exchange_api_called": False,
                     })
+
+                if plan["action"] == "CLOSE":
+                    ledger["signals"][signal["signal_key"]] = (
+                        _trend_score_auto_signal_record(
+                            signal, action="EXIT", state=closed,
+                        )
+                    )
+                    transition.update({
+                        "phase": "COMPLETE",
+                        "action": "EXIT",
+                        "completed_at_utc": datetime.now(timezone.utc).isoformat(),
+                    })
+                    event_id = f"{transition_id}:exit-complete"
+                    should_notify = _trend_score_auto_register_notification(
+                        ledger, event_id, action="EXIT", signal=signal,
+                    )
+                    ledger["current_transition"] = transition
+                    _trend_score_auto_write_ledger(data_dir, ledger)
+                    _trend_score_auto_health_update(
+                        user, status="flat",
+                        last_action="exited the invalidated directional paper position",
+                        last_error=None, current_zone=None, symbol=None, lots=0,
+                        last_transition_id=transition_id,
+                    )
+                    if should_notify:
+                        _trend_score_auto_notify(
+                            f"🤖 <b>TREND ENGINE DRY RUN — {user.upper()}</b>\n"
+                            f"Exited <code>{closed.get('symbol', '')}</code> after "
+                            "directional invalidation. No replacement was opened."
+                        )
+                    return True
 
                 if prepared is None:
                     if plan["action"] == "CLOSE_THEN_OPEN":
@@ -11476,6 +11953,31 @@ def _maybe_auto_trend_score_cycle() -> bool:
 
                 if prepared.get("zone") != signal["zone"]:
                     raise RuntimeError("prepared contract no longer matches the score zone")
+                try:
+                    dry_risk_snapshot = _trend_score_auto_dry_risk_snapshot(
+                        prepared,
+                        dict(prepared.get("quote_snapshot") or {}),
+                    )
+                except Exception as exc:
+                    transition.update({
+                        "phase": "ENTRY_BLOCKED_RISK",
+                        "entry_blocked_reason": str(exc)[:500],
+                        "updated_at_utc": datetime.now(timezone.utc).isoformat(),
+                    })
+                    ledger["current_transition"] = transition
+                    _trend_score_auto_write_ledger(data_dir, ledger)
+                    _trend_score_auto_health_update(
+                        user,
+                        status="flat_waiting_risk" if plan["action"] == "CLOSE_THEN_OPEN" else "blocked",
+                        last_action=(
+                            "previous score zone exited; paper replacement is blocked by risk"
+                            if plan["action"] == "CLOSE_THEN_OPEN"
+                            else "paper score entry is blocked by the same risk policy used in LIVE"
+                        ),
+                        last_error=str(exc)[:500], current_zone=None,
+                        symbol=None, lots=0,
+                    )
+                    return plan["action"] == "CLOSE_THEN_OPEN"
                 quote_age = _trend_score_auto_quote_age(
                     prepared.get("quote_timestamp"), datetime.now(timezone.utc),
                 )
@@ -11501,7 +12003,7 @@ def _maybe_auto_trend_score_cycle() -> bool:
                 ):
                     raise RuntimeError("Controller mode changed before paper entry")
                 opened = _trend_score_auto_open_state(
-                    signal, prepared, transition_id,
+                    signal, prepared, transition_id, dry_risk_snapshot,
                 )
                 _atomic_write_json(
                     _slot_file("trend", dry_run=True), opened,
@@ -11522,6 +12024,12 @@ def _maybe_auto_trend_score_cycle() -> bool:
                     _trend_score_auto_signal_record(
                         signal, action=action, state=opened,
                     )
+                )
+                _trend_score_auto_lock_setup(
+                    ledger,
+                    signal,
+                    transition_id=transition_id,
+                    action=action,
                 )
                 transition.update({
                     "phase": "COMPLETE",
@@ -11636,6 +12144,36 @@ def api_trend_engine_score_auto_status():
         "fixed_lots": TREND_SCORE_AUTO_LOTS,
         "config_error": error,
     }
+    try:
+        setup_lock = _trend_score_auto_setup_lock(
+            _trend_score_auto_ledger(_mode_data_dir(namespace_dry_run))
+        )
+    except Exception as exc:
+        # The controller will fail closed on a corrupt ledger.  Keep the
+        # status endpoint readable so the operator can see that condition.
+        setup_lock = None
+        payload["setup_lock_error"] = str(exc)[:300]
+    try:
+        current_mode_revision = _trading_mode_payload().get("mode_revision")
+    except Exception:
+        # Configuration errors already make the controller inactive. Keep the
+        # status response fail-safe and keep a reset control disabled.
+        current_mode_revision = None
+    lock_active = bool(
+        setup_lock
+        and active_mode
+        and str(setup_lock.get("mode_revision") or "")
+        == str(current_mode_revision or "")
+    )
+    if setup_lock:
+        payload["setup_lock"] = {
+            "active": lock_active,
+            "zone": setup_lock["target_zone"],
+            "recorded_at_utc": setup_lock.get("recorded_at_utc"),
+            "source_signal_key": setup_lock.get("source_signal_key"),
+        }
+    else:
+        payload["setup_lock"] = {"active": False}
     position_status = str(state.get("status") or "IDLE").upper()
     controller_state = bool(
         ownership
@@ -11662,6 +12200,95 @@ def api_trend_engine_score_auto_status():
     else:
         payload.setdefault("position_status", position_status)
     return jsonify(payload)
+
+
+@app.route("/api/trend-engine/score-auto/setup-lock/reset", methods=["POST"])
+def api_trend_engine_score_auto_setup_lock_reset():
+    """Explicitly allow one fresh entry in the current score zone.
+
+    This endpoint is deliberately narrow: it never changes a position, sends
+    an order, changes configuration, or emits a Telegram alert.  It only
+    clears the durable setup lock while holding the same account-entry lock as
+    the automated controllers, so an operator reset cannot race an entry.
+    """
+    user = _active_user()
+    try:
+        cfg = _user_cfg()
+        mode = _trend_score_auto_mode(cfg)
+        if mode not in {"dry_run", "live"}:
+            return jsonify({
+                "ok": False,
+                "error": (
+                    "Enable DRY RUN or LIVE automatic score trading before "
+                    "resetting its setup lock"
+                ),
+            }), 409
+        config_error = _trend_score_auto_config_error(cfg)
+        if config_error:
+            return jsonify({"ok": False, "error": config_error}), 409
+
+        dry_run = mode == "dry_run"
+        account_dir = _user_dir()
+        owner = (
+            f"trend-score-setup-reset:{user}:{os.getpid()}:{time.time_ns()}"
+        )
+        with account_entry_lock(account_dir, owner) as acquired:
+            if not acquired:
+                return jsonify({
+                    "ok": False,
+                    "error": (
+                        "Another account entry or recovery is in progress; "
+                        "retry the setup reset shortly"
+                    ),
+                }), 409
+
+            # Re-read after the cross-process lock.  A concurrent Save must
+            # not redirect a reset from the selected DRY namespace to LIVE.
+            locked_cfg = _user_cfg()
+            if _trend_score_auto_mode(locked_cfg) != mode:
+                return jsonify({
+                    "ok": False,
+                    "error": "Automation mode changed; reload and retry the setup reset",
+                }), 409
+            data_dir = _mode_data_dir(dry_run)
+            with account_file_lock(
+                data_dir, "score-setup-lock", owner,
+                stale_after_sec=30, wait_sec=0,
+            ) as file_acquired:
+                if not file_acquired:
+                    return jsonify({
+                        "ok": False,
+                        "error": "The score controller is updating its setup lock; retry shortly",
+                    }), 409
+                ledger = _trend_score_auto_ledger(data_dir)
+                previous = _trend_score_auto_setup_lock(ledger)
+                if previous is None:
+                    return jsonify({
+                        "ok": True,
+                        "released": False,
+                        "message": "No score-zone setup lock is active",
+                    })
+                ledger["setup_lock"] = None
+                _trend_score_auto_write_ledger(data_dir, ledger)
+
+        _trend_audit("trend_score_auto_setup_lock_manual_reset", {
+            "execution_mode": mode,
+            "zone": previous["target_zone"],
+            "source_signal_key": previous.get("source_signal_key"),
+            "order_submitted": False,
+            "exchange_api_called": False,
+        })
+        return jsonify({
+            "ok": True,
+            "released": True,
+            "zone": previous["target_zone"],
+            "message": (
+                "The score-zone setup lock was reset. This did not close a "
+                "position or submit an order."
+            ),
+        })
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)[:300]}), 400
 
 
 def _trend_auto_loop() -> None:
@@ -11891,6 +12518,9 @@ _CONFIG_NUMERIC_BOUNDS = {
     "TREND_BOOK_PARTICIPATION_PCT": (0.1, 100),
     "TREND_QUOTE_MAX_AGE_SECS": (1, 300), "TREND_MAX_MARK_IV": (0, 10),
     "TREND_RISK_BUDGET_USD": (1, 10_000_000),
+    "TREND_DRY_RUN_CAPITAL_USD": (1, 10_000_000),
+    "TREND_MOVE_MIN_EDGE_PCT": (0, 1000),
+    "TREND_MOVE_MAX_JUMP_PROBABILITY": (0, 1),
     "TREND_MAX_SLIPPAGE_PCT": (0.01, 20), "TREND_ORDER_CHUNK_LOTS": (1, 5000),
     "MAX_ORDER_LOTS": (1, 5000),
     "TREND_REENTRY_COOLDOWN_MIN": (0, 1440),

@@ -7,15 +7,15 @@ State machine:
             └────── invalidate ◀─────┘  (gap, checksum mismatch, bad payload)
 
 While not VALID, order-flow features are unavailable and the owner must
-resubscribe to obtain a fresh snapshot.  Sequence-gap detection is the primary
-integrity gate; checksum validation is pluggable and ships disabled because the
-venue's ``cs`` formulation is unconfirmed (assumption A2b) — enabling the flag
-without a verifier is a configuration error, not a silent no-op.
+resubscribe to obtain a fresh snapshot.  Sequence continuity and Delta's
+documented top-10 CRC32 checksum are both verified whenever validation is
+enabled.  A missing checksum is an integrity failure, never a silent bypass.
 """
 
 from __future__ import annotations
 
 import enum
+import zlib
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -41,6 +41,27 @@ class ApplyResult(enum.StrEnum):
 ChecksumFn = Callable[["OrderBook"], int]
 
 
+def delta_checksum(book: "OrderBook") -> int:
+    """Delta ``ob_updates`` checksum over the top ten levels on each side.
+
+    Delta documents ``asks|bids`` with price/size pairs joined as
+    ``price:size``. Decimal's fixed-point rendering preserves meaningful
+    trailing zeroes while avoiding an exponent representation in the checksum
+    material. CRC32 is converted to an unsigned 32-bit integer because Python
+    may otherwise expose a signed result on some platforms.
+    """
+    bids, asks = book.depth(10)
+
+    def render(levels: tuple[Level, ...]) -> str:
+        return ",".join(
+            f"{format(level.price, 'f')}:{format(level.size, 'f')}"
+            for level in levels
+        )
+
+    material = f"{render(asks)}|{render(bids)}"
+    return zlib.crc32(material.encode("utf-8")) & 0xFFFFFFFF
+
+
 @dataclass(frozen=True, slots=True)
 class BookTop:
     bid: Level | None
@@ -59,13 +80,9 @@ class OrderBook:
         validate_checksums: bool = False,
         checksum_fn: ChecksumFn | None = None,
     ) -> None:
-        if validate_checksums and checksum_fn is None:
-            raise ValueError(
-                "validate_checksums=True requires a checksum_fn; the venue "
-                "formulation is unconfirmed (assumption A2b)")
         self.symbol = symbol
         self._validate_checksums = validate_checksums
-        self._checksum_fn = checksum_fn
+        self._checksum_fn = checksum_fn or delta_checksum
         self._bids: dict[Decimal, Decimal] = {}
         self._asks: dict[Decimal, Decimal] = {}
         self._state = BookState.AWAITING_SNAPSHOT
@@ -134,9 +151,11 @@ class OrderBook:
         return ApplyResult.APPLIED
 
     def _checksum_ok(self, delta: BookDelta) -> bool:
-        if not self._validate_checksums or delta.checksum is None:
+        if not self._validate_checksums:
             return True
-        assert self._checksum_fn is not None  # enforced in __init__
+        if delta.checksum is None:
+            return False
+        assert self._checksum_fn is not None
         return self._checksum_fn(self) == delta.checksum
 
     # ── views ────────────────────────────────────────────────────────────

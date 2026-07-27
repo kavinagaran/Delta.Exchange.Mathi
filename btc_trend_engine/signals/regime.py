@@ -70,6 +70,15 @@ class RegimeClassifier:
     def current(self) -> Regime:
         return self._current
 
+    def restore(self, regime: str | Regime) -> None:
+        """Restore the last committed regime after a process restart.
+
+        Only a previously persisted enum value is accepted.  A malformed
+        record deliberately leaves the classifier in its fail-closed initial
+        state rather than inventing continuity.
+        """
+        self._current = regime if isinstance(regime, Regime) else Regime(regime)
+
     def classify(
         self,
         *,

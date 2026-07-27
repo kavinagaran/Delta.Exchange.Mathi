@@ -237,6 +237,35 @@ def test_drifting_into_the_hold_band_does_not_exit():
         assert "hold band" in reason
 
 
+def test_opposite_hold_band_invalidates_an_existing_directional_position():
+    """The dead band prevents churn, but cannot preserve a contradicted CE/PE.
+
+    A call at -30 (or put at +30) is in HOLD rather than the opposite entry
+    zone.  That must be an exit-only decision, not a stale position or a
+    premature reversal.
+    """
+    assert zones.should_exit("CE_2_ITM", "HOLD", score=-15.1)[0] is True
+    assert zones.should_exit("PE_2_ITM", "HOLD", score=15.1)[0] is True
+    assert zones.should_exit("CE_2_ITM", "HOLD", score=30.0)[0] is False
+    assert zones.should_exit("PE_2_ITM", "HOLD", score=-30.0)[0] is False
+
+
+@pytest.mark.parametrize(
+    ("zone", "regime", "expected"),
+    [
+        ("CE_2_ITM", "TREND_UP", True),
+        ("CE_2_ITM", "BREAKOUT_UP", True),
+        ("CE_2_ITM", "BREAKOUT_DOWN", False),
+        ("PE_2_ITM", "TREND_DOWN", True),
+        ("PE_2_ITM", "BREAKOUT_DOWN", True),
+        ("PE_2_ITM", "TREND_UP", False),
+        ("SHORT_MOVE", "RANGE", True),
+    ],
+)
+def test_directional_regime_alignment_is_explicit(zone, regime, expected):
+    assert zones.directional_regime_matches(zone, regime) is expected
+
+
 def test_score_drift_within_a_zone_never_exits():
     """+40 -> +90 -> +36 is all one CE zone: no exit, no re-entry, no churn."""
     open_zone = zones.zone_for_score(40.0)

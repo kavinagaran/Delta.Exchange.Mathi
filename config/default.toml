@@ -44,11 +44,10 @@ api_key_env = "ENGINE_READ_ONLY_API_KEY"
 api_secret_env = "ENGINE_READ_ONLY_API_SECRET"
 
 [orderbook]
-# Sequence-gap detection is the primary integrity gate. The l2_updates
-# checksum ('cs') could not be reproduced against 69 candidate formulations
-# (assumption A2b), so checksum validation ships disabled until the algorithm
-# is confirmed against official documentation.
-validate_checksums = false
+# Validate both sequence continuity and Delta's documented top-10 CRC32
+# checksum (asks ascending, bids descending). A mismatch invalidates the book
+# and forces a fresh snapshot before another score can be committed.
+validate_checksums = true
 # A book this deep (~2,050 levels/side) only needs the top for features.
 feature_depth_levels = 50
 

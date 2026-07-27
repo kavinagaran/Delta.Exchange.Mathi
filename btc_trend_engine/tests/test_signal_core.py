@@ -341,8 +341,8 @@ def test_snapshot_matches_contract_shape():
                 "reason_codes", "data_quality", "invalidation_price",
                 "zone", "zone_action_allowed", "zone_reason"):
         assert key in snapshot, key
-    # 1.1.0 added the zone fields additively; the client compares major only.
-    assert snapshot["schema_version"] == "1.1.0"
+    # 1.2.0 adds zone confidence/regime gates; clients compare major only.
+    assert snapshot["schema_version"] == "1.2.0"
     assert snapshot["entry_allowed"] is True
     assert snapshot["invalidation_price"] == "63000.0"
     assert snapshot["suggested_stop_bps"] == pytest.approx(58.5)
@@ -448,6 +448,56 @@ def test_sideways_zone_still_obeys_shared_safety_gates():
     )
     assert snapshot["zone"] == zones.SHORT_MOVE
     assert snapshot["zone_action_allowed"] is False
+
+
+def test_directional_zone_requires_its_own_confidence_gate():
+    # A raw +40 score can be produced by a small fast component while the
+    # timeframes do not align.  The zone must not bypass minimum_confidence.
+    snapshot = _snapshot(
+        regime=Regime.TREND_UP,
+        direction=0,
+        score_value=40.0,
+    )
+    confidence_gate = next(
+        gate for gate in snapshot["gates"]
+        if gate["name"] == "directional_confidence"
+    )
+    assert snapshot["zone"] == zones.CE_2_ITM
+    assert confidence_gate["passed"] is False
+    assert snapshot["zone_action_allowed"] is False
+
+
+def test_directional_zone_requires_regime_to_agree_with_score_side():
+    snapshot = _snapshot(
+        regime=Regime.BREAKOUT_DOWN,
+        direction=1,
+        score_value=40.0,
+    )
+    alignment_gate = next(
+        gate for gate in snapshot["gates"]
+        if gate["name"] == "regime_matches_directional_zone"
+    )
+    assert snapshot["zone"] == zones.CE_2_ITM
+    assert alignment_gate["passed"] is False
+    assert snapshot["zone_action_allowed"] is False
+
+
+def test_deferred_account_risk_is_visible_but_not_an_engine_pass():
+    gates = [
+        {"name": "data_fresh", "passed": True, "detail": None},
+        {
+            "name": "risk_lock_clear", "passed": False, "required": False,
+            "status": "DEFERRED", "detail": "checked per account",
+        },
+    ]
+    snapshot = _snapshot(gates=gates)
+    risk_gate = next(
+        gate for gate in snapshot["gates"] if gate["name"] == "risk_lock_clear"
+    )
+    assert risk_gate["status"] == "DEFERRED"
+    assert snapshot["entry_allowed"] is True
+    assert snapshot["zone_action_allowed"] is True
+    assert "GATE_RISK_LOCK_CLEAR_FAILED" not in snapshot["reason_codes"]
 
 
 def test_invariant_score_bounds_and_weights():

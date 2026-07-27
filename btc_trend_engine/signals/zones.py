@@ -48,6 +48,15 @@ ZONES = frozenset({CE_2_ITM, PE_2_ITM, SHORT_MOVE, HOLD})
 # volatility, so the sideways zone is if anything *more* sensitive to it.
 UNSAFE_REGIMES = frozenset({"HIGH_VOL_SHOCK", "LOW_LIQUIDITY", "DEGRADED"})
 
+# A score can be high because a fast component is moving while the 15-minute
+# structure says the opposite.  Treating that disagreement as a directional
+# entry is exactly the kind of model conflict a rules engine should surface,
+# not average away.  RANGE remains valid only for the SHORT_MOVE policy.
+_DIRECTIONAL_REGIMES = {
+    CE_2_ITM: frozenset({"TREND_UP", "BREAKOUT_UP"}),
+    PE_2_ITM: frozenset({"TREND_DOWN", "BREAKOUT_DOWN"}),
+}
+
 
 @dataclass(frozen=True, slots=True)
 class ZonePolicy:
@@ -80,6 +89,17 @@ def zone_for_score(score: float, policy: ZonePolicy | None = None) -> str:
     if abs(score) <= policy.sideways_max_abs:
         return SHORT_MOVE
     return HOLD
+
+
+def directional_regime_matches(zone: str, regime: str) -> bool:
+    """Whether a directional zone agrees with the classified structure.
+
+    Non-directional zones deliberately return ``True``: their own gates carry
+    the relevant safety policy and this helper must never turn a HOLD/MOVE
+    condition into a fabricated directional opinion.
+    """
+    permitted = _DIRECTIONAL_REGIMES.get(zone)
+    return True if permitted is None else regime in permitted
 
 
 def decide(
@@ -136,23 +156,40 @@ def decide(
                         option_type="PE", itm_steps=2)
 
 
-def should_exit(open_zone: str, current_zone: str) -> tuple[bool, str]:
+def should_exit(
+    open_zone: str,
+    current_zone: str,
+    *,
+    score: float | None = None,
+    policy: ZonePolicy | None = None,
+) -> tuple[bool, str]:
     """Signal-driven exit rule (operator spec 2026-07-26).
 
-    A position is closed on a **zone change only** — never part-way through a
-    zone because the score drifted within it. Protective exits (SL / TSL / TP)
-    are handled by ``tp_monitor.py`` and are deliberately outside this
-    function: they act on price, continuously, and must not be gated on a
-    candle close or on the signal engine being healthy.
+    A position is normally closed on a **zone change only** — never part-way
+    through a zone because the score drifted within it.  The exception is a
+    directional invalidation: a CE is no longer defensible once the score has
+    crossed below the *opposite* neutral boundary, and a PE is no longer
+    defensible once it has crossed above it.  In that case the HOLD band closes
+    the old directional position but does not open a replacement.  This keeps
+    the anti-churn band while avoiding a long CE being held at (say) -30.
 
-    HOLD is not a zone change. The hold band exists precisely so a score
-    oscillating around a boundary does not close and reopen a position; if
-    HOLD forced an exit, the band would cause the churn it was added to
-    prevent.
+    Protective exits (SL / TSL / TP) are handled by ``tp_monitor.py`` and are
+    deliberately outside this function: they act on price, continuously, and
+    must not be gated on a candle close or on the signal engine being healthy.
     """
     if open_zone == current_zone:
         return False, "still in the entry zone"
     if current_zone == HOLD:
+        active_policy = policy or ZonePolicy()
+        if score is not None:
+            if open_zone == CE_2_ITM and score < -active_policy.sideways_max_abs:
+                return True, (
+                    "bullish position invalidated: score crossed below the "
+                    "opposite neutral boundary")
+            if open_zone == PE_2_ITM and score > active_policy.sideways_max_abs:
+                return True, (
+                    "bearish position invalidated: score crossed above the "
+                    "opposite neutral boundary")
         return False, "hold band is not a zone change; position is kept"
     return True, f"zone changed {open_zone} -> {current_zone}"
 
