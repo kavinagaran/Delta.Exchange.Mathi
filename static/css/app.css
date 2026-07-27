@@ -4,6 +4,11 @@
 
 :root {
   color-scheme: dark;
+  /* Neon green — shared by the brand glow, the nav icons and Sign out.
+     Defined once here rather than per theme: the glow is deliberately the
+     same in Red and Blue, so neither theme block overrides it. */
+  --neon:     #39ff14;
+  --neon-rgb: 57, 255, 20;
   --sidebar-bg:     linear-gradient(165deg, rgba(8, 5, 7, .98), rgba(25, 6, 10, .97) 58%, rgba(7, 4, 6, .99));
   --sidebar-border: rgba(255, 58, 78, .34);
   --sidebar-text:   #c8aeb2;
@@ -166,7 +171,27 @@ body.native-app .toast { left: 12px; right: 12px; bottom: 16px; max-width: none;
   padding: 9px 14px; border-radius: 999px;
   color: var(--sidebar-text); font-weight: 500; font-size: 13.5px;
 }
-.nav a svg { width: 17px; height: 17px; flex-shrink: 0; }
+/* Neon-green icons. `stroke` is set in CSS rather than left to
+   currentColor so the icon keeps its glow while the label text goes on
+   following each theme's sidebar-text / active colour — a CSS declaration
+   beats the stroke="currentColor" presentation attribute in base.html.
+   The glow is a stacked drop-shadow because it has to follow the stroke
+   outline; box-shadow would halo the square SVG box instead. */
+.nav a svg {
+  width: 17px; height: 17px; flex-shrink: 0;
+  stroke: var(--neon);
+  filter:
+    drop-shadow(0 0 2px rgba(var(--neon-rgb), .85))
+    drop-shadow(0 0 5px rgba(var(--neon-rgb), .45));
+  transition: filter .18s ease;
+}
+.nav a:hover svg,
+.nav a.active svg {
+  filter:
+    drop-shadow(0 0 2px rgba(var(--neon-rgb), .95))
+    drop-shadow(0 0 7px rgba(var(--neon-rgb), .65))
+    drop-shadow(0 0 15px rgba(var(--neon-rgb), .35));
+}
 .nav a:hover { color: #d7deea; background: rgba(255,255,255,.05); }
 .nav a.active { color: var(--sidebar-active); background: rgba(37, 99, 235, .22); }
 
@@ -175,8 +200,27 @@ body.native-app .toast { left: 12px; right: 12px; bottom: 16px; max-width: none;
   color: var(--sidebar-text); font-size: 12px;
 }
 .sidebar-foot .who { color: #d7deea; font-weight: 600; }
-.sidebar-foot a { color: var(--sidebar-text); }
+/* inline-flex so the exit icon sits on the text baseline row without
+   stretching the link to the full sidebar width. */
+.sidebar-foot a {
+  color: var(--sidebar-text);
+  display: inline-flex; align-items: center; gap: 7px;
+}
 .sidebar-foot a:hover { color: #fff; }
+.sidebar-foot a svg {
+  width: 15px; height: 15px; flex-shrink: 0;
+  stroke: var(--neon);
+  filter:
+    drop-shadow(0 0 2px rgba(var(--neon-rgb), .85))
+    drop-shadow(0 0 5px rgba(var(--neon-rgb), .45));
+  transition: filter .18s ease;
+}
+.sidebar-foot a:hover svg {
+  filter:
+    drop-shadow(0 0 2px rgba(var(--neon-rgb), .95))
+    drop-shadow(0 0 7px rgba(var(--neon-rgb), .65))
+    drop-shadow(0 0 15px rgba(var(--neon-rgb), .35));
+}
 
 .main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 
@@ -1451,6 +1495,11 @@ body.login-body {
 @media (max-width: 720px) {
   :root:not([data-theme="dark"]) body,
   :root[data-theme="dark"] body { background-attachment: scroll; }
+}
+@media (prefers-reduced-motion: reduce) {
+  /* the icon glow transitions live on the svg, which the .nav a selectors
+     below do not cover */
+  .nav a svg, .sidebar-foot a svg { transition: none; }
 }
 @media (prefers-reduced-motion: reduce) {
   :root:not([data-theme="dark"]) .nav a,
