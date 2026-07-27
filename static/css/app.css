@@ -1924,11 +1924,14 @@ body.login-body {
 .te-gates { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; }
 .te-gate {
   display: grid;
-  grid-template-columns: 20px minmax(0, 1fr) auto;
+  /* Two columns only. A third `auto` column for the detail text competed with
+     the label for width and broke it onto one word per line; the detail is a
+     tooltip now (see renderGates in trend_engine.html). */
+  grid-template-columns: 18px minmax(0, 1fr);
   align-items: center;
-  gap: 7px;
+  gap: 9px;
   min-height: 36px;
-  padding: 6px 8px;
+  padding: 8px 10px;
   border: 1px solid var(--border);
   border-radius: 7px;
   background: color-mix(in srgb, var(--surface-subtle) 74%, transparent);
@@ -1954,7 +1957,18 @@ body.login-body {
 .te-gate.is-fail strong { color: var(--neg); }
 .te-gate.is-na .te-gate-icon,
 .te-gate.is-na strong { color: var(--muted); }
-.te-gate strong { font-size: 9px; letter-spacing: .04em; text-transform: uppercase; }
+/* All cells sit on one baseline grid: every label is a single line, ellipsised
+   rather than wrapped, so no cell can grow taller than its neighbours and the
+   two columns stay aligned row for row. */
+.te-gate strong {
+  font-size: 9.5px;
+  letter-spacing: .05em;
+  line-height: 1.2;
+  text-transform: uppercase;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 
 .te-reason-codes { display: flex; flex-wrap: wrap; gap: 7px; }
 

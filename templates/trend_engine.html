@@ -510,11 +510,19 @@ function renderGates(gates) {
     const deferredGate = g.status === 'DEFERRED';
     const gateClass = deferredGate ? 'is-na' : (g.passed ? 'is-pass' : 'is-fail');
     const icon = deferredGate ? '•' : (g.passed ? '✓' : '✕');
+    // The detail moves to a tooltip rather than a subtext line: as a third
+    // grid column it stole width from the label, which then wrapped one word
+    // per line and left the cells at wildly different heights. The reason a
+    // gate failed is still worth having, just not at the cost of the layout.
+    const label = g.label || formatCode(g.name);
+    // Label included in the tooltip as well as the detail: labels are
+    // ellipsised to keep every cell one line tall, so the tooltip has to be
+    // able to show what was cut off.
+    const tip = esc(g.detail ? `${label} — ${g.detail}` : label);
     return `
-    <div class="te-gate ${gateClass}">
+    <div class="te-gate ${gateClass}" title="${tip}">
       <span class="te-gate-icon" aria-hidden="true">${icon}</span>
-      <strong>${esc(g.label || formatCode(g.name))}</strong>
-      ${g.detail ? `<small>${esc(g.detail)}</small>` : ''}
+      <strong>${esc(label)}</strong>
     </div>`;
   }).join('');
 }
