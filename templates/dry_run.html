@@ -343,7 +343,7 @@ function dryTrendScoreTarget(status) {
     CE_2_ITM: 'Buy 2-step ITM Call',
     PE_2_ITM: 'Buy 2-step ITM Put',
     SHORT_MOVE: status?.status === 'awaiting_confirmation'
-      ? 'Wait for 15-minute neutral-score confirmation'
+      ? 'Wait for 30-minute neutral-score confirmation'
       : 'Sell ATM MOVE straddle',
     HOLD: 'Hold the open position — no new entry',
   };
