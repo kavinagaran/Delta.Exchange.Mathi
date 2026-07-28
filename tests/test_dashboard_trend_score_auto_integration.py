@@ -629,7 +629,7 @@ def test_score_cycle_opens_once_and_never_reuses_same_bar_after_protection_exit(
         mock.assert_not_called()
 
 
-def test_score_cycle_blocks_same_zone_after_protection_until_zone_changes(
+def test_score_cycle_blocks_same_zone_after_protection_until_manual_reset(
         score_cycle, monkeypatch):
     """A protection exit must not turn a continuing CE zone into re-entries."""
     state_path = score_cycle["dry"] / "trend_state.json"
@@ -662,24 +662,120 @@ def test_score_cycle_blocks_same_zone_after_protection_until_zone_changes(
     assert score_cycle["prepare"].call_count == 1
     assert score_cycle["notify"].call_count == 1
 
-    # A confirmed different zone releases the old setup lock. HOLD itself
-    # opens nothing, but a later CE is now a fresh setup and may enter once.
+    # HOLD is not a new entry setup and must not clear a completed CE lock.
     score_cycle["holder"]["signal"] = _score_signal(
         score_cycle["mode"], score=20,
         zone=dashboard.TREND_SCORE_HOLD_ZONE, suffix="10:10:00Z",
     )
     assert dashboard._maybe_auto_trend_score_cycle() is False
-    assert dashboard._trend_score_auto_ledger(score_cycle["dry"])["setup_lock"] is None
+    assert (
+        dashboard._trend_score_auto_ledger(score_cycle["dry"])["setup_lock"]
+        ["target_zone"]
+        == dashboard.TREND_SCORE_CE_ZONE
+    )
+
+    # Editing a risk/exit setting is not an explicit entry re-arm either.
+    _write(
+        score_cycle["account"] / "config.json",
+        _safe_score_config(TP_TARGET_PNL_TREND="501"),
+    )
+    revised_mode = dashboard._trading_mode_payload()
+    score_cycle["holder"]["signal"] = _score_signal(
+        revised_mode, score=60,
+        zone=dashboard.TREND_SCORE_CE_ZONE, suffix="10:15:00Z",
+    )
+    assert dashboard._maybe_auto_trend_score_cycle() is False
+    assert score_cycle["prepare"].call_count == 1
+    ledger = dashboard._trend_score_auto_ledger(score_cycle["dry"])
+    assert ledger["signals"][
+        score_cycle["holder"]["signal"]["signal_key"]
+    ]["action"] == "SETUP_LOCKED"
+
+    # The explicit operator reset is the sole re-arm for this same CE setup.
+    with dashboard.app.test_request_context(
+            "/api/trend-engine/score-auto/setup-lock/reset", method="POST"):
+        response = dashboard.api_trend_engine_score_auto_setup_lock_reset()
+    assert response.status_code == 200
+    assert response.get_json()["released"] is True
 
     score_cycle["holder"]["signal"] = _score_signal(
-        score_cycle["mode"], score=60,
-        zone=dashboard.TREND_SCORE_CE_ZONE, suffix="10:15:00Z",
+        revised_mode, score=60,
+        zone=dashboard.TREND_SCORE_CE_ZONE, suffix="10:20:00Z",
     )
     assert dashboard._maybe_auto_trend_score_cycle() is True
     assert score_cycle["prepare"].call_count == 2
     assert score_cycle["notify"].call_count == 2
     for mock in score_cycle["forbidden"].values():
         mock.assert_not_called()
+
+
+def test_legacy_controller_state_is_backfilled_once_without_undoing_reset(
+        score_cycle):
+    ledger = dashboard._trend_score_auto_ledger(score_cycle["dry"])
+    legacy_state = {
+        "status": "CLOSED",
+        "ownership": dashboard.TREND_SCORE_AUTO_OWNERSHIP,
+        "entry_trigger": dashboard.TREND_SCORE_AUTO_TRIGGER,
+        "execution_mode": "dry_run",
+        "dry_run": True,
+        "trend_score_zone": dashboard.TREND_SCORE_CE_ZONE,
+        "score_auto_signal_key": "legacy-controller-ce",
+    }
+
+    lock, checked = dashboard._trend_score_auto_backfill_legacy_setup_lock(
+        ledger, legacy_state, mode=score_cycle["mode"], dry_run=True,
+    )
+
+    assert checked is True
+    assert lock is not None
+    assert lock["target_zone"] == dashboard.TREND_SCORE_CE_ZONE
+    assert lock["backfilled_from_legacy_state"] is True
+    assert ledger["legacy_setup_lock_migration_v1"] is True
+
+    # An operator reset must remain reset; migration can only ever run once.
+    ledger["setup_lock"] = None
+    lock, checked = dashboard._trend_score_auto_backfill_legacy_setup_lock(
+        ledger, legacy_state, mode=score_cycle["mode"], dry_run=True,
+    )
+    assert lock is None
+    assert checked is False
+
+
+def test_setup_lock_semantics_v2_recovers_only_an_open_missing_lock(
+        score_cycle):
+    ledger = dashboard._trend_score_auto_ledger(score_cycle["dry"])
+    state = {
+        "status": "OPEN",
+        "ownership": dashboard.TREND_SCORE_AUTO_OWNERSHIP,
+        "entry_trigger": dashboard.TREND_SCORE_AUTO_TRIGGER,
+        "execution_mode": "dry_run",
+        "dry_run": True,
+        "trend_score_zone": dashboard.TREND_SCORE_PE_ZONE,
+        "score_auto_signal_key": "pre-v2-open-pe",
+    }
+
+    lock, checked = dashboard._trend_score_auto_recover_open_setup_lock_v2(
+        ledger, state, mode=score_cycle["mode"], dry_run=True,
+    )
+
+    assert checked is True
+    assert lock is not None
+    assert lock["target_zone"] == dashboard.TREND_SCORE_PE_ZONE
+    assert lock["recovered_by_lock_semantics_v2"] is True
+    assert ledger["setup_lock_semantics_v2_migrated"] is True
+
+    # A v2-recorded manual reset is never silently re-created by recovery.
+    ledger["setup_lock"] = None
+    ledger["setup_lock_semantics_v2_migrated"] = False
+    ledger["setup_lock_last_manual_reset_at_utc"] = (
+        "2026-07-22T10:30:00+00:00"
+    )
+    lock, checked = dashboard._trend_score_auto_recover_open_setup_lock_v2(
+        ledger, state, mode=score_cycle["mode"], dry_run=True,
+    )
+    assert checked is True
+    assert lock is None
+    assert ledger["setup_lock"] is None
 
 
 def test_score_cycle_closes_and_switches_on_the_same_new_signal_exactly_once(
@@ -941,6 +1037,23 @@ def test_score_auto_status_reports_server_mode_and_controller_position(
     assert payload["current_zone"] == dashboard.TREND_SCORE_CE_ZONE
     assert payload["symbol"].startswith("C-BTC-")
     assert payload["lots"] == 1000
+    assert payload["setup_lock"]["active"] is True
+    assert payload["setup_lock"]["zone"] == dashboard.TREND_SCORE_CE_ZONE
+
+
+def test_score_auto_status_keeps_lock_reset_available_after_config_save(
+        score_cycle):
+    assert dashboard._maybe_auto_trend_score_cycle() is True
+    _write(
+        score_cycle["account"] / "config.json",
+        _safe_score_config(TP_TARGET_PNL_TREND="501"),
+    )
+
+    with dashboard.app.test_request_context(
+            "/api/trend-engine/score-auto/status"):
+        payload = dashboard.api_trend_engine_score_auto_status().get_json()
+
+    assert payload["enabled"] is True
     assert payload["setup_lock"]["active"] is True
     assert payload["setup_lock"]["zone"] == dashboard.TREND_SCORE_CE_ZONE
 

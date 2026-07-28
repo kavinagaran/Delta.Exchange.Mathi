@@ -37,6 +37,26 @@ void main() {
     expect(tester.takeException(), isNull);
     expect(find.text('Trend'), findsOneWidget);
     expect(find.text('Paper'), findsOneWidget);
+    // The /trades tab is labelled by its route, not by the page title — the
+    // full 'Performance' does not fit a seven-tab bar at 360dp.
+    expect(find.text('Trades'), findsOneWidget);
+    expect(find.text('Performance'), findsNothing);
+  });
+
+  testWidgets('tab icons are neon green in both themes', (
+    WidgetTester tester,
+  ) async {
+    for (final blue in [false, true]) {
+      final iconTheme = buildAppTheme(blue: blue).navigationBarTheme.iconTheme!;
+      final selected = iconTheme.resolve({WidgetState.selected})!;
+      final idle = iconTheme.resolve(<WidgetState>{})!;
+
+      expect(selected.color, kNeon);
+      expect(idle.color, kNeon.withValues(alpha: .72));
+      // Both states glow; selected simply carries the wider halos.
+      expect(selected.shadows, kNeonIconGlowStrong);
+      expect(idle.shadows, kNeonIconGlow);
+    }
   });
 
   test('all dashboard pages except Logs are exposed as tabs', () {
@@ -66,6 +86,34 @@ void main() {
     expect(kBlueAccent, const Color(0xFF39A7FF));
     expect(buildAppTheme(blue: false).brightness, Brightness.dark);
     expect(buildAppTheme(blue: true).brightness, Brightness.dark);
+  });
+
+  test('the neon brand accent matches --neon in static/css/app.css', () {
+    expect(kNeon, const Color(0xFF39FF14));
+    expect(kNeonTitle, const Color(0xFFEAFFE4));
+    expect(kNeonSubtle, const Color(0xFF6DFF4D));
+    // The web keeps --neon in the base :root rather than in a theme block, so
+    // neither native theme may pull the brand glow towards its own accent.
+    expect(
+      buildAppTheme(blue: false).navigationBarTheme.indicatorColor,
+      buildAppTheme(blue: true).navigationBarTheme.indicatorColor,
+    );
+  });
+
+  testWidgets('the brand title carries the neon glow', (
+    WidgetTester tester,
+  ) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Text('Nithi Bot', style: neonBrandTextStyle(fontSize: 16)),
+        ),
+      ),
+    );
+
+    final style = tester.widget<Text>(find.text('Nithi Bot')).style!;
+    expect(style.color, kNeonTitle);
+    expect(style.shadows, kNeonTextGlow);
   });
 
   test('Flask session cookie is extracted for the embedded dashboard', () {

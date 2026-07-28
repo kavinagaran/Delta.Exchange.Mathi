@@ -434,8 +434,8 @@ def test_dry_manual_exit_supports_every_strategy_and_appends_exactly_once(
         dashboard, "_dry_run_mark_and_pnl",
         lambda state: (125.0, 0.25, 0.25, 0.0),
     )
-    raw_post = Mock(side_effect=AssertionError("simulation used HTTP POST"))
-    monkeypatch.setattr(dashboard.req, "post", raw_post)
+    close_alert = Mock()
+    monkeypatch.setattr(dashboard, "_trend_score_auto_notify", close_alert)
     mode = dashboard._trading_mode_payload()
     body = {
         "expected_mode": "dry_run",
@@ -464,7 +464,9 @@ def test_dry_manual_exit_supports_every_strategy_and_appends_exactly_once(
     assert len(history) == 1
     assert history[0]["simulation_id"] == f"sim-{slot}-test"
     assert not (account / "trade_history.json").exists()
-    raw_post.assert_not_called()
+    close_alert.assert_called_once()
+    assert "PAPER TRADE CLOSED" in close_alert.call_args.args[0]
+    assert closed["telegram_close_alert_event_id"]
 
 
 def test_trend_dry_entry_writes_only_isolated_state_and_never_submits_order(
@@ -607,6 +609,8 @@ def test_dry_protection_tp_sl_tsl_close_locally_and_append_once(
         dashboard, "_dry_run_mark_and_pnl",
         lambda record: (125.0, pnl, pnl, 0.0),
     )
+    close_alert = Mock()
+    monkeypatch.setattr(dashboard, "_trend_score_auto_notify", close_alert)
     raw_post = Mock(side_effect=AssertionError("protection used HTTP POST"))
     monkeypatch.setattr(dashboard.req, "post", raw_post)
 
@@ -625,6 +629,9 @@ def test_dry_protection_tp_sl_tsl_close_locally_and_append_once(
     assert history[0]["exit_trigger"] == expected_trigger
     assert not (account / "trade_history.json").exists()
     raw_post.assert_not_called()
+    close_alert.assert_called_once()
+    assert "PAPER TRADE CLOSED" in close_alert.call_args.args[0]
+    assert closed["telegram_close_alert_event_id"]
 
 
 def test_dry_protection_honors_each_positions_poll_interval_and_reports_health(

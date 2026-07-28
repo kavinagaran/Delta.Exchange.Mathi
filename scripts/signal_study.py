@@ -17,10 +17,20 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from btc_trend_engine.market_data.messages import Candle  # noqa: E402
+from btc_trend_engine.research.derivatives_history import (  # noqa: E402
+    FUNDING_SYMBOL,
+    MARK_SYMBOL,
+    OI_SYMBOL,
+    SPOT_SYMBOL,
+    DerivativesHistory,
+)
 from btc_trend_engine.research.information_coefficient import (  # noqa: E402
     SCORE_KEY,
     collect_observations,
@@ -32,6 +42,60 @@ from btc_trend_engine.signals.score import V1_WEIGHTS  # noqa: E402
 from scripts.backtest import load_cached  # noqa: E402
 
 DEFAULT_HORIZONS = (30, 60, 120, 240)
+AUX_SYMBOLS = (MARK_SYMBOL, SPOT_SYMBOL, FUNDING_SYMBOL, OI_SYMBOL)
+AUX_RESOLUTION = "1h"
+AUX_CACHE = Path(__file__).resolve().parent.parent / "data" / "backtest"
+_CANDLE_ROW_CAP = 2_000     # venue caps a response; page under it
+
+
+def _aux_cache_path(symbol: str) -> Path:
+    # ':' and '.' are not portable in filenames (':' is illegal on Windows).
+    safe = symbol.replace(":", "_").replace(".", "")
+    return AUX_CACHE / f"{safe}-{AUX_RESOLUTION}.json"
+
+
+def fetch_aux_series(symbol: str, start: datetime, end: datetime) -> list[dict]:
+    """Public auxiliary candles (mark/spot/funding/OI), cached on disk."""
+    import requests
+
+    path = _aux_cache_path(symbol)
+    if path.exists():
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    rows: dict[int, dict] = {}
+    cursor = start
+    step = timedelta(hours=_CANDLE_ROW_CAP)
+    while cursor < end:
+        window_end = min(cursor + step, end)
+        response = requests.get(
+            "https://api.india.delta.exchange/v2/history/candles",
+            params={"resolution": AUX_RESOLUTION, "symbol": symbol,
+                    "start": int(cursor.timestamp()),
+                    "end": int(window_end.timestamp())},
+            timeout=30,
+        ).json()
+        for row in response.get("result") or []:
+            rows[int(row["time"])] = row
+        cursor = window_end
+    ordered = [rows[key] for key in sorted(rows)]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(ordered), encoding="utf-8")
+    return ordered
+
+
+def aux_candles(rows: list[dict], symbol: str) -> list[Candle]:
+    out: list[Candle] = []
+    for row in rows:
+        try:
+            out.append(Candle(
+                symbol=symbol, resolution=AUX_RESOLUTION,
+                start=datetime.fromtimestamp(int(row["time"]), tz=timezone.utc),
+                open=Decimal(str(row["open"])), high=Decimal(str(row["high"])),
+                low=Decimal(str(row["low"])), close=Decimal(str(row["close"])),
+                volume=Decimal(str(row.get("volume") or 0)), closed=True))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return out
 
 
 def main() -> int:
@@ -43,6 +107,12 @@ def main() -> int:
     parser.add_argument("--candles", type=int, default=0,
                         help="use only the most recent N cached candles (0 = all)")
     parser.add_argument("--json", dest="json_path", help="write full results as JSON")
+    parser.add_argument("--derivatives", action="store_true",
+                        help="reconstruct funding/OI/basis history so "
+                             "derivatives_context can be measured")
+    parser.add_argument("--as-running", action="store_true",
+                        help="with --derivatives, omit funding_percentile to "
+                             "match what production actually computes")
     args = parser.parse_args()
 
     horizons = [int(h) for h in args.horizons.split(",") if h.strip()]
@@ -54,8 +124,27 @@ def main() -> int:
     print(f"loaded {len(candles):,} {args.resolution} candles "
           f"({candles[0].start:%Y-%m-%d} .. {candles[-1].start:%Y-%m-%d})")
 
+    derivatives_at = None
+    if args.derivatives:
+        print(f"fetching derivatives history ({', '.join(AUX_SYMBOLS)}) ...")
+        span_start = candles[0].start - timedelta(days=35)   # funding window
+        span_end = candles[-1].start + timedelta(hours=2)
+        series = {}
+        for symbol in AUX_SYMBOLS:
+            rows = fetch_aux_series(symbol, span_start, span_end)
+            series[symbol] = aux_candles(rows, symbol)
+            print(f"  {symbol:<16} {len(series[symbol]):>6,} hourly bars")
+        derivatives_at = DerivativesHistory(
+            mark=series[MARK_SYMBOL], spot=series[SPOT_SYMBOL],
+            funding=series[FUNDING_SYMBOL], open_interest=series[OI_SYMBOL],
+            include_funding_percentile=not args.as_running)
+        mode = ("as running in production (no funding_percentile)"
+                if args.as_running else "as designed (with funding_percentile)")
+        print(f"  mode: {mode}")
+
     print("replaying the production scorer over history ...")
-    observations = collect_observations(candles, horizons_minutes=horizons)
+    observations = collect_observations(candles, horizons_minutes=horizons,
+                                        derivatives_at=derivatives_at)
     if not observations:
         print("no observations -- not enough history after warmup", file=sys.stderr)
         return 1

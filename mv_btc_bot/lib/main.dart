@@ -30,12 +30,38 @@ const kBlueAccent = Color(0xFF39A7FF);
 const kBlueAccentBright = Color(0xFF8BD0FF);
 const kBlueNegative = Color(0xFFFF7180);
 
+// Neon green brand accent, mirroring --neon (#39ff14) in static/css/app.css.
+// Shared by both native themes on purpose: the web keeps the glow out of its
+// per-theme blocks so it reads identically in Red and Blue, and the app now
+// does the same for its tab icons and the header brand lock-up.
+const kNeon = Color(0xFF39FF14);
+const kNeonTitle = Color(0xFFEAFFE4); // .brand .name
+const kNeonSubtle = Color(0xFF6DFF4D); // .brand .sub
+
+// The glow is layered rather than one wide blur: a tight bright core keeps the
+// glyphs and icon strokes legible, and the wider faint halos do the actual
+// neon work. A single large shadow just looks smeared.
+const kNeonTextGlow = <Shadow>[
+  Shadow(color: Color(0xF239FF14), blurRadius: 4),
+  Shadow(color: Color(0xB339FF14), blurRadius: 11),
+  Shadow(color: Color(0x7339FF14), blurRadius: 24),
+];
+const kNeonIconGlow = <Shadow>[
+  Shadow(color: Color(0xD939FF14), blurRadius: 4),
+  Shadow(color: Color(0x7339FF14), blurRadius: 10),
+];
+const kNeonIconGlowStrong = <Shadow>[
+  Shadow(color: Color(0xF239FF14), blurRadius: 4),
+  Shadow(color: Color(0xA639FF14), blurRadius: 14),
+  Shadow(color: Color(0x5939FF14), blurRadius: 30),
+];
+
 const kRedBackgroundAsset = 'assets/crimson-dashboard-bg.png';
 const kBlueBackgroundAsset = 'assets/sparkling-blue-dashboard-bg.png';
 
 final appTheme = AppThemeController();
 
-const kWebAssetRevision = '4.8.0+19-header-align-30m';
+const kWebAssetRevision = '4.9.0+20-neon-tabs';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -163,9 +189,12 @@ ThemeData buildAppTheme({required bool blue}) {
     navigationBarTheme: NavigationBarThemeData(
       height: 70,
       backgroundColor: surface.withValues(alpha: .94),
-      indicatorColor: accent.withValues(alpha: .20),
+      indicatorColor: kNeon.withValues(alpha: .16),
       surfaceTintColor: Colors.transparent,
       labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
+      // The label keeps following each theme's accent/muted colours, exactly
+      // like `.nav a` on the web: only the icon goes neon, so the selected tab
+      // still reads as Red or Blue.
       labelTextStyle: WidgetStateProperty.resolveWith(
         (states) => TextStyle(
           color: states.contains(WidgetState.selected) ? accent : muted,
@@ -175,11 +204,22 @@ ThemeData buildAppTheme({required bool blue}) {
               : FontWeight.w600,
         ),
       ),
+      // Neon in both states, brighter when selected — `.nav a svg` versus
+      // `.nav a.active svg`. The bottom bar has no hover to lean on, so the
+      // idle icon is also held slightly back in opacity; together with the
+      // indicator pill that keeps the selected tab obvious.
       iconTheme: WidgetStateProperty.resolveWith(
-        (states) => IconThemeData(
-          color: states.contains(WidgetState.selected) ? accent : muted,
-          size: 21,
-        ),
+        (states) => states.contains(WidgetState.selected)
+            ? const IconThemeData(
+                color: kNeon,
+                size: 21,
+                shadows: kNeonIconGlowStrong,
+              )
+            : IconThemeData(
+                color: kNeon.withValues(alpha: .72),
+                size: 21,
+                shadows: kNeonIconGlow,
+              ),
       ),
     ),
     progressIndicatorTheme: ProgressIndicatorThemeData(color: accent),
@@ -329,6 +369,51 @@ class RedBlueThemeToggle extends StatelessWidget {
   }
 }
 
+/// The logo with the web's `.brand img.logo` treatment: a thin neon edge, a
+/// hard unblurred ring so the corner stays crisp instead of dissolving into
+/// its own halo, then widening blurred halos.
+class NeonLogo extends StatelessWidget {
+  const NeonLogo({super.key, required this.size, required this.radius});
+
+  final double size;
+  final double radius;
+
+  @override
+  Widget build(BuildContext context) {
+    final corner = BorderRadius.circular(radius);
+    return SizedBox(
+      width: size,
+      height: size,
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          borderRadius: corner,
+          border: Border.all(color: const Color(0x8C39FF14)),
+          boxShadow: const [
+            BoxShadow(color: Color(0x1A39FF14), spreadRadius: 3),
+            BoxShadow(color: Color(0x9939FF14), blurRadius: 8),
+            BoxShadow(color: Color(0x6639FF14), blurRadius: 18),
+            BoxShadow(color: Color(0x3339FF14), blurRadius: 34),
+          ],
+        ),
+        child: ClipRRect(
+          borderRadius: corner,
+          child: Image.asset('assets/logo.png', fit: BoxFit.cover),
+        ),
+      ),
+    );
+  }
+}
+
+/// `.brand .name` — neon-tinted off-white over the layered glow. The tracking
+/// is the web's .06em, expressed against whichever size the caller needs.
+TextStyle neonBrandTextStyle({required double fontSize}) => TextStyle(
+  color: kNeonTitle,
+  fontSize: fontSize,
+  fontWeight: FontWeight.w700,
+  letterSpacing: fontSize * .06,
+  shadows: kNeonTextGlow,
+);
+
 class MathiBotApp extends StatelessWidget {
   const MathiBotApp({super.key});
 
@@ -377,7 +462,9 @@ const appPages = <AppPageSpec>[
   ),
   AppPageSpec(
     label: 'Performance',
-    navLabel: 'Performance',
+    // 'Performance' is the widest tab in the bar and the only one that has to
+    // shrink to fit; 'Trades' matches the /trades route it opens.
+    navLabel: 'Trades',
     path: '/trades',
     icon: Icons.trending_up_rounded,
   ),
@@ -626,41 +713,30 @@ class _HomeShellState extends State<HomeShell> {
       appBar: AppBar(
         toolbarHeight: 62,
         leadingWidth: 58,
-        leading: Padding(
-          padding: const EdgeInsets.fromLTRB(14, 10, 6, 10),
-          child: DecoratedBox(
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(10),
-              boxShadow: [
-                BoxShadow(
-                  color: Theme.of(
-                    context,
-                  ).colorScheme.primary.withValues(alpha: .18),
-                  blurRadius: 12,
-                  offset: const Offset(0, 2),
-                ),
-              ],
-            ),
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(10),
-              child: Image.asset('assets/logo.png', fit: BoxFit.cover),
-            ),
-          ),
+        leading: const Padding(
+          padding: EdgeInsets.fromLTRB(14, 10, 6, 10),
+          child: Center(child: NeonLogo(size: 34, radius: 10)),
         ),
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Text('Nithi Bot'),
+            Text('Nithi Bot', style: neonBrandTextStyle(fontSize: 16)),
             const SizedBox(height: 2),
             Text(
               SessionService.displayName.isEmpty
                   ? SessionService.username
                   : SessionService.displayName,
-              style: TextStyle(
-                color: muted,
+              style: const TextStyle(
+                color: kNeonSubtle,
                 fontSize: 10.5,
                 fontWeight: FontWeight.w500,
+                // Tighter than the title on purpose: at this size a wide halo
+                // bleeds across the letterforms, same as `.brand .sub`.
+                shadows: [
+                  Shadow(color: Color(0x8C39FF14), blurRadius: 4),
+                  Shadow(color: Color(0x4739FF14), blurRadius: 10),
+                ],
               ),
             ),
           ],
@@ -762,10 +838,7 @@ class _StartupScreen extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            ClipRRect(
-              borderRadius: BorderRadius.circular(16),
-              child: Image.asset('assets/logo.png', width: 72, height: 72),
-            ),
+            const NeonLogo(size: 72, radius: 16),
             const SizedBox(height: 20),
             const SizedBox(
               width: 28,
@@ -859,26 +932,14 @@ class _LoginScreenState extends State<LoginScreen> {
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.stretch,
                           children: [
-                            Align(
-                              child: ClipRRect(
-                                borderRadius: BorderRadius.circular(16),
-                                child: Image.asset(
-                                  'assets/logo.png',
-                                  width: 76,
-                                  height: 76,
-                                ),
-                              ),
+                            const Align(
+                              child: NeonLogo(size: 76, radius: 16),
                             ),
                             const SizedBox(height: 18),
                             Text(
                               'Nithi Bot',
                               textAlign: TextAlign.center,
-                              style: TextStyle(
-                                color: colors.onSurface,
-                                fontSize: 24,
-                                fontWeight: FontWeight.w800,
-                                letterSpacing: -.35,
-                              ),
+                              style: neonBrandTextStyle(fontSize: 24),
                             ),
                             const SizedBox(height: 4),
                             Text(

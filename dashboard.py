@@ -8136,6 +8136,8 @@ def _trend_score_auto_ledger(data_dir: Path) -> dict:
             "no_fill_setup": None,
             "setup_lock": None,
             "legacy_setup_lock_migration_v1": False,
+            "setup_lock_semantics_v2_migrated": False,
+            "setup_lock_last_manual_reset_at_utc": None,
         }
     if ledger.get("schema_version") != 1:
         raise RuntimeError("Trend score-auto ledger schema is unsupported")
@@ -8155,11 +8157,19 @@ def _trend_score_auto_ledger(data_dir: Path) -> dict:
     migration_checked = ledger.get("legacy_setup_lock_migration_v1", False)
     if not isinstance(migration_checked, bool):
         raise RuntimeError("Trend score-auto setup-lock migration marker is invalid")
+    semantics_migrated = ledger.get("setup_lock_semantics_v2_migrated", False)
+    if not isinstance(semantics_migrated, bool):
+        raise RuntimeError("Trend score-auto setup-lock semantics marker is invalid")
+    manual_reset_at = ledger.get("setup_lock_last_manual_reset_at_utc")
+    if manual_reset_at is not None and not isinstance(manual_reset_at, str):
+        raise RuntimeError("Trend score-auto setup-lock reset marker is invalid")
     ledger.setdefault("notifications", {})
     ledger.setdefault("current_transition", None)
     ledger.setdefault("no_fill_setup", None)
     ledger.setdefault("setup_lock", None)
     ledger.setdefault("legacy_setup_lock_migration_v1", False)
+    ledger.setdefault("setup_lock_semantics_v2_migrated", False)
+    ledger.setdefault("setup_lock_last_manual_reset_at_utc", None)
     return ledger
 
 
@@ -9021,34 +9031,16 @@ def _trend_score_auto_setup_lock(ledger: dict) -> dict | None:
 
 
 def _trend_score_auto_setup_lock_matches(ledger: dict, signal: dict) -> bool:
-    """Whether a later candle is still the already-traded zone setup."""
+    """Whether a later candle is still the already-traded score zone.
+
+    Risk, TP, SL, trailing-stop, and other Bot Config edits must never turn a
+    completed score-zone trade into a fresh entry.  The zone is the setup
+    identity; ``mode_revision`` remains audit metadata only.
+    """
     lock = _trend_score_auto_setup_lock(ledger)
     if lock is None:
         return False
-    return (
-        str(lock.get("target_zone") or "") == str(signal["zone"])
-        and str(lock.get("mode_revision") or "")
-        == str((signal.get("mode") or {}).get("mode_revision") or "")
-    )
-
-
-def _trend_score_auto_release_setup_lock_if_reset(
-    ledger: dict,
-    signal: dict,
-) -> dict | None:
-    """Release a setup lock only after a zone or saved-config reset.
-
-    The lock intentionally survives TP, SL, TSL, settlement, dashboard
-    restart, and later completed candles in the same zone. A different zone is
-    a new setup. Saving a configuration change creates a new mode revision and
-    is the deliberate operator reset path for an otherwise unchanged zone.
-    """
-    lock = _trend_score_auto_setup_lock(ledger)
-    if lock is None or _trend_score_auto_setup_lock_matches(ledger, signal):
-        return None
-    released = dict(lock)
-    ledger["setup_lock"] = None
-    return released
+    return str(lock.get("target_zone") or "") == str(signal["zone"])
 
 
 def _trend_score_auto_lock_setup(
@@ -9126,6 +9118,61 @@ def _trend_score_auto_backfill_legacy_setup_lock(
     if lock is None:  # Defensive: the helper above must have produced a lock.
         raise RuntimeError("legacy score-zone setup lock was not recorded")
     lock["backfilled_from_legacy_state"] = True
+    return lock, True
+
+
+def _trend_score_auto_recover_open_setup_lock_v2(
+    ledger: dict,
+    state: dict,
+    *,
+    mode: dict,
+    dry_run: bool,
+) -> tuple[dict | None, bool]:
+    """Repair the pre-v2 automatic-unlock defect for one open position.
+
+    Older releases cleared a lock when any Bot Config field was saved or when
+    the score briefly visited HOLD.  On the first v2 cycle only, recover a
+    missing lock from a verified controller-owned *open* position.  A manual
+    reset recorded by v2 is always respected and can never be re-created by
+    this recovery path.
+    """
+    if ledger.get("setup_lock_semantics_v2_migrated") is True:
+        return None, False
+    ledger["setup_lock_semantics_v2_migrated"] = True
+    if _trend_score_auto_setup_lock(ledger) is not None:
+        return None, True
+    if ledger.get("setup_lock_last_manual_reset_at_utc"):
+        return None, True
+
+    expected_mode = "dry_run" if dry_run else "live"
+    expected_ownership = _trend_score_auto_ownership(expected_mode)
+    zone = str(state.get("trend_score_zone") or "").strip()
+    signal_key = str(state.get("score_auto_signal_key") or "").strip()
+    if not (
+        str(state.get("status") or "").upper() == "OPEN"
+        and state.get("ownership") == expected_ownership
+        and state.get("entry_trigger") == TREND_SCORE_AUTO_TRIGGER
+        and str(state.get("execution_mode") or "").lower() == expected_mode
+        and state.get("dry_run") is dry_run
+        and zone in {
+            TREND_SCORE_CE_ZONE,
+            TREND_SCORE_PE_ZONE,
+            TREND_SCORE_MOVE_ZONE,
+        }
+        and signal_key
+    ):
+        return None, True
+
+    _trend_score_auto_lock_setup(
+        ledger,
+        {"zone": zone, "signal_key": signal_key, "mode": mode},
+        transition_id=f"lock-semantics-v2:{signal_key}",
+        action="LOCK_SEMANTICS_V2_RECOVERY",
+    )
+    lock = _trend_score_auto_setup_lock(ledger)
+    if lock is None:  # Defensive: the helper above must have produced a lock.
+        raise RuntimeError("score-zone setup lock recovery was not recorded")
+    lock["recovered_by_lock_semantics_v2"] = True
     return lock, True
 
 
@@ -11041,12 +11088,29 @@ def _maybe_auto_trend_score_live_cycle(
                         dry_run=False,
                     )
                 )
-                if migration_checked:
+                recovered_setup_lock, semantics_migration_checked = (
+                    _trend_score_auto_recover_open_setup_lock_v2(
+                        ledger,
+                        latest_trend,
+                        mode=boundary_mode,
+                        dry_run=False,
+                    )
+                )
+                if migration_checked or semantics_migration_checked:
                     _trend_score_auto_write_ledger(data_dir, ledger)
                 if legacy_setup_lock is not None:
                     _trend_audit("trend_score_auto_live_setup_lock_backfilled", {
                         "zone": legacy_setup_lock["target_zone"],
                         "source_signal_key": legacy_setup_lock.get(
+                            "source_signal_key"
+                        ),
+                        "order_submitted": False,
+                        "exchange_api_called": False,
+                    })
+                if recovered_setup_lock is not None:
+                    _trend_audit("trend_score_auto_live_setup_lock_recovered", {
+                        "zone": recovered_setup_lock["target_zone"],
+                        "source_signal_key": recovered_setup_lock.get(
                             "source_signal_key"
                         ),
                         "order_submitted": False,
@@ -11097,27 +11161,6 @@ def _maybe_auto_trend_score_live_cycle(
                             "exchange_api_called": False,
                         },
                     )
-
-                released_setup_lock = _trend_score_auto_release_setup_lock_if_reset(
-                    ledger, current_signal,
-                )
-                if released_setup_lock is not None:
-                    _trend_score_auto_write_ledger(data_dir, ledger)
-                    _trend_audit("trend_score_auto_live_setup_lock_released", {
-                        "previous_zone": released_setup_lock.get("target_zone"),
-                        "new_zone": current_signal["zone"],
-                        "source_signal_key": released_setup_lock.get(
-                            "source_signal_key"
-                        ),
-                        "reset_by": (
-                            "zone_change"
-                            if str(released_setup_lock.get("target_zone") or "")
-                            != str(current_signal["zone"])
-                            else "configuration_change"
-                        ),
-                        "order_submitted": False,
-                        "exchange_api_called": False,
-                    })
 
                 # Crash/response-loss recovery owns this complete cycle.  Its
                 # original signal—not today's newest bar—is the only key that
@@ -11845,12 +11888,29 @@ def _maybe_auto_trend_score_cycle() -> bool:
                         dry_run=True,
                     )
                 )
-                if migration_checked:
+                recovered_setup_lock, semantics_migration_checked = (
+                    _trend_score_auto_recover_open_setup_lock_v2(
+                        ledger,
+                        states["trend"],
+                        mode=boundary_mode,
+                        dry_run=True,
+                    )
+                )
+                if migration_checked or semantics_migration_checked:
                     _trend_score_auto_write_ledger(data_dir, ledger)
                 if legacy_setup_lock is not None:
                     _trend_audit("trend_score_auto_setup_lock_backfilled", {
                         "zone": legacy_setup_lock["target_zone"],
                         "source_signal_key": legacy_setup_lock.get(
+                            "source_signal_key"
+                        ),
+                        "order_submitted": False,
+                        "exchange_api_called": False,
+                    })
+                if recovered_setup_lock is not None:
+                    _trend_audit("trend_score_auto_setup_lock_recovered", {
+                        "zone": recovered_setup_lock["target_zone"],
+                        "source_signal_key": recovered_setup_lock.get(
                             "source_signal_key"
                         ),
                         "order_submitted": False,
@@ -11871,26 +11931,6 @@ def _maybe_auto_trend_score_cycle() -> bool:
                         lots=(owned or {}).get("lots"),
                     )
                     return False
-                released_setup_lock = _trend_score_auto_release_setup_lock_if_reset(
-                    ledger, signal,
-                )
-                if released_setup_lock is not None:
-                    _trend_score_auto_write_ledger(data_dir, ledger)
-                    _trend_audit("trend_score_auto_setup_lock_released", {
-                        "previous_zone": released_setup_lock.get("target_zone"),
-                        "new_zone": signal["zone"],
-                        "source_signal_key": released_setup_lock.get(
-                            "source_signal_key"
-                        ),
-                        "reset_by": (
-                            "zone_change"
-                            if str(released_setup_lock.get("target_zone") or "")
-                            != str(signal["zone"])
-                            else "configuration_change"
-                        ),
-                        "order_submitted": False,
-                        "exchange_api_called": False,
-                    })
                 consumed = set(ledger["signals"])
                 consumed |= set(
                     _trend_score_auto_ledger(_mode_data_dir(False)).get(
@@ -12309,18 +12349,11 @@ def api_trend_engine_score_auto_status():
         # status endpoint readable so the operator can see that condition.
         setup_lock = None
         payload["setup_lock_error"] = str(exc)[:300]
-    try:
-        current_mode_revision = _trading_mode_payload().get("mode_revision")
-    except Exception:
-        # Configuration errors already make the controller inactive. Keep the
-        # status response fail-safe and keep a reset control disabled.
-        current_mode_revision = None
-    lock_active = bool(
-        setup_lock
-        and active_mode
-        and str(setup_lock.get("mode_revision") or "")
-        == str(current_mode_revision or "")
-    )
+    # A setup lock survives Bot Config saves by design.  Its zone—not the
+    # configuration revision captured for audit—is its identity.  Requiring
+    # a revision match here made the reset control disagree with the
+    # controller and left valid locks impossible to reset from the UI.
+    lock_active = bool(setup_lock and active_mode)
     if setup_lock:
         payload["setup_lock"] = {
             "active": lock_active,
@@ -12425,6 +12458,9 @@ def api_trend_engine_score_auto_setup_lock_reset():
                         "message": "No score-zone setup lock is active",
                     })
                 ledger["setup_lock"] = None
+                ledger["setup_lock_last_manual_reset_at_utc"] = (
+                    datetime.now(timezone.utc).isoformat()
+                )
                 _trend_score_auto_write_ledger(data_dir, ledger)
 
         _trend_audit("trend_score_auto_setup_lock_manual_reset", {

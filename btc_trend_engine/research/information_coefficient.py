@@ -46,7 +46,7 @@ from __future__ import annotations
 
 import math
 from bisect import bisect_right
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
@@ -152,6 +152,7 @@ def collect_observations(
     warmup: int = DEFAULT_WARMUP,
     feature_window: int = DEFAULT_FEATURE_WINDOW,
     derivatives: Mapping[str, float] | None = None,
+    derivatives_at: Callable[[datetime], Mapping[str, float]] | None = None,
     symbol: str = "BTCUSD",
 ) -> list[Observation]:
     """Replay the engine's own scoring over history, pairing it with outcomes.
@@ -190,10 +191,15 @@ def collect_observations(
 
         features = {role: compute_timeframe_features(role, window[role])
                     for role in ROLES}
+        # A time-varying source (DerivativesHistory) takes precedence over a
+        # static mapping; both are optional and default to "no derivatives",
+        # which is what the component saw before this was measurable.
+        context = (dict(derivatives_at(decision_close)) if derivatives_at
+                   else dict(derivatives or {}))
         result = compute_score(
             structural=features[ROLES[0]], primary=features[ROLES[1]],
             setup=features[ROLES[2]], trigger=features[ROLES[3]],
-            derivatives=dict(derivatives or {}),
+            derivatives=context,
         )
         if result.trend_score is None:
             continue
