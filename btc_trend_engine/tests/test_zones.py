@@ -15,7 +15,10 @@ from btc_trend_engine.signals.zones import ZonePolicy
 def _decide(score, **kw):
     params = dict(score=score, regime="TREND_UP", data_quality="OK",
                   gates_passed=True, stop_loss_configured=True,
-                  short_move_confirmed=True)
+                  short_move_confirmed=True,
+                  # Quiet by default: these cases are about the score bands,
+                  # so the components must not be what blocks them.
+                  max_abs_component=5.0)
     params.update(kw)
     return zones.decide(**params)
 
@@ -81,7 +84,8 @@ def test_every_score_in_range_maps_to_exactly_one_known_zone():
 def test_selling_move_is_now_default_behaviour():
     """Operator decision 2026-07-26: MOVE selling is always on, no opt-in."""
     assert zones.decide(score=0.0, regime="RANGE", data_quality="OK",
-                        gates_passed=True, short_move_confirmed=True).action_allowed is True
+                        gates_passed=True, short_move_confirmed=True,
+                        max_abs_component=5.0).action_allowed is True
 
 
 def test_selling_move_is_refused_without_a_stop_loss():
@@ -89,9 +93,58 @@ def test_selling_move_is_refused_without_a_stop_loss():
     straddle is the only position here that can lose more than the account."""
     decision = zones.decide(score=0.0, regime="RANGE", data_quality="OK",
                             gates_passed=True, stop_loss_configured=False,
-                            short_move_confirmed=True)
+                            short_move_confirmed=True, max_abs_component=5.0)
     assert decision.action_allowed is False
     assert "stop loss" in decision.reason
+
+
+# ── component agreement (a zero sum is not automatically a quiet market) ──
+def test_cancelling_components_do_not_count_as_sideways():
+    """The failure this gate exists for: a strongly bullish higher timeframe
+    and a strongly bearish trigger sum to zero and would otherwise read as the
+    calmest possible market."""
+    decision = _decide(0.0, max_abs_component=100.0)
+    assert decision.zone == zones.SHORT_MOVE
+    assert decision.action_allowed is False
+    assert "components disagree" in decision.reason
+
+
+def test_component_agreement_is_required_evidence_not_an_optional_extra():
+    """Unmeasured must not read as calm: this is the one position that can
+    lose more than the account, so the missing case fails closed."""
+    decision = zones.decide(score=0.0, regime="RANGE", data_quality="OK",
+                            gates_passed=True, short_move_confirmed=True)
+    assert decision.action_allowed is False
+    assert "not measured" in decision.reason
+
+
+def test_the_component_ceiling_is_inclusive_at_its_boundary():
+    policy = zones.ZonePolicy()
+    at_ceiling = _decide(0.0, max_abs_component=policy.sideways_max_component_abs)
+    beyond = _decide(0.0, max_abs_component=policy.sideways_max_component_abs + 0.1)
+    assert at_ceiling.action_allowed is True
+    assert beyond.action_allowed is False
+
+
+def test_disagreement_is_reported_before_the_confirmation_window():
+    """Reporting 'waiting for confirmation' on a conflicted market implies
+    waiting will fix it. The disagreement is the real reason and must win."""
+    decision = _decide(0.0, max_abs_component=90.0, short_move_confirmed=False)
+    assert "components disagree" in decision.reason
+
+
+def test_component_agreement_does_not_gate_the_directional_zones():
+    """A large component is the entire point of a directional entry; applying
+    the neutrality ceiling there would block every CE and PE."""
+    for score in (85.0, -85.0):
+        decision = zones.decide(score=score, regime="TREND_UP",
+                                data_quality="OK", gates_passed=True)
+        assert decision.action_allowed is True
+
+
+def test_a_component_ceiling_of_zero_is_rejected_as_unreachable():
+    with pytest.raises(ValueError, match="sideways_max_component_abs"):
+        ZonePolicy(sideways_max_component_abs=0.0)
 
 
 def test_a_missing_stop_does_not_block_the_directional_zones():

@@ -41,6 +41,25 @@ class ScoreResult:
     components: list[ComponentScore]
     available_weight: float
 
+    @property
+    def max_abs_component(self) -> float | None:
+        """Widest single-component reading, on the same scale as the score.
+
+        A weighted sum near zero has two very different causes and cannot tell
+        them apart: every component is quiet, or large components cancel.
+        ``0.40 x (+50) + 0.20 x (-100)`` is also zero, and that is a market in
+        violent disagreement across timeframes, not a sideways one.  A consumer
+        that needs genuine neutrality must require *every* component to be
+        small, which is what this reports.
+
+        Unavailable components and weight-0 components are excluded: neither
+        contributes to the sum, so neither can be the disagreement.  Returns
+        None when nothing is available, which callers must not read as calm.
+        """
+        magnitudes = [abs(c.score) for c in self.components
+                      if c.available and c.score is not None and c.weight > 0]
+        return max(magnitudes) if magnitudes else None
+
 
 def _clamp(value: float, low: float = -1.0, high: float = 1.0) -> float:
     return max(low, min(high, value))

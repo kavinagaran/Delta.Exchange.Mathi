@@ -357,9 +357,21 @@ def test_unconfirmed_short_move_does_not_close_or_replace_a_live_position(
     live_account,
     monkeypatch,
 ):
-    """A pending 15-minute neutral confirmation is explicitly a no-op."""
+    """A pending neutral confirmation preserves the position but rearms entry."""
     old_state = _owned_state(dashboard.TREND_SCORE_CE_ZONE)
     _write(live_account / "trend_state.json", old_state)
+    ledger = dashboard._trend_score_auto_ledger(live_account)
+    dashboard._trend_score_auto_lock_setup(
+        ledger,
+        {
+            "zone": dashboard.TREND_SCORE_CE_ZONE,
+            "signal_key": old_state["score_auto_signal_key"],
+            "mode": dashboard._trading_mode_payload(),
+        },
+        transition_id="old-ce-transition",
+        action="OPEN",
+    )
+    dashboard._trend_score_auto_write_ledger(live_account, ledger)
     signal = _signal(
         dashboard._trading_mode_payload(),
         0.0,
@@ -382,6 +394,11 @@ def test_unconfirmed_short_move_does_not_close_or_replace_a_live_position(
 
     assert dashboard._maybe_auto_trend_score_cycle() is False
     assert json.loads((live_account / "trend_state.json").read_text("utf-8")) == old_state
+    released_ledger = dashboard._trend_score_auto_ledger(live_account)
+    assert released_ledger["setup_lock"] is None
+    assert released_ledger[
+        "setup_lock_short_move_confirmation_released_at_utc"
+    ]
     prepare.assert_not_called()
     close.assert_not_called()
     execute.assert_not_called()

@@ -24,7 +24,11 @@ from btc_trend_engine.signals.regime import (
     Regime,
     RegimeClassifier,
 )
-from btc_trend_engine.signals.score import V1_WEIGHTS, compute_score
+from btc_trend_engine.signals.score import (
+    V1_WEIGHTS,
+    ComponentScore,
+    compute_score,
+)
 from btc_trend_engine.signals.snapshot import (
     SignalConfig,
     SignalHysteresis,
@@ -310,11 +314,20 @@ def test_the_hold_band_is_asymmetric_between_entering_and_holding():
 # ── snapshot invariants (contract §invariants, §23.4) ───────────────────
 def _snapshot(regime=Regime.TREND_UP, data_quality="OK", direction=1,
               gates_ok=True, score_value=80.0, gates=None,
-              short_move_confirmed=False):
+              short_move_confirmed=False, component_abs=None):
     inputs = _full_bull_inputs()
     score = compute_score(**inputs)
     if score_value is not None:
         object.__setattr__(score, "trend_score", score_value)
+    if component_abs is not None:
+        # The fixture is bullish, so forcing `trend_score` alone leaves a
+        # neutral score sitting on strongly bullish components -- a state the
+        # real scorer cannot produce, and one the sideways component-agreement
+        # gate correctly refuses. Bring the components along with the score.
+        object.__setattr__(score, "components", [
+            ComponentScore(name=c.name, weight=c.weight, available=c.available,
+                           score=None if c.score is None else component_abs)
+            for c in score.components])
     gates = gates or [
         {"name": "data_fresh", "passed": gates_ok, "detail": None},
         {"name": "risk_lock_clear", "passed": True, "detail": None},
@@ -383,6 +396,7 @@ def test_sideways_zone_ignores_only_directional_entry_gates():
         regime=Regime.RANGE,
         direction=0,
         score_value=0.0,
+        component_abs=5.0,
         gates=gates,
         short_move_confirmed=True,
     )
@@ -404,6 +418,7 @@ def test_unconfirmed_short_move_matrix_names_the_wait_instead_of_a_failed_ce_pe_
         regime=Regime.RANGE,
         direction=0,
         score_value=10.0,
+        component_abs=5.0,
         short_move_confirmed=False,
     )
     confirmation = next(
@@ -444,10 +459,73 @@ def test_sideways_zone_still_obeys_shared_safety_gates():
         regime=Regime.RANGE,
         direction=0,
         score_value=0.0,
+        component_abs=5.0,
         gates=gates,
     )
     assert snapshot["zone"] == zones.SHORT_MOVE
     assert snapshot["zone_action_allowed"] is False
+
+
+def test_cancelling_components_block_the_sideways_zone_in_the_snapshot():
+    """End-to-end version of the zones-level rule: a score forced to neutral
+    on top of the strongly bullish fixture is a cancellation, and the entry
+    matrix must say so rather than reporting a quiet market."""
+    snapshot = _snapshot(
+        regime=Regime.RANGE, direction=0, score_value=0.0,
+        short_move_confirmed=True,
+    )
+    agreement = next(gate for gate in snapshot["gates"]
+                     if gate["name"] == "components_agree_neutral")
+    assert snapshot["zone"] == zones.SHORT_MOVE
+    assert snapshot["zone_action_allowed"] is False
+    assert agreement["passed"] is False
+    assert "cancelling" in agreement["detail"]
+    assert "components disagree" in snapshot["zone_reason"]
+
+
+# ── the specific SHORT_MOVE reasons must survive the snapshot ───────────
+#
+# Both conditions are ALSO rows in the zone gate matrix, so both drive
+# `gates_passed` false. When `decide` checked that first, every blocked MOVE
+# went out as "one or more execution gates failed" and the real reason never
+# left the engine -- silently disabling the dashboard's reason routing.
+# Asserting the gate row alone does not catch this; the reason must be
+# asserted from a real `build_snapshot`.
+
+def test_unconfirmed_move_reports_the_wait_not_a_generic_gate_failure():
+    snapshot = _snapshot(
+        regime=Regime.RANGE, direction=0, score_value=0.0,
+        component_abs=5.0, short_move_confirmed=False,
+    )
+    assert snapshot["zone"] == zones.SHORT_MOVE
+    assert snapshot["zone_action_allowed"] is False
+    assert "confirmation" in snapshot["zone_reason"]
+
+
+def test_disagreement_outranks_the_confirmation_wait_in_the_snapshot():
+    """Both failing at once must report the disagreement: waiting cannot fix
+    components that cancel."""
+    snapshot = _snapshot(
+        regime=Regime.RANGE, direction=0, score_value=0.0,
+        short_move_confirmed=False,
+    )
+    assert "components disagree" in snapshot["zone_reason"]
+
+
+def test_other_failed_gates_still_report_generically_for_a_quiet_move():
+    """The reordering must not let a MOVE-specific reason mask an unrelated
+    safety gate that is the real blocker."""
+    gates = [
+        {"name": "data_fresh", "passed": True, "detail": None},
+        {"name": "book_valid", "passed": False, "detail": "book invalid"},
+        {"name": "risk_lock_clear", "passed": True, "detail": None},
+    ]
+    snapshot = _snapshot(
+        regime=Regime.RANGE, direction=0, score_value=0.0,
+        component_abs=5.0, short_move_confirmed=True, gates=gates,
+    )
+    assert snapshot["zone_action_allowed"] is False
+    assert snapshot["zone_reason"] == "one or more execution gates failed"
 
 
 def test_directional_zone_requires_its_own_confidence_gate():

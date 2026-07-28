@@ -8366,6 +8366,128 @@ def _collect_trend_score_auto_signal() -> dict:
     return signal
 
 
+def _trend_score_auto_short_move_confirmation_pending(signal: dict) -> bool:
+    """Whether the engine is waiting to confirm a neutral SHORT_MOVE setup."""
+    reason = str(signal.get("zone_reason") or "").lower()
+    return bool(
+        signal.get("zone") == TREND_SCORE_MOVE_ZONE
+        and signal.get("zone_action_allowed") is not True
+        and "confirmation" in reason
+    )
+
+
+def _trend_score_auto_short_move_components_disagree(signal: dict) -> bool:
+    """Whether a neutral MOVE score is components cancelling, not a calm tape.
+
+    Matched by phrase for the same reason the confirmation wait is matched by
+    word (see ``_trend_score_auto_engine_action_ready``): ``zone_reason`` is
+    the only "why" that crosses the engine boundary.  The phrase is pinned
+    against the engine's own wording by
+    ``test_component_disagreement_reason_is_recognised_by_the_dashboard`` so
+    the two cannot drift apart silently.
+    """
+    reason = str(signal.get("zone_reason") or "").lower()
+    return bool(
+        signal.get("zone") == TREND_SCORE_MOVE_ZONE
+        and signal.get("zone_action_allowed") is not True
+        and "components disagree" in reason
+    )
+
+
+def _trend_score_auto_short_move_setup_pending(signal: dict) -> bool:
+    """Whether a MOVE setup is in progress but not yet executable.
+
+    Both blocked-setup reasons count: the engine is either still counting
+    confirmation bars, or holding back because the components behind the
+    neutral score cancel rather than agree.  Neither is a trade, and in both
+    the neutral band is a *new* setup forming.
+    """
+    return (_trend_score_auto_short_move_confirmation_pending(signal)
+            or _trend_score_auto_short_move_components_disagree(signal))
+
+
+def _trend_score_auto_release_setup_lock_for_short_move_setup(
+    user: str,
+    signal: dict,
+    *,
+    execution_mode: str,
+) -> dict | None:
+    """Release a completed setup lock while a fresh MOVE setup is pending.
+
+    The neutral band is a new setup in progress, not an executable trade.  A
+    completed CE/PE/MOVE setup must therefore not survive that wait and
+    suppress the next eligible score zone.  This deliberately does not touch a
+    position, signal record, or notification.
+
+    Applies to both reasons a forming MOVE setup can be blocked — the
+    confirmation window and component disagreement.  It originally covered
+    only the former, which left a stale lock suppressing the next zone
+    whenever the components blocked the MOVE instead; the persisted ledger key
+    keeps its original ``..._short_move_confirmation_released_at_utc`` spelling
+    so existing ledgers stay readable.
+    """
+    if not _trend_score_auto_short_move_setup_pending(signal):
+        return None
+    expected_mode = "live" if execution_mode.upper() == "LIVE" else "dry_run"
+    expected_dry_run = expected_mode == "dry_run"
+    data_dir = _mode_data_dir(expected_dry_run)
+    root_dir = _user_dir()
+    owner = (
+        f"trend-score-confirmation-release:{user}:{os.getpid()}:"
+        f"{time.time_ns()}"
+    )
+    with account_entry_lock(root_dir, owner) as exposure_lock:
+        if not exposure_lock:
+            raise RuntimeError(
+                "account exposure lock is busy; cannot release the prior "
+                "score-zone setup lock during SHORT_MOVE confirmation"
+            )
+        with account_file_lock(
+            root_dir,
+            "config",
+            owner,
+            stale_after_sec=30,
+            wait_sec=5,
+        ) as config_lock:
+            if not config_lock:
+                raise RuntimeError(
+                    "account configuration is busy; cannot release the prior "
+                    "score-zone setup lock during SHORT_MOVE confirmation"
+                )
+            mode = _trading_mode_payload()
+            if (
+                bool(mode.get("dry_run_mode")) != expected_dry_run
+                or mode.get("mode_revision")
+                != (signal.get("mode") or {}).get("mode_revision")
+                or _trend_score_auto_mode(_user_cfg()) != expected_mode
+            ):
+                raise RuntimeError(
+                    "trading mode changed before the SHORT_MOVE confirmation "
+                    "could release the prior setup lock"
+                )
+            ledger = _trend_score_auto_ledger(data_dir)
+            previous = _trend_score_auto_setup_lock(ledger)
+            if previous is None:
+                return None
+            ledger["setup_lock"] = None
+            # A release is intentional state-machine behavior, never an
+            # accident for the one-time legacy-lock recovery to undo.
+            ledger["setup_lock_semantics_v2_migrated"] = True
+            ledger["setup_lock_short_move_confirmation_released_at_utc"] = (
+                datetime.now(timezone.utc).isoformat()
+            )
+            _trend_score_auto_write_ledger(data_dir, ledger)
+    _trend_audit("trend_score_auto_setup_lock_released_for_short_move_confirmation", {
+        "execution_mode": expected_mode,
+        "previous_zone": previous.get("target_zone"),
+        "source_signal_key": previous.get("source_signal_key"),
+        "confirmation_signal_key": signal.get("signal_key"),
+        "order_submitted": False,
+        "exchange_api_called": False,
+    })
+    return previous
+
+
 def _trend_score_auto_engine_action_ready(
     user: str,
     cycle_at: str,
@@ -8393,18 +8515,32 @@ def _trend_score_auto_engine_action_ready(
     # tuned parameter (15m -> 30m on 2026-07-27) and pinning the minute count
     # here means a silent behaviour change the next time it moves. No other
     # zone_reason the engine emits contains "confirmation".
-    is_confirmation = (
-        signal.get("zone") == TREND_SCORE_MOVE_ZONE
-        and "confirmation" in reason
+    is_confirmation = _trend_score_auto_short_move_confirmation_pending(signal)
+    # A forming MOVE setup releases the previous lock whichever way it is
+    # blocked, but only the confirmation wait is reported as
+    # "awaiting_confirmation": component disagreement is not a wait, and
+    # labelling it one would tell the operator that time alone resolves it.
+    setup_pending = _trend_score_auto_short_move_setup_pending(signal)
+    released_lock = None
+    if setup_pending:
+        released_lock = _trend_score_auto_release_setup_lock_for_short_move_setup(
+            user,
+            signal,
+            execution_mode=execution_mode,
+        )
+    released_note = (
+        "released the prior score-zone setup lock; "
+        if released_lock is not None else ""
     )
     _trend_score_auto_health_update(
         user,
         status=("awaiting_confirmation" if is_confirmation else "blocked"),
         last_cycle_utc=cycle_at,
         last_action=(
-            "waiting for 30-minute SHORT_MOVE confirmation"
+            f"{released_note}waiting for 30-minute SHORT_MOVE confirmation"
             if is_confirmation
-            else f"{execution_mode} score action is blocked by the Trend Engine"
+            else f"{released_note}{execution_mode} score action is blocked "
+            f"by the Trend Engine"
         ),
         last_error=None if is_confirmation else reason,
         direction_score=signal.get("score"),

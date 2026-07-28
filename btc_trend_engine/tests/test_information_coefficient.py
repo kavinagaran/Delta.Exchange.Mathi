@@ -19,14 +19,17 @@ from btc_trend_engine.research.information_coefficient import (
     SCORE_KEY,
     CalibrationBucket,
     Observation,
+    _quantile,
     _ranks,
     collect_observations,
     component_correlation,
+    confirmation_flags,
     ic_t_stat,
     information_coefficient,
     information_coefficients,
     pearson,
     score_calibration,
+    sideways_gate_profile,
     spearman,
 )
 
@@ -294,3 +297,133 @@ def test_longest_horizon_never_runs_past_the_data():
     last_start = candles[-1].start
     for obs in observations:
         assert obs.at + timedelta(minutes=240 + 5) <= last_start
+
+
+# ── path outcome and the sideways gate profile ──────────────────────────
+
+def test_excursion_measures_the_path_not_the_destination():
+    """The case the signed return cannot see: price travels a long way and
+    comes back, which is exactly what a short straddle is hurt by."""
+    candles = _series(3_100)
+    observations = collect_observations(
+        candles, horizons_minutes=[60], warmup=2_880)
+    assert observations
+    for obs in observations:
+        excursion = obs.forward_max_excursion[60]
+        # An excursion is a distance, so it is never negative and can never be
+        # smaller than the move actually realised by the endpoint.
+        assert excursion >= 0.0
+        assert excursion >= abs(obs.forward_returns[60]) - 1e-12
+
+
+def test_excursion_equals_the_widest_move_inside_the_window():
+    """Recomputed straight from the candles: the excursion must span exactly
+    the bars traversed between the entry open and the horizon open, so the
+    path and the endpoint return describe the same window."""
+    candles = _series(3_100)
+    observations = collect_observations(
+        candles, horizons_minutes=[30], warmup=2_880)
+    assert observations
+    obs = observations[0]
+
+    index = next(i for i, c in enumerate(candles) if c.start == obs.at)
+    entry = float(candles[index + 1].open)
+    traversed = candles[index + 1:index + 1 + 30 // 5]
+    expected = max(max(float(c.high) for c in traversed) - entry,
+                   entry - min(float(c.low) for c in traversed)) / entry
+    assert obs.forward_max_excursion[30] == pytest.approx(expected)
+
+
+def test_observations_carry_the_regime_and_the_widest_component():
+    candles = _series(3_100)
+    observations = collect_observations(
+        candles, horizons_minutes=[30], warmup=2_880)
+    assert observations
+    for obs in observations:
+        assert obs.regime is not None
+        assert obs.max_abs_component is not None
+        # Display scale, so it must bound every component the study recorded.
+        widest = max((abs(v) for v in obs.components.values()), default=0.0)
+        assert obs.max_abs_component >= widest * 100.0 - 1e-6
+
+
+def _obs(minute: int, score: float, *, excursion: float,
+         regime: str = "RANGE", widest: float = 5.0) -> Observation:
+    return Observation(
+        at=START + timedelta(minutes=minute), components={}, score=score,
+        forward_returns={60: 0.0}, forward_max_excursion={60: excursion},
+        regime=regime, max_abs_component=widest)
+
+
+def test_confirmation_needs_consecutive_bars_and_a_gap_resets_it():
+    inside = [_obs(5 * i, 0.0, excursion=0.001) for i in range(8)]
+    flags = confirmation_flags(inside, confirmation_bars=6)
+    # Six in a row means the sixth bar is the first confirmed one.
+    assert flags[:5] == [False] * 5
+    assert flags[5] is True and flags[7] is True
+
+    # Same bars, but one is missing: the run restarts rather than assuming
+    # continuity across the hole.
+    gapped = inside[:3] + [_obs(5 * i, 0.0, excursion=0.001)
+                           for i in range(4, 9)]
+    assert confirmation_flags(gapped, confirmation_bars=6)[:7] == [False] * 7
+
+
+def test_a_score_leaving_the_band_resets_the_confirmation_run():
+    bars = ([_obs(5 * i, 0.0, excursion=0.001) for i in range(5)]
+            + [_obs(25, 80.0, excursion=0.001)]
+            + [_obs(5 * i, 0.0, excursion=0.001) for i in range(6, 11)])
+    assert not any(confirmation_flags(bars, confirmation_bars=6))
+
+
+def test_gate_profile_stages_are_cumulative_and_report_excursion():
+    calm = [_obs(5 * i, 0.0, excursion=0.001) for i in range(10)]
+    loud = [_obs(5 * (10 + i), 80.0, excursion=0.05) for i in range(10)]
+    profiles = sideways_gate_profile(calm + loud, 60)
+
+    by_label = {p.label: p for p in profiles}
+    assert by_label["all scored bars"].n == 20
+    band = next(p for p in profiles if p.label.startswith("|score|"))
+    assert band.n == 10                       # the loud half scores 80
+    assert band.mean_excursion == pytest.approx(0.001)
+    # Each stage may only ever remove bars.
+    counts = [p.n for p in profiles]
+    assert counts == sorted(counts, reverse=True)
+
+
+def test_gate_profile_applies_the_regime_veto():
+    shocked = [_obs(5 * i, 0.0, excursion=0.02, regime="HIGH_VOL_SHOCK")
+               for i in range(10)]
+    profiles = sideways_gate_profile(shocked, 60)
+    assert next(p for p in profiles if p.label == "+ regime safe").n == 0
+
+
+def test_component_ceilings_tighten_in_order_regardless_of_input_order():
+    bars = [_obs(5 * i, 0.0, excursion=0.001, widest=10.0 * (i % 6))
+            for i in range(12)]
+    profiles = sideways_gate_profile(bars, 60, component_ceilings=(20, 50, 35))
+    ceiling_rows = [p for p in profiles if "max|component|" in p.label]
+    assert [p.label for p in ceiling_rows] == [
+        "+ max|component| <= 50",
+        "+ max|component| <= 35",
+        "+ max|component| <= 20",
+    ]
+    assert [p.n for p in ceiling_rows] == sorted(
+        [p.n for p in ceiling_rows], reverse=True)
+
+
+def test_gate_profile_refuses_observations_it_cannot_replay():
+    """Silently dropping bars that lack the regime would shrink the sample
+    without saying so, which is how a profile lies."""
+    bare = [Observation(at=START, components={}, score=0.0,
+                        forward_returns={60: 0.0},
+                        forward_max_excursion={60: 0.001})]
+    with pytest.raises(ValueError, match="regime"):
+        sideways_gate_profile(bare, 60)
+
+
+def test_quantile_interpolates_between_neighbours():
+    assert _quantile([0.0, 1.0], 0.5) == pytest.approx(0.5)
+    assert _quantile([0.0, 10.0, 20.0], 0.9) == pytest.approx(18.0)
+    assert _quantile([], 0.5) == 0.0
+    assert _quantile([4.0], 0.9) == 4.0

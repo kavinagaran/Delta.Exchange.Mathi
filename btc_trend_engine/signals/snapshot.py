@@ -141,6 +141,7 @@ def _zone_entry_gates(
     score: float,
     regime: Regime,
     short_move_confirmed: bool,
+    max_abs_component: float | None,
     confidence: float,
     config: SignalConfig,
 ) -> list[dict[str, Any]]:
@@ -222,6 +223,25 @@ def _zone_entry_gates(
             "detail": (
                 f"score {score:+.1f} is inside −{policy.sideways_max_abs:g} to "
                 f"+{policy.sideways_max_abs:g}"
+            ),
+        },
+        {
+            # The neutral score above bounds the weighted SUM; this bounds the
+            # widest single component. Without it a strongly bullish 4h and a
+            # strongly bearish 5m cancel to a score of 0 and read as sideways.
+            "name": "components_agree_neutral",
+            "label": "COMPONENT AGREEMENT",
+            "passed": (max_abs_component is not None
+                       and max_abs_component <= policy.sideways_max_component_abs),
+            "detail": (
+                "component agreement was not measured"
+                if max_abs_component is None else
+                f"widest component reads {max_abs_component:.1f}, within the "
+                f"{policy.sideways_max_component_abs:g} ceiling"
+                if max_abs_component <= policy.sideways_max_component_abs else
+                f"widest component reads {max_abs_component:.1f}, beyond the "
+                f"{policy.sideways_max_component_abs:g} ceiling: the near-zero "
+                f"score is components cancelling, not a quiet market"
             ),
         },
         {
@@ -326,6 +346,7 @@ def build_snapshot(
     # differ -- `entry_allowed` additionally requires a tradeable regime, and
     # RANGE blocks it, whereas RANGE is precisely the sell-MOVE setup.
     score_value = score.trend_score if score.trend_score is not None else 0.0
+    max_abs_component = score.max_abs_component
     zone = zones.zone_for_score(score_value)
     zone_gates = _zone_entry_gates(
         gates,
@@ -333,6 +354,7 @@ def build_snapshot(
         score=score_value,
         regime=regime,
         short_move_confirmed=short_move_confirmed,
+        max_abs_component=max_abs_component,
         confidence=confidence,
         config=config,
     )
@@ -344,6 +366,7 @@ def build_snapshot(
         gates_passed=zone_gates_passed,
         stop_loss_configured=stop_loss_configured,
         short_move_confirmed=short_move_confirmed,
+        max_abs_component=max_abs_component,
     )
     reason_codes = build_reason_codes(
         regime=regime, direction=direction, timeframe_biases=biases,

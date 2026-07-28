@@ -47,7 +47,7 @@ from __future__ import annotations
 import math
 from bisect import bisect_right
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
 from ..backtest.event_replay import ROLES, _resample
@@ -55,7 +55,9 @@ from ..features.pipeline import compute_timeframe_features
 from ..market_data.messages import Candle
 from ..market_data.normalizer import resolution_seconds
 from ..signals.producer import TRIGGER
+from ..signals.regime import RegimeClassifier
 from ..signals.score import V1_WEIGHTS, compute_score
+from ..signals.zones import UNSAFE_REGIMES, ZonePolicy
 
 SCORE_KEY = "trend_score"
 
@@ -72,6 +74,22 @@ class Observation:
     components: Mapping[str, float]        # component -> raw value in [-1, 1]
     score: float                           # -100 .. 100
     forward_returns: Mapping[int, float]   # horizon minutes -> return
+    # Largest excursion *away from entry* reached at any point inside the
+    # horizon, as a positive fraction: max(|price - entry|) / entry.
+    #
+    # Signed endpoint return is the wrong outcome for a short straddle, which
+    # does not care which way price went and is killed by the path rather than
+    # the destination.  A band can post a flawless 0.50 directional hit rate
+    # while moving 3% every time, and `forward_returns` cannot see that.
+    # (The absolute *endpoint* move needs no field: it is abs(forward_returns).)
+    forward_max_excursion: Mapping[int, float] = field(default_factory=dict)
+    # Regime as the live classifier would have labelled this bar, so a gate
+    # that includes the regime veto can be replayed faithfully rather than
+    # approximated. None means "not reconstructed".
+    regime: str | None = None
+    # ScoreResult.max_abs_component, on the display scale (0..100) so it is
+    # directly comparable with ZonePolicy.sideways_max_component_abs.
+    max_abs_component: float | None = None
 
 
 # ── statistics (stdlib only; no scipy dependency for a research script) ──
@@ -176,7 +194,13 @@ def collect_observations(
     series_starts = {role: [c.start for c in candles]
                      for role, candles in full_series.items()}
     opens = [float(c.open) for c in ordered]
+    highs = [float(c.high) for c in ordered]
+    lows = [float(c.low) for c in ordered]
     max_offset = max(horizon // step_minutes for horizon in horizons_minutes)
+
+    # The classifier carries hysteresis across bars, so it has to see the same
+    # sequence the live producer would -- including bars this study discards.
+    classifier = RegimeClassifier()
 
     observations: list[Observation] = []
     # Stop early enough that the longest horizon still has a real price.
@@ -201,6 +225,15 @@ def collect_observations(
             setup=features[ROLES[2]], trigger=features[ROLES[3]],
             derivatives=context,
         )
+        # Classify every bar, including skipped ones: production feeds a
+        # degraded read in as 0.0 rather than withholding it, and skipping
+        # here would give the hysteresis a different history.
+        decision = classifier.classify(
+            data_quality_ok=True,
+            trend_score=(0.0 if result.trend_score is None
+                         else float(result.trend_score)),
+            setup=features[ROLES[2]],
+        )
         if result.trend_score is None:
             continue
 
@@ -213,13 +246,22 @@ def collect_observations(
         if entry <= 0:
             continue
         forward = {}
+        excursion = {}
         for horizon in horizons_minutes:
             target = index + 1 + horizon // step_minutes
             forward[horizon] = opens[target] / entry - 1.0
+            # Bars index+1 .. target-1 are the ones actually traversed between
+            # the entry open and the horizon open, so the path and the endpoint
+            # return describe the same window.
+            excursion[horizon] = max(max(highs[index + 1:target]) - entry,
+                                     entry - min(lows[index + 1:target])) / entry
 
         observations.append(Observation(
             at=ordered[index].start, components=components,
-            score=float(result.trend_score), forward_returns=forward))
+            score=float(result.trend_score), forward_returns=forward,
+            forward_max_excursion=excursion,
+            regime=decision.regime.value,
+            max_abs_component=result.max_abs_component))
     return observations
 
 
@@ -295,6 +337,139 @@ def component_correlation(
             if value is not None:
                 matrix[(left, right)] = value
     return matrix
+
+
+# ── does the sideways gate actually select calm markets? ────────────────
+
+@dataclass(frozen=True, slots=True)
+class GateProfile:
+    """Forward movement for the bars one filter stage lets through."""
+
+    label: str
+    n: int
+    share: float             # of all scored bars
+    mean_excursion: float
+    median_excursion: float
+    p90_excursion: float
+
+
+def _quantile(ordered: Sequence[float], q: float) -> float:
+    """Linear-interpolated quantile of an already-sorted sequence."""
+    if not ordered:
+        return 0.0
+    if len(ordered) == 1:
+        return ordered[0]
+    position = q * (len(ordered) - 1)
+    low = int(position)
+    high = min(low + 1, len(ordered) - 1)
+    return ordered[low] + (position - low) * (ordered[high] - ordered[low])
+
+
+def confirmation_flags(
+    observations: Sequence[Observation],
+    *,
+    policy: ZonePolicy | None = None,
+    confirmation_bars: int = 6,
+    bar_minutes: int = 5,
+) -> list[bool]:
+    """Per-observation replay of ``producer._short_move_confirmed``.
+
+    A run of in-band bars only counts while the bars are actually adjacent: a
+    gap resets it rather than assuming continuity across missing data, which
+    is what the producer does when a candle never arrived.
+    """
+    active = policy or ZonePolicy()
+    step = timedelta(minutes=bar_minutes)
+    flags: list[bool] = []
+    run = 0
+    previous: datetime | None = None
+    for obs in observations:
+        if abs(obs.score) > active.sideways_max_abs:
+            run = 0
+        elif previous is not None and obs.at - previous == step:
+            run += 1
+        else:
+            run = 1
+        flags.append(run >= confirmation_bars)
+        previous = obs.at
+    return flags
+
+
+def sideways_gate_profile(
+    observations: Sequence[Observation],
+    horizon_minutes: int,
+    *,
+    policy: ZonePolicy | None = None,
+    confirmation_bars: int = 6,
+    bar_minutes: int = 5,
+    component_ceilings: Sequence[float] = (),
+) -> list[GateProfile]:
+    """What forward movement each stage of the SHORT_MOVE gate selects.
+
+    The stages are cumulative and in the order the live engine applies them,
+    so each row shows what that condition added on top of the one above.  The
+    question being answered is blunt: **does the gate select quieter markets
+    than average at all?**  If the excursion rows do not fall as the filters
+    tighten, the gate is not detecting anything, however reasonable it looks.
+
+    Excursion, not signed return, is the outcome throughout -- a short
+    straddle is indifferent to direction and is hurt by the largest move
+    against it at any point in the window, not by where price finished.
+    """
+    active = policy or ZonePolicy()
+    if any(obs.regime is None for obs in observations):
+        raise ValueError(
+            "sideways_gate_profile needs the regime on every observation; "
+            "rebuild them with collect_observations")
+    if any(obs.max_abs_component is None for obs in observations):
+        raise ValueError(
+            "sideways_gate_profile needs max_abs_component on every "
+            "observation; rebuild them with collect_observations")
+
+    usable = [obs for obs in observations
+              if horizon_minutes in obs.forward_max_excursion]
+    if not usable:
+        return []
+    confirmed = confirmation_flags(
+        usable, policy=active, confirmation_bars=confirmation_bars,
+        bar_minutes=bar_minutes)
+
+    total = len(usable)
+    rows = [(obs, flag) for obs, flag in zip(usable, confirmed, strict=True)]
+
+    Stage = Callable[[Observation, bool], bool]
+    stages: list[tuple[str, Stage]] = [
+        ("all scored bars", lambda obs, flag: True),
+        (f"|score| <= {active.sideways_max_abs:g}",
+         lambda obs, flag: abs(obs.score) <= active.sideways_max_abs),
+        (f"+ {confirmation_bars * bar_minutes}m confirmation",
+         lambda obs, flag: flag),
+        ("+ regime safe", lambda obs, flag: obs.regime not in UNSAFE_REGIMES),
+    ]
+    # Descending, so each successive ceiling row is strictly tighter than the
+    # one above it and the cumulative stacking reads as "and now tighter still"
+    # regardless of the order the caller passed them in.
+    for ceiling in sorted(component_ceilings, reverse=True):
+        stages.append((
+            f"+ max|component| <= {ceiling:g}",
+            # Bind the ceiling per iteration; a closure over the loop variable
+            # would give every row the last one.
+            (lambda limit: lambda obs, flag: obs.max_abs_component <= limit)(ceiling),
+        ))
+
+    profiles: list[GateProfile] = []
+    surviving = rows
+    for label, predicate in stages:
+        surviving = [(obs, flag) for obs, flag in surviving if predicate(obs, flag)]
+        excursions = sorted(obs.forward_max_excursion[horizon_minutes]
+                            for obs, _ in surviving)
+        n = len(excursions)
+        profiles.append(GateProfile(
+            label=label, n=n, share=n / total if total else 0.0,
+            mean_excursion=sum(excursions) / n if n else 0.0,
+            median_excursion=_quantile(excursions, 0.5),
+            p90_excursion=_quantile(excursions, 0.9)))
+    return profiles
 
 
 @dataclass(frozen=True, slots=True)

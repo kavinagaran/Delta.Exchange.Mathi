@@ -9,6 +9,7 @@ from unittest.mock import Mock
 import pytest
 
 import dashboard
+from btc_trend_engine.signals import zones
 
 
 def _write(path: Path, value) -> None:
@@ -946,6 +947,120 @@ def test_score_cycle_neutral_zone_opens_short_move_in_trend_slot_without_window(
     assert not (score_cycle["dry"] / "straddle_state.json").exists()
     for mock in score_cycle["forbidden"].values():
         mock.assert_not_called()
+
+
+def test_short_move_confirmation_releases_prior_setup_lock_and_rearms_next_entry(
+        score_cycle):
+    """A neutral confirmation wait must not carry a completed CE lock forward."""
+    state_path = score_cycle["dry"] / "trend_state.json"
+    assert dashboard._maybe_auto_trend_score_cycle() is True
+    opened = json.loads(state_path.read_text(encoding="utf-8"))
+    assert dashboard._trend_score_auto_ledger(score_cycle["dry"])[
+        "setup_lock"
+    ]["target_zone"] == dashboard.TREND_SCORE_CE_ZONE
+
+    pending_move = _score_signal(
+        score_cycle["mode"],
+        score=0,
+        zone=dashboard.TREND_SCORE_MOVE_ZONE,
+        suffix="10:05:00Z",
+    )
+    pending_move["zone_action_allowed"] = False
+    pending_move["zone_reason"] = (
+        "waiting for 30-minute confirmation: six consecutive completed "
+        "5-minute scores must remain inside -15 to +15"
+    )
+    score_cycle["holder"]["signal"] = pending_move
+
+    assert dashboard._maybe_auto_trend_score_cycle() is False
+    # Confirmation must never close the current position, but it does release
+    # the completed setup so a later eligible signal is not suppressed.
+    assert json.loads(state_path.read_text(encoding="utf-8")) == opened
+    ledger = dashboard._trend_score_auto_ledger(score_cycle["dry"])
+    assert ledger["setup_lock"] is None
+    assert ledger["setup_lock_short_move_confirmation_released_at_utc"]
+    assert dashboard._trend_score_auto_health["alice"]["status"] == (
+        "awaiting_confirmation"
+    )
+    assert score_cycle["prepare"].call_count == 1
+    assert score_cycle["notify"].call_count == 1
+
+    # Once the earlier trade has completed, a fresh CE signal is eligible
+    # again; no manual reset is required after the abandoned MOVE setup.
+    closed = dict(opened)
+    closed["status"] = "CLOSED"
+    _write(state_path, closed)
+    score_cycle["holder"]["signal"] = _score_signal(
+        score_cycle["mode"],
+        score=60,
+        zone=dashboard.TREND_SCORE_CE_ZONE,
+        suffix="10:10:00Z",
+    )
+    assert dashboard._maybe_auto_trend_score_cycle() is True
+    assert score_cycle["prepare"].call_count == 2
+    assert json.loads(state_path.read_text(encoding="utf-8"))["status"] == "OPEN"
+
+
+def test_component_disagreement_also_releases_the_prior_setup_lock(score_cycle):
+    """A MOVE blocked because its components cancel is still a forming setup.
+
+    Releasing only on the confirmation wait left a completed CE lock in place
+    whenever disagreement was what blocked the MOVE, which then suppressed the
+    next eligible zone.
+    """
+    state_path = score_cycle["dry"] / "trend_state.json"
+    assert dashboard._maybe_auto_trend_score_cycle() is True
+    opened = json.loads(state_path.read_text(encoding="utf-8"))
+    assert dashboard._trend_score_auto_ledger(score_cycle["dry"])[
+        "setup_lock"
+    ]["target_zone"] == dashboard.TREND_SCORE_CE_ZONE
+
+    conflicted = _score_signal(
+        score_cycle["mode"],
+        score=0,
+        zone=dashboard.TREND_SCORE_MOVE_ZONE,
+        suffix="10:05:00Z",
+    )
+    conflicted["zone_action_allowed"] = False
+    conflicted["zone_reason"] = zones.decide(
+        score=0.0, regime="RANGE", data_quality="OK", gates_passed=True,
+        short_move_confirmed=True, max_abs_component=95.0,
+    ).reason
+    score_cycle["holder"]["signal"] = conflicted
+
+    assert dashboard._maybe_auto_trend_score_cycle() is False
+    assert json.loads(state_path.read_text(encoding="utf-8")) == opened
+    ledger = dashboard._trend_score_auto_ledger(score_cycle["dry"])
+    assert ledger["setup_lock"] is None
+    assert ledger["setup_lock_short_move_confirmation_released_at_utc"]
+    # Disagreement is not a wait, so it must not be dressed up as one.
+    assert dashboard._trend_score_auto_health["alice"]["status"] == "blocked"
+    assert "released the prior score-zone setup lock" in (
+        dashboard._trend_score_auto_health["alice"]["last_action"]
+    )
+
+
+def test_component_disagreement_reason_is_recognised_by_the_dashboard():
+    """Pins the engine's wording to the dashboard's matcher.
+
+    ``zone_reason`` is the only "why" that crosses the engine boundary, so the
+    phrase is matched rather than a structured field. Rewording it in
+    signals/zones.py without this test would silently stop releasing the lock.
+    """
+    blocked = zones.decide(
+        score=0.0, regime="RANGE", data_quality="OK", gates_passed=True,
+        short_move_confirmed=True, max_abs_component=95.0,
+    )
+    signal = {
+        "zone": dashboard.TREND_SCORE_MOVE_ZONE,
+        "zone_action_allowed": False,
+        "zone_reason": blocked.reason,
+    }
+    assert blocked.action_allowed is False
+    assert dashboard._trend_score_auto_short_move_components_disagree(signal)
+    assert dashboard._trend_score_auto_short_move_setup_pending(signal)
+    # Disagreement must not be mistaken for the confirmation wait.
+    assert not dashboard._trend_score_auto_short_move_confirmation_pending(signal)
 
 
 def test_score_cycle_blocks_foreign_paper_position_without_modifying_it(

@@ -37,6 +37,7 @@ from btc_trend_engine.research.information_coefficient import (  # noqa: E402
     component_correlation,
     information_coefficients,
     score_calibration,
+    sideways_gate_profile,
 )
 from btc_trend_engine.signals.score import V1_WEIGHTS  # noqa: E402
 from scripts.backtest import load_cached  # noqa: E402
@@ -113,9 +114,13 @@ def main() -> int:
     parser.add_argument("--as-running", action="store_true",
                         help="with --derivatives, omit funding_percentile to "
                              "match what production actually computes")
+    parser.add_argument("--component-ceilings", default="50,35,25",
+                        help="max|component| ceilings to profile for the "
+                             "sideways gate (default 50,35,25)")
     args = parser.parse_args()
 
     horizons = [int(h) for h in args.horizons.split(",") if h.strip()]
+    ceilings = [float(c) for c in args.component_ceilings.split(",") if c.strip()]
 
     # load_cached already returns Candle objects, not raw API rows.
     candles = load_cached(args.symbol, args.resolution)
@@ -176,7 +181,36 @@ def main() -> int:
         marker = "  <-- redundant" if abs(value) > 0.7 else ""
         print(f"  {left:<26}{right:<26}{value:+.3f}{marker}")
 
-    print("\n\nSCORE CALIBRATION  (bands are the live zone boundaries)")
+    print("\n\nSIDEWAYS GATE PROFILE  (forward MAX EXCURSION, not signed return)")
+    print("  Stages are cumulative, in the order the live engine applies them.")
+    print("  A short straddle is indifferent to direction and is hurt by the")
+    print("  largest move against it at any point -- so if these rows do not")
+    print("  FALL as the filters tighten, the gate selects nothing.\n")
+    for horizon in horizons:
+        profiles = sideways_gate_profile(
+            observations, horizon, component_ceilings=ceilings)
+        if not profiles:
+            continue
+        baseline = profiles[0].median_excursion
+        print(f"  horizon {horizon}m")
+        print(f"    {'stage':<34}{'n':>8}{'share':>8}{'mean':>9}"
+              f"{'median':>9}{'p90':>9}{'vs all':>9}")
+        for profile in profiles:
+            if not profile.n:
+                print(f"    {profile.label:<34}{0:>8}{'--':>8}{'--':>9}"
+                      f"{'--':>9}{'--':>9}{'--':>9}")
+                continue
+            relative = (profile.median_excursion / baseline
+                        if baseline else float("nan"))
+            print(f"    {profile.label:<34}{profile.n:>8}"
+                  f"{profile.share:>8.1%}"
+                  f"{profile.mean_excursion * 100:>8.3f}%"
+                  f"{profile.median_excursion * 100:>8.3f}%"
+                  f"{profile.p90_excursion * 100:>8.3f}%"
+                  f"{relative:>9.2f}x")
+        print()
+
+    print("\nSCORE CALIBRATION  (bands are the live zone boundaries)")
     print("  hit_rate is signed by the band; 0.50 = coin toss\n")
     for horizon in horizons:
         print(f"  horizon {horizon}m")
@@ -210,6 +244,17 @@ def main() -> int:
                 {"a": a, "b": b, "spearman": v}
                 for (a, b), v in sorted(correlation.items())
             ],
+            "sideways_gate_profile": {
+                str(h): [
+                    {"stage": p.label, "n": p.n, "share": p.share,
+                     "mean_excursion": p.mean_excursion,
+                     "median_excursion": p.median_excursion,
+                     "p90_excursion": p.p90_excursion}
+                    for p in sideways_gate_profile(
+                        observations, h, component_ceilings=ceilings)
+                ]
+                for h in horizons
+            },
             "calibration": {
                 str(h): [
                     {"band": b.label, "n": b.n, "mean_return": b.mean_return,
