@@ -1,7 +1,7 @@
 """Score -> action zone mapping against the operator spec (2026-07-29):
 
     +40..+100 bullish CE 2-step ITM · -40..-100 bearish PE 2-step ITM
-    -30..+30 sideways sell ATM MOVE with 5m ADX below 35 · all other gaps HOLD
+    -30..+30 sideways sell ATM MOVE with 5m ADX below 30 · all other gaps HOLD
 """
 
 from __future__ import annotations
@@ -89,7 +89,7 @@ def test_selling_move_is_refused_when_adx_does_not_confirm_calm():
     decision = zones.decide(score=0.0, regime="RANGE", data_quality="OK",
                             gates_passed=True, short_move_calm=False)
     assert decision.action_allowed is False
-    assert "ADX is not below 35" in decision.reason
+    assert "ADX is not below 30" in decision.reason
 
 
 def test_a_missing_stop_does_not_block_the_directional_zones():

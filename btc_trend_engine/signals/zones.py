@@ -2,7 +2,7 @@
 
     +40 .. +100   BULLISH    buy 2-step ITM CE
     -40 .. -100   BEARISH    buy 2-step ITM PE
-    -30 .. +30    SIDEWAYS   sell ATM MOVE when 5m ADX is below 35
+    -30 .. +30    SIDEWAYS   sell ATM MOVE when 5m ADX is below 30
     all other gaps HOLD      no new action
 
 **The gaps are deliberate, not an oversight in the spec.** The only neutral
@@ -137,7 +137,7 @@ def decide(
         if not short_move_calm:
             return ZoneDecision(
                 zone, False,
-                "ADX is not below 35; calm-market confirmation is required "
+                "ADX is not below 30; calm-market confirmation is required "
                 "before selling MOVE")
         if not stop_loss_configured:
             return ZoneDecision(

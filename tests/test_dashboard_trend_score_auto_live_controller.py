@@ -365,7 +365,7 @@ def test_short_move_with_non_calm_5m_adx_does_not_close_or_replace_a_live_positi
         0.0,
         suffix="10:10:00Z",
         zone_action_allowed=False,
-        zone_reason="5m ADX 40.0 must be below 35 before selling MOVE",
+        zone_reason="5m ADX 40.0 must be below 30 before selling MOVE",
     )
     prepare = Mock(side_effect=AssertionError("blocked MOVE must not prepare"))
     close = Mock(side_effect=AssertionError("blocked MOVE must not close"))

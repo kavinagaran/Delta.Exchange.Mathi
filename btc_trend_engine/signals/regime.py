@@ -17,7 +17,9 @@ from dataclasses import dataclass
 
 from ..features.pipeline import TimeframeFeatures
 
-CALM_ADX_MAX = 35.0
+# Five-minute ADX below 30 is a calm/sideways market.  At 30 or above the
+# engine may classify a directional CE/PE setup when score and RSI agree.
+CALM_ADX_MAX = 30.0
 
 
 class Regime(enum.StrEnum):
@@ -47,7 +49,7 @@ class RegimeConfig:
     # as "the engine rarely trades", not as an error.
     trend_enter_score: float = 40.0   # was 60.0 (§8.2 example)
     trend_exit_score: float = 30.0    # matches the neutral candidate boundary
-    # ADX below 35 is the calm/sideways condition.  RANGE is deliberately
+    # ADX below 30 is the calm/sideways condition.  RANGE is deliberately
     # permitted by the SHORT_MOVE zone, so this is a positive confirmation for
     # that setup — not a blanket "do not trade" state.
     calm_adx_max: float = CALM_ADX_MAX

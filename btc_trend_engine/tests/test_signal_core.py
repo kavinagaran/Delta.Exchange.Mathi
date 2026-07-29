@@ -298,13 +298,13 @@ def test_breakout_requires_body():
                                setup=strong).regime is Regime.BREAKOUT_UP
 
 
-def test_adx_below_35_is_a_calm_sideways_regime_and_can_confirm_move():
+def test_adx_below_30_is_a_calm_sideways_regime_and_can_confirm_move():
     setup = _tf({"vol_ratio": 1.0, "volume_ratio": 1.0,
                  "adx": 62.0, "rsi": 72.0})
     decision = RegimeClassifier().classify(
         data_quality_ok=True, trend_score=85.0,
         setup=setup,
-        trigger=_tf({"adx": 34.9}),
+        trigger=_tf({"adx": 29.9}),
     )
     assert decision.regime is Regime.RANGE
     assert "calm-zone" in decision.reason
@@ -429,7 +429,7 @@ def test_sideways_zone_ignores_only_directional_entry_gates():
         direction=0,
         score_value=0.0,
         gates=gates,
-        trigger_adx=34.9,
+        trigger_adx=29.9,
     )
     assert snapshot["zone"] == zones.SHORT_MOVE
     assert snapshot["zone_action_allowed"] is True
@@ -449,7 +449,7 @@ def test_short_move_is_immediately_actionable_once_5m_adx_is_calm():
         regime=Regime.RANGE,
         direction=0,
         score_value=10.0,
-        trigger_adx=34.9,
+        trigger_adx=29.9,
     )
     assert snapshot["zone"] == zones.SHORT_MOVE
     assert snapshot["zone_action_allowed"] is True
@@ -459,18 +459,18 @@ def test_short_move_is_immediately_actionable_once_5m_adx_is_calm():
     assert "GATE_SCORE_BEYOND_ENTRY_THRESHOLD_FAILED" not in snapshot["reason_codes"]
 
 
-def test_short_move_matrix_requires_adx_below_35():
+def test_short_move_matrix_requires_adx_below_30():
     snapshot = _snapshot(
         regime=Regime.RANGE,
         direction=0,
         score_value=0.0,
-        trigger_adx=35.0,
+        trigger_adx=30.0,
     )
     calm_gate = next(gate for gate in snapshot["gates"]
                      if gate["name"] == "calm_adx")
     assert calm_gate["passed"] is False
     assert snapshot["zone_action_allowed"] is False
-    assert "ADX is not below 35" in snapshot["zone_reason"]
+    assert "ADX is not below 30" in snapshot["zone_reason"]
 
 
 def test_hold_band_matrix_explains_that_an_entry_is_not_intended():

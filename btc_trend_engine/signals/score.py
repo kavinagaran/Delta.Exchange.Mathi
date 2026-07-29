@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import Mapping
 
 from ..features.pipeline import TimeframeFeatures
+from .regime import CALM_ADX_MAX
 
 # ADR 0004: order_flow held at 0 until recorded history can validate it.
 # ADX is strength only; its signed contribution is set by the independently
@@ -148,15 +149,15 @@ def _adx_trend_strength(trigger: TimeframeFeatures,
                         direction_hint: float | None) -> float | None:
     """Signed ADX evidence from the 5m trigger timeframe.
 
-    ADX under 35 intentionally contributes a neutral score: that is the
-    calm-zone threshold shared with the regime classifier.  Above 35, strength
+    ADX under 30 intentionally contributes a neutral score: that is the
+    calm-zone threshold shared with the regime classifier.  Above 30, strength
     is signed only when RSI or higher-timeframe structure has an opinion;
     ADX itself never invents a direction.
     """
     adx = trigger.get("adx")
     if adx is None:
         return None
-    strength = _clamp((adx - 35.0) / 20.0, 0.0, 1.0)
+    strength = _clamp((adx - CALM_ADX_MAX) / 20.0, 0.0, 1.0)
     sign_source = rsi_score if rsi_score is not None else direction_hint
     if sign_source is None or abs(sign_source) < 0.05:
         return 0.0

@@ -89,7 +89,7 @@ raising. Protection is never gated on a candle close or on engine health.
 |---|---|---|---|
 | `+40 … +100` | `CE_2_ITM` | buy | 2-step ITM call (ATM − 2) |
 | `+30 < score < +40` | `HOLD` | none — keep open position | — |
-| `−30 … +30` with 5m ADX < 35 | `SHORT_MOVE` | sell | ATM MOVE straddle |
+| `−30 … +30` with 5m ADX < 30 | `SHORT_MOVE` | sell | ATM MOVE straddle |
 | `−40 < score < −30` | `HOLD` | none — keep open position | — |
 | `−100 … −40` | `PE_2_ITM` | buy | 2-step ITM put (ATM + 2) |
 
@@ -101,7 +101,7 @@ to it so the two cannot drift.
 Directional entries also require the score to agree with the classified
 structure (`TREND_UP`/`BREAKOUT_UP` for CE, `TREND_DOWN`/`BREAKOUT_DOWN` for
 PE) and to meet the engine's minimum confidence. A `SHORT_MOVE` additionally
-needs a calm 5m ADX reading below 35, a fresh executable quote, positive
+needs a calm 5m ADX reading below 30, a fresh executable quote, positive
 premium-versus-forecast net edge, and jump probability below the configured
 limit. Missing evidence blocks the entry.
 

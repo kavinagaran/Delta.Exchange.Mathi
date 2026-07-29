@@ -168,12 +168,12 @@ All bind `127.0.0.1:5055` and require `X-Engine-Token` except `/health`.
 |---:|---|---|
 | `+40 … +100` | `CE_2_ITM` | Buy a 2-step ITM call |
 | `+30 < score < +40` | `HOLD` | Keep the existing position |
-| `−30 … +30` with 5m ADX below 35 | `SHORT_MOVE` | Sell the ATM MOVE straddle |
+| `−30 … +30` with 5m ADX below 30 | `SHORT_MOVE` | Sell the ATM MOVE straddle |
 | `−40 < score < −30` | `HOLD` | Keep the existing position |
 | `−100 … −40` | `PE_2_ITM` | Buy a 2-step ITM put |
 
 At exactly ±30 the score is a `SHORT_MOVE` candidate. The current closed
-5m score is actionable when its 5m ADX is below 35, subject to the remaining
+5m score is actionable when its 5m ADX is below 30, subject to the remaining
 execution safeguards. There is no multi-candle confirmation wait.
 
 `HOLD` prevents a new entry and normally preserves the open position. The

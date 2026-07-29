@@ -132,6 +132,10 @@ _trend_score_auto_health: dict[str, dict] = {}
 TREND_ENGINE_DRY_PREVIEW_TTL_SECONDS = 120
 TREND_ENGINE_REMAINING_EV_TTL_SECONDS = 300
 TREND_SCORE_AUTO_LEDGER_FILE = "trend_score_auto_ledger.json"
+# A close must outlive its mutable slot state.  This journal is deliberately
+# separate from ``trade_history.json`` so a closed simulation cannot be lost
+# if a history write is temporarily unavailable just before the next entry.
+DRY_CLOSED_TRADE_OUTBOX_FILE = "dry_closed_trade_outbox.json"
 TREND_SCORE_AUTO_OWNERSHIP = "trend_score_auto_dry_run"
 TREND_SCORE_AUTO_LIVE_OWNERSHIP = "trend_score_auto_live"
 TREND_SCORE_AUTO_TRIGGER = "trend_engine_score_zone_auto"
@@ -838,6 +842,11 @@ def _hist_file(*, dry_run: bool = False) -> Path:
     return _mode_data_dir(dry_run) / "trade_history.json"
 
 
+def _dry_closed_trade_outbox_path(data_dir: Path | None = None) -> Path:
+    """Return the account-local durable journal for closed simulations."""
+    return Path(data_dir or _mode_data_dir(True)) / DRY_CLOSED_TRADE_OUTBOX_FILE
+
+
 def _is_dry_record(record: dict | None) -> bool:
     if not isinstance(record, dict):
         return False
@@ -983,6 +992,160 @@ def _append_trade_history(
                     history[duplicate_index] = stored
                     _atomic_write_json(path, history)
         return _history_accounting_complete(stored)
+
+
+def _dry_closed_trade_outbox(data_dir: Path) -> dict:
+    """Read the durable close journal strictly; corruption blocks new entries."""
+    path = _dry_closed_trade_outbox_path(data_dir)
+    if not path.exists():
+        return {"schema_version": 1, "records": {}}
+    try:
+        journal = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError) as exc:
+        raise RuntimeError("closed DRY RUN trade journal is unreadable") from exc
+    if (not isinstance(journal, dict)
+            or journal.get("schema_version") != 1
+            or not isinstance(journal.get("records"), dict)):
+        raise RuntimeError("closed DRY RUN trade journal is invalid")
+    for simulation_id, item in journal["records"].items():
+        if (not isinstance(simulation_id, str) or not simulation_id
+                or not isinstance(item, dict)
+                or item.get("slot") not in SLOTS
+                or not isinstance(item.get("state"), dict)):
+            raise RuntimeError("closed DRY RUN trade journal contains an invalid record")
+    return journal
+
+
+def _write_dry_closed_trade_outbox(data_dir: Path, journal: dict) -> None:
+    _atomic_write_json(_dry_closed_trade_outbox_path(data_dir), journal)
+
+
+def _queue_closed_dry_trade(
+    slot: str,
+    state: dict,
+    *,
+    owner: str,
+) -> None:
+    """Persist a completed simulation before its mutable slot can be reused."""
+    data_dir = _mode_data_dir(True)
+    record = _as_dry_record(state, slot)
+    simulation_id = _simulation_identity(record, slot)
+    if str(record.get("status") or "").upper() != "CLOSED":
+        raise RuntimeError("only closed DRY RUN positions may enter the close journal")
+    with account_file_lock(
+        data_dir, "dry-closed-outbox", owner, stale_after_sec=90, wait_sec=2,
+    ) as acquired:
+        if not acquired:
+            raise RuntimeError("closed DRY RUN trade journal is busy")
+        journal = _dry_closed_trade_outbox(data_dir)
+        existing = journal["records"].get(simulation_id)
+        if existing is not None and existing.get("state") != record:
+            raise RuntimeError("closed DRY RUN trade journal identity conflict")
+        if existing is None:
+            journal["records"][simulation_id] = {
+                "slot": slot,
+                "state": record,
+                "queued_at_utc": datetime.now(timezone.utc).isoformat(),
+            }
+            _write_dry_closed_trade_outbox(data_dir, journal)
+
+
+def _audit_dry_run_close_once(slot: str, state: dict) -> tuple[dict, bool]:
+    """Durably audit a local close exactly once before allowing replacement."""
+    record = _as_dry_record(state, slot)
+    simulation_id = _simulation_identity(record, slot)
+    event_id = f"dry-run-close:{simulation_id}"
+    if record.get("close_audit_event_id") == event_id:
+        return record, True
+    try:
+        audit_event(_user_dir(), "dry_run_trade_closed", {
+            "event_id": event_id,
+            "slot": slot,
+            "simulation_id": simulation_id,
+            "symbol": record.get("symbol"),
+            "score_zone": record.get("trend_score_zone"),
+            "side": record.get("side"),
+            "lots": record.get("lots"),
+            "exit_trigger": record.get("exit_trigger"),
+            "pnl_usd": record.get("pnl_usd"),
+            "order_submitted": False,
+            "exchange_api_called": False,
+        })
+    except Exception as exc:
+        record["close_audit_pending"] = True
+        record["close_audit_error"] = str(exc)[:300]
+        return record, False
+    record.update({
+        "close_audit_event_id": event_id,
+        "close_audit_logged_at_utc": datetime.now(timezone.utc).isoformat(),
+        "close_audit_pending": False,
+        "close_audit_error": "",
+    })
+    return record, True
+
+
+def _recover_closed_dry_trade_outbox(*, owner: str) -> bool:
+    """Flush every journalled close, or return false and keep entries blocked.
+
+    Callers must hold the account entry lock and all applicable ``close-*``
+    slot locks.  The journal is written before a close reaches mutable slot
+    state, so this also recovers a process crash between those two writes.
+    """
+    data_dir = _mode_data_dir(True)
+    with account_file_lock(
+        data_dir, "dry-closed-outbox", owner, stale_after_sec=90, wait_sec=2,
+    ) as acquired:
+        if not acquired:
+            return False
+        journal = _dry_closed_trade_outbox(data_dir)
+        for simulation_id, item in list(journal["records"].items()):
+            slot = str(item["slot"])
+            queued = _as_dry_record(item["state"], slot)
+            if _simulation_identity(queued, slot) != simulation_id:
+                raise RuntimeError("closed DRY RUN trade journal identity is inconsistent")
+            state_path = _slot_file(slot, dry_run=True)
+            current = _load_json(state_path, {})
+            if current and not _is_dry_record(current):
+                raise RuntimeError(
+                    f"closed DRY RUN {slot} history conflicts with a non-DRY slot state"
+                )
+            current_identity = (
+                _simulation_identity(current, slot) if _is_dry_record(current) else ""
+            )
+            if current_identity and current_identity != simulation_id:
+                raise RuntimeError(
+                    f"closed DRY RUN {slot} history conflicts with a newer slot state"
+                )
+            # A shutdown after queueing but before writing the CLOSED slot is
+            # repaired from the journal.  A matching closed slot may have more
+            # recent notification/audit flags, so retain them when merging.
+            if current_identity == simulation_id:
+                closed = {**queued, **current}
+            else:
+                closed = dict(queued)
+            closed.update({
+                "status": "CLOSED",
+                "history_pending": True,
+                "history_logged": False,
+            })
+            closed, audited = _audit_dry_run_close_once(slot, closed)
+            _atomic_write_json(state_path, closed)
+            if not audited:
+                return False
+            appended = _append_trade_history(
+                closed, f"dry-close-recovery:{slot}:{simulation_id}", dry_run=True,
+            )
+            if not appended:
+                return False
+            closed.update({
+                "history_pending": False,
+                "history_logged": True,
+                "history_logged_at_utc": datetime.now(timezone.utc).isoformat(),
+            })
+            _atomic_write_json(state_path, closed)
+            del journal["records"][simulation_id]
+            _write_dry_closed_trade_outbox(data_dir, journal)
+    return True
 
 
 def _flush_pending_history() -> None:
@@ -3560,15 +3723,17 @@ def _close_dry_simulation_locked(
         "history_logged": False,
     })
     state_file = _slot_file(slot, dry_run=True)
+    # The close journal is the commit boundary.  It is durable before the
+    # mutable slot changes, so an entry can never erase a completed position
+    # whose history append is temporarily unavailable.
+    recovery_owner = f"dry-close:{slot}:{os.getpid()}:{time.time_ns()}"
+    _queue_closed_dry_trade(slot, state, owner=recovery_owner)
     _atomic_write_json(state_file, state)
-    appended = _append_trade_history(
-        state, f"dry-close:{slot}:{trigger}", dry_run=True)
-    state["history_pending"] = not appended
-    state["history_logged"] = appended
-    if appended:
-        state["history_logged_at_utc"] = datetime.now(timezone.utc).isoformat()
-    _atomic_write_json(state_file, state)
-    return state
+    _recover_closed_dry_trade_outbox(owner=recovery_owner)
+    # A history/audit failure intentionally leaves the CLOSED state and its
+    # journal entry in place.  The score controller will fail closed before it
+    # can reuse the slot, while startup/protection cycles keep retrying it.
+    return _load_json(state_file, state)
 
 
 @app.route("/api/square-off", methods=["POST"])
@@ -4945,6 +5110,9 @@ def _dry_protection_policy(state: dict) -> dict:
     return {
         "tp_target_pnl": nonnegative("tp_target_pnl"),
         "sl_target_pnl": nonnegative("sl_target_pnl"),
+        # Kept for the monitor-status API and older clients.  New dry-run
+        # protection uses the explicit arm/trail values below.
+        "tsl_target_pnl": legacy_tsl,
         "tsl_arm_pnl": nonnegative("tsl_arm_pnl", legacy_tsl),
         "tsl_trail_pnl": nonnegative("tsl_trail_pnl", legacy_tsl),
         "tsl_lock_min_pnl": nonnegative("tsl_lock_min_pnl"),
@@ -8401,7 +8569,7 @@ def _trend_score_auto_engine_action_ready(
     """Do not mutate a position until the engine has approved this zone.
 
     A SHORT_MOVE is actionable only when the engine confirms the current
-    closed 5m score is neutral and its 5m ADX is below 35. The same fail-safe
+    closed 5m score is neutral and its 5m ADX is below 30. The same fail-safe
     rule applies to every other engine action gate.
     """
     if signal.get("zone") == TREND_SCORE_HOLD_ZONE:
@@ -8841,7 +9009,7 @@ def _trend_score_auto_other_slot_blocker(slot: str, state: dict) -> str | None:
     return None
 
 
-def _trend_score_auto_repair_closed_history(state: dict) -> dict:
+def _trend_score_auto_repair_closed_history(state: dict, *, owner: str) -> dict:
     if (
         str(state.get("status") or "").upper() != "CLOSED"
         or not state.get("history_pending")
@@ -8849,16 +9017,12 @@ def _trend_score_auto_repair_closed_history(state: dict) -> dict:
         return state
     if not _is_dry_record(state):
         raise RuntimeError("A non-DRY closed Trend record has pending history")
-    if not _append_trade_history(
-        state, "trend-score-auto-history-recovery", dry_run=True,
-    ):
+    # Adopt pre-journal legacy pending closes before repair.  From this point
+    # onward the same durable outbox protects both current and migrated rows.
+    _queue_closed_dry_trade("trend", state, owner=owner)
+    if not _recover_closed_dry_trade_outbox(owner=owner):
         raise RuntimeError("Previous DRY RUN Trend history is still pending")
-    repaired = dict(state)
-    repaired["history_pending"] = False
-    repaired["history_logged"] = True
-    repaired["history_logged_at_utc"] = datetime.now(timezone.utc).isoformat()
-    _atomic_write_json(_slot_file("trend", dry_run=True), repaired)
-    return repaired
+    return _trend_score_auto_strict_json(_slot_file("trend", dry_run=True), {})
 
 
 def _trend_score_auto_signal_record(
@@ -11810,6 +11974,15 @@ def _maybe_auto_trend_score_cycle() -> bool:
                     )
                     return False
 
+                # Do not reuse a slot until every earlier paper close has an
+                # fsynced audit record and a final history row.  This is also
+                # the controller's startup-recovery boundary.
+                if not _recover_closed_dry_trade_outbox(owner=owner):
+                    raise RuntimeError(
+                        "A closed DRY RUN trade is awaiting durable history; "
+                        "new entries are blocked"
+                    )
+
                 boundary_mode = _trading_mode_payload()
                 boundary_cfg = _user_cfg()
                 boundary_error = _trend_score_auto_config_error(boundary_cfg)
@@ -11837,7 +12010,7 @@ def _maybe_auto_trend_score_cycle() -> bool:
                     if blocker:
                         raise RuntimeError(blocker)
                 states["trend"] = _trend_score_auto_repair_closed_history(
-                    states["trend"],
+                    states["trend"], owner=owner,
                 )
                 owned = _trend_score_auto_owned_position(states["trend"])
                 ledger = _trend_score_auto_ledger(data_dir)
@@ -12013,6 +12186,12 @@ def _maybe_auto_trend_score_cycle() -> bool:
                             else "trend_engine_score_zone_switch"
                         ),
                     )
+                    if (closed.get("history_pending")
+                            or closed.get("close_audit_pending")):
+                        raise RuntimeError(
+                            "DRY RUN exit is awaiting durable history; "
+                            "replacement entry is blocked"
+                        )
                     transition.update({
                         "phase": "EXIT_COMMITTED",
                         "exit_committed_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -13174,6 +13353,27 @@ def _dry_run_protection_cycle(
         _import_legacy_dry_records()
     except Exception:
         pass
+    # Recover a close left between the journal and history by a prior process
+    # before evaluating fresh protection.  Entry and slot locks use the same
+    # order as the score controller, preventing a close/re-entry interleave.
+    recovery_owner = f"dry-protection-recovery:{os.getpid()}:{time.time_ns()}"
+    with account_entry_lock(_user_dir(), recovery_owner) as exposure_lock:
+        if exposure_lock:
+            with ExitStack() as recovery_locks:
+                all_slots_locked = True
+                for slot in SLOTS:
+                    acquired = recovery_locks.enter_context(account_file_lock(
+                        _mode_data_dir(True), f"close-{slot}", recovery_owner,
+                        stale_after_sec=30, wait_sec=0,
+                    ))
+                    if not acquired:
+                        all_slots_locked = False
+                        break
+                if all_slots_locked:
+                    try:
+                        _recover_closed_dry_trade_outbox(owner=recovery_owner)
+                    except Exception as exc:
+                        print(f"Dry-run close recovery warning for {_active_user()}: {exc}")
     for slot in SLOTS:
         state_path = _slot_file(slot, dry_run=True)
         state = _load_json(state_path, {})
@@ -13242,10 +13442,20 @@ def _dry_run_protection_cycle(
             except (TypeError, ValueError):
                 pass
 
-        with account_file_lock(
-            _mode_data_dir(True), f"close-{slot}",
-            f"dry-protection:{os.getpid()}", stale_after_sec=30, wait_sec=0,
-        ) as acquired:
+        close_owner = f"dry-protection:{slot}:{os.getpid()}:{time.time_ns()}"
+        with ExitStack() as protection_locks:
+            # Only a real close changes account exposure.  Taking the account
+            # entry mutex first serializes it with a score-zone replacement.
+            if trigger:
+                exposure_lock = protection_locks.enter_context(account_entry_lock(
+                    _user_dir(), close_owner,
+                ))
+                if not exposure_lock:
+                    continue
+            acquired = protection_locks.enter_context(account_file_lock(
+                _mode_data_dir(True), f"close-{slot}", close_owner,
+                stale_after_sec=30, wait_sec=0,
+            ))
             if not acquired:
                 continue
             latest = _load_json(state_path, {})

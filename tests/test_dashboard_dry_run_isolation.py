@@ -634,6 +634,112 @@ def test_dry_protection_tp_sl_tsl_close_locally_and_append_once(
     assert closed["telegram_close_alert_event_id"]
 
 
+def test_closed_dry_trade_is_journaled_and_recovered_before_slot_reuse(
+        isolated_dashboard, monkeypatch):
+    """A failed history append must not let a subsequent entry erase a close."""
+    account = isolated_dashboard
+    state_path = account / "dry_run" / "trend_state.json"
+    _write(state_path, _dry_state("trend"))
+    monkeypatch.setattr(
+        dashboard, "_dry_run_mark_and_pnl",
+        lambda record: (125.0, 12.0, 12.0, 0.0),
+    )
+    original_append = dashboard._append_trade_history
+    monkeypatch.setattr(dashboard, "_append_trade_history", lambda *args, **kwargs: False)
+
+    with dashboard.app.test_request_context("/api/dry-run/status"):
+        with dashboard.account_entry_lock(account, "test-durable-close") as entry_lock:
+            assert entry_lock
+            with dashboard.account_file_lock(
+                    account / "dry_run", "close-trend", "test-durable-close") as close_lock:
+                assert close_lock
+                closed = dashboard._close_dry_simulation_locked(
+                    "trend", _dry_state("trend"), trigger="take_profit_simulated",
+                )
+
+        assert closed["status"] == "CLOSED"
+        assert closed["history_pending"] is True
+        outbox_path = account / "dry_run" / dashboard.DRY_CLOSED_TRADE_OUTBOX_FILE
+        journal = json.loads(outbox_path.read_text(encoding="utf-8"))
+        assert list(journal["records"]) == ["sim-trend-test"]
+        assert not (account / "dry_run" / "trade_history.json").exists()
+
+        monkeypatch.setattr(dashboard, "_append_trade_history", original_append)
+        with dashboard.account_entry_lock(account, "test-durable-recovery") as entry_lock:
+            assert entry_lock
+            with dashboard.account_file_lock(
+                    account / "dry_run", "close-trend", "test-durable-recovery") as close_lock:
+                assert close_lock
+                assert dashboard._recover_closed_dry_trade_outbox(
+                    owner="test-durable-recovery") is True
+
+    recovered = json.loads(state_path.read_text(encoding="utf-8"))
+    history = json.loads(
+        (account / "dry_run" / "trade_history.json").read_text(encoding="utf-8"))
+    journal = json.loads(outbox_path.read_text(encoding="utf-8"))
+    assert recovered["status"] == "CLOSED"
+    assert recovered["history_pending"] is False
+    assert recovered["close_audit_event_id"] == "dry-run-close:sim-trend-test"
+    assert len(history) == 1
+    assert history[0]["simulation_id"] == "sim-trend-test"
+    assert journal["records"] == {}
+    audit_lines = (account / "strategy_audit.jsonl").read_text(encoding="utf-8")
+    assert '"event":"dry_run_trade_closed"' in audit_lines
+
+
+def test_close_journal_recovers_if_process_dies_before_closed_slot_write(
+        isolated_dashboard, monkeypatch):
+    """The journal restores a close even across the slot-write crash window."""
+    account = isolated_dashboard
+    state_path = account / "dry_run" / "trend_state.json"
+    open_state = _dry_state("trend")
+    _write(state_path, open_state)
+    monkeypatch.setattr(
+        dashboard, "_dry_run_mark_and_pnl",
+        lambda record: (125.0, 12.0, 12.0, 0.0),
+    )
+    original_write = dashboard._atomic_write_json
+
+    def crash_before_closed_slot(path, value):
+        if (Path(path) == state_path
+                and isinstance(value, dict)
+                and value.get("status") == "CLOSED"):
+            raise OSError("simulated process crash before slot commit")
+        return original_write(path, value)
+
+    monkeypatch.setattr(dashboard, "_atomic_write_json", crash_before_closed_slot)
+    with dashboard.app.test_request_context("/api/dry-run/status"):
+        with dashboard.account_entry_lock(account, "test-slot-crash") as entry_lock:
+            assert entry_lock
+            with dashboard.account_file_lock(
+                    account / "dry_run", "close-trend", "test-slot-crash") as close_lock:
+                assert close_lock
+                with pytest.raises(OSError, match="slot commit"):
+                    dashboard._close_dry_simulation_locked(
+                        "trend", open_state, trigger="take_profit_simulated",
+                    )
+
+        journal_path = account / "dry_run" / dashboard.DRY_CLOSED_TRADE_OUTBOX_FILE
+        assert json.loads(journal_path.read_text(encoding="utf-8"))["records"]
+        assert json.loads(state_path.read_text(encoding="utf-8"))["status"] == "OPEN"
+
+        monkeypatch.setattr(dashboard, "_atomic_write_json", original_write)
+        with dashboard.account_entry_lock(account, "test-slot-crash-recovery") as entry_lock:
+            assert entry_lock
+            with dashboard.account_file_lock(
+                    account / "dry_run", "close-trend", "test-slot-crash-recovery") as close_lock:
+                assert close_lock
+                assert dashboard._recover_closed_dry_trade_outbox(
+                    owner="test-slot-crash-recovery") is True
+
+    recovered = json.loads(state_path.read_text(encoding="utf-8"))
+    history = json.loads(
+        (account / "dry_run" / "trade_history.json").read_text(encoding="utf-8"))
+    assert recovered["status"] == "CLOSED"
+    assert recovered["history_pending"] is False
+    assert len(history) == 1
+
+
 def test_dry_protection_honors_each_positions_poll_interval_and_reports_health(
         isolated_dashboard, monkeypatch):
     account = isolated_dashboard

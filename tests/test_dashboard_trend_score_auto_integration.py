@@ -686,6 +686,46 @@ def test_score_cycle_opens_once_and_never_reuses_same_bar_after_protection_exit(
         mock.assert_not_called()
 
 
+def test_score_cycle_blocks_replacement_while_closed_history_is_pending(
+        score_cycle, monkeypatch):
+    """A failed close-history write must keep the controller flat and blocked."""
+    state_path = score_cycle["dry"] / "trend_state.json"
+    assert dashboard._maybe_auto_trend_score_cycle() is True
+    opened = json.loads(state_path.read_text(encoding="utf-8"))
+
+    original_append = dashboard._append_trade_history
+    monkeypatch.setattr(dashboard, "_append_trade_history", lambda *args, **kwargs: False)
+    monkeypatch.setattr(
+        dashboard, "_dry_run_mark_and_pnl",
+        lambda state: (230.0, 9.98, 10.0, 0.01),
+    )
+    with dashboard.account_entry_lock(
+            score_cycle["account"], "test-pending-history-close") as entry_lock:
+        assert entry_lock
+        with dashboard.account_file_lock(
+                score_cycle["dry"], "close-trend", "test-pending-history-close") as close_lock:
+            assert close_lock
+            closed = dashboard._close_dry_simulation_locked(
+                "trend", opened, trigger="take_profit_simulated",
+            )
+    assert closed["history_pending"] is True
+
+    score_cycle["holder"]["signal"] = _score_signal(
+        score_cycle["mode"], score=-60,
+        zone=dashboard.TREND_SCORE_PE_ZONE, suffix="10:05:00Z",
+    )
+    assert dashboard._maybe_auto_trend_score_cycle() is False
+    still_closed = json.loads(state_path.read_text(encoding="utf-8"))
+    assert still_closed["status"] == "CLOSED"
+    assert still_closed["simulation_id"] == opened["simulation_id"]
+    assert still_closed["history_pending"] is True
+    assert "awaiting durable history" in (
+        dashboard._trend_score_auto_health["alice"]["last_error"]
+    )
+
+    monkeypatch.setattr(dashboard, "_append_trade_history", original_append)
+
+
 def test_score_cycle_blocks_same_zone_after_protection_until_manual_reset(
         score_cycle, monkeypatch):
     """A protection exit must not turn a continuing CE zone into re-entries."""
