@@ -55,7 +55,7 @@ from ..features.pipeline import compute_timeframe_features
 from ..market_data.messages import Candle
 from ..market_data.normalizer import resolution_seconds
 from ..signals.producer import TRIGGER
-from ..signals.regime import RegimeClassifier
+from ..signals.regime import CALM_ADX_MAX, RegimeClassifier
 from ..signals.score import V1_WEIGHTS, compute_score
 from ..signals.zones import UNSAFE_REGIMES, ZonePolicy
 
@@ -87,9 +87,13 @@ class Observation:
     # that includes the regime veto can be replayed faithfully rather than
     # approximated. None means "not reconstructed".
     regime: str | None = None
-    # ScoreResult.max_abs_component, on the display scale (0..100) so it is
-    # directly comparable with ZonePolicy.sideways_max_component_abs.
+    # ScoreResult.max_abs_component, on the display scale (0..100). Retained
+    # for research: the live gate no longer uses a component ceiling.
     max_abs_component: float | None = None
+    # 5-minute ADX. This is the production calm test for SHORT_MOVE
+    # (`zones.decide` requires it below `regime.CALM_ADX_MAX`), so the gate
+    # profile replays it. None means the indicator was not yet defined.
+    adx: float | None = None
 
 
 # ── statistics (stdlib only; no scipy dependency for a research script) ──
@@ -261,7 +265,10 @@ def collect_observations(
             score=float(result.trend_score), forward_returns=forward,
             forward_max_excursion=excursion,
             regime=decision.regime.value,
-            max_abs_component=result.max_abs_component))
+            max_abs_component=result.max_abs_component,
+            # The 5m ADX is the live SHORT_MOVE calm test (zones.decide), so
+            # the gate profile has to replay it rather than approximate it.
+            adx=features[ROLES[3]].get("adx")))
     return observations
 
 
@@ -400,7 +407,8 @@ def sideways_gate_profile(
     horizon_minutes: int,
     *,
     policy: ZonePolicy | None = None,
-    confirmation_bars: int = 6,
+    calm_adx_max: float | None = CALM_ADX_MAX,
+    confirmation_bars: int = 0,
     bar_minutes: int = 5,
     component_ceilings: Sequence[float] = (),
 ) -> list[GateProfile]:
@@ -442,10 +450,26 @@ def sideways_gate_profile(
         ("all scored bars", lambda obs, flag: True),
         (f"|score| <= {active.sideways_max_abs:g}",
          lambda obs, flag: abs(obs.score) <= active.sideways_max_abs),
-        (f"+ {confirmation_bars * bar_minutes}m confirmation",
-         lambda obs, flag: flag),
-        ("+ regime safe", lambda obs, flag: obs.regime not in UNSAFE_REGIMES),
     ]
+    # The live calm test. `zones.decide` refuses SHORT_MOVE unless the 5m ADX
+    # is below CALM_ADX_MAX, so it belongs in the cumulative profile; a bar
+    # whose ADX was never computed cannot have passed it.
+    if calm_adx_max is not None:
+        stages.append((
+            f"+ 5m ADX < {calm_adx_max:g}",
+            lambda obs, flag: obs.adx is not None and obs.adx < calm_adx_max,
+        ))
+    # Superseded 2026-07-29: the engine replaced the N-bar confirmation window
+    # with the ADX test above. Kept as an opt-in research stage (0 = off) so
+    # the retired idea can still be measured, never as a default that would
+    # misreport the live gate.
+    if confirmation_bars > 0:
+        stages.append((
+            f"+ {confirmation_bars * bar_minutes}m confirmation (retired)",
+            lambda obs, flag: flag,
+        ))
+    stages.append(
+        ("+ regime safe", lambda obs, flag: obs.regime not in UNSAFE_REGIMES))
     # Descending, so each successive ceiling row is strictly tighter than the
     # one above it and the cumulative stacking reads as "and now tighter still"
     # regardless of the order the caller passed them in.

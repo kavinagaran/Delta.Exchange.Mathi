@@ -348,11 +348,15 @@ def test_observations_carry_the_regime_and_the_widest_component():
 
 
 def _obs(minute: int, score: float, *, excursion: float,
-         regime: str = "RANGE", widest: float = 5.0) -> Observation:
+         regime: str = "RANGE", widest: float = 5.0,
+         adx: float | None = 20.0) -> Observation:
+    # adx defaults to a calm reading on purpose: leaving it None would make
+    # the live ADX stage reject every bar, and every stage below it would then
+    # be asserted against an empty set -- passing vacuously.
     return Observation(
         at=START + timedelta(minutes=minute), components={}, score=score,
         forward_returns={60: 0.0}, forward_max_excursion={60: excursion},
-        regime=regime, max_abs_component=widest)
+        regime=regime, max_abs_component=widest, adx=adx)
 
 
 def test_confirmation_needs_consecutive_bars_and_a_gap_resets_it():
@@ -427,3 +431,47 @@ def test_quantile_interpolates_between_neighbours():
     assert _quantile([0.0, 10.0, 20.0], 0.9) == pytest.approx(18.0)
     assert _quantile([], 0.5) == 0.0
     assert _quantile([4.0], 0.9) == 4.0
+
+
+# ── the live calm test (ADX), which replaced the confirmation window ────
+
+def test_gate_profile_applies_the_live_adx_calm_test():
+    """zones.decide refuses SHORT_MOVE unless the 5m ADX is calm, so the
+    profile must replay that rather than a retired approximation."""
+    calm = [_obs(5 * i, 0.0, excursion=0.001, adx=15.0) for i in range(10)]
+    trending = [_obs(5 * (10 + i), 0.0, excursion=0.02, adx=45.0)
+                for i in range(10)]
+
+    profiles = sideways_gate_profile(calm + trending, 60)
+    adx_stage = next(p for p in profiles if "ADX" in p.label)
+    assert adx_stage.n == 10                    # only the calm half survives
+    assert adx_stage.mean_excursion == pytest.approx(0.001)
+
+
+def test_bars_without_an_adx_reading_cannot_pass_the_calm_test():
+    """A test that was never computed was never passed."""
+    unknown = [_obs(5 * i, 0.0, excursion=0.001, adx=None) for i in range(6)]
+    profiles = sideways_gate_profile(unknown, 60)
+    assert next(p for p in profiles if "ADX" in p.label).n == 0
+
+
+def test_calm_adx_threshold_is_configurable_and_can_be_disabled():
+    bars = [_obs(5 * i, 0.0, excursion=0.001, adx=25.0) for i in range(6)]
+
+    # Tighter than the readings: nothing survives.
+    strict = sideways_gate_profile(bars, 60, calm_adx_max=20.0)
+    assert next(p for p in strict if "ADX" in p.label).n == 0
+
+    # Disabled entirely: the stage is absent, not silently passing.
+    off = sideways_gate_profile(bars, 60, calm_adx_max=None)
+    assert not any("ADX" in p.label for p in off)
+
+
+def test_retired_confirmation_stage_is_off_by_default():
+    """It is opt-in now: defaulting it on would misreport the live gate."""
+    bars = [_obs(5 * i, 0.0, excursion=0.001) for i in range(8)]
+    assert not any("confirmation" in p.label
+                   for p in sideways_gate_profile(bars, 60))
+    opted_in = sideways_gate_profile(bars, 60, confirmation_bars=6)
+    stage = next(p for p in opted_in if "confirmation" in p.label)
+    assert "retired" in stage.label and stage.n > 0
