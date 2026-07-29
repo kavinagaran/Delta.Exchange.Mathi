@@ -236,10 +236,82 @@ def test_order_flow_weight_is_zero_and_unavailable_in_v1():
     assert order_flow.weight == 0.0
     assert not order_flow.available
     assert sum(c.weight for c in result.components) == pytest.approx(1.0)
-    assert V1_WEIGHTS["higher_timeframe_trend"] == 0.30
     assert {"rsi_momentum", "adx_trend_strength"} <= {
         component.name for component in result.components
     }
+
+
+def test_weights_are_normalised_and_zero_weights_still_reported():
+    """The invariants, not the literals.
+
+    Pinning a specific weight made this test a tripwire for every retune
+    rather than a guard on anything: it asserted higher_timeframe_trend was
+    0.30 and had to be edited the moment the 2026-07-29 reweight landed. What
+    actually matters is that the vector normalises, that no weight is
+    negative (a negative weight silently inverts a component), and that a
+    component parked at 0.00 is still published so the dashboard and the
+    research harness can see it.
+    """
+    assert sum(V1_WEIGHTS.values()) == pytest.approx(1.0)
+    assert all(weight >= 0.0 for weight in V1_WEIGHTS.values())
+
+    result = compute_score(**_full_bull_inputs())
+    reported = {component.name for component in result.components}
+    assert reported == set(V1_WEIGHTS)
+
+    # rsi_momentum was retired to 0.00 for redundancy (Spearman +0.778 with
+    # lower_timeframe_momentum) but is still computed and displayed.
+    assert V1_WEIGHTS["rsi_momentum"] == 0.0
+    rsi = next(c for c in result.components if c.name == "rsi_momentum")
+    assert rsi.available and rsi.score is not None
+
+
+def test_zero_weight_contributes_nothing_to_the_sum():
+    """Weight 0.00 must mean absent from the weighted sum, not merely small.
+
+    Checked by comparing against a weight vector that omits the key entirely:
+    comparing V1_WEIGHTS with a copy of itself would pass whatever the weight
+    was.
+    """
+    without_key = {name: weight for name, weight in V1_WEIGHTS.items()
+                   if weight > 0}
+    assert "rsi_momentum" not in without_key
+
+    parked = compute_score(**_full_bull_inputs())
+    omitted = compute_score(**_full_bull_inputs(), weights=without_key)
+    assert parked.trend_score == pytest.approx(omitted.trend_score)
+
+
+def test_retiring_rsi_does_not_remove_rsi_from_the_score():
+    """RSI still signs adx_trend_strength, so its weight is not its influence.
+
+    This surprised the 2026-07-29 reweight and is pinned so it cannot surprise
+    the next one. `_adx_trend_strength` takes `rsi_score` as its sign source --
+    ADX supplies magnitude, RSI supplies direction -- so dropping
+    `rsi_momentum` to 0.00 removes RSI's *direct* term while leaving it in
+    control of a component that now carries 0.20.
+
+    It is also the mechanical reason those two components measure Spearman
+    +0.672 in docs/signal-study.md: the correlation is built in, not observed.
+    """
+    baseline = compute_score(**_full_bull_inputs())
+
+    flipped = _full_bull_inputs()
+    for role in ("structural", "primary", "setup", "trigger"):
+        features = dict(flipped[role].features)
+        features["rsi"] = 12.0          # 70 -> 12: bullish to deeply oversold
+        flipped[role] = _tf(features)
+    moved = compute_score(**flipped)
+
+    assert moved.trend_score is not None and baseline.trend_score is not None
+    assert moved.trend_score < baseline.trend_score
+
+    # The whole move is the ADX sign flip: strength is (45-30)/20 = 0.75, and
+    # reversing a 0.75 reading on a 0.20-weight component shifts the
+    # normalised sum by -2 * 0.75 * 0.20 = -0.30, before the tanh.
+    before = math.atanh(baseline.trend_score / 100.0) / 1.5
+    after = math.atanh(moved.trend_score / 100.0) / 1.5
+    assert after - before == pytest.approx(-0.30, abs=0.005)
 
 
 def test_insufficient_inputs_yield_no_score_not_neutral():

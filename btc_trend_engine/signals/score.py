@@ -19,18 +19,61 @@ from .regime import CALM_ADX_MAX
 
 # ADR 0004: order_flow held at 0 until recorded history can validate it.
 # ADX is strength only; its signed contribution is set by the independently
-# calculated RSI/structure direction.  RSI is intentionally a separate
-# component rather than being buried inside lower-timeframe momentum, so the
-# dashboard can show both pieces of evidence.
+# calculated RSI/structure direction.
+#
+# Reweighted 2026-07-29 from the measured information coefficients and
+# correlation matrix in docs/signal-study.md (115,188 candles, 13 months).
+# Read that document before changing these: every component except
+# derivatives_context has a NEGATIVE IC at every horizon this strategy
+# trades, so these weights reduce harm, they do not create edge.  The
+# composite improves from -0.040 to -0.032; it does not become positive, and
+# no weighting of these inputs can make it positive.
+#
+#   higher_timeframe_trend  0.30 -> 0.24  trimmed: significant at only 1 of 4
+#                                         horizons, but 4H/1H features are
+#                                         forecasting a 0.6-3.3h holding period
+#   market_structure        0.18 -> 0.12  cut: significantly negative at 3 of
+#                                         4 horizons (|t| = 2.5 at 120m)
+#   lower_timeframe_momentum 0.13 -> 0.14 held: the most negative single
+#                                         component; must NOT absorb rsi's
+#                                         freed weight
+#   rsi_momentum            0.14 -> 0.00  removed: Spearman +0.778 against
+#                                         lower_timeframe_momentum -- the same
+#                                         input measured twice.  This is the
+#                                         one change justified structurally
+#                                         (redundancy) rather than by fitting
+#                                         an IC estimate, which is what makes
+#                                         it the safest of them.
+#   adx_trend_strength      0.10 -> 0.20  raised: its IC is indistinguishable
+#                                         from zero (|t| = 1.4).  Weights are
+#                                         normalised, so weight on a zero-IC
+#                                         component is weight NOT on a
+#                                         negative one.  Dilution, not a claim
+#                                         that ADX predicts anything.
+#   breakout_quality        0.08 -> 0.15  raised: least negative of the
+#                                         significant price components at 120m
+#   derivatives_context     0.07 -> 0.15  raised and CAPPED.  Only positive IC
+#                                         and the only orthogonal input
+#                                         (rho <= +0.267 against every price
+#                                         component).  An unconstrained
+#                                         optimiser wants 96.5% here; it is a
+#                                         lead at |t| = 0.9, not a result, and
+#                                         letting an unproven estimate size
+#                                         itself is how the previous weights
+#                                         went wrong.
+#
+# Note that weights are normalised to 1.0, so they can only change the mix,
+# never the amount of conviction.  To act less on a negative signal the levers
+# are the tanh gain below, ZonePolicy's entry threshold, and position size.
 V1_WEIGHTS: dict[str, float] = {
-    "higher_timeframe_trend": 0.30,
-    "market_structure": 0.18,
-    "lower_timeframe_momentum": 0.13,
-    "rsi_momentum": 0.14,
-    "adx_trend_strength": 0.10,
+    "higher_timeframe_trend": 0.24,
+    "market_structure": 0.12,
+    "lower_timeframe_momentum": 0.14,
+    "rsi_momentum": 0.00,
+    "adx_trend_strength": 0.20,
     "order_flow": 0.00,
-    "breakout_quality": 0.08,
-    "derivatives_context": 0.07,
+    "breakout_quality": 0.15,
+    "derivatives_context": 0.15,
 }
 
 
