@@ -216,7 +216,6 @@ def test_score_auto_mode_is_persisted_only_and_accepts_explicit_live(
         ({"MORNING_ENABLED": "true"}, "Morning"),
         ({"EVENING_ENABLED": "true"}, "Evening"),
         ({"MAX_ORDER_LOTS": "999"}, "1,000-lot"),
-        ({"SL_TARGET_PNL_TREND": "0"}, "positive Trend TP"),
     ],
 )
 def test_score_auto_config_rejects_live_or_competing_automation(
@@ -564,8 +563,17 @@ def test_score_open_state_is_ui_ready_protected_and_exactly_1000_lots(
     assert state["trend_score_zone"] == dashboard.TREND_SCORE_CE_ZONE
     assert state["direction_score_at_entry"] == 63.5
     assert state["simulation_id"].startswith("sim-trend-score-")
-    assert state["protection_config"] == policy
-    assert state["risk_at_entry_usd"] == policy["sl_target_pnl"]
+    protection = state["protection_config"]
+    # 220 premium × 0.001 contract value × 1,000 lots = $220 entry premium.
+    # The entry snapshot must use the fixed percentage rule, not the account's
+    # legacy dollar placeholders.
+    assert protection["entry_premium_usd"] == 220.0
+    assert protection["tp_target_pnl"] == 220.0
+    assert protection["sl_target_pnl"] == 110.0
+    assert protection["tsl_arm_pnl"] == protection["tsl_trail_pnl"] == 55.0
+    assert protection["protection_source"] == "automatic_filled_premium"
+    assert protection["manual_override_allowed"] is True
+    assert state["risk_at_entry_usd"] == 110.0
     assert state["entry_fees_usd"] == 10.0
     assert state["execution_snapshot"]["order_submitted"] is False
     assert state["execution_snapshot"]["exchange_api_called"] is False

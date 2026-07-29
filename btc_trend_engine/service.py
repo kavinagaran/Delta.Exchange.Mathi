@@ -250,7 +250,10 @@ class EngineService:
         if not isinstance(start, str) or not start:
             return
         try:
-            score = float(view["live_score"])
+            # Chart precision is deliberately separate from the rounded dial
+            # score.  Retain a compatibility fallback for test fixtures and
+            # older producer responses during a rolling deployment.
+            score = float(view.get("chart_score", view["live_score"]))
         except (KeyError, TypeError, ValueError):
             return
         if not math.isfinite(score):
@@ -275,6 +278,10 @@ class EngineService:
                 "low": score,
                 "close": score,
                 "samples": 1,
+                # A service restart can begin recording part way through a
+                # market candle.  Keep that fact with the display bar so the
+                # renderer does not present one late sample as a full OHLC.
+                "partial": self._preview_score_started_late(start, as_of),
                 "last_sample_utc": as_of,
                 "data_quality": view.get("data_quality"),
                 "forming": True,
@@ -287,6 +294,21 @@ class EngineService:
         current["samples"] = int(current.get("samples") or 0) + 1
         current["last_sample_utc"] = as_of
         current["data_quality"] = view.get("data_quality")
+
+    @staticmethod
+    def _preview_score_started_late(start: str, as_of: str) -> bool:
+        """Whether preview capture began after the first 15s of its bar.
+
+        This flag is visual metadata only.  It neither affects the score nor
+        reaches a committed snapshot or an order consumer.
+        """
+        try:
+            bar_start = datetime.fromisoformat(start.replace("Z", "+00:00"))
+            sample_at = datetime.fromisoformat(as_of.replace("Z", "+00:00"))
+        except ValueError:
+            return True
+        return sample_at.astimezone(timezone.utc) > (
+            bar_start.astimezone(timezone.utc) + timedelta(seconds=15))
 
     @staticmethod
     def _preview_candle_end(start: str) -> str:

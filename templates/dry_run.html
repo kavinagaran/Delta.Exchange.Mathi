@@ -215,6 +215,10 @@ function dryProtectionHtml(state, displaySlot, controlSlot = displaySlot) {
     ? `TSL floor ${f$(Number(p.tsl_floor_usd))}` : 'TSL not armed';
   const error = p.last_error
     ? `<div class="dry-protection-error">${esc(p.last_error)}</div>` : '';
+  const automaticallySized = p.protection_source === 'automatic_filled_premium';
+  const policyCopy = automaticallySized
+    ? 'Automatic from the filled premium: TP +100%, SL −50%, TSL arm +25% / trail 25%. Edit and Save to override this open paper trade.'
+    : 'Paper-only monitor · always active while this simulation is open. Zero disables SL or TSL.';
   return `<section class="dry-protection-box" aria-label="Simulated TP, SL and TSL monitor">
     <div class="dry-protection-hd">
       <div>
@@ -253,7 +257,7 @@ function dryProtectionHtml(state, displaySlot, controlSlot = displaySlot) {
               onclick="saveDryProtection('${displaySlot}', '${controlSlot}')">Save</button>
     </div>
     ${error}
-    <p>Paper-only monitor · always active while this simulation is open. Zero disables SL or TSL.</p>
+    <p>${esc(policyCopy)}</p>
   </section>`;
 }
 

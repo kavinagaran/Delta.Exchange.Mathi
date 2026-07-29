@@ -12,6 +12,7 @@ from trend_score_live_execution import (
     LiveScoreExecutionError,
     bounded_ioc_payload,
     execute_or_recover_entry,
+    premium_percent_protection_policy,
     score_close_client_id,
     score_entry_client_id,
     switch_entry_gate,
@@ -155,6 +156,7 @@ def _run(
     load_state=None,
     final_preflight=None,
     audit=None,
+    protection_config_override=_UNSET,
     terminal_timeout_sec: float = 0,
 ):
     transition = transition_override
@@ -242,7 +244,10 @@ def _run(
         prepared=prepared,
         transition_id=transition,
         fresh_quote=fresh_quote,
-        protection_config=_policy(),
+        protection_config=(
+            _policy() if protection_config_override is _UNSET
+            else protection_config_override
+        ),
         risk_snapshot={"proposed_risk_usd": 250, "allowed": True},
         existing_state=existing_state,
         persist_state=persist_state,
@@ -277,6 +282,29 @@ def test_transition_client_ids_are_stable_scoped_and_delta_sized():
         "Alice Smith", "transition-1", sequence=1
     )
     assert len(close_zero) <= 32
+
+
+def test_filled_premium_policy_uses_exact_percentages_and_actual_fill_basis():
+    requested = premium_percent_protection_policy(
+        300.0, 0.001, LIVE_SCORE_LOTS, poll_secs=15,
+    )
+    assert requested["entry_premium_usd"] == 300.0
+    assert requested["tp_target_pnl"] == 300.0
+    assert requested["sl_target_pnl"] == 150.0
+    assert requested["tsl_arm_pnl"] == requested["tsl_trail_pnl"] == 75.0
+    assert requested["poll_secs"] == 15
+
+    # The selected quote was $300, but Delta filled at $220. The durable OPEN
+    # state must be recomputed from the exchange basis rather than retaining
+    # a stale selected-price target.
+    result, _, _, _ = _run(protection_config_override=requested)
+    assert result["status"] == "OPEN"
+    policy = result["state"]["protection_config"]
+    assert policy["entry_premium_usd"] == 220.0
+    assert policy["tp_target_pnl"] == 220.0
+    assert policy["sl_target_pnl"] == 110.0
+    assert policy["tsl_arm_pnl"] == policy["tsl_trail_pnl"] == 55.0
+    assert policy["protection_source"] == "automatic_filled_premium"
 
 
 @pytest.mark.parametrize(

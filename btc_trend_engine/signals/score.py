@@ -44,6 +44,11 @@ class ComponentScore:
 @dataclass(frozen=True, slots=True)
 class ScoreResult:
     trend_score: float | None      # (-100, 100); None when insufficient inputs
+    # The decision score is intentionally rounded to one decimal before it is
+    # committed.  The live preview chart, however, needs the unrounded value
+    # so that genuine movement inside a five-minute candle does not collapse
+    # into a row of artificial dojis.
+    raw_trend_score: float | None
     components: list[ComponentScore]
     available_weight: float
 
@@ -246,12 +251,13 @@ def compute_score(
             available=available))
 
     if available_weight < 0.5:
-        return ScoreResult(trend_score=None, components=components,
+        return ScoreResult(trend_score=None, raw_trend_score=None, components=components,
                            available_weight=available_weight)
     # Renormalise over the available weight so missing optional context does
     # not systematically shrink the score toward zero.
     normalised = weighted_sum / available_weight
-    trend_score = 100.0 * math.tanh(1.5 * normalised)
-    return ScoreResult(trend_score=round(trend_score, 1),
+    raw_trend_score = 100.0 * math.tanh(1.5 * normalised)
+    return ScoreResult(trend_score=round(raw_trend_score, 1),
+                       raw_trend_score=raw_trend_score,
                        components=components,
                        available_weight=round(available_weight, 4))

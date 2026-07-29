@@ -23,6 +23,7 @@ from btc_trend_engine.config import load_config
 from btc_trend_engine.market_data.messages import Candle
 from btc_trend_engine.service import EngineService
 from btc_trend_engine.signals.producer import SnapshotProducer
+from btc_trend_engine.signals.score import ScoreResult
 
 T0 = datetime(2026, 7, 26, 6, 0, tzinfo=timezone.utc)
 AUTH = {"X-Engine-Token": "test-token"}
@@ -101,6 +102,23 @@ def test_the_live_score_moves_with_the_forming_candle():
                                  forming=_forming(66000.0), data_quality="OK")
     assert low["live_score"] != high["live_score"]
     assert high["live_score"] > low["live_score"]
+
+
+def test_live_view_keeps_extra_precision_for_the_display_only_chart(monkeypatch):
+    """A rounded dial must not turn real intrabar movement into fake dojis."""
+    monkeypatch.setattr(
+        "btc_trend_engine.signals.producer.compute_score",
+        lambda **_kwargs: ScoreResult(
+            trend_score=12.3, raw_trend_score=12.3456,
+            components=[], available_weight=1.0),
+    )
+    producer = SnapshotProducer("BTCUSD")
+    view = producer.produce_live(
+        now=T0, candles=_all_timeframes(), forming=_forming(63000.0),
+        data_quality="OK")
+    assert view is not None
+    assert view["live_score"] == 12.3
+    assert view["chart_score"] == 12.3456
 
 
 def test_the_committed_score_does_NOT_move_with_the_forming_candle():
@@ -208,6 +226,7 @@ def test_preview_score_history_builds_5m_display_only_ohlc(service):
         "low": 10.0,
         "close": 18.0,
         "samples": 2,
+        "partial": False,
         "last_sample_utc": "2026-07-26T06:00:20Z",
         "data_quality": "OK",
         "forming": False,
@@ -217,6 +236,20 @@ def test_preview_score_history_builds_5m_display_only_ohlc(service):
     assert forming["forming"] is True
     assert "signal_id" not in completed
     assert "entry_allowed" not in completed
+
+
+def test_preview_score_history_uses_chart_precision_and_marks_late_capture(service):
+    view = {
+        "forming_candle_start": "2026-07-26T06:00:00Z",
+        "as_of": "2026-07-26T06:01:00Z",
+        "live_score": 10.0,
+        "chart_score": 10.0473,
+        "data_quality": "OK",
+    }
+    service._record_preview_score(view)
+    current = service.live_score_history()["candles"][-1]
+    assert current["open"] == current["close"] == 10.0473
+    assert current["partial"] is True
 
 
 def test_live_history_endpoint_requires_token_and_is_display_only(config, service):

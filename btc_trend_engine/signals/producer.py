@@ -171,7 +171,12 @@ class SnapshotProducer:
             setup=features[SETUP], trigger=features[TRIGGER],
             derivatives={},
         )
+        # ``live_score`` remains the one-decimal value used by the dial.  The
+        # separate chart value keeps enough precision for a faithful OHLC
+        # preview without changing the committed decision or any trade path.
         live_score = score.trend_score if score.trend_score is not None else 0.0
+        chart_score = (score.raw_trend_score
+                       if score.raw_trend_score is not None else live_score)
         from . import zones
 
         committed = self.latest() or {}
@@ -180,6 +185,7 @@ class SnapshotProducer:
             "provisional": True,
             "as_of": now.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "live_score": round(live_score, 1),
+            "chart_score": round(chart_score, 4),
             "live_zone": zones.zone_for_score(live_score),
             "data_quality": data_quality,
             "forming_candle_start": (

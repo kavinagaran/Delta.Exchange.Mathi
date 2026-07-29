@@ -64,15 +64,14 @@
   <section class="card">
     <div class="card-hd">Position protection</div>
     <div class="card-bd">
-      <p class="config-copy">Applied to every score-zone position. Updating these values also refreshes the protection policy for an open bot-owned trade.</p>
+      <p class="config-copy"><strong>Automatic on every filled entry:</strong> TP captures 100% of the entry premium, SL risks 50%, and TSL arms after a 25% gain and trails by 25%. The actual filled premium and lots set the dollar values for that specific trade.</p>
       <div class="form-grid">
-        <label class="fld"><span>Take profit $</span><input id="c-TP_TARGET_PNL_TREND" type="number" min="1" step="1"></label>
-        <label class="fld"><span>Stop loss $</span><input id="c-SL_TARGET_PNL_TREND" type="number" min="1" step="1"></label>
-        <label class="fld"><span>Trail starts at P&amp;L $</span><input id="c-TSL_ARM_PNL_TREND" type="number" min="1" step="1"></label>
-        <label class="fld"><span>Trailing distance $</span><input id="c-TSL_TRAIL_PNL_TREND" type="number" min="1" step="1"></label>
-        <label class="fld"><span>Minimum locked P&amp;L $</span><input id="c-TSL_LOCK_MIN_PNL_TREND" type="number" min="0" step="1"></label>
-        <label class="fld"><span>Protection check seconds</span><input id="c-TP_POLL_SECS_TREND" type="number" min="10" max="300" step="1"></label>
+        <label class="fld"><span>Take profit</span><div class="config-static-value"><strong>+100% of filled premium</strong><small>Long CE/PE target: 2× entry premium</small></div></label>
+        <label class="fld"><span>Stop loss</span><div class="config-static-value"><strong>−50% of filled premium</strong><small>Long CE/PE stop: 0.5× entry premium</small></div></label>
+        <label class="fld"><span>Trailing stop</span><div class="config-static-value"><strong>Arm +25% · trail 25%</strong><small>Locks break-even when the trail first arms</small></div></label>
+        <label class="fld"><span>Protection check seconds</span><input id="c-TP_POLL_SECS_TREND" type="number" min="10" max="300" step="1"><em class="fld-hint">Controls monitoring frequency only; it does not change the automatic formula.</em></label>
       </div>
+      <p class="config-copy">To override an open trade later, edit its TP / SL / TSL monitor in Overview (LIVE) or Paper (DRY RUN) and save. A manual override affects only that open position; new entries continue to use the automatic premium rule.</p>
     </div>
   </section>
 
@@ -159,8 +158,7 @@
 <script>
 const KEYS = [
   'DRY_RUN', 'TREND_ENGINE_SCORE_AUTO_MODE', 'MAX_ORDER_LOTS',
-  'TP_TARGET_PNL_TREND', 'SL_TARGET_PNL_TREND', 'TSL_ARM_PNL_TREND',
-  'TSL_TRAIL_PNL_TREND', 'TSL_LOCK_MIN_PNL_TREND', 'TP_POLL_SECS_TREND',
+  'TP_POLL_SECS_TREND',
   'TREND_RISK_BUDGET_USD', 'TREND_DRY_RUN_CAPITAL_USD', 'SHORT_MAX_RISK_USD',
   'MAX_TRADES_PER_DAY_GLOBAL', 'MAX_DAILY_LOSS_USD', 'MAX_OPEN_RISK_USD',
   'MAX_ACCOUNT_PREMIUM_AT_RISK_USD', 'MAX_CONSECUTIVE_LOSSES',

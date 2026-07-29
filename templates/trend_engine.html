@@ -185,6 +185,9 @@
           <span class="is-pe"><i></i>Buy PE ≤ −40</span>
         </div>
       </div>
+      <div class="te-preview-chart-controls" id="te-preview-chart-controls">
+        Drag the bottom time axis to expand or compress the candle view. Drag the left score axis to zoom vertically. Double-click either axis to reset it.
+      </div>
       <div class="te-preview-chart-stage">
         <canvas id="te-preview-score-chart" role="img" aria-label="Five-minute Preview Decision score candlestick chart with colour-coded score zones"></canvas>
         <div class="te-preview-chart-empty" id="te-preview-chart-empty">Collecting Preview Decision score samples. The first five-minute candle is forming.</div>
@@ -511,16 +514,31 @@ function renderPreviewScoreChart(history) {
   const canvas = document.getElementById('te-preview-score-chart');
   const empty = document.getElementById('te-preview-chart-empty');
   const candidates = Array.isArray(history?.candles) ? history.candles : [];
-  const candles = candidates.map(candle => ({
-    ...candle,
-    open: Number(candle?.open),
-    high: Number(candle?.high),
-    low: Number(candle?.low),
-    close: Number(candle?.close),
-  })).filter(candle => (
-    finite(candle.open) && finite(candle.high)
-    && finite(candle.low) && finite(candle.close)
-  ));
+  // Defensive normalisation keeps the display chart valid during a rolling
+  // engine deployment or after an interrupted refresh.  It does not alter
+  // any decision data: this endpoint is strictly display-only.
+  const candlesByStart = new Map();
+  candidates.forEach((raw, index) => {
+    const open = Number(raw?.open);
+    const high = Number(raw?.high);
+    const low = Number(raw?.low);
+    const close = Number(raw?.close);
+    if (![open, high, low, close].every(finite)) return;
+    const start = String(raw?.start_utc || '');
+    const startMillis = Date.parse(start);
+    const candle = {
+      ...raw,
+      open,
+      high: Math.max(open, high, low, close),
+      low: Math.min(open, high, low, close),
+      close,
+      _sortKey: Number.isFinite(startMillis) ? startMillis : index,
+    };
+    // Prefer the most recently supplied version of a still-forming bar.
+    candlesByStart.set(start || `unknown-${index}`, candle);
+  });
+  const candles = [...candlesByStart.values()].sort((left, right) =>
+    left._sortKey - right._sortKey);
 
   if (!history?.available || !candles.length) {
     canvas.hidden = true;
@@ -536,12 +554,137 @@ function renderPreviewScoreChart(history) {
   const latest = candles[candles.length - 1];
   canvas.setAttribute(
     'aria-label',
-    `Five-minute Preview Decision score candles. Latest score ${signedScore(latest.close)}.`,
+    `Five-minute Preview Decision score candles. Latest score ${signedScore(latest.close)}. Drag the bottom axis to change the time scale or the left axis to change the score scale.`,
   );
   drawPreviewScoreChart(canvas, candles);
 }
 
+const previewScoreChartStates = new WeakMap();
+
+function previewScoreChartState(canvas) {
+  let state = previewScoreChartStates.get(canvas);
+  if (!state) {
+    state = {
+      xScale: 1,
+      scoreSpan: 200,
+      candles: [],
+      geometry: null,
+      drag: null,
+      interactionsInstalled: false,
+    };
+    previewScoreChartStates.set(canvas, state);
+  }
+  return state;
+}
+
+function clampPreviewChart(value, minimum, maximum) {
+  return Math.min(maximum, Math.max(minimum, value));
+}
+
+function previewChartPointer(canvas, event) {
+  const rect = canvas.getBoundingClientRect();
+  return {
+    x: event.clientX - rect.left,
+    y: event.clientY - rect.top,
+  };
+}
+
+function previewChartAxisAt(state, point) {
+  const geometry = state.geometry;
+  if (!geometry) return null;
+  const { plot } = geometry;
+  if (point.y >= plot.bottom && point.y <= geometry.height
+      && point.x >= plot.left && point.x <= plot.right) {
+    return 'x';
+  }
+  if (point.x >= 0 && point.x <= plot.left
+      && point.y >= plot.top && point.y <= plot.bottom) {
+    return 'y';
+  }
+  return null;
+}
+
+function redrawPreviewChartFromState(canvas, state) {
+  if (Array.isArray(state.candles) && state.candles.length) {
+    drawPreviewScoreChart(canvas, state.candles);
+  }
+}
+
+function installPreviewScoreChartInteractions(canvas, state) {
+  if (state.interactionsInstalled) return;
+  state.interactionsInstalled = true;
+  canvas.style.touchAction = 'none';
+
+  canvas.addEventListener('pointerdown', event => {
+    const point = previewChartPointer(canvas, event);
+    const axis = previewChartAxisAt(state, point);
+    if (!axis) return;
+    event.preventDefault();
+    state.drag = {
+      axis,
+      pointerId: event.pointerId,
+      startX: point.x,
+      startY: point.y,
+      initialXScale: state.xScale,
+      initialScoreSpan: state.scoreSpan,
+    };
+    canvas.setPointerCapture?.(event.pointerId);
+    canvas.dataset.axisDrag = axis;
+    canvas.style.cursor = axis === 'x' ? 'ew-resize' : 'ns-resize';
+  });
+
+  canvas.addEventListener('pointermove', event => {
+    const point = previewChartPointer(canvas, event);
+    const drag = state.drag;
+    if (!drag || drag.pointerId !== event.pointerId) {
+      const axis = previewChartAxisAt(state, point);
+      canvas.style.cursor = axis === 'x' ? 'ew-resize' : axis === 'y' ? 'ns-resize' : 'default';
+      return;
+    }
+    event.preventDefault();
+    if (drag.axis === 'x') {
+      // Drag right to magnify the time axis and left to show more candles.
+      state.xScale = clampPreviewChart(
+        drag.initialXScale * Math.exp((point.x - drag.startX) / 180),
+        0.35,
+        5,
+      );
+    } else {
+      // Drag upward to magnify scores around zero and down to compress them.
+      state.scoreSpan = clampPreviewChart(
+        drag.initialScoreSpan * Math.exp((point.y - drag.startY) / 190),
+        60,
+        260,
+      );
+    }
+    redrawPreviewChartFromState(canvas, state);
+  });
+
+  const stopDragging = event => {
+    if (!state.drag || state.drag.pointerId !== event.pointerId) return;
+    try { canvas.releasePointerCapture?.(event.pointerId); } catch (_) { /* already released */ }
+    state.drag = null;
+    delete canvas.dataset.axisDrag;
+    const axis = previewChartAxisAt(state, previewChartPointer(canvas, event));
+    canvas.style.cursor = axis === 'x' ? 'ew-resize' : axis === 'y' ? 'ns-resize' : 'default';
+  };
+  canvas.addEventListener('pointerup', stopDragging);
+  canvas.addEventListener('pointercancel', stopDragging);
+
+  canvas.addEventListener('dblclick', event => {
+    const axis = previewChartAxisAt(state, previewChartPointer(canvas, event));
+    if (!axis) return;
+    event.preventDefault();
+    if (axis === 'x') state.xScale = 1;
+    else state.scoreSpan = 200;
+    redrawPreviewChartFromState(canvas, state);
+  });
+}
+
 function drawPreviewScoreChart(canvas, candles) {
+  const state = previewScoreChartState(canvas);
+  state.candles = candles;
+  installPreviewScoreChartInteractions(canvas, state);
   const rect = canvas.getBoundingClientRect();
   const width = Math.max(320, Math.floor(rect.width || canvas.clientWidth || 320));
   const height = Math.max(250, Math.floor(rect.height || canvas.clientHeight || 292));
@@ -556,11 +699,17 @@ function drawPreviewScoreChart(canvas, candles) {
   ctx.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
   ctx.clearRect(0, 0, width, height);
 
-  const plot = { left: 62, top: 22, right: width - 18, bottom: height - 44 };
+  // The right-side zone-label lane is intentionally outside of the candle
+  // plot.  This keeps the latest candles from being drawn behind zone labels.
+  const zoneLabelLane = clampPreviewChart(width * .135, 92, 132);
+  const plot = { left: 62, top: 22, right: width - zoneLabelLane - 12, bottom: height - 44 };
   const plotWidth = Math.max(1, plot.right - plot.left);
   const plotHeight = Math.max(1, plot.bottom - plot.top);
-  const scoreY = value => plot.top + ((100 - Math.max(-100, Math.min(100, value))) / 200) * plotHeight;
+  const scoreMaximum = state.scoreSpan / 2;
+  const scoreMinimum = -scoreMaximum;
+  const scoreY = value => plot.top + ((scoreMaximum - value) / state.scoreSpan) * plotHeight;
   const scoreLabel = value => `${value > 0 ? '+' : ''}${value}`;
+  state.geometry = { width, height, plot };
 
   const backdrop = ctx.createLinearGradient(0, plot.top, 0, plot.bottom);
   backdrop.addColorStop(0, 'rgba(18, 77, 122, .32)');
@@ -578,9 +727,12 @@ function drawPreviewScoreChart(canvas, candles) {
   // the chart into an execution surface.  The boundaries themselves are
   // drawn below as deliberately thin dotted lines.
   const fillScoreBand = (upper, lower, colour) => {
-    const top = scoreY(upper);
+    const clippedUpper = clampPreviewChart(upper, scoreMinimum, scoreMaximum);
+    const clippedLower = clampPreviewChart(lower, scoreMinimum, scoreMaximum);
+    if (clippedUpper <= clippedLower) return;
+    const top = scoreY(clippedUpper);
     ctx.fillStyle = colour;
-    ctx.fillRect(plot.left, top, plotWidth, scoreY(lower) - top);
+    ctx.fillRect(plot.left, top, plotWidth, scoreY(clippedLower) - top);
   };
   fillScoreBand(100, 40, 'rgba(57, 240, 173, .075)');
   fillScoreBand(40, 30, 'rgba(142, 153, 166, .14)');
@@ -588,9 +740,16 @@ function drawPreviewScoreChart(canvas, candles) {
   fillScoreBand(-30, -40, 'rgba(142, 153, 166, .14)');
   fillScoreBand(-40, -100, 'rgba(255, 95, 126, .075)');
 
+  const preferredTick = state.scoreSpan <= 80 ? 20 : state.scoreSpan <= 150 ? 25 : 50;
+  const firstTick = Math.ceil(scoreMinimum / preferredTick) * preferredTick;
+  const scoreTicks = [];
+  for (let value = firstTick; value <= scoreMaximum + .001; value += preferredTick) {
+    scoreTicks.push(Math.round(value * 100) / 100);
+  }
+  if (!scoreTicks.includes(0) && scoreMinimum < 0 && scoreMaximum > 0) scoreTicks.push(0);
   ctx.font = '800 11px Inter, Segoe UI, sans-serif';
   ctx.textBaseline = 'middle';
-  for (const level of [-100, -50, 0, 50, 100]) {
+  for (const level of scoreTicks.sort((a, b) => a - b)) {
     const y = scoreY(level);
     ctx.setLineDash(level === 0 ? [] : [2, 5]);
     ctx.lineWidth = level === 0 ? 1 : .55;
@@ -605,6 +764,7 @@ function drawPreviewScoreChart(canvas, candles) {
   }
 
   for (const zone of PREVIEW_SCORE_ZONE_LEVELS) {
+    if (zone.value < scoreMinimum || zone.value > scoreMaximum) continue;
     const y = scoreY(zone.value);
     ctx.save();
     ctx.setLineDash([1, 6]);
@@ -618,8 +778,8 @@ function drawPreviewScoreChart(canvas, candles) {
     ctx.setLineDash([]);
     ctx.globalAlpha = 1;
     ctx.font = '800 9px Inter, Segoe UI, sans-serif';
-    const labelWidth = ctx.measureText(zone.label).width + 12;
-    const labelX = plot.right - labelWidth - 5;
+    const labelWidth = Math.min(zoneLabelLane - 8, ctx.measureText(zone.label).width + 12);
+    const labelX = plot.right + 6;
     ctx.fillStyle = 'rgba(4, 20, 39, .88)';
     ctx.fillRect(labelX, y - 8, labelWidth, 16);
     ctx.fillStyle = zone.color;
@@ -641,28 +801,47 @@ function drawPreviewScoreChart(canvas, candles) {
   ctx.stroke();
   ctx.restore();
 
-  const slot = plotWidth / candles.length;
+  const baseSlot = plotWidth / Math.min(Math.max(candles.length, 1), 48);
+  const slot = clampPreviewChart(baseSlot * state.xScale, 6, 48);
+  const visibleCount = Math.max(1, Math.min(candles.length, Math.floor(plotWidth / slot)));
+  const visibleCandles = candles.slice(-visibleCount);
+  const visiblePlotWidth = slot * visibleCandles.length;
+  const candleOffset = Math.max(0, plotWidth - visiblePlotWidth);
   const candleWidth = Math.max(3, Math.min(16, slot * .58));
-  candles.forEach((candle, index) => {
-    const x = plot.left + slot * (index + .5);
-    const rising = candle.close >= candle.open;
-    const colour = rising ? '#36eab2' : '#ff5478';
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(plot.left, plot.top, plotWidth, plotHeight);
+  ctx.clip();
+  visibleCandles.forEach((candle, index) => {
+    const x = plot.left + candleOffset + slot * (index + .5);
+    const movement = candle.close - candle.open;
+    const isDoji = Math.abs(movement) < .01;
+    const isPartial = candle.partial === true && !candle.forming;
+    const rising = movement > 0;
+    // A flat score is a neutral doji, not a bullish candle.  Partial bars
+    // come from capture starting after the candle began (for example after a
+    // service restart) and are deliberately subdued rather than misleading.
+    const colour = isPartial ? '#8492a6' : isDoji ? '#c0cad5'
+      : rising ? '#36eab2' : '#ff5478';
     const wickTop = scoreY(Math.max(candle.open, candle.high, candle.low, candle.close));
     const wickBottom = scoreY(Math.min(candle.open, candle.high, candle.low, candle.close));
-    const bodyTop = scoreY(Math.max(candle.open, candle.close));
-    const bodyBottom = scoreY(Math.min(candle.open, candle.close));
-    const bodyHeight = Math.max(2, bodyBottom - bodyTop);
+    const rawBodyTop = scoreY(Math.max(candle.open, candle.close));
+    const rawBodyBottom = scoreY(Math.min(candle.open, candle.close));
+    const bodyHeight = isDoji ? 1.5 : Math.max(2, rawBodyBottom - rawBodyTop);
+    const bodyTop = isDoji ? scoreY(candle.open) - bodyHeight / 2 : rawBodyTop;
     ctx.save();
     ctx.strokeStyle = colour;
     ctx.fillStyle = colour;
     ctx.shadowColor = colour;
     ctx.shadowBlur = candle.forming ? 12 : 7;
-    ctx.globalAlpha = candle.forming ? 1 : .87;
+    ctx.globalAlpha = isPartial ? .48 : candle.forming ? 1 : .87;
     ctx.lineWidth = 1.4;
+    if (isPartial) ctx.setLineDash([3, 3]);
     ctx.beginPath();
     ctx.moveTo(x, wickTop);
     ctx.lineTo(x, wickBottom);
     ctx.stroke();
+    ctx.setLineDash([]);
     if (candle.forming) {
       ctx.fillStyle = 'rgba(8, 35, 61, .96)';
       ctx.fillRect(x - candleWidth / 2, bodyTop, candleWidth, bodyHeight);
@@ -673,11 +852,12 @@ function drawPreviewScoreChart(canvas, candles) {
     }
     ctx.restore();
   });
+  ctx.restore();
 
-  const labelCount = Math.min(6, candles.length);
-  const labelStep = Math.max(1, Math.floor((candles.length - 1) / Math.max(1, labelCount - 1)));
-  const labelIndexes = new Set([0, candles.length - 1]);
-  for (let index = labelStep; index < candles.length - 1; index += labelStep) {
+  const labelCount = Math.min(6, visibleCandles.length);
+  const labelStep = Math.max(1, Math.floor((visibleCandles.length - 1) / Math.max(1, labelCount - 1)));
+  const labelIndexes = new Set([0, visibleCandles.length - 1]);
+  for (let index = labelStep; index < visibleCandles.length - 1; index += labelStep) {
     labelIndexes.add(index);
   }
   ctx.font = '800 10px Inter, Segoe UI, sans-serif';
@@ -685,14 +865,14 @@ function drawPreviewScoreChart(canvas, candles) {
   ctx.textBaseline = 'top';
   ctx.textAlign = 'center';
   [...labelIndexes].sort((a, b) => a - b).forEach(index => {
-    const x = plot.left + slot * (index + .5);
-    ctx.fillText(formatPreviewChartTime(candles[index].start_utc), x, plot.bottom + 12);
+    const x = plot.left + candleOffset + slot * (index + .5);
+    ctx.fillText(formatPreviewChartTime(visibleCandles[index].start_utc), x, plot.bottom + 12);
   });
   ctx.fillStyle = '#c2cbd5';
   ctx.textAlign = 'left';
   ctx.font = '800 9px Inter, Segoe UI, sans-serif';
   ctx.fillText('PREVIEW DECISION SCORE', plot.left, 5);
-  if (candles[candles.length - 1].forming) {
+  if (visibleCandles[visibleCandles.length - 1].forming) {
     ctx.textAlign = 'right';
     ctx.fillStyle = '#dbeeff';
     ctx.fillText('FORMING', plot.right, 5);

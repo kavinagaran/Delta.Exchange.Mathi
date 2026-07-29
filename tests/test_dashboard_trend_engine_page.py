@@ -62,6 +62,31 @@ def test_preview_score_chart_is_display_only_and_marks_every_zone_boundary():
     assert ".te-preview-chart-stage canvas" in STYLE
 
 
+def test_preview_score_chart_supports_axis_drag_scaling_and_reserves_zone_label_lane():
+    assert "Drag the bottom time axis to expand or compress the candle view." in TEMPLATE
+    assert "previewScoreChartStates" in TEMPLATE
+    assert "installPreviewScoreChartInteractions" in TEMPLATE
+    assert "canvas.addEventListener('pointerdown'" in TEMPLATE
+    assert "canvas.addEventListener('pointermove'" in TEMPLATE
+    assert "canvas.addEventListener('dblclick'" in TEMPLATE
+    assert "state.xScale" in TEMPLATE
+    assert "state.scoreSpan" in TEMPLATE
+    # Candles render only through plot.right; zone labels begin after it.
+    assert "const zoneLabelLane" in TEMPLATE
+    assert "const labelX = plot.right + 6" in TEMPLATE
+    assert "ctx.rect(plot.left, plot.top, plotWidth, plotHeight)" in TEMPLATE
+    assert "touch-action: none" in STYLE
+
+
+def test_preview_score_chart_normalises_ohlc_and_treats_flat_scores_as_neutral_dojis():
+    assert "const candlesByStart = new Map()" in TEMPLATE
+    assert "high: Math.max(open, high, low, close)" in TEMPLATE
+    assert "low: Math.min(open, high, low, close)" in TEMPLATE
+    assert "const isDoji = Math.abs(movement) < .01" in TEMPLATE
+    assert "const isPartial = candle.partial === true && !candle.forming" in TEMPLATE
+    assert "const colour = isPartial ? '#8492a6' : isDoji ? '#c0cad5'" in TEMPLATE
+
+
 def test_live_and_committed_scores_have_separate_colored_circles():
     assert 'id="te-live-score-gauge"' in TEMPLATE
     assert 'id="te-committed-score-gauge"' in TEMPLATE

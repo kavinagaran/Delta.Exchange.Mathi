@@ -53,6 +53,7 @@ from trend_score_live_execution import (
     ExactOrderLookup as TrendScoreExactOrderLookup,
     bounded_ioc_payload as build_trend_score_live_ioc_payload,
     execute_or_recover_entry as execute_or_recover_trend_score_live_entry,
+    premium_percent_protection_policy as build_premium_percent_protection_policy,
     switch_entry_gate as trend_score_live_switch_entry_gate,
 )
 
@@ -463,12 +464,8 @@ CONFIG_PAGE_DEFAULTS = {
     "DRY_RUN": "true",
     "TREND_ENGINE_SCORE_AUTO_MODE": "disabled",
     "MAX_ORDER_LOTS": "1000",
-    # Score-zone position protection
-    "TP_TARGET_PNL_TREND": "100",
-    "SL_TARGET_PNL_TREND": "50",
-    "TSL_ARM_PNL_TREND": "50",
-    "TSL_TRAIL_PNL_TREND": "50",
-    "TSL_LOCK_MIN_PNL_TREND": "0",
+    # Score-zone protection targets are derived from each filled premium.
+    # Only the monitor interval is account-configurable on this page.
     "TP_POLL_SECS_TREND": "30",
     # Account-wide risk limits
     "MAX_TRADES_PER_DAY_GLOBAL": "3",
@@ -1159,30 +1156,9 @@ def _trend_score_auto_config_error(config: dict | None = None) -> str | None:
             return float("nan")
         return value
 
-    tp = number("TP_TARGET_PNL_TREND", 100)
-    sl = abs(number("SL_TARGET_PNL_TREND", 50))
-    legacy_tsl = abs(number("TSL_TARGET_PNL_TREND", 50))
-    arm = abs(number("TSL_ARM_PNL_TREND", legacy_tsl))
-    trail = abs(number("TSL_TRAIL_PNL_TREND", legacy_tsl))
-    if not all(math.isfinite(value) and value > 0 for value in (tp, sl, arm, trail)):
-        return (
-            "Trend score automation requires positive Trend TP, SL, "
-            "TSL arm, and TSL trail values"
-        )
     if mode == "live":
         if not _config_truthy(cfg.get("SAFE_EXECUTION_ENABLED"), True):
             return "LIVE Trend score automation requires safe IOC execution"
-        short_cap = number("SHORT_MAX_RISK_USD", 0)
-        if not math.isfinite(short_cap) or short_cap < sl:
-            return (
-                "LIVE Trend score automation requires Maximum short risk to "
-                "cover the configured Trend stop loss"
-            )
-        risk_budget = number("TREND_RISK_BUDGET_USD", 100)
-        if not math.isfinite(risk_budget) or risk_budget < sl:
-            return (
-                "LIVE Trend risk budget must cover the configured Trend stop loss"
-            )
     dry_capital = number("TREND_DRY_RUN_CAPITAL_USD", 1000)
     if not math.isfinite(dry_capital) or dry_capital <= 0:
         return "Trend DRY RUN capital must be positive"
@@ -3815,6 +3791,37 @@ def _tp_policy(slot: str) -> dict:
     }
 
 
+def _trend_score_auto_premium_protection_policy(
+    prepared: dict,
+    *,
+    entry_price: float | None = None,
+) -> dict:
+    """Snapshot the fixed premium-percentage rule for one score-zone entry.
+
+    The account configuration retains only the monitor interval.  TP, SL, and
+    TSL amounts are derived from this entry's premium and never inherited from
+    an earlier trade.  LIVE fills are recalculated a second time against the
+    authoritative exchange average price inside ``trend_score_live_execution``.
+    """
+    reference = _trend_score_auto_number(
+        entry_price if entry_price is not None else prepared.get("entry_price"),
+        "selected entry premium", positive=True,
+    )
+    contract_value = _trend_score_auto_number(
+        prepared.get("contract_value"), "contract value", positive=True,
+    )
+    lots = int(_trend_score_auto_number(
+        prepared.get("lots") or TREND_SCORE_AUTO_LOTS,
+        "entry lots", positive=True,
+    ))
+    if lots != TREND_SCORE_AUTO_LOTS:
+        raise RuntimeError("Trend score automation requires exactly 1,000 lots")
+    poll_secs = _tp_policy("trend").get("poll_secs", 30)
+    return build_premium_percent_protection_policy(
+        reference, contract_value, lots, poll_secs=poll_secs,
+    )
+
+
 @app.route("/api/tp-monitor", methods=["GET"])
 def tp_monitor_status():
     user = _active_user()
@@ -3825,10 +3832,13 @@ def tp_monitor_status():
         except (TypeError, ValueError, OverflowError):
             return 0
     for slot in SLOTS:
-        policy = _tp_policy(slot)
+        st = _load_json(_slot_file(slot), {})
+        policy = _dry_protection_policy({
+            **st,
+            "slot": st.get("slot") or slot,
+        })
         target, poll, sl, tsl = (policy["tp_target_pnl"], policy["poll_secs"],
                                  policy["sl_target_pnl"], policy["tsl_target_pnl"])
-        st = _load_json(_slot_file(slot), {})
         health = _tp_health(user, slot)
         running = _tp_running(user, slot)
         health_fresh = _tp_health_fresh(health)
@@ -3897,6 +3907,10 @@ def tp_monitor_status():
                      "tsl_arm_pnl": policy["tsl_arm_pnl"],
                      "tsl_trail_pnl": policy["tsl_trail_pnl"],
                      "tsl_lock_min_pnl": policy["tsl_lock_min_pnl"],
+                     "protection_source": policy["protection_source"],
+                     "entry_premium_usd": policy["entry_premium_usd"],
+                     "manual_override_allowed": policy[
+                         "manual_override_allowed"],
                      "healthy": bool(verified_health and health.get("status") == "healthy"),
                      "health_matches": health_matches, "health": health,
                      "protection_established": bool(
@@ -4935,6 +4949,18 @@ def _dry_protection_policy(state: dict) -> dict:
         "tsl_trail_pnl": nonnegative("tsl_trail_pnl", legacy_tsl),
         "tsl_lock_min_pnl": nonnegative("tsl_lock_min_pnl"),
         "poll_secs": max(poll_secs, 10),
+        "protection_mode": str(policy.get("protection_mode") or ""),
+        "protection_source": str(policy.get("protection_source") or "manual"),
+        "entry_premium_usd": nonnegative("entry_premium_usd"),
+        "tp_percent_of_entry_premium": nonnegative(
+            "tp_percent_of_entry_premium"),
+        "sl_percent_of_entry_premium": nonnegative(
+            "sl_percent_of_entry_premium"),
+        "tsl_arm_percent_of_entry_premium": nonnegative(
+            "tsl_arm_percent_of_entry_premium"),
+        "tsl_trail_percent_of_entry_premium": nonnegative(
+            "tsl_trail_percent_of_entry_premium"),
+        "manual_override_allowed": bool(policy.get("manual_override_allowed")),
     }
 
 
@@ -8650,11 +8676,7 @@ def _trend_score_auto_open_state(
     product_id = int(_trend_score_auto_number(
         prepared.get("product_id"), "product id", positive=True,
     ))
-    policy = _tp_policy("trend")
-    if not all(float(policy.get(key) or 0) > 0 for key in (
-        "tp_target_pnl", "sl_target_pnl", "tsl_arm_pnl", "tsl_trail_pnl",
-    )):
-        raise RuntimeError("Trend TP, SL, and TSL protection must all be enabled")
+    policy = _trend_score_auto_premium_protection_policy(prepared)
     lots = TREND_SCORE_AUTO_LOTS
     fee = _option_fee_per_lot(price, contract_value, strike) * lots
     zone = signal["zone"]
@@ -8679,6 +8701,7 @@ def _trend_score_auto_open_state(
         "entry_date": now.strftime("%Y-%m-%d"),
         "entry_time_utc": now.strftime("%H:%M:%S"),
         "entry_at_utc": now.isoformat().replace("+00:00", "Z"),
+        "dry_next_protection_check_utc": now.isoformat(),
         "symbol": prepared["symbol"],
         "product_id": product_id,
         "strike": strike,
@@ -8726,6 +8749,7 @@ def _trend_score_auto_open_state(
         "market_regime_at_entry": signal["market_regime"],
         "btc_at_entry": (signal["snapshot"].get("market") or {}).get("spot"),
         "risk_at_entry_usd": float(policy["sl_target_pnl"]),
+        "protection_risk_at_entry_usd": float(policy["sl_target_pnl"]),
         "protection_config": policy,
         "protection_revision": 0,
         "continuity_revision": 0,
@@ -9445,10 +9469,6 @@ def _trend_score_auto_risk_snapshot(
     all fixed-size, premium, short-stop, and account-ledger limits are identical.
     """
     cfg = _user_cfg()
-    protection = _tp_policy("trend")
-    sl_target = _trend_score_auto_number(
-        protection.get("sl_target_pnl"), "Trend stop loss", positive=True,
-    )
     cv = _trend_score_auto_number(
         prepared.get("contract_value"), "contract value", positive=True,
     )
@@ -9461,6 +9481,10 @@ def _trend_score_auto_risk_snapshot(
         quote.get(side_price_key), f"fresh {side_price_key}", positive=True,
     )
     lots = TREND_SCORE_AUTO_LOTS
+    reference_price = _trend_score_auto_number(
+        prepared.get("entry_price"),
+        "selected option reference price", positive=True,
+    )
     risk_budget = _trend_score_auto_number(
         cfg.get("TREND_RISK_BUDGET_USD") or 100,
         "Trend risk budget",
@@ -9482,6 +9506,12 @@ def _trend_score_auto_risk_snapshot(
             raise RuntimeError("available USD balance is invalid")
 
     if is_short:
+        protection = _trend_score_auto_premium_protection_policy(
+            prepared, entry_price=max(reference_price, quoted_price),
+        )
+        sl_target = _trend_score_auto_number(
+            protection.get("sl_target_pnl"), "Trend stop loss", positive=True,
+        )
         short_cap = _trend_score_auto_number(
             cfg.get("SHORT_MAX_RISK_USD"), "maximum short risk", positive=True,
         )
@@ -9499,15 +9529,16 @@ def _trend_score_auto_risk_snapshot(
         max_slippage = max(_as_float(
             cfg.get("TREND_MAX_SLIPPAGE_PCT") or 1, 1,
         ), 0)
-        reference_price = _trend_score_auto_number(
-            prepared.get("entry_price"),
-            "selected option reference price",
-            positive=True,
-        )
         # Size the long-option risk at the maximum approved buy boundary,
         # rather than a transient best ask. This remains stable across the
         # final quote recheck and conservatively covers every permitted fill.
         price = reference_price * (1 + max_slippage / 100)
+        protection = _trend_score_auto_premium_protection_policy(
+            prepared, entry_price=price,
+        )
+        sl_target = _trend_score_auto_number(
+            protection.get("sl_target_pnl"), "Trend stop loss", positive=True,
+        )
         fee_per_lot = 2 * _option_fee_per_lot(price, cv, strike)
         premium_per_lot = price * cv
         slippage_per_lot = 0.0
@@ -9559,6 +9590,7 @@ def _trend_score_auto_risk_snapshot(
         "requested_lots": lots,
         "fixed_size_policy": True,
         "risk_mode": "dry_run" if dry_run else "live",
+        "protection_policy_at_entry": copy.deepcopy(protection),
     }
 
 
@@ -10611,7 +10643,7 @@ def _trend_score_auto_live_execute(
         fresh_quote=quote,
         protection_config=(
             existing_state.get("protection_config")
-            if pending else _tp_policy("trend")
+            if pending else _trend_score_auto_premium_protection_policy(selected)
         ),
         risk_snapshot=risk_snapshot,
         existing_state=existing_state,
@@ -12905,7 +12937,40 @@ def _save_config_data(data: dict):
                 state = _load_json(state_path, {})
                 if (state.get("status") == "OPEN"
                         and _is_dry_record(state) is dry_run):
-                    state["protection_config"] = _tp_policy(slot)
+                    existing_policy = state.get("protection_config")
+                    automatic_policy = bool(
+                        slot == "trend"
+                        and isinstance(existing_policy, dict)
+                        and existing_policy.get("protection_source")
+                        == "automatic_filled_premium"
+                    )
+                    poll_key = (
+                        "TP_POLL_SECS_MORNING" if slot == "morning"
+                        else "TP_POLL_SECS_TREND" if slot == "trend"
+                        else "TP_POLL_SECS"
+                    )
+                    manual_values_changed = bool(
+                        (keys - {poll_key}) & set(data)
+                    )
+                    if automatic_policy and not manual_values_changed:
+                        # A polling-frequency-only update must not silently
+                        # replace a filled-premium policy with legacy fixed
+                        # dollar values. The entry formula stays intact.
+                        policy = dict(existing_policy)
+                        policy["poll_secs"] = _tp_policy(slot)["poll_secs"]
+                    else:
+                        policy = _tp_policy(slot)
+                        if slot == "trend" and manual_values_changed:
+                            policy.update({
+                                "protection_mode": "manual_override_v1",
+                                "protection_source": "manual_override",
+                                "manual_override_at_utc": datetime.now(
+                                    timezone.utc
+                                ).isoformat(),
+                                "automatic_entry_protection_replaced": automatic_policy,
+                                "manual_override_allowed": True,
+                            })
+                    state["protection_config"] = policy
                     if dry_run:
                         # A saved paper policy must become effective on the
                         # next scheduler tick, not after the old interval.

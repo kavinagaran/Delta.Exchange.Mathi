@@ -235,7 +235,7 @@ def test_config_reset_profile_covers_every_page_field_and_is_fail_safe():
         encoding="utf-8")
     page_keys = set(re.findall(r'id="c-([A-Z0-9_]+)"', html))
     preserved = set(dashboard.CONFIG_PAGE_PRESERVED_KEYS)
-    assert len(page_keys) == 30
+    assert len(page_keys) == 25
     assert preserved == {"TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"}
     assert page_keys - preserved == set(dashboard.CONFIG_PAGE_DEFAULTS)
     assert set(dashboard.CONFIG_PAGE_DEFAULTS) <= set(dashboard.CONFIG_KEYS)
@@ -326,7 +326,9 @@ def test_saving_reset_profile_preserves_credentials_and_off_page_protection(
     assert saved["TP_TARGET_PNL"] == "250"
     assert saved["SL_TARGET_PNL"] == "200"
     assert saved["TSL_TARGET_PNL"] == "100"
-    assert saved["TP_TARGET_PNL_TREND"] == "100"
+    # Per-entry score protection now derives from the filled premium; the
+    # retired fixed-dollar value is intentionally off-page and preserved.
+    assert saved["TP_TARGET_PNL_TREND"] == "125"
     assert saved["DYNAMIC_LOTS"] == "true"
     assert saved["MAX_TRADES_PER_DAY"] == "3"
     for key, value in dashboard.SCORE_ZONE_LEGACY_DISABLED_SETTINGS.items():
@@ -867,6 +869,62 @@ def test_tp_save_snapshots_open_state_under_close_lock_and_restarts_after_releas
     assert saved_state["pending_tp_protection"] == pending_intent
     assert saved_state["pending_close_client_order_id"] == "close-journal-1"
     assert saved_state["orphan_protection_order_ids"] == [77]
+
+
+def test_automatic_filled_premium_policy_survives_poll_edit_and_allows_manual_override(
+        isolated_account, monkeypatch):
+    _write_json(isolated_account / "config.json", {
+        "DRY_RUN": "false",
+        "TP_POLL_SECS_TREND": "30",
+    })
+    state_path = isolated_account / "trend_state.json"
+    automatic = {
+        "tp_target_pnl": 220.0,
+        "sl_target_pnl": 110.0,
+        "tsl_arm_pnl": 55.0,
+        "tsl_trail_pnl": 55.0,
+        "tsl_lock_min_pnl": 0.0,
+        "poll_secs": 30,
+        "protection_source": "automatic_filled_premium",
+        "protection_mode": "filled_premium_percent_v1",
+        "entry_premium_usd": 220.0,
+        "manual_override_allowed": True,
+    }
+    _write_json(state_path, {
+        "slot": "trend", "status": "OPEN", "dry_run": False,
+        "product_id": 42, "lots": 1_000,
+        "protection_config": automatic,
+    })
+    monkeypatch.setattr(dashboard, "_tp_running", lambda *_: False)
+
+    with dashboard.app.test_request_context(
+            "/api/config", method="POST",
+            json={"TP_POLL_SECS_TREND": "15"}):
+        payload, status = _response(dashboard.set_config())
+    assert status == 200 and payload["ok"] is True
+    saved = json.loads(state_path.read_text(encoding="utf-8"))
+    assert saved["protection_config"]["protection_source"] \
+        == "automatic_filled_premium"
+    assert saved["protection_config"]["tp_target_pnl"] == 220.0
+    assert saved["protection_config"]["sl_target_pnl"] == 110.0
+    assert saved["protection_config"]["poll_secs"] == 15
+
+    with dashboard.app.test_request_context(
+            "/api/config", method="POST", json={
+                "TP_TARGET_PNL_TREND": "300",
+                "SL_TARGET_PNL_TREND": "150",
+                "TSL_ARM_PNL_TREND": "75",
+                "TSL_TRAIL_PNL_TREND": "75",
+                "TSL_LOCK_MIN_PNL_TREND": "0",
+            }):
+        payload, status = _response(dashboard.set_config())
+    assert status == 200 and payload["ok"] is True
+    saved = json.loads(state_path.read_text(encoding="utf-8"))
+    manual = saved["protection_config"]
+    assert manual["protection_source"] == "manual_override"
+    assert manual["automatic_entry_protection_replaced"] is True
+    assert manual["tp_target_pnl"] == 300.0
+    assert manual["sl_target_pnl"] == 150.0
 
 
 def test_short_move_requires_explicit_positive_risk_cap():

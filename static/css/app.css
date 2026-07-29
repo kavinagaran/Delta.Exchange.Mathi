@@ -1902,6 +1902,16 @@ body.login-body {
 .te-preview-chart-legend .is-hold { color: #aeb7c2; }
 .te-preview-chart-legend .is-move { color: #d9e1ea; }
 .te-preview-chart-legend .is-pe { color: #ff5f7e; }
+.te-preview-chart-controls {
+  padding: 7px 16px;
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 14%, var(--border));
+  color: color-mix(in srgb, var(--text) 72%, var(--muted));
+  background: color-mix(in srgb, var(--surface-subtle) 28%, transparent);
+  font-size: 9px;
+  font-weight: 750;
+  letter-spacing: .025em;
+  line-height: 1.45;
+}
 .te-preview-chart-stage {
   position: relative;
   min-height: 640px;
@@ -1926,6 +1936,7 @@ body.login-body {
   display: block;
   width: 100%;
   height: 626px;
+  touch-action: none;
 }
 .te-preview-chart-stage canvas[hidden] { display: none; }
 .te-preview-chart-empty {

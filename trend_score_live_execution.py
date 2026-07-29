@@ -43,6 +43,56 @@ from typing import Any, Callable, Mapping
 
 
 LIVE_SCORE_LOTS = 1_000
+PREMIUM_PERCENT_PROTECTION_MODE = "filled_premium_percent_v1"
+
+
+def premium_percent_protection_policy(
+    entry_price: Any,
+    contract_value: Any,
+    lots: Any,
+    *,
+    poll_secs: Any = 30,
+) -> dict[str, Any]:
+    """Build the score-zone protection snapshot from an entry premium.
+
+    The monitor stores dollar P&L thresholds, while the strategy rule is
+    expressed as percentages of the selected option/MOVE premium.  Converting
+    once at entry keeps protection stable when account defaults change later:
+
+    * TP captures 100% of the entry premium;
+    * SL risks 50% of the entry premium;
+    * TSL arms after a 25% premium gain and trails by 25% of that premium.
+
+    ``entry_price`` is the actual exchange fill for LIVE positions.  This
+    helper is deliberately in the irreversible-entry module so recovery of a
+    filled pending order cannot fall back to a stale quote or configuration.
+    """
+    premium = (
+        _finite(entry_price, "entry premium", positive=True)
+        * _finite(contract_value, "contract value", positive=True)
+        * _positive_int(lots, "entry lots")
+    )
+    try:
+        interval = max(int(float(poll_secs)), 10)
+    except (TypeError, ValueError, OverflowError):
+        interval = 30
+    return {
+        "tp_target_pnl": round(premium, 8),
+        "sl_target_pnl": round(premium * 0.50, 8),
+        "tsl_arm_pnl": round(premium * 0.25, 8),
+        "tsl_trail_pnl": round(premium * 0.25, 8),
+        "tsl_lock_min_pnl": 0.0,
+        "tsl_target_pnl": round(premium * 0.25, 8),
+        "poll_secs": interval,
+        "protection_mode": PREMIUM_PERCENT_PROTECTION_MODE,
+        "protection_source": "automatic_filled_premium",
+        "entry_premium_usd": round(premium, 8),
+        "tp_percent_of_entry_premium": 100.0,
+        "sl_percent_of_entry_premium": 50.0,
+        "tsl_arm_percent_of_entry_premium": 25.0,
+        "tsl_trail_percent_of_entry_premium": 25.0,
+        "manual_override_allowed": True,
+    }
 
 _ACTIVE_ORDER_STATES = {
     "open",
@@ -925,6 +975,21 @@ def _open_state_from_fill(
     entered, entry_time_source = _entry_timestamp(pending, order)
     fee, fee_source = _commission(order)
     state = copy.deepcopy(dict(pending))
+    configured_protection = state.get("protection_config")
+    if (
+        isinstance(configured_protection, Mapping)
+        and configured_protection.get("protection_mode")
+        == PREMIUM_PERCENT_PROTECTION_MODE
+    ):
+        # The pending state uses the selected quote for the pre-POST risk
+        # check.  Once filled, protection must use the real exchange basis
+        # and actual partial-fill quantity instead.
+        configured_protection = premium_percent_protection_policy(
+            exchange_entry,
+            state["contract_value"],
+            filled,
+            poll_secs=configured_protection.get("poll_secs", 30),
+        )
     state.update(
         {
             "status": "OPEN",
@@ -950,6 +1015,11 @@ def _open_state_from_fill(
             "original_bot_entry_fee_usd": fee,
             "original_bot_entry_fee_source": fee_source,
             "pnl_includes_fees": False,
+            "protection_config": configured_protection,
+            "protection_risk_at_entry_usd": (
+                configured_protection.get("sl_target_pnl")
+                if isinstance(configured_protection, Mapping) else None
+            ),
             "order_id": order.get("id"),
             "order_ids": [order.get("id")],
             "client_order_id": pending.get("pending_entry_client_order_id"),
@@ -2035,10 +2105,12 @@ def execute_or_recover_entry(
 __all__ = [
     "ExactOrderLookup",
     "LIVE_SCORE_LOTS",
+    "PREMIUM_PERCENT_PROTECTION_MODE",
     "LiveScoreExecutionError",
     "bounded_ioc_payload",
     "build_pending_entry_state",
     "execute_or_recover_entry",
+    "premium_percent_protection_policy",
     "score_close_client_id",
     "score_entry_client_id",
     "switch_entry_gate",
