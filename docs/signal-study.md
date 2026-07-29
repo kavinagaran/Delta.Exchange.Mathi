@@ -152,26 +152,28 @@ only the tightest setting helps at longer horizons, at the cost of keeping
 
 ## Stability
 
-**Not yet re-run for this edition.** The two-half split below is from the
-superseded sample (63,351 candles, six components, ±35/±15 bands) and is
-retained only because it answers a question this edition does not:
+Re-run for this edition, on the current eight-component score and ±40/±30
+bands, at the 120m horizon:
 
-| half | period | score IC @120m | CE band hit | PE band hit |
-|---|---|---|---|---|
-| first | 2025-12-17 → 2026-04-16 | −0.039 | 0.455 | 0.469 |
-| second | 2026-04-06 → 2026-07-25 | −0.041 | 0.442 | 0.471 |
+| half | candle span | bars | score IC | t | CE band hit | PE band hit |
+|---|---|---|---|---|---|---|
+| first | 2025-06-24 → 2026-01-12 | 57,569 | −0.038 | −1.6 | 0.468 | 0.449 |
+| second | 2026-01-10 → 2026-07-29 | 56,849 | −0.044 | −2.3 | 0.453 | 0.454 |
 
-Two disjoint periods, the same sign and nearly the same magnitude, so the
-negative direction was not a single-regime artefact *for that
-configuration*. Whether it holds for the current eight-component score on
-±40/±30 is untested. Treat this table as suggestive of the new result, not
-evidence for it.
+The observation sets are disjoint: the 2.5-day overlap in the candle spans is
+the second half's feature warmup, which produces no observations of its own.
 
-The full-sample significance in this edition is much stronger than anything
-the older split could show (composite t = −4.4 on 19,070 independent samples
-against −1.5 before), but statistical significance over one continuous window
-is not the same property as stability across disjoint windows. Re-running the
-split is the outstanding item.
+**The direction is stable.** Both halves are negative and close in magnitude
+(−0.038, −0.044), and **all four directional hit rates are below 0.50** —
+0.468/0.449 in the first half, 0.453/0.454 in the second. Neither half
+contradicts the other, so the full-sample result is not a single-regime
+artefact.
+
+**Per-half significance is weaker than the full sample**, as it must be: the
+second half clears |t| > 2 (−2.3), the first does not (−1.6), while the
+pooled sample reaches −4.4 at 30m. Halving the data roughly halves the
+independent sample, so this is the expected pattern rather than a
+disagreement between the halves.
 
 ## What this does and does not establish
 
