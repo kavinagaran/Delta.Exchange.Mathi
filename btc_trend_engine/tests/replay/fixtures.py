@@ -29,13 +29,13 @@ T0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
 SYMBOL = "BTCUSD"
 BASE_PRICE = 60_000.0
 
-# The 4h timeframe needs SnapshotProducer.MIN_CANDLES (60) closed candles
-# before features are considered complete, and one 4h candle is 48 five-minute
-# candles. Anything shorter than 60*48 = 2880 makes every fixture report
+# The 1h timeframe needs SnapshotProducer.MIN_CANDLES (60) closed candles
+# before features are considered complete, and one 1h candle is 12 five-minute
+# candles. Anything shorter than 60*12 = 720 makes every fixture report
 # FEATURES_INCOMPLETE, which would silently turn each scenario into a test
 # that the engine refuses to trade on insufficient history — true, but not
-# what these fixtures are for. 3400 leaves ~70 closed 4h candles.
-N = 3400
+# what these fixtures are for. 1200 leaves 100 closed 1h candles.
+N = 1200
 
 # Consequence of that warmup: several thousand bars are consumed before the
 # first decision is made. A scenario whose defining event happens early is
@@ -67,7 +67,7 @@ def _to_candles(closes: list[float], *, resolution: str = "5m",
                 volatility: float = 0.0008, start: datetime = T0) -> list[Candle]:
     """Deterministic OHLC around a close series. High/low are derived from the
     move itself plus a fixed fraction, never from a random draw."""
-    step = {"5m": 300, "15m": 900, "1h": 3600, "4h": 14400}[resolution]
+    step = {"5m": 300, "15m": 900, "30m": 1800, "1h": 3600}[resolution]
     out: list[Candle] = []
     previous = closes[0]
     for index, close in enumerate(closes):

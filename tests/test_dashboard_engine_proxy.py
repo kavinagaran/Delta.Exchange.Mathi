@@ -60,6 +60,23 @@ def test_live_route_proxies_display_only_view(tmp_path):
     mocked.assert_called_once_with("BTCUSD")
 
 
+def test_live_history_route_proxies_display_only_score_candles(tmp_path):
+    history = {
+        "available": True,
+        "display_only": True,
+        "resolution": "5m",
+        "candles": [{"open": 5, "high": 10, "low": 2, "close": 7}],
+    }
+    with _authenticated_client(tmp_path) as client, \
+            patch.object(
+                trend_engine_client, "get_live_history", return_value=history
+            ) as mocked:
+        resp = client.get("/api/engine/live-history?symbol=BTCUSD")
+    assert resp.status_code == 200
+    assert resp.get_json() == history
+    mocked.assert_called_once_with("BTCUSD")
+
+
 def test_snapshot_route_never_raises_into_the_dashboard(tmp_path):
     """The whole point of trend_engine_client.get_snapshot is that it never
     raises — but if it somehow did, the route must not 500 into a broken
@@ -155,6 +172,7 @@ def test_engine_proxy_routes_require_authentication(tmp_path):
         (tmp_path / "users").mkdir()
         client = dashboard.app.test_client()
         for path in ("/api/engine/snapshot", "/api/engine/live",
+                     "/api/engine/live-history",
                      "/api/engine/health",
                      "/api/engine/status", "/api/engine/risk",
                      "/api/engine/shadow"):

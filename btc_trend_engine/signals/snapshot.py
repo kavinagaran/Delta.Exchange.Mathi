@@ -18,18 +18,20 @@ from typing import Any, Mapping
 
 from ..features.pipeline import FEATURE_SET_VERSION, TimeframeFeatures
 from . import zones
-from .regime import NON_TRADEABLE, Regime
+from .regime import CALM_ADX_MAX, NON_TRADEABLE, Regime, is_calm_adx
 from .score import ScoreResult
 
 # 1.1.0: additive zone fields (zone, zone_action_allowed, zone_reason,
 # zone_option_type, zone_itm_steps). Minor bump -- the client compares major
 # only, so existing consumers are unaffected.
-SCHEMA_VERSION = "1.2.0"
-MODEL_VERSION = "trend-rules-v1.0.0"
+SCHEMA_VERSION = "1.3.0"
+# The model version participates in signal_id. This version introduces the
+# +/-30/+/-40 zone profile and ADX/RSI regime confirmation.
+MODEL_VERSION = "trend-rules-v1.3.0"
 
 # These two v1 gates describe whether a *directional* entry is available. They
 # remain in the public gate matrix for backward compatibility, but they are not
-# applicable to SHORT_MOVE: RANGE and a score inside +/-15 are the definition
+# applicable to SHORT_MOVE: RANGE and a score inside +/-30 are the definition
 # of that zone rather than reasons to reject it.
 _DIRECTIONAL_ONLY_GATE_NAMES = frozenset({
     "regime_tradeable",
@@ -39,13 +41,13 @@ _DIRECTIONAL_ONLY_GATE_NAMES = frozenset({
 
 @dataclass(frozen=True, slots=True)
 class SignalConfig:
-    # Operator spec: directional entry at |score| >= 35; the neutral candidate
-    # range is only |score| <= 15 and must persist for three closed 5m candles.
+    # Operator spec: directional entry at |score| >= 40; the neutral candidate
+    # range is only |score| <= 30 and must persist for six closed 5m candles.
     # Every intermediate score is HOLD -- see signals/zones.py. Was 65/25;
     # entry threshold moved to match the zone spec so `direction` and `zone`
     # can never disagree about whether a directional trade is on.
-    entry_score: float = 35.0
-    hold_score: float = 15.0
+    entry_score: float = 40.0
+    hold_score: float = 30.0
     minimum_confidence: float = 0.62
     ttl_seconds: int = 300
     forecast_horizon_seconds: int = 900
@@ -140,8 +142,8 @@ def _zone_entry_gates(
     zone: str,
     score: float,
     regime: Regime,
-    short_move_confirmed: bool,
-    max_abs_component: float | None,
+    short_move_calm: bool,
+    trigger_adx: float | None,
     confidence: float,
     config: SignalConfig,
 ) -> list[dict[str, Any]]:
@@ -149,7 +151,7 @@ def _zone_entry_gates(
 
     The original two directional gates are accurate for CE/PE entries but
     misleading for a neutral SHORT_MOVE candidate: RANGE is valid there and a
-    score of +10 should not be displayed as a failed ``|score| >= 35`` test.
+    score of +10 should not be displayed as a failed ``|score| >= 40`` test.
     Keep the raw gates for the stable reason-code contract; this is the
     operator-facing entry matrix shown by the dashboard.
     """
@@ -207,6 +209,18 @@ def _zone_entry_gates(
     return [
         *shared,
         {
+            "name": "calm_adx",
+            "label": "CALM ADX",
+            "passed": short_move_calm,
+            "detail": (
+                f"5m ADX {trigger_adx:.1f} is below {CALM_ADX_MAX:.0f}; calm market confirms SHORT_MOVE"
+                if short_move_calm else
+                (f"5m ADX {trigger_adx:.1f} must be below {CALM_ADX_MAX:.0f} before selling MOVE"
+                 if trigger_adx is not None else
+                 "5m ADX is unavailable; calm-market confirmation is required before selling MOVE")
+            ),
+        },
+        {
             "name": "regime_safe_for_move",
             "label": "REGIME SAFE FOR MOVE",
             "passed": regime_safe,
@@ -223,39 +237,6 @@ def _zone_entry_gates(
             "detail": (
                 f"score {score:+.1f} is inside −{policy.sideways_max_abs:g} to "
                 f"+{policy.sideways_max_abs:g}"
-            ),
-        },
-        {
-            # The neutral score above bounds the weighted SUM; this bounds the
-            # widest single component. Without it a strongly bullish 4h and a
-            # strongly bearish 5m cancel to a score of 0 and read as sideways.
-            "name": "components_agree_neutral",
-            "label": "COMPONENT AGREEMENT",
-            "passed": (max_abs_component is not None
-                       and max_abs_component <= policy.sideways_max_component_abs),
-            "detail": (
-                "component agreement was not measured"
-                if max_abs_component is None else
-                f"widest component reads {max_abs_component:.1f}, within the "
-                f"{policy.sideways_max_component_abs:g} ceiling"
-                if max_abs_component <= policy.sideways_max_component_abs else
-                f"widest component reads {max_abs_component:.1f}, beyond the "
-                f"{policy.sideways_max_component_abs:g} ceiling: the near-zero "
-                f"score is components cancelling, not a quiet market"
-            ),
-        },
-        {
-            # The machine-readable name carries no minute count on purpose:
-            # the confirmation window is a tuned parameter (15m -> 30m on
-            # 2026-07-27) and a name baking it in has to be renamed, and every
-            # consumer updated, each time it moves.
-            "name": "short_move_confirmed",
-            "label": "30-MIN MOVE CONFIRMATION",
-            "passed": short_move_confirmed,
-            "detail": (
-                "six consecutive completed 5-minute scores stayed in the neutral range"
-                if short_move_confirmed
-                else "waiting for six consecutive completed 5-minute scores in the neutral range"
             ),
         },
     ]
@@ -303,9 +284,8 @@ def build_snapshot(
     config: SignalConfig,
     forecast: Mapping[str, float | None] | None = None,
     stop_loss_configured: bool = True,
-    short_move_confirmed: bool = False,
 ) -> dict[str, Any]:
-    timeframe_features = {"4h": structural, "1h": primary,
+    timeframe_features = {"1h": structural, "30m": primary,
                           "15m": setup, "5m": trigger}
     biases = {tf: _timeframe_bias(features)
               for tf, features in timeframe_features.items()}
@@ -346,15 +326,16 @@ def build_snapshot(
     # differ -- `entry_allowed` additionally requires a tradeable regime, and
     # RANGE blocks it, whereas RANGE is precisely the sell-MOVE setup.
     score_value = score.trend_score if score.trend_score is not None else 0.0
-    max_abs_component = score.max_abs_component
     zone = zones.zone_for_score(score_value)
+    trigger_adx = trigger.get("adx")
+    short_move_calm = is_calm_adx(trigger_adx)
     zone_gates = _zone_entry_gates(
         gates,
         zone=zone,
         score=score_value,
         regime=regime,
-        short_move_confirmed=short_move_confirmed,
-        max_abs_component=max_abs_component,
+        short_move_calm=short_move_calm,
+        trigger_adx=trigger_adx,
         confidence=confidence,
         config=config,
     )
@@ -365,8 +346,7 @@ def build_snapshot(
         data_quality=data_quality,
         gates_passed=zone_gates_passed,
         stop_loss_configured=stop_loss_configured,
-        short_move_confirmed=short_move_confirmed,
-        max_abs_component=max_abs_component,
+        short_move_calm=short_move_calm,
     )
     reason_codes = build_reason_codes(
         regime=regime, direction=direction, timeframe_biases=biases,
@@ -382,8 +362,6 @@ def build_snapshot(
                 "SCORE_BELOW_ENTRY_THRESHOLD",
             }
         ]
-        if not short_move_confirmed:
-            reason_codes.append("SHORT_MOVE_15M_CONFIRMATION_PENDING")
 
     return {
         "schema_version": SCHEMA_VERSION,
@@ -419,7 +397,7 @@ def build_snapshot(
             {"timeframe": tf, "bias": biases[tf],
              "score": _timeframe_display_score(timeframe_features[tf]),
              "closed_candle_utc": _iso(timeframe_closes[tf])}
-            for tf in ("4h", "1h", "15m", "5m")
+            for tf in ("1h", "30m", "15m", "5m")
         ],
         "gates": zone_gates,
         "reason_codes": reason_codes,

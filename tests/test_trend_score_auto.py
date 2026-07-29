@@ -80,18 +80,18 @@ def _move_product(expiry, strike, *, product_id=20_001, **changes):
 @pytest.mark.parametrize(
     ("score", "expected"),
     [
-        # Directional at |35|; only +/-15 is a SHORT_MOVE candidate.  Every
-        # intermediate score is HOLD (the engine separately confirms 15 min).
+        # Directional at |40|; only +/-30 is a SHORT_MOVE candidate.  Every
+        # intermediate score is HOLD (the engine separately confirms 30 min).
         (-100, PE_2_ITM),
-        (-35, PE_2_ITM),
-        (-34.999, HOLD),
-        (-15.001, HOLD),
-        (-15, SHORT_MOVE),
+        (-40, PE_2_ITM),
+        (-39.999, HOLD),
+        (-30.001, HOLD),
+        (-30, SHORT_MOVE),
         (0, SHORT_MOVE),
-        (15, SHORT_MOVE),
-        (15.001, HOLD),
-        (34.999, HOLD),
-        (35, CE_2_ITM),
+        (30, SHORT_MOVE),
+        (30.001, HOLD),
+        (39.999, HOLD),
+        (40, CE_2_ITM),
         (100, CE_2_ITM),
     ],
 )
@@ -104,7 +104,7 @@ def test_score_zone_delegates_to_the_engine_so_thresholds_cannot_drift():
     copies of a trading threshold is how they end up disagreeing."""
     from btc_trend_engine.signals import zones
 
-    for score in (-100, -35, -30, -25, 0, 25, 30, 35, 100):
+    for score in (-100, -40, -35, -30, 0, 30, 35, 40, 100):
         assert score_zone(score) == zones.zone_for_score(float(score))
 
 
@@ -300,14 +300,12 @@ def test_move_uses_earliest_eligible_expiry_and_lower_atm_tie():
     assert selected["lots"] == 1000
 
 
-def test_move_accepts_exactly_ninety_minutes_without_a_session_window():
+def test_move_requires_more_than_ninety_minutes_without_a_session_window():
     expiry = NOW + timedelta(minutes=90)
     product = _move_product(expiry, 64800)
-    # 10:00 UTC is intentionally neither legacy scheduled entry time. The
-    # selector has no slot or time-window input and remains eligible.
-    selected = select_move_contract([product], spot=64820, now=NOW)
-    assert selected is not None
-    assert selected["time_to_expiry_hours"] == 1.5
+    # Exactly 90 minutes is intentionally excluded; there is no legacy
+    # morning/evening window involved in this decision.
+    assert select_move_contract([product], spot=64820, now=NOW) is None
 
 
 def test_move_skips_sub_ninety_minutes_and_has_no_maximum_dte():
@@ -456,14 +454,14 @@ def test_hold_band_keeps_an_open_position_instead_of_closing_it():
 
     Without an explicit guard an open position falls through to
     CLOSE_THEN_OPEN (current != HOLD), and that path CLOSES FIRST -- so a
-    score drifting into 25..35 would flatten the position and only then fail
+    score drifting into 30..40 would flatten the position and only then fail
     to open a 'HOLD' contract. Net effect: the hysteresis band would cause
     the exact churn it exists to prevent, plus a real exit.
     """
     position = {"trend_score_zone": CE_2_ITM, "symbol": "C-BTC-64000-260726",
                 "side": "long"}
     plan = plan_score_transition(
-        score=30, signal_key="sig-hold", owned_positions=[position])
+        score=35, signal_key="sig-hold", owned_positions=[position])
     assert plan["action"] == "NOOP"
     assert plan["reason"] == "SCORE_IN_HOLD_BAND"
     assert plan["close_position"] is None
@@ -475,7 +473,7 @@ def test_hold_band_keeps_an_open_position_instead_of_closing_it():
 
 def test_hold_band_opens_nothing_when_flat():
     plan = plan_score_transition(
-        score=-30, signal_key="sig-hold-flat", owned_positions=[])
+        score=-35, signal_key="sig-hold-flat", owned_positions=[])
     assert plan["action"] == "NOOP"
     assert plan["open_zone"] is None
 
@@ -484,7 +482,7 @@ def test_opposite_hold_band_closes_directional_position_without_reversal():
     position = {"trend_score_zone": CE_2_ITM, "symbol": "C-BTC-64000-260726",
                 "side": "long"}
     plan = plan_score_transition(
-        score=-30, signal_key="sig-directional-invalidation",
+        score=-35, signal_key="sig-directional-invalidation",
         owned_positions=[position])
     assert plan["action"] == "CLOSE"
     assert plan["current_zone"] == CE_2_ITM

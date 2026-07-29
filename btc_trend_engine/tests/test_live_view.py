@@ -26,7 +26,7 @@ from btc_trend_engine.signals.producer import SnapshotProducer
 
 T0 = datetime(2026, 7, 26, 6, 0, tzinfo=timezone.utc)
 AUTH = {"X-Engine-Token": "test-token"}
-SECONDS = {"5m": 300, "15m": 900, "1h": 3600, "4h": 14400}
+SECONDS = {"5m": 300, "15m": 900, "30m": 1800, "1h": 3600}
 
 
 def _series(resolution: str, closes: list[float]) -> list[Candle]:
@@ -49,7 +49,7 @@ def _rising(n=120, start=60000.0, step=25.0):
 
 def _all_timeframes(closes=None):
     closes = closes or _rising()
-    return {tf: _series(tf, closes) for tf in ("4h", "1h", "15m", "5m")}
+    return {tf: _series(tf, closes) for tf in ("1h", "30m", "15m", "5m")}
 
 
 def _forming(close: float) -> Candle:
@@ -174,6 +174,61 @@ def test_live_endpoint_rejects_a_different_symbol(config, service):
     with TestClient(create_app(config, service=service)) as http:
         assert http.get("/trend/live?symbol=ETHUSD",
                         headers=AUTH).status_code == 404
+
+
+def test_preview_score_history_builds_5m_display_only_ohlc(service):
+    """The chart history follows only provisional scores and stays separate
+    from committed snapshots/order permissions."""
+    first_start = "2026-07-26T06:00:00Z"
+    second_start = "2026-07-26T06:05:00Z"
+    samples = iter([
+        {"forming_candle_start": first_start, "as_of": first_start,
+         "live_score": 10.0, "data_quality": "OK"},
+        {"forming_candle_start": first_start, "as_of": "2026-07-26T06:00:20Z",
+         "live_score": 18.0, "data_quality": "OK"},
+        {"forming_candle_start": second_start, "as_of": second_start,
+         "live_score": -8.0, "data_quality": "OK"},
+    ])
+    service.producer.produce_live = lambda **_kwargs: next(samples)
+
+    service.refresh_live_view(T0)
+    service.refresh_live_view(T0 + timedelta(seconds=20))
+    service.refresh_live_view(T0 + timedelta(minutes=5))
+    history = service.live_score_history()
+
+    assert history["display_only"] is True
+    assert history["resolution"] == "5m"
+    assert len(history["candles"]) == 2
+    completed, forming = history["candles"]
+    assert completed == {
+        "start_utc": first_start,
+        "end_utc": second_start,
+        "open": 10.0,
+        "high": 18.0,
+        "low": 10.0,
+        "close": 18.0,
+        "samples": 2,
+        "last_sample_utc": "2026-07-26T06:00:20Z",
+        "data_quality": "OK",
+        "forming": False,
+    }
+    assert forming["start_utc"] == second_start
+    assert forming["open"] == forming["close"] == -8.0
+    assert forming["forming"] is True
+    assert "signal_id" not in completed
+    assert "entry_allowed" not in completed
+
+
+def test_live_history_endpoint_requires_token_and_is_display_only(config, service):
+    with TestClient(create_app(config, service=service)) as http:
+        assert http.get("/trend/live/history").status_code == 401
+        body = http.get("/trend/live/history?limit=8", headers=AUTH).json()
+    assert body == {
+        "symbol": "BTCUSD",
+        "resolution": "5m",
+        "display_only": True,
+        "candles": [],
+    }
 
 
 def test_refresh_live_view_never_raises_into_the_housekeeping_loop(service):

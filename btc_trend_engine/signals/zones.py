@@ -1,13 +1,13 @@
-"""Score -> action zone mapping (operator spec, 2026-07-26).
+"""Score -> action zone mapping (operator spec, 2026-07-29).
 
-    +35 .. +100   BULLISH    buy 2-step ITM CE
-    -35 .. -100   BEARISH    buy 2-step ITM PE
-    -15 .. +15    SIDEWAYS   sell ATM MOVE after 30 minutes of confirmation
+    +40 .. +100   BULLISH    buy 2-step ITM CE
+    -40 .. -100   BEARISH    buy 2-step ITM PE
+    -30 .. +30    SIDEWAYS   sell ATM MOVE when 5m ADX is below 35
     all other gaps HOLD      no new action
 
 **The gaps are deliberate, not an oversight in the spec.** The only neutral
-entry range is ``-15 <= score <= +15``. Scores between 15 and 35 (or -35 and
--15) are HOLD bands: entering a directional trade needs |score| >= 35, while
+entry range is ``-30 <= score <= +30``. Scores between 30 and 40 (or -40 and
+-30) are HOLD bands: entering a directional trade needs |score| >= 40, while
 an open position is kept rather than churned through an inferred intermediate
 trade. This prevents a score oscillating around a boundary from paying both
 spreads on consecutive candles.
@@ -18,9 +18,9 @@ silently:
 
 1. **Legacy PE is 3 steps ITM (`PE_3_ITM`), this is 2** (`PE_2_ITM`), per the
    spec. Legacy was asymmetric — CE at ATM-2, PE at ATM+3. This is symmetric.
-2. **Legacy has no 30-minute confirmation.** It switches directional/MOVE hard
-   at |25|, so legacy will disagree with this model for every non-action gap
-   and until the new neutral-range confirmation completes.
+2. **Legacy switches hard at |25|.** It will disagree with this model for
+   every non-action gap. This model uses the current closed 5m score plus a
+   calm 5m ADX reading for the SHORT_MOVE policy.
 
 A "step" is an index offset in the expiry's sorted strike list, matching
 ``trend_score_auto.select_policy_contract``: ITM for a call is a *lower*
@@ -41,10 +41,6 @@ HOLD = "HOLD"
 
 ZONES = frozenset({CE_2_ITM, PE_2_ITM, SHORT_MOVE, HOLD})
 
-# One spelling, because `decide` reports it from two places and a consumer
-# matching on the text must not have to know which.
-_GATES_FAILED = "one or more execution gates failed"
-
 # Regimes that block every action regardless of score. RANGE is NOT here:
 # under this spec a sideways market is not "no trade", it is the MOVE setup.
 # HIGH_VOL_SHOCK and LOW_LIQUIDITY remain blocking for all three actions —
@@ -64,43 +60,14 @@ _DIRECTIONAL_REGIMES = {
 
 @dataclass(frozen=True, slots=True)
 class ZonePolicy:
-    directional_entry_abs: float = 35.0
-    sideways_max_abs: float = 15.0
-    # Ceiling on the WIDEST single component, not on their weighted sum.
-    #
-    # The sum is what `sideways_max_abs` bounds, and a sum near zero can mean
-    # either "nothing is happening" or "large opposing readings cancelled".
-    # Only the first is a sideways market; the second is a market whose
-    # timeframes disagree, which is among the worst conditions to be short a
-    # straddle in.
-    #
-    # 50 is measured, not asserted.  research/information_coefficient.
-    # sideways_gate_profile over 60,422 bars of BTCUSD 5m history gives median
-    # forward excursion, relative to all bars, for the gate plus each ceiling:
-    #
-    #     ceiling   30m     60m    share of bars
-    #     (none)    0.89x   0.88x      9.6%
-    #     50        0.85x   0.86x      6.0%
-    #     35        0.85x   0.85x      3.4%
-    #     25        0.82x   0.84x      1.8%
-    #
-    # 50 captures effectively all of the improvement that 35 does while
-    # leaving ~78% more bars eligible, and the 50/35/25 spread is inside the
-    # noise of an overlapping sample.  Two limits on how much this buys:
-    # the effect is a 30-60m one (it vanishes by 120m and reverses by 240m),
-    # and p90 excursion -- the tail a short straddle actually dies in -- barely
-    # moves at any ceiling.  This bounds a failure mode; it is not an edge.
-    sideways_max_component_abs: float = 50.0
+    directional_entry_abs: float = 40.0
+    sideways_max_abs: float = 30.0
 
     def __post_init__(self) -> None:
         if self.sideways_max_abs >= self.directional_entry_abs:
             raise ValueError(
                 "sideways_max_abs must be below directional_entry_abs, or the "
                 "hold band inverts and the zones overlap")
-        if self.sideways_max_component_abs <= 0:
-            raise ValueError(
-                "sideways_max_component_abs must be positive, or the sideways "
-                "zone can never act")
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,8 +109,7 @@ def decide(
     data_quality: str,
     gates_passed: bool,
     stop_loss_configured: bool = True,
-    short_move_confirmed: bool = False,
-    max_abs_component: float | None = None,
+    short_move_calm: bool = True,
     policy: ZonePolicy | None = None,
 ) -> ZoneDecision:
     """Zone plus whether its action may actually be taken.
@@ -154,13 +120,6 @@ def decide(
     so ``stop_loss_configured=False`` blocks the sideways zone outright. That
     is not a policy preference — an unstopped short straddle is the one
     position in this system that can lose more than the account holds.
-
-    ``max_abs_component`` (``ScoreResult.max_abs_component``) is required for
-    the sideways zone and **omitting it blocks the action**.  A near-zero score
-    is only evidence of a sideways market once the components behind it are
-    known to be individually small, so treating "not measured" as "calm" would
-    fail open on exactly the reading this gate exists to catch.  The
-    directional zones do not use it: there, large components are the point.
     """
     zone = zone_for_score(score, policy)
 
@@ -175,50 +134,23 @@ def decide(
             f"|score| {abs(score):.1f} is inside the "
             f"{policy.sideways_max_abs:g}-{policy.directional_entry_abs:g} hold band")
     if zone == SHORT_MOVE:
-        active = policy or ZonePolicy()
-        # These two run BEFORE the generic gate check on purpose. Both are
-        # also rows in the caller's zone gate matrix (snapshot.
-        # _zone_entry_gates), so either failing also drives `gates_passed`
-        # false -- and answering "one or more execution gates failed" would
-        # discard the only description of *why* that ever leaves the engine.
-        # The consumer routes on this string: dashboard.py decides
-        # "awaiting confirmation" versus "blocked", and releases the previous
-        # setup lock, by reading it.
-        #
-        # Disagreement is reported ahead of the confirmation window because
-        # "waiting for confirmation" implies waiting will resolve it, when
-        # what is needed is for the disagreement itself to go away.
-        if max_abs_component is None:
+        if not short_move_calm:
             return ZoneDecision(
                 zone, False,
-                "component agreement was not measured; refusing to sell MOVE "
-                "on an unverified neutral score")
-        if max_abs_component > active.sideways_max_component_abs:
-            return ZoneDecision(
-                zone, False,
-                f"components disagree: the widest reads "
-                f"{max_abs_component:.1f}, beyond the "
-                f"{active.sideways_max_component_abs:g} ceiling. A near-zero "
-                f"score here is cancellation, not a sideways market")
-        if not short_move_confirmed:
-            return ZoneDecision(
-                zone, False,
-                "waiting for 30-minute confirmation: six consecutive "
-                "completed 5-minute scores must remain inside -15 to +15")
-        # Any OTHER failing gate -- a stale feed, an invalid book -- still
-        # reports generically; only the two above describe themselves.
-        if not gates_passed:
-            return ZoneDecision(zone, False, _GATES_FAILED)
+                "ADX is not below 35; calm-market confirmation is required "
+                "before selling MOVE")
         if not stop_loss_configured:
             return ZoneDecision(
                 zone, False,
                 "refusing to sell MOVE with no stop loss configured "
                 "(unbounded loss)")
+        if not gates_passed:
+            return ZoneDecision(zone, False, "one or more execution gates failed")
         return ZoneDecision(
             zone, True,
-            "sideways confirmed for 30 minutes: sell ATM MOVE (stop required)")
+            "calm 5-minute ADX confirms SHORT_MOVE: sell ATM MOVE (stop required)")
     if not gates_passed:
-        return ZoneDecision(zone, False, _GATES_FAILED)
+        return ZoneDecision(zone, False, "one or more execution gates failed")
     if zone == CE_2_ITM:
         return ZoneDecision(zone, True, "bullish: buy 2-step ITM CE",
                             option_type="CE", itm_steps=2)

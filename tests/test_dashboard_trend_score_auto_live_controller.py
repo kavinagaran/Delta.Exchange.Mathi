@@ -273,14 +273,14 @@ def test_explicit_live_mode_routes_only_to_live_controller(
 @pytest.mark.parametrize(
     ("score", "expected_zone", "expected_type", "expected_side"),
     (
-        # Directional at |35|; +/-15 is the confirmed short-MOVE candidate.
+        # Directional at |40|; +/-30 is the confirmed short-MOVE candidate.
         # Every intermediate score is HOLD and maps to no contract class.
         (-100, dashboard.TREND_SCORE_PE_ZONE, "PE", "long"),
-        (-35, dashboard.TREND_SCORE_PE_ZONE, "PE", "long"),
-        (-15, dashboard.TREND_SCORE_MOVE_ZONE, "MOVE", "short"),
+        (-40, dashboard.TREND_SCORE_PE_ZONE, "PE", "long"),
+        (-30, dashboard.TREND_SCORE_MOVE_ZONE, "MOVE", "short"),
         (0, dashboard.TREND_SCORE_MOVE_ZONE, "MOVE", "short"),
-        (15, dashboard.TREND_SCORE_MOVE_ZONE, "MOVE", "short"),
-        (35, dashboard.TREND_SCORE_CE_ZONE, "CE", "long"),
+        (30, dashboard.TREND_SCORE_MOVE_ZONE, "MOVE", "short"),
+        (40, dashboard.TREND_SCORE_CE_ZONE, "CE", "long"),
         (100, dashboard.TREND_SCORE_CE_ZONE, "CE", "long"),
     ),
 )
@@ -353,38 +353,23 @@ def test_matching_live_zone_holds_partial_fill_without_topping_up(
     assert ledger["signals"][signal["signal_key"]]["action"] == "HOLD"
 
 
-def test_unconfirmed_short_move_does_not_close_or_replace_a_live_position(
+def test_short_move_with_non_calm_5m_adx_does_not_close_or_replace_a_live_position(
     live_account,
     monkeypatch,
 ):
-    """A pending neutral confirmation preserves the position but rearms entry."""
+    """An ADX-blocked SHORT_MOVE is explicitly a no-op."""
     old_state = _owned_state(dashboard.TREND_SCORE_CE_ZONE)
     _write(live_account / "trend_state.json", old_state)
-    ledger = dashboard._trend_score_auto_ledger(live_account)
-    dashboard._trend_score_auto_lock_setup(
-        ledger,
-        {
-            "zone": dashboard.TREND_SCORE_CE_ZONE,
-            "signal_key": old_state["score_auto_signal_key"],
-            "mode": dashboard._trading_mode_payload(),
-        },
-        transition_id="old-ce-transition",
-        action="OPEN",
-    )
-    dashboard._trend_score_auto_write_ledger(live_account, ledger)
     signal = _signal(
         dashboard._trading_mode_payload(),
         0.0,
         suffix="10:10:00Z",
         zone_action_allowed=False,
-        zone_reason=(
-            "waiting for 30-minute confirmation: six consecutive completed "
-            "5-minute scores must remain inside -15 to +15"
-        ),
+        zone_reason="5m ADX 40.0 must be below 35 before selling MOVE",
     )
-    prepare = Mock(side_effect=AssertionError("pending MOVE must not prepare"))
-    close = Mock(side_effect=AssertionError("pending MOVE must not close"))
-    execute = Mock(side_effect=AssertionError("pending MOVE must not enter"))
+    prepare = Mock(side_effect=AssertionError("blocked MOVE must not prepare"))
+    close = Mock(side_effect=AssertionError("blocked MOVE must not close"))
+    execute = Mock(side_effect=AssertionError("blocked MOVE must not enter"))
     monkeypatch.setattr(
         dashboard, "_collect_trend_score_auto_signal", Mock(return_value=signal),
     )
@@ -394,17 +379,10 @@ def test_unconfirmed_short_move_does_not_close_or_replace_a_live_position(
 
     assert dashboard._maybe_auto_trend_score_cycle() is False
     assert json.loads((live_account / "trend_state.json").read_text("utf-8")) == old_state
-    released_ledger = dashboard._trend_score_auto_ledger(live_account)
-    assert released_ledger["setup_lock"] is None
-    assert released_ledger[
-        "setup_lock_short_move_confirmation_released_at_utc"
-    ]
     prepare.assert_not_called()
     close.assert_not_called()
     execute.assert_not_called()
-    assert dashboard._trend_score_auto_health["alice"]["status"] == (
-        "awaiting_confirmation"
-    )
+    assert dashboard._trend_score_auto_health["alice"]["status"] == "blocked"
 
 
 @pytest.mark.parametrize(

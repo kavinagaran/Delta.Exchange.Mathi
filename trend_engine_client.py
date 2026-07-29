@@ -337,6 +337,41 @@ def get_live_view(symbol: str = "BTCUSD") -> dict[str, Any]:
         return {"available": False, "detail": f"{type(exc).__name__}: {exc}"}
 
 
+def get_live_history(symbol: str = "BTCUSD", *, limit: int = 60) -> dict[str, Any]:
+    """Display-only 5-minute Preview Decision score candles. Never raises.
+
+    This returns a deliberately non-decision-shaped object.  No caller can
+    mistake this repainting history for a committed, tradeable signal.
+    """
+    try:
+        response = requests.get(
+            f"{engine_base_url()}/trend/live/history",
+            params={"symbol": symbol, "limit": max(1, min(int(limit), 144))},
+            headers={"X-Engine-Token": os.getenv("ENGINE_TOKEN", "")},
+            timeout=_timeout(),
+        )
+        if response.status_code != 200:
+            return {"available": False, "detail": f"HTTP {response.status_code}",
+                    "candles": []}
+        payload = response.json()
+        if (not isinstance(payload, dict)
+                or payload.get("display_only") is not True
+                or not isinstance(payload.get("candles"), list)):
+            return {"available": False, "detail": "malformed live history",
+                    "candles": []}
+        return {
+            "available": True,
+            "symbol": payload.get("symbol") or symbol,
+            "resolution": payload.get("resolution") or "5m",
+            "display_only": True,
+            "candles": [item for item in payload["candles"]
+                        if isinstance(item, dict)],
+        }
+    except Exception as exc:
+        return {"available": False, "detail": f"{type(exc).__name__}: {exc}",
+                "candles": []}
+
+
 def get_shadow_summary() -> dict[str, Any]:
     """Agreement statistics for the Trend Engine page. Never raises."""
     try:

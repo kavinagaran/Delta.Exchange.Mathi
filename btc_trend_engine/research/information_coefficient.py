@@ -4,8 +4,8 @@ The trend score sums six components with fixed weights (``signals.score``),
 but nothing has ever measured what any of them predicts.  Two questions the
 weights currently answer by assertion:
 
-1. ``higher_timeframe_trend`` carries 40% of the weight and is built from 4H
-   and 1H structure -- while positions are held for hours.  A feature can be
+1. ``higher_timeframe_trend`` carries 40% of the weight and is built from 1H
+   and 30M structure -- while positions are held for hours.  A feature can be
    genuinely informative at its own horizon and worthless at ours.
 2. Four of the six components are monotone functions of the same recent price
    path, so the "ensemble" may be one opinion counted four times.  Correlated
@@ -61,9 +61,9 @@ from ..signals.zones import UNSAFE_REGIMES, ZonePolicy
 
 SCORE_KEY = "trend_score"
 
-# Enough history for the slowest feature (4H EMA-50 plus ATR) to be defined.
+# Enough history for the slowest feature (1H EMA-50 plus ATR) to be defined.
 DEFAULT_FEATURE_WINDOW = 240
-DEFAULT_WARMUP = 2_880          # 5m bars: 10 days, so 4H features exist
+DEFAULT_WARMUP = 720            # 5m bars: 2.5 days, so 1H features exist
 
 
 @dataclass(frozen=True, slots=True)
@@ -488,7 +488,7 @@ class CalibrationBucket:
 
 def score_calibration(
     observations: Sequence[Observation], horizon_minutes: int,
-    *, edges: Sequence[float] = (-100, -35, -15, 15, 35, 100),
+    *, edges: Sequence[float] = (-100, -40, -30, 30, 40, 100),
 ) -> list[CalibrationBucket]:
     """What each score band actually implied, historically.
 

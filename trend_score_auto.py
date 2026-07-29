@@ -78,12 +78,12 @@ def score_zone(score: Any) -> str:
     """Return the exact approved action zone for a validated engine score.
 
     Thresholds come from ``btc_trend_engine.signals.zones`` — the single
-    source of truth for the 2026-07-26 operator spec — rather than being
+    source of truth for the 2026-07-29 operator spec — rather than being
     duplicated here, so the two modules cannot drift apart:
 
-        |score| >= 35   directional (CE_2_ITM / PE_2_ITM, both 2-step ITM)
-        |score| <= 15   SHORT_MOVE candidate (the engine must then confirm
-                        six consecutive completed 5m scores)
+        |score| >= 40   directional (CE_2_ITM / PE_2_ITM, both 2-step ITM)
+        |score| <= 30   SHORT_MOVE candidate (the engine must also confirm
+                        5m ADX is below 35)
         otherwise       HOLD (no new action, keep any open position; see
                         zones.should_exit)
 
@@ -384,8 +384,8 @@ def select_move_contract(
 
     Eligibility depends only on the authoritative listing, exact settlement
     timestamp, and product limits.  There is deliberately no morning/evening
-    session argument.  The current expiry remains eligible at exactly 90
-    minutes and is skipped only below that floor; no maximum DTE is imposed.
+    session argument. The current expiry is eligible only when more than 90
+    minutes remain; no maximum DTE is imposed.
     """
 
     current = _utc_time(now, "now")
@@ -427,7 +427,7 @@ def select_move_contract(
             raise TrendScoreAutoInputError(
                 f"raw_products[{index}].strike_price must be positive"
             )
-        if (expiry - current).total_seconds() < MIN_TIME_TO_EXPIRY_SECONDS:
+        if (expiry - current).total_seconds() <= MIN_TIME_TO_EXPIRY_SECONDS:
             continue
         by_expiry.setdefault(expiry, []).append({
             "symbol": symbol,

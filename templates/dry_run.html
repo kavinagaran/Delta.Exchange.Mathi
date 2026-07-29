@@ -342,9 +342,7 @@ function dryTrendScoreTarget(status) {
   const labels = {
     CE_2_ITM: 'Buy 2-step ITM Call',
     PE_2_ITM: 'Buy 2-step ITM Put',
-    SHORT_MOVE: status?.status === 'awaiting_confirmation'
-      ? 'Wait for 30-minute neutral-score confirmation'
-      : 'Sell ATM MOVE straddle',
+    SHORT_MOVE: 'Sell ATM MOVE straddle',
     HOLD: 'Hold the open position — no new entry',
   };
   if (labels[zone]) return labels[zone];
@@ -391,8 +389,9 @@ function dryTrendScoreAutoHtml() {
     ? fN(dryTrendScoreAutoStatus.direction_score, 1) : 'Waiting';
   const regime = dryTrendScoreAutoStatus.market_regime
     ? dryEngineDecisionLabel(dryTrendScoreAutoStatus.market_regime) : 'Waiting';
-  const zone = dryTrendScoreAutoStatus.engine_zone
-    ? dryEngineDecisionLabel(dryTrendScoreAutoStatus.engine_zone) : 'Waiting';
+  const zoneCode = String(dryTrendScoreAutoStatus.engine_zone || '')
+    .trim().toUpperCase();
+  const zone = zoneCode ? dryEngineDecisionLabel(zoneCode) : 'Waiting';
   const symbol = dryTrendScoreAutoStatus.symbol || 'Waiting for an eligible contract';
   const lots = dryKnownNumber(dryTrendScoreAutoStatus.lots)
     ? fN(dryTrendScoreAutoStatus.lots) : '—';
@@ -418,7 +417,7 @@ function dryTrendScoreAutoHtml() {
       <div class="wide"><dt>Current automatic action</dt><dd>${esc(dryTrendScoreTarget(dryTrendScoreAutoStatus))}</dd></div>
       <div><dt>Direction score</dt><dd>${esc(score)}</dd></div>
       <div><dt>Market regime</dt><dd>${esc(regime)}</dd></div>
-      <div><dt>Trade type</dt><dd>${esc(dryScoreZoneLabel({ trend_score_zone: zone }))}</dd></div>
+      <div><dt>Trade type</dt><dd>${esc(dryScoreZoneLabel({ trend_score_zone: zoneCode }))}</dd></div>
       <div><dt>Lots</dt><dd>${esc(lots)}</dd></div>
       <div class="wide"><dt>Selected / open contract</dt><dd>${esc(symbol)}</dd></div>
       <div class="wide"><dt>Last automatic action</dt><dd>${esc(lastAction)}</dd></div>

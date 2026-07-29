@@ -1,4 +1,4 @@
-# TrendSnapshot contract — v1.2.0
+# TrendSnapshot contract — v1.3.0
 
 **Frozen at v1.0.0:** 2026-07-25 · **Source:** `Trend_Engine.md` §5.3
 **Producer:** `btc_trend_engine` · **Consumer:** `trend_engine_client.py` → `dashboard.py`
@@ -22,11 +22,16 @@ matrix. `risk_lock_clear` is now explicitly `status: "DEFERRED"` and
 `required: false`: account risk is checked by the per-user execution
 controller, not falsely reported as an engine pass.
 
+**v1.3.0 (2026-07-29)** — the production score profile now reports closed
+`1h`, `30m`, `15m`, and `5m` candles. The decision remains committed on the
+closed 5m candle. The model version changed so the new profile creates a
+distinct signal identity for both paper and real execution controllers.
+
 ## Payload
 
 ```json
 {
-  "schema_version": "1.2.0",
+  "schema_version": "1.3.0",
   "symbol": "BTCUSD",
   "timestamp": "2026-07-25T10:15:00Z",
   "candle_close_utc": "2026-07-25T10:15:00Z",
@@ -59,8 +64,8 @@ controller, not falsely reported as an engine pass.
     {"name": "derivatives_context",    "weight": 0.10, "score": 55.0, "available": true}
   ],
   "timeframes": [
-    {"timeframe": "4h",  "bias": 1, "score": 62.0, "closed_candle_utc": "2026-07-25T08:00:00Z"},
-    {"timeframe": "1h",  "bias": 1, "score": 74.0, "closed_candle_utc": "2026-07-25T10:00:00Z"},
+    {"timeframe": "1h",  "bias": 1, "score": 62.0, "closed_candle_utc": "2026-07-25T10:00:00Z"},
+    {"timeframe": "30m", "bias": 1, "score": 74.0, "closed_candle_utc": "2026-07-25T10:00:00Z"},
     {"timeframe": "15m", "bias": 1, "score": 70.0, "closed_candle_utc": "2026-07-25T10:15:00Z"},
     {"timeframe": "5m",  "bias": 1, "score": 66.0, "closed_candle_utc": "2026-07-25T10:15:00Z"}
   ],
@@ -80,7 +85,7 @@ controller, not falsely reported as an engine pass.
   "reason_codes": ["1H_TREND_UP", "15M_BREAKOUT_CONFIRMED", "5M_PULLBACK_RECOVERY"],
   "data_quality": "OK",
   "feature_set_version": "v1.0.0",
-  "model_version": "trend-rules-v1.0.0"
+  "model_version": "trend-rules-v1.1.0"
 }
 ```
 
@@ -104,6 +109,7 @@ controller, not falsely reported as an engine pass.
 | `components[].score` | `null` when `available: false`; weights sum to 1.0 |
 | `components[].weight` | v1 weighting per [ADR 0004](adr/0004-order-flow-weight.md) |
 | `timeframes[].bias` | `-1` \| `0` \| `+1` |
+| `timeframes[].timeframe` | exactly `1h`, `30m`, `15m`, `5m` in the production score profile; all are closed candles |
 | `gates[]` | complete list always present; a failed required gate carries a human-readable `detail`. A `required: false, status: "DEFERRED"` gate is intentionally checked by the account execution path |
 | `reason_codes` | stable machine-readable identifiers, §12.5. Treated as a public contract — snapshot-tested |
 
@@ -160,16 +166,16 @@ All bind `127.0.0.1:5055` and require `X-Engine-Token` except `/health`.
 
 | Score | Zone | Action |
 |---:|---|---|
-| `+35 … +100` | `CE_2_ITM` | Buy a 2-step ITM call |
-| `+15 < score < +35` | `HOLD` | Keep the existing position |
-| `−15 … +15` for three closed 5m candles | `SHORT_MOVE` | Sell the ATM MOVE straddle |
-| `−35 < score < −15` | `HOLD` | Keep the existing position |
-| `−100 … −35` | `PE_2_ITM` | Buy a 2-step ITM put |
+| `+40 … +100` | `CE_2_ITM` | Buy a 2-step ITM call |
+| `+30 < score < +40` | `HOLD` | Keep the existing position |
+| `−30 … +30` with 5m ADX below 35 | `SHORT_MOVE` | Sell the ATM MOVE straddle |
+| `−40 < score < −30` | `HOLD` | Keep the existing position |
+| `−100 … −40` | `PE_2_ITM` | Buy a 2-step ITM put |
 
-At exactly ±15 the score is a `SHORT_MOVE` candidate. The engine keeps
-`zone_action_allowed=false` until it has observed the full 15-minute
-confirmation, so a dashboard consumer cannot switch or enter early.
+At exactly ±30 the score is a `SHORT_MOVE` candidate. The current closed
+5m score is actionable when its 5m ADX is below 35, subject to the remaining
+execution safeguards. There is no multi-candle confirmation wait.
 
 `HOLD` prevents a new entry and normally preserves the open position. The
-execution controller makes one exit-only exception: a CE is closed below −15,
-and a PE is closed above +15. It never reverses directly from that HOLD.
+execution controller makes one exit-only exception: a CE is closed below −30,
+and a PE is closed above +30. It never reverses directly from that HOLD.

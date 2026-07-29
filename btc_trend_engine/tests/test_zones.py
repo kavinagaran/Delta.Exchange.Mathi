@@ -1,7 +1,7 @@
-"""Score -> action zone mapping against the operator spec (2026-07-26):
+"""Score -> action zone mapping against the operator spec (2026-07-29):
 
-    +35..+100 bullish CE 2-step ITM · -35..-100 bearish PE 2-step ITM
-    -15..+15 sideways sell ATM MOVE after 30 minutes · all other gaps HOLD
+    +40..+100 bullish CE 2-step ITM · -40..-100 bearish PE 2-step ITM
+    -30..+30 sideways sell ATM MOVE with 5m ADX below 35 · all other gaps HOLD
 """
 
 from __future__ import annotations
@@ -14,17 +14,13 @@ from btc_trend_engine.signals.zones import ZonePolicy
 
 def _decide(score, **kw):
     params = dict(score=score, regime="TREND_UP", data_quality="OK",
-                  gates_passed=True, stop_loss_configured=True,
-                  short_move_confirmed=True,
-                  # Quiet by default: these cases are about the score bands,
-                  # so the components must not be what blocks them.
-                  max_abs_component=5.0)
+                  gates_passed=True, stop_loss_configured=True)
     params.update(kw)
     return zones.decide(**params)
 
 
 # ── the three specified bands, including their exact boundaries ─────────
-@pytest.mark.parametrize("score", [35.0, 36.0, 65.0, 99.9, 100.0])
+@pytest.mark.parametrize("score", [40.0, 40.1, 65.0, 99.9, 100.0])
 def test_bullish_band_buys_two_step_itm_ce(score):
     decision = _decide(score)
     assert decision.zone == zones.CE_2_ITM
@@ -32,7 +28,7 @@ def test_bullish_band_buys_two_step_itm_ce(score):
     assert zones.strike_index_offset(decision.zone) == -2
 
 
-@pytest.mark.parametrize("score", [-35.0, -36.0, -65.0, -100.0])
+@pytest.mark.parametrize("score", [-40.0, -40.1, -65.0, -100.0])
 def test_bearish_band_buys_two_step_itm_pe(score):
     decision = _decide(score)
     assert decision.zone == zones.PE_2_ITM
@@ -41,7 +37,7 @@ def test_bearish_band_buys_two_step_itm_pe(score):
     assert zones.strike_index_offset(decision.zone) == +2
 
 
-@pytest.mark.parametrize("score", [-15.0, -14.9, 0.0, 12.0, 14.9, 15.0])
+@pytest.mark.parametrize("score", [-30.0, -29.9, 0.0, 12.0, 29.9, 30.0])
 def test_sideways_band_sells_atm_move(score):
     decision = _decide(score)
     assert decision.zone == zones.SHORT_MOVE
@@ -50,9 +46,9 @@ def test_sideways_band_sells_atm_move(score):
     assert zones.strike_index_offset(decision.zone) is None
 
 
-@pytest.mark.parametrize("score", [15.1, 25.0, 34.9, -15.1, -25.0, -34.9])
+@pytest.mark.parametrize("score", [30.1, 35.0, 39.9, -30.1, -35.0, -39.9])
 def test_the_gap_between_the_bands_is_a_hold_not_an_action(score):
-    """The spec makes 15<|s|<35 HOLD; treating it as either neighbour
+    """The spec makes 30<|s|<40 HOLD; treating it as either neighbour
     would make the engine thrash across a single threshold."""
     decision = _decide(score)
     assert decision.zone == zones.HOLD
@@ -61,17 +57,10 @@ def test_the_gap_between_the_bands_is_a_hold_not_an_action(score):
 
 
 def test_the_boundaries_are_inclusive_exactly_as_written():
-    assert zones.zone_for_score(35.0) == zones.CE_2_ITM
-    assert zones.zone_for_score(-35.0) == zones.PE_2_ITM
-    assert zones.zone_for_score(15.0) == zones.SHORT_MOVE
-    assert zones.zone_for_score(-15.0) == zones.SHORT_MOVE
-
-
-def test_short_move_waits_for_the_full_confirmation_window():
-    decision = _decide(0.0, short_move_confirmed=False)
-    assert decision.zone == zones.SHORT_MOVE
-    assert decision.action_allowed is False
-    assert "30-minute confirmation" in decision.reason
+    assert zones.zone_for_score(40.0) == zones.CE_2_ITM
+    assert zones.zone_for_score(-40.0) == zones.PE_2_ITM
+    assert zones.zone_for_score(30.0) == zones.SHORT_MOVE
+    assert zones.zone_for_score(-30.0) == zones.SHORT_MOVE
 
 
 def test_every_score_in_range_maps_to_exactly_one_known_zone():
@@ -84,67 +73,23 @@ def test_every_score_in_range_maps_to_exactly_one_known_zone():
 def test_selling_move_is_now_default_behaviour():
     """Operator decision 2026-07-26: MOVE selling is always on, no opt-in."""
     assert zones.decide(score=0.0, regime="RANGE", data_quality="OK",
-                        gates_passed=True, short_move_confirmed=True,
-                        max_abs_component=5.0).action_allowed is True
+                        gates_passed=True).action_allowed is True
 
 
 def test_selling_move_is_refused_without_a_stop_loss():
     """The stop replaces ALLOW_SHORT_MOVE as the control. An unstopped short
     straddle is the only position here that can lose more than the account."""
     decision = zones.decide(score=0.0, regime="RANGE", data_quality="OK",
-                            gates_passed=True, stop_loss_configured=False,
-                            short_move_confirmed=True, max_abs_component=5.0)
+                            gates_passed=True, stop_loss_configured=False)
     assert decision.action_allowed is False
     assert "stop loss" in decision.reason
 
 
-# ── component agreement (a zero sum is not automatically a quiet market) ──
-def test_cancelling_components_do_not_count_as_sideways():
-    """The failure this gate exists for: a strongly bullish higher timeframe
-    and a strongly bearish trigger sum to zero and would otherwise read as the
-    calmest possible market."""
-    decision = _decide(0.0, max_abs_component=100.0)
-    assert decision.zone == zones.SHORT_MOVE
-    assert decision.action_allowed is False
-    assert "components disagree" in decision.reason
-
-
-def test_component_agreement_is_required_evidence_not_an_optional_extra():
-    """Unmeasured must not read as calm: this is the one position that can
-    lose more than the account, so the missing case fails closed."""
+def test_selling_move_is_refused_when_adx_does_not_confirm_calm():
     decision = zones.decide(score=0.0, regime="RANGE", data_quality="OK",
-                            gates_passed=True, short_move_confirmed=True)
+                            gates_passed=True, short_move_calm=False)
     assert decision.action_allowed is False
-    assert "not measured" in decision.reason
-
-
-def test_the_component_ceiling_is_inclusive_at_its_boundary():
-    policy = zones.ZonePolicy()
-    at_ceiling = _decide(0.0, max_abs_component=policy.sideways_max_component_abs)
-    beyond = _decide(0.0, max_abs_component=policy.sideways_max_component_abs + 0.1)
-    assert at_ceiling.action_allowed is True
-    assert beyond.action_allowed is False
-
-
-def test_disagreement_is_reported_before_the_confirmation_window():
-    """Reporting 'waiting for confirmation' on a conflicted market implies
-    waiting will fix it. The disagreement is the real reason and must win."""
-    decision = _decide(0.0, max_abs_component=90.0, short_move_confirmed=False)
-    assert "components disagree" in decision.reason
-
-
-def test_component_agreement_does_not_gate_the_directional_zones():
-    """A large component is the entire point of a directional entry; applying
-    the neutrality ceiling there would block every CE and PE."""
-    for score in (85.0, -85.0):
-        decision = zones.decide(score=score, regime="TREND_UP",
-                                data_quality="OK", gates_passed=True)
-        assert decision.action_allowed is True
-
-
-def test_a_component_ceiling_of_zero_is_rejected_as_unreachable():
-    with pytest.raises(ValueError, match="sideways_max_component_abs"):
-        ZonePolicy(sideways_max_component_abs=0.0)
+    assert "ADX is not below 35" in decision.reason
 
 
 def test_a_missing_stop_does_not_block_the_directional_zones():
@@ -220,13 +165,13 @@ def test_trend_score_auto_now_delegates_here_so_there_is_one_source_of_truth():
     """
     from trend_score_auto import score_zone as legacy_entry_point
 
-    for score in (-100, -50, -35, -30, -15, 0, 15, 30, 35, 50, 100):
+    for score in (-100, -50, -40, -35, -30, 0, 30, 35, 40, 50, 100):
         assert legacy_entry_point(score) == zones.zone_for_score(float(score))
 
-    # Specifically: all scores from 15 to 35 are HOLD (the only neutral entry
-    # band is +/-15), and puts are 2-step rather than 3-step ITM.
-    assert legacy_entry_point(30) == zones.HOLD
-    assert legacy_entry_point(-30) == zones.HOLD
+    # Specifically: all scores from 30 to 40 are HOLD (the neutral entry
+    # band is +/-30), and puts are 2-step rather than 3-step ITM.
+    assert legacy_entry_point(35) == zones.HOLD
+    assert legacy_entry_point(-35) == zones.HOLD
     assert legacy_entry_point(-50) == zones.PE_2_ITM
 
 
@@ -293,14 +238,14 @@ def test_drifting_into_the_hold_band_does_not_exit():
 def test_opposite_hold_band_invalidates_an_existing_directional_position():
     """The dead band prevents churn, but cannot preserve a contradicted CE/PE.
 
-    A call at -30 (or put at +30) is in HOLD rather than the opposite entry
+    A call at -35 (or put at +35) is in HOLD rather than the opposite entry
     zone.  That must be an exit-only decision, not a stale position or a
     premature reversal.
     """
-    assert zones.should_exit("CE_2_ITM", "HOLD", score=-15.1)[0] is True
-    assert zones.should_exit("PE_2_ITM", "HOLD", score=15.1)[0] is True
-    assert zones.should_exit("CE_2_ITM", "HOLD", score=30.0)[0] is False
-    assert zones.should_exit("PE_2_ITM", "HOLD", score=-30.0)[0] is False
+    assert zones.should_exit("CE_2_ITM", "HOLD", score=-35.0)[0] is True
+    assert zones.should_exit("PE_2_ITM", "HOLD", score=35.0)[0] is True
+    assert zones.should_exit("CE_2_ITM", "HOLD", score=35.0)[0] is False
+    assert zones.should_exit("PE_2_ITM", "HOLD", score=-35.0)[0] is False
 
 
 @pytest.mark.parametrize(
@@ -320,7 +265,7 @@ def test_directional_regime_alignment_is_explicit(zone, regime, expected):
 
 
 def test_score_drift_within_a_zone_never_exits():
-    """+40 -> +90 -> +36 is all one CE zone: no exit, no re-entry, no churn."""
+    """+40 -> +90 -> +41 is all one CE zone: no exit, no re-entry, no churn."""
     open_zone = zones.zone_for_score(40.0)
-    for score in (90.0, 36.0, 100.0, 35.0):
+    for score in (90.0, 41.0, 100.0, 40.0):
         assert zones.should_exit(open_zone, zones.zone_for_score(score))[0] is False

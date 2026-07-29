@@ -62,7 +62,7 @@ flowchart LR
       A1["new committed snapshot"] --> A2{"zone vs position zone"}
       A2 -->|same| A3["hold"]
       A2 -->|"ordinary HOLD"| A4["hold — NOT an exit"]
-      A2 -->|"CE below −15 / PE above +15"| A6["CLOSE — invalidated, no replacement"]
+      A2 -->|"CE below −30 / PE above +30"| A6["CLOSE — invalidated, no replacement"]
       A2 -->|different| A5["CLOSE_THEN_OPEN"]
     end
 
@@ -87,13 +87,13 @@ raising. Protection is never gated on a candle close or on engine health.
 
 | Score | Zone | Action | Instrument |
 |---|---|---|---|
-| `+35 … +100` | `CE_2_ITM` | buy | 2-step ITM call (ATM − 2) |
-| `+15 < score < +35` | `HOLD` | none — keep open position | — |
-| `−15 … +15` for three completed 5m candles | `SHORT_MOVE` | sell | ATM MOVE straddle |
-| `−35 < score < −15` | `HOLD` | none — keep open position | — |
-| `−100 … −35` | `PE_2_ITM` | buy | 2-step ITM put (ATM + 2) |
+| `+40 … +100` | `CE_2_ITM` | buy | 2-step ITM call (ATM − 2) |
+| `+30 < score < +40` | `HOLD` | none — keep open position | — |
+| `−30 … +30` with 5m ADX < 35 | `SHORT_MOVE` | sell | ATM MOVE straddle |
+| `−40 < score < −30` | `HOLD` | none — keep open position | — |
+| `−100 … −40` | `PE_2_ITM` | buy | 2-step ITM put (ATM + 2) |
 
-At ±35 the directional zones apply; at ±15 the SHORT_MOVE candidate zone
+At ±40 the directional zones apply; at ±30 the SHORT_MOVE candidate zone
 applies. Bands live in exactly one place, `btc_trend_engine/signals/zones.py`;
 `trend_score_auto.score_zone` delegates
 to it so the two cannot drift.
@@ -101,7 +101,7 @@ to it so the two cannot drift.
 Directional entries also require the score to agree with the classified
 structure (`TREND_UP`/`BREAKOUT_UP` for CE, `TREND_DOWN`/`BREAKOUT_DOWN` for
 PE) and to meet the engine's minimum confidence. A `SHORT_MOVE` additionally
-needs its 30-minute confirmation, a fresh executable quote, positive
+needs a calm 5m ADX reading below 35, a fresh executable quote, positive
 premium-versus-forecast net edge, and jump probability below the configured
 limit. Missing evidence blocks the entry.
 

@@ -43,9 +43,9 @@ def zone_agreement(legacy_zone: str, engine_zone: str | None) -> tuple[bool | No
     """Compare the *action* each engine would take, not just its direction.
 
     Direction agreement hides the two changes that matter most under the
-    2026-07-26 zone spec: legacy buys a 3-step ITM put where this engine buys
+    2026-07-29 zone spec: legacy buys a 3-step ITM put where this engine buys
     a 2-step one (same direction, different instrument), and legacy takes a
-    directional trade in 25<|score|<35 where this engine holds flat (same
+    directional trade in 25<|score|<40 where this engine holds flat (same
     "not sideways", opposite position).
     """
     if not engine_zone:

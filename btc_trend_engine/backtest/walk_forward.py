@@ -23,10 +23,10 @@ from ..signals.snapshot import SignalConfig
 from .event_replay import ReplayConfig, replay
 from .performance import Performance, evaluate
 
-# Bracketed around the 2026-07-26 operator spec's |35| directional entry, so
-# the sweep answers "is 35 a cliff or a plateau?" rather than re-testing the
+# Bracketed around the 2026-07-29 operator spec's |40| directional entry, so
+# the sweep answers "is 40 a cliff or a plateau?" rather than re-testing the
 # superseded 65. Was (55, 65, 75).
-DEFAULT_ENTRY_SCORES = (30.0, 35.0, 45.0)
+DEFAULT_ENTRY_SCORES = (35.0, 40.0, 50.0)
 DEFAULT_MIN_CONFIDENCE = (0.55, 0.62, 0.70)
 
 

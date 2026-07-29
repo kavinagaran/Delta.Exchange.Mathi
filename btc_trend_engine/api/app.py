@@ -105,6 +105,18 @@ def create_app(config: EngineConfig,
                                 detail="no live view yet; awaiting market data")
         return view
 
+    @app.get("/trend/live/history", dependencies=[Depends(require_token)])
+    async def trend_live_history(request: Request, symbol: str | None = None,
+                                 limit: int = 60) -> dict[str, object]:
+        """Recent Preview Decision score candles for the dashboard chart.
+
+        This is display data only: it contains no committed decision fields
+        and the engine never reads it when evaluating an entry or exit.
+        """
+        engine_service = _service(request)
+        _require_symbol(engine_service, symbol)
+        return engine_service.live_score_history(limit)
+
     @app.get("/trend/history", dependencies=[Depends(require_token)])
     async def trend_history(request: Request, symbol: str | None = None,
                             limit: int = 50) -> dict[str, object]:

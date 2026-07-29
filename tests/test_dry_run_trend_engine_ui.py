@@ -12,14 +12,10 @@ NODE = shutil.which("node")
 def test_dry_run_ui_has_one_score_zone_workspace_and_no_legacy_trade_frames():
     template = (ROOT / "templates" / "dry_run.html").read_text(encoding="utf-8")
 
-    # The card is headed "Paper trade" since the score-zone wording was
-    # renamed throughout this page; the internal ids (score_zone_position,
-    # legacy_position_blockers) deliberately did not move with the copy.
     assert "Paper trade" in template
+    assert "Score-zone paper trade" not in template
     assert "Current position" in template
     assert "Latest engine decision" in template
-    assert "score_zone_position" in template
-    assert "legacy_position_blockers" in template
     assert "One automated paper position per user" in template
     for obsolete in (
         "Morning MOVE",
@@ -87,11 +83,9 @@ const state = {
 };
 const html = dryPositionDetails(state);
 const tradeTime = html.indexOf('<dt>Time of trade</dt>');
-// Labelled "Trade type" since the score-zone rename; still the same row in
-// the same position, still fed by dryScoreZoneLabel.
-const zone = html.indexOf('<dt>Trade type</dt>');
-const contract = html.indexOf('<dt>Contract</dt>');
-if (tradeTime < 0 || zone < 0 || contract < 0 || tradeTime > zone || zone > contract) {
+    const tradeType = html.indexOf('<dt>Trade type</dt>');
+    const contract = html.indexOf('<dt>Contract</dt>');
+if (tradeTime < 0 || tradeType < 0 || contract < 0 || tradeTime > tradeType || tradeType > contract) {
   throw new Error(`paper-trade fields are not ordered correctly: ${html}`);
 }
 if (!html.includes('7:20 AM IST')) {
@@ -99,6 +93,9 @@ if (!html.includes('7:20 AM IST')) {
 }
 if (html.includes('<dt>Started</dt>')) {
   throw new Error('obsolete Started row remains');
+}
+if (html.includes('<dt>Score zone</dt>')) {
+  throw new Error('obsolete Score zone row remains');
 }
 if (!html.includes("endDrySimulation('trend')")) {
   throw new Error(`Exit no longer targets the score-zone owner: ${html}`);
@@ -132,7 +129,7 @@ def test_score_zone_decision_uses_the_configured_zone_bands_and_confirmation_cop
 const fs = require('fs');
 const vm = require('vm');
 const source = fs.readFileSync('templates/dry_run.html', 'utf8');
-const start = source.indexOf('function dryEngineDecisionLabel');
+const start = source.indexOf('function dryScoreZoneLabel');
 const end = source.indexOf('function renderDryMode');
 if (start < 0 || end <= start) throw new Error('Trend Engine panel functions not found');
 
@@ -142,10 +139,6 @@ global.dryKnownNumber = value => value !== null && value !== undefined &&
 global.fN = (value, digits = 2) => Number(value).toFixed(digits);
 global.esc = value => String(value ?? '').replace(/&/g, '&amp;')
   .replace(/</g, '&lt;').replace(/>/g, '&gt;');
-// Defined above this slice, and now called from dryTrendScoreAutoHtml to
-// render the Trade type row. Stubbed like the other cross-boundary helpers;
-// the real mapping has its own test below.
-global.dryScoreZoneLabel = record => String(record?.trend_score_zone || '');
 vm.runInThisContext(source.slice(start, end));
 
 if (dryTrendScoreTarget({engine_zone: 'CE_2_ITM'}) !== 'Buy 2-step ITM Call') {
@@ -157,57 +150,21 @@ if (dryTrendScoreTarget({engine_zone: 'PE_2_ITM'}) !== 'Buy 2-step ITM Put') {
 if (dryTrendScoreTarget({engine_zone: 'HOLD'}) !== 'Hold the open position — no new entry') {
   throw new Error('HOLD zone mapping changed');
 }
-if (dryTrendScoreTarget({engine_zone: 'SHORT_MOVE', status: 'awaiting_confirmation'}) !==
-    'Wait for 30-minute neutral-score confirmation') {
-  throw new Error('SHORT_MOVE confirmation copy changed');
+if (dryTrendScoreTarget({engine_zone: 'SHORT_MOVE'}) !== 'Sell ATM MOVE straddle') {
+  throw new Error('SHORT_MOVE action copy changed');
 }
 global.dryTrendScoreAutoStatus = {
-  enabled: true, mode: 'dry_run', status: 'awaiting_confirmation',
+  enabled: true, mode: 'dry_run', status: 'active',
   direction_score: 0, market_regime: 'RANGE', engine_zone: 'SHORT_MOVE',
   lots: 1000, signal_bar_close_utc: '2026-07-26T10:00:00Z',
   last_cycle_utc: '2026-07-26T10:00:01Z',
 };
 global.dryTrendScoreAutoReachable = true;
 const html = dryTrendScoreAutoHtml();
-if (!html.includes('Wait for 30-minute neutral-score confirmation') ||
-    !html.includes('One user-owned paper position may be open at a time.')) {
+if (!html.includes('Sell ATM MOVE straddle') ||
+    !html.includes('One user-owned paper position may be open at a time.') ||
+    !html.includes('<dt>Trade type</dt><dd>MV</dd>')) {
   throw new Error(`paper-trade decision copy is incomplete: ${html}`);
-}
-"""
-    result = subprocess.run(
-        [NODE, "-e", script], cwd=ROOT, text=True, capture_output=True, check=False
-    )
-    assert result.returncode == 0, result.stderr
-
-@pytest.mark.skipif(NODE is None, reason="Node.js is required for frontend JavaScript tests")
-def test_trade_type_label_shortens_the_zone_and_falls_back_to_the_symbol():
-    """The Trade type column is the renamed Score zone column, and it now
-    abbreviates: CE / PE / MV rather than the raw zone identifier. The symbol
-    fallback still covers records written before trend_score_zone existed."""
-    script = r"""
-const fs = require('fs');
-const vm = require('vm');
-const source = fs.readFileSync('templates/dry_run.html', 'utf8');
-const start = source.indexOf('function dryScoreZoneLabel');
-const end = source.indexOf('function dryKnownNumber');
-if (start < 0 || end <= start) throw new Error('dryScoreZoneLabel not found');
-vm.runInThisContext(source.slice(start, end));
-
-const cases = [
-  [{trend_score_zone: 'CE_2_ITM'}, 'CE'],
-  [{trend_score_zone: 'PE_2_ITM'}, 'PE'],
-  [{trend_score_zone: 'SHORT_MOVE'}, 'MV'],
-  [{engine_zone: 'short_move'}, 'MV'],
-  [{symbol: 'C-BTC-65000-230726'}, 'CE'],
-  [{symbol: 'P-BTC-65000-230726'}, 'PE'],
-  [{symbol: 'MV-BTC-65800-230726'}, 'MV'],
-  [{}, 'Trade pending'],
-];
-for (const [record, expected] of cases) {
-  const actual = dryScoreZoneLabel(record);
-  if (actual !== expected) {
-    throw new Error(`${JSON.stringify(record)} -> ${actual}, expected ${expected}`);
-  }
 }
 """
     result = subprocess.run(

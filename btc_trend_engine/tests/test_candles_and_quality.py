@@ -41,6 +41,7 @@ def _dq_config(**overrides) -> DataQualityConfig:
 def test_bucket_start_aligns_to_resolution():
     ts = datetime(2026, 7, 25, 10, 7, 33, tzinfo=timezone.utc)
     assert bucket_start(ts, "5m") == datetime(2026, 7, 25, 10, 5, tzinfo=timezone.utc)
+    assert bucket_start(ts, "30m") == datetime(2026, 7, 25, 10, 0, tzinfo=timezone.utc)
     assert bucket_start(ts, "4h") == datetime(2026, 7, 25, 8, 0, tzinfo=timezone.utc)
 
 

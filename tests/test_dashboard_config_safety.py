@@ -235,7 +235,7 @@ def test_config_reset_profile_covers_every_page_field_and_is_fail_safe():
         encoding="utf-8")
     page_keys = set(re.findall(r'id="c-([A-Z0-9_]+)"', html))
     preserved = set(dashboard.CONFIG_PAGE_PRESERVED_KEYS)
-    assert len(page_keys) == 32
+    assert len(page_keys) == 30
     assert preserved == {"TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"}
     assert page_keys - preserved == set(dashboard.CONFIG_PAGE_DEFAULTS)
     assert set(dashboard.CONFIG_PAGE_DEFAULTS) <= set(dashboard.CONFIG_KEYS)
@@ -267,8 +267,8 @@ def test_config_reset_profile_covers_every_page_field_and_is_fail_safe():
     assert "TREND_AUTO_ENTRY_MODE" not in page_keys
     assert defaults["SHORT_MAX_RISK_USD"] == "50"
     assert defaults["TREND_DRY_RUN_CAPITAL_USD"] == "1000"
-    assert defaults["TREND_MOVE_MIN_EDGE_PCT"] == "15"
-    assert defaults["TREND_MOVE_MAX_JUMP_PROBABILITY"] == "0.05"
+    assert "TREND_MOVE_MIN_EDGE_PCT" not in defaults
+    assert "TREND_MOVE_MAX_JUMP_PROBABILITY" not in defaults
     assert defaults["RISK_FAIL_CLOSED"] == "true"
     assert defaults["SAFE_EXECUTION_ENABLED"] == "true"
     assert defaults["ALLOW_EXTERNAL_POSITIONS_WITH_BOT"] == "false"

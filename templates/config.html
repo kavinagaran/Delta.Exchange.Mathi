@@ -45,11 +45,11 @@
     <div class="form-sec">
       <div class="form-sec-title">Score zones</div>
       <div class="score-zone-band-grid" aria-label="Score zone rules">
-        <div class="score-zone-band is-call"><strong>+35 to +100</strong><span>CE 2 ITM</span><small>Buy a 2-step in-the-money Call</small></div>
-        <div class="score-zone-band is-hold"><strong>+15 to below +35</strong><span>HOLD</span><small>Keep the current position; no new entry</small></div>
-        <div class="score-zone-band is-move"><strong>−15 to +15</strong><span>SHORT MOVE</span><small>Sell ATM MOVE only after 15 minutes in range</small></div>
-        <div class="score-zone-band is-hold"><strong>Above −35 to below −15</strong><span>HOLD</span><small>Keep the current position; no new entry</small></div>
-        <div class="score-zone-band is-put"><strong>−100 to −35</strong><span>PE 2 ITM</span><small>Buy a 2-step in-the-money Put</small></div>
+        <div class="score-zone-band is-call"><strong>+40 to +100</strong><span>BUY CE · 2 ITM</span><small>Buy a 2-step in-the-money Call</small></div>
+        <div class="score-zone-band is-hold"><strong>Above +30 to below +40</strong><span>HOLD</span><small>Keep the current position; no new entry</small></div>
+        <div class="score-zone-band is-move"><strong>−30 to +30</strong><span>SHORT MOVE</span><small>Sell ATM MOVE when 5-minute ADX is below 35, premium is above $300, and more than 90 minutes remain</small></div>
+        <div class="score-zone-band is-hold"><strong>Above −40 to below −30</strong><span>HOLD</span><small>Keep the current position; no new entry</small></div>
+        <div class="score-zone-band is-put"><strong>−100 to −40</strong><span>BUY PE · 2 ITM</span><small>Buy a 2-step in-the-money Put</small></div>
       </div>
       <p class="config-copy">A new valid zone exits the current score-zone position first. The controller opens the replacement only after the previous exit is proven. After an entry, that same zone is locked—even after TP, SL, or trailing stop—until the score enters a different zone or you deliberately reset it below.</p>
       <div class="btn-row" style="margin-top:12px">
@@ -120,8 +120,8 @@
           <label class="fld"><span>Maximum spread %</span><input id="c-MAX_SPREAD_PCT" type="number" min="0.1" max="100" step="0.1"></label>
           <label class="fld"><span>Maximum slippage %</span><input id="c-MAX_SLIPPAGE_PCT" type="number" min="0.01" max="20" step="0.1"></label>
           <label class="fld"><span>Maximum quote age seconds</span><input id="c-MAX_QUOTE_AGE_SEC" type="number" min="1" max="300" step="1"></label>
-          <label class="fld"><span>Minimum net edge %</span><input id="c-TREND_MOVE_MIN_EDGE_PCT" type="number" min="0" max="1000" step="0.1"><em class="fld-hint">Premium must exceed forecast movement and costs by this buffer.</em></label>
-          <label class="fld"><span>Maximum jump probability</span><input id="c-TREND_MOVE_MAX_JUMP_PROBABILITY" type="number" min="0" max="1" step="0.01"><em class="fld-hint">Blocks a short MOVE when the engine sees elevated tail risk.</em></label>
+          <label class="fld"><span>Minimum quoted premium</span><div class="config-static-value"><strong>Above $300</strong><small>Uses the current ATM MOVE bid.</small></div></label>
+          <label class="fld"><span>Minimum time to expiry</span><div class="config-static-value"><strong>More than 90 minutes</strong><small>The current expiry is skipped at or below this limit.</small></div></label>
         </div>
       </section>
       <section>
@@ -167,7 +167,7 @@ const KEYS = [
   'LOSS_COOLDOWN_MINUTES', 'RISK_FAIL_CLOSED', 'ALLOW_EXTERNAL_POSITIONS_WITH_BOT',
   'SAFE_EXECUTION_ENABLED', 'TREND_MAX_SPREAD_PCT', 'TREND_MAX_SLIPPAGE_PCT',
   'TREND_QUOTE_MAX_AGE_SECS', 'MAX_SPREAD_PCT', 'MAX_SLIPPAGE_PCT',
-  'MAX_QUOTE_AGE_SEC', 'TREND_MOVE_MIN_EDGE_PCT', 'TREND_MOVE_MAX_JUMP_PROBABILITY',
+  'MAX_QUOTE_AGE_SEC',
   'TELEGRAM_ALERTS', 'TELEGRAM_BOT_TOKEN', 'TELEGRAM_CHAT_ID',
 ];
 
@@ -415,7 +415,7 @@ async function saveConfig() {
   }
   if (scoreMode === 'dry_run' && loadedScoreAutoMode !== 'dry_run' && !confirm(
       'Enable automatic DRY RUN score-zone trading?\n\n' +
-      'Every eligible trade uses 1,000 lots. +35 or above buys a 2-step ITM Call; −35 or below buys a 2-step ITM Put; scores that stay inside −15 to +15 for 15 minutes sell ATM MOVE. HOLD bands do not open or close a position.\n\n' +
+      'Every eligible trade uses 1,000 lots. +40 or above buys a 2-step ITM Call; −40 or below buys a 2-step ITM Put; scores inside −30 to +30 sell ATM MOVE only when 5-minute ADX is below 35, the current bid is above $300, and more than 90 minutes remain. HOLD bands do not open or close a position.\n\n' +
       'No exchange order will be placed.')) return;
   if (scoreMode === 'live' && loadedScoreAutoMode !== 'live' && !confirm(
       'Enable LIVE automatic score-zone trading?\n\n' +

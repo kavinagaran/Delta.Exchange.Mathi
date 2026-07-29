@@ -1,4 +1,4 @@
-"""Transparent weighted trend score (§11) with the v1 weighting of ADR 0004.
+"""Transparent weighted trend score (§11) with explainable ADX/RSI inputs.
 
 Each component maps features → a raw score in [-1, +1]; the weighted sum goes
 through ``100·tanh`` so the final score lives in (-100, +100) and saturates
@@ -17,13 +17,19 @@ from typing import Mapping
 from ..features.pipeline import TimeframeFeatures
 
 # ADR 0004: order_flow held at 0 until recorded history can validate it.
+# ADX is strength only; its signed contribution is set by the independently
+# calculated RSI/structure direction.  RSI is intentionally a separate
+# component rather than being buried inside lower-timeframe momentum, so the
+# dashboard can show both pieces of evidence.
 V1_WEIGHTS: dict[str, float] = {
-    "higher_timeframe_trend": 0.40,
-    "market_structure": 0.20,
-    "lower_timeframe_momentum": 0.20,
+    "higher_timeframe_trend": 0.30,
+    "market_structure": 0.18,
+    "lower_timeframe_momentum": 0.13,
+    "rsi_momentum": 0.14,
+    "adx_trend_strength": 0.10,
     "order_flow": 0.00,
-    "breakout_quality": 0.10,
-    "derivatives_context": 0.10,
+    "breakout_quality": 0.08,
+    "derivatives_context": 0.07,
 }
 
 
@@ -67,7 +73,7 @@ def _clamp(value: float, low: float = -1.0, high: float = 1.0) -> float:
 
 def _higher_timeframe_trend(structural: TimeframeFeatures,
                             primary: TimeframeFeatures) -> float | None:
-    """4H structural environment + 1H primary trend (§7 table)."""
+    """1H structural environment + 30M primary trend (§7 table)."""
     parts: list[float] = []
     for tf, weight in ((structural, 0.4), (primary, 0.6)):
         distance = tf.get("ema_distance_atr")
@@ -95,15 +101,61 @@ def _market_structure(primary: TimeframeFeatures,
 
 
 def _lower_timeframe_momentum(trigger: TimeframeFeatures) -> float | None:
-    rsi = trigger.get("rsi")
     slope = trigger.get("ema_slope_atr")
     vwap_distance = trigger.get("vwap_distance_atr")
-    if rsi is None or slope is None:
+    if slope is None and vwap_distance is None:
         return None
-    score = 0.5 * _clamp((rsi - 50.0) / 25.0) + 0.35 * _clamp(slope / 1.0)
+    score = 0.0
+    weight = 0.0
+    if slope is not None:
+        score += 0.65 * _clamp(slope / 1.0)
+        weight += 0.65
     if vwap_distance is not None:
-        score += 0.15 * _clamp(vwap_distance / 2.0)
-    return _clamp(score)
+        score += 0.35 * _clamp(vwap_distance / 2.0)
+        weight += 0.35
+    return _clamp(score / weight) if weight else None
+
+
+def _rsi_momentum(structural: TimeframeFeatures, primary: TimeframeFeatures,
+                  setup: TimeframeFeatures, trigger: TimeframeFeatures
+                  ) -> float | None:
+    """Multi-timeframe RSI direction, centred at neutral 50.
+
+    RSI above 70 and below 30 saturate at +/-1.  The setup and trigger
+    readings carry most of the weight because they make the immediate
+    entry-direction call, while 1h/30m prevent an isolated five-minute RSI
+    spike from dominating the score.
+    """
+    weighted = 0.0
+    available = 0.0
+    for timeframe, weight in ((structural, 0.15), (primary, 0.25),
+                              (setup, 0.35), (trigger, 0.25)):
+        rsi = timeframe.get("rsi")
+        if rsi is None:
+            continue
+        weighted += weight * _clamp((rsi - 50.0) / 20.0)
+        available += weight
+    return _clamp(weighted / available) if available else None
+
+
+def _adx_trend_strength(trigger: TimeframeFeatures,
+                        rsi_score: float | None,
+                        direction_hint: float | None) -> float | None:
+    """Signed ADX evidence from the 5m trigger timeframe.
+
+    ADX under 35 intentionally contributes a neutral score: that is the
+    calm-zone threshold shared with the regime classifier.  Above 35, strength
+    is signed only when RSI or higher-timeframe structure has an opinion;
+    ADX itself never invents a direction.
+    """
+    adx = trigger.get("adx")
+    if adx is None:
+        return None
+    strength = _clamp((adx - 35.0) / 20.0, 0.0, 1.0)
+    sign_source = rsi_score if rsi_score is not None else direction_hint
+    if sign_source is None or abs(sign_source) < 0.05:
+        return 0.0
+    return strength if sign_source > 0 else -strength
 
 
 def _breakout_quality(setup: TimeframeFeatures) -> float | None:
@@ -151,8 +203,8 @@ def _derivatives_context(derivatives: Mapping[str, float],
 
 def compute_score(
     *,
-    structural: TimeframeFeatures,   # 4h
-    primary: TimeframeFeatures,      # 1h
+    structural: TimeframeFeatures,   # 1h
+    primary: TimeframeFeatures,      # 30m
     setup: TimeframeFeatures,        # 15m
     trigger: TimeframeFeatures,      # 5m
     derivatives: Mapping[str, float],
@@ -166,10 +218,14 @@ def compute_score(
     underlying_sign = (0.0 if direction_hint is None
                       else (1.0 if direction_hint > 0 else
                             -1.0 if direction_hint < 0 else 0.0))
+    rsi_score = _rsi_momentum(structural, primary, setup, trigger)
     raw: dict[str, float | None] = {
         "higher_timeframe_trend": direction_hint,
         "market_structure": _market_structure(primary, setup),
         "lower_timeframe_momentum": _lower_timeframe_momentum(trigger),
+        "rsi_momentum": rsi_score,
+        "adx_trend_strength": _adx_trend_strength(
+            trigger, rsi_score, direction_hint),
         "order_flow": None,  # ADR 0004: not computed in v1
         "breakout_quality": _breakout_quality(setup),
         "derivatives_context": _derivatives_context(derivatives, underlying_sign),

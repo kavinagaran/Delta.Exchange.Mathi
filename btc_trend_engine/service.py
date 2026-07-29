@@ -15,8 +15,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import shutil
-from datetime import datetime, timezone
+from collections import deque
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import websockets
@@ -102,6 +104,12 @@ class EngineService:
         self._restore_signal_state()
         self.last_ticker: dict[str, Any] = {}
         self.live_view: dict[str, Any] | None = None
+        # The Preview Decision intentionally has a separate, in-memory display
+        # history.  It records the repainting score inside the forming trigger
+        # candle so the UI can draw score candles, but it is never persisted as
+        # a decision and is never exposed to the order consumer.
+        self._preview_score_candles: deque[dict[str, Any]] = deque(maxlen=144)
+        self._preview_score_forming: dict[str, Any] | None = None
         self.raw_capture_enabled = True
         self.dispatch_errors = 0
         self.snapshot_errors = 0
@@ -217,16 +225,97 @@ class EngineService:
         i.e. ~5s). Never raises into the loop, and never touches the committed
         snapshot — see SnapshotProducer.produce_live."""
         try:
-            self.live_view = self.producer.produce_live(
+            view = self.producer.produce_live(
                 now=now,
                 candles={resolution: series.closed_candles()
                          for resolution, series in self.candles.series.items()},
                 forming=self.candles.series[TRIGGER_RESOLUTION].forming(),
                 data_quality=self.current_data_quality(),
             )
+            if view is not None:
+                self._record_preview_score(view)
+            self.live_view = view
         except Exception:
             log.exception("live view refresh failed")
         return self.live_view
+
+    def _record_preview_score(self, view: dict[str, Any]) -> None:
+        """Fold one provisional sample into a 5-minute score OHLC candle.
+
+        This deliberately consumes only the display-only ``produce_live``
+        result.  The records stay in process memory, have no signal ID or
+        entry permission, and are returned only by the display-history API.
+        """
+        start = view.get("forming_candle_start")
+        if not isinstance(start, str) or not start:
+            return
+        try:
+            score = float(view["live_score"])
+        except (KeyError, TypeError, ValueError):
+            return
+        if not math.isfinite(score):
+            return
+
+        as_of = view.get("as_of")
+        if not isinstance(as_of, str) or not as_of:
+            as_of = self.clock.now().astimezone(timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%SZ")
+
+        current = self._preview_score_forming
+        if current is None or current["start_utc"] != start:
+            if current is not None:
+                completed = dict(current)
+                completed["forming"] = False
+                self._preview_score_candles.append(completed)
+            self._preview_score_forming = {
+                "start_utc": start,
+                "end_utc": self._preview_candle_end(start),
+                "open": score,
+                "high": score,
+                "low": score,
+                "close": score,
+                "samples": 1,
+                "last_sample_utc": as_of,
+                "data_quality": view.get("data_quality"),
+                "forming": True,
+            }
+            return
+
+        current["high"] = max(float(current["high"]), score)
+        current["low"] = min(float(current["low"]), score)
+        current["close"] = score
+        current["samples"] = int(current.get("samples") or 0) + 1
+        current["last_sample_utc"] = as_of
+        current["data_quality"] = view.get("data_quality")
+
+    @staticmethod
+    def _preview_candle_end(start: str) -> str:
+        try:
+            parsed = datetime.fromisoformat(start.replace("Z", "+00:00"))
+            return (parsed.astimezone(timezone.utc) + timedelta(minutes=5)).strftime(
+                "%Y-%m-%dT%H:%M:%SZ")
+        except ValueError:
+            # A malformed display timestamp should not affect market capture.
+            # The UI still receives the originating timestamp and simply omits
+            # an end label rather than fabricating a time.
+            return ""
+
+    def live_score_history(self, limit: int = 60) -> dict[str, Any]:
+        """Return recent display-only Preview Decision score candles.
+
+        The history is intentionally ephemeral: a restart starts a new chart
+        rather than presenting provisional scores as durable trade evidence.
+        """
+        safe_limit = max(1, min(int(limit), 144))
+        candles = [dict(candle) for candle in self._preview_score_candles]
+        if self._preview_score_forming is not None:
+            candles.append(dict(self._preview_score_forming))
+        return {
+            "symbol": self.config.engine.symbol,
+            "resolution": "5m",
+            "display_only": True,
+            "candles": candles[-safe_limit:],
+        }
 
     def _on_disconnect(self, reason: str) -> None:
         # Block-entries-first (§6.4 step 1): the book is invalid the moment the

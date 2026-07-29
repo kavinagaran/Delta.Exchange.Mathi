@@ -217,7 +217,7 @@ class FeatureVector:
   ],
   "data_quality": "OK",
   "feature_set_version": "v1.0.0",
-  "model_version": "trend-rules-v1.0.0"
+  "model_version": "trend-rules-v1.1.0"
 }
 ```
 
@@ -336,8 +336,8 @@ Use the following initial functional timeframes, configurable through YAML or en
 
 | Timeframe | Function |
 |---|---|
-| 4-hour | Structural bull or bear environment |
-| 1-hour | Primary trend direction and strength |
+| 1-hour | Structural bull or bear environment |
+| 30-minute | Primary intraday trend direction and strength |
 | 15-minute | Setup, breakout, and continuation quality |
 | 5-minute | Entry trigger and invalidation refinement |
 | Tick / 1-minute | Order flow, liquidity, and execution timing |
@@ -354,8 +354,8 @@ Rules:
 Example long alignment:
 
 ```text
-4H structure       = Bullish or neutral
-1H trend           = Bullish
+1H structure       = Bullish or neutral
+30M trend          = Bullish
 15M setup          = Bullish continuation or breakout
 5M trigger         = Bullish close or pullback recovery
 Order flow         = Positive or non-opposing
@@ -710,7 +710,8 @@ Every signal must include a TTL. The consumer must reject expired signals.
 Use stable machine-readable reason codes such as:
 
 ```text
-4H_STRUCTURE_BULLISH
+1H_STRUCTURE_BULLISH
+30M_TREND_ALIGNED
 1H_EMA_SLOPE_POSITIVE
 15M_BREAKOUT_CONFIRMED
 5M_PULLBACK_RECOVERY
@@ -1637,8 +1638,8 @@ Use this as the first transparent baseline, subject to repository compatibility 
 
 ```text
 Primary instrument       BTCUSD perpetual or configured BTC reference
-Regime timeframe         1 hour
-Structural timeframe     4 hours
+Regime timeframe         30 minutes
+Structural timeframe     1 hour
 Setup timeframe          15 minutes
 Trigger timeframe        5 minutes
 Order-flow horizons      Tick, 10s, 30s, 2m, and 5m

@@ -135,6 +135,9 @@ TREND_SCORE_AUTO_OWNERSHIP = "trend_score_auto_dry_run"
 TREND_SCORE_AUTO_LIVE_OWNERSHIP = "trend_score_auto_live"
 TREND_SCORE_AUTO_TRIGGER = "trend_engine_score_zone_auto"
 TREND_SCORE_AUTO_LEDGER_SIGNAL_LIMIT = 576
+# Fixed strategy rule: both DRY RUN and LIVE use the same quoted ATM MOVE
+# premium floor before a SHORT MOVE can be opened.
+SHORT_MOVE_MIN_PREMIUM_USD = 300.0
 _external_options: dict[str, list] = {}
 TREND_SIGNAL_SNAPSHOT_FILE = "trend_signal_snapshot.json"
 
@@ -424,7 +427,6 @@ CONFIG_KEYS = [
     "TREND_MAX_SLIPPAGE_PCT", "TREND_ORDER_CHUNK_LOTS",
     "TREND_MARKET_FALLBACK_ENABLED", "TREND_REENTRY_COOLDOWN_MIN",
     "TREND_ALLOW_MISSING_BOOK", "TREND_DRY_RUN_CAPITAL_USD",
-    "TREND_MOVE_MIN_EDGE_PCT", "TREND_MOVE_MAX_JUMP_PROBABILITY",
     "TREND_ENGINE_SCORE_AUTO_MODE",
     "MAX_TRADES_PER_DAY", "MAX_TRADES_PER_DAY_GLOBAL",
     "MAX_DAILY_LOSS_USD", "MAX_OPEN_RISK_USD", "MAX_CONSECUTIVE_LOSSES",
@@ -480,10 +482,6 @@ CONFIG_PAGE_DEFAULTS = {
     "TREND_RISK_BUDGET_USD": "100",
     "SHORT_MAX_RISK_USD": "50",
     "TREND_DRY_RUN_CAPITAL_USD": "1000",
-    # A neutral direction is not automatically positive short-vol edge. The
-    # MOVE premium must cover forecast movement, fees, and this extra buffer.
-    "TREND_MOVE_MIN_EDGE_PCT": "15",
-    "TREND_MOVE_MAX_JUMP_PROBABILITY": "0.05",
     # Safe execution and fresh-quote requirements. The controller chooses
     # the matching option or MOVE settings for the active score zone.
     "SAFE_EXECUTION_ENABLED": "true",
@@ -1186,14 +1184,8 @@ def _trend_score_auto_config_error(config: dict | None = None) -> str | None:
                 "LIVE Trend risk budget must cover the configured Trend stop loss"
             )
     dry_capital = number("TREND_DRY_RUN_CAPITAL_USD", 1000)
-    min_move_edge = number("TREND_MOVE_MIN_EDGE_PCT", 15)
-    max_move_jump = number("TREND_MOVE_MAX_JUMP_PROBABILITY", 0.05)
     if not math.isfinite(dry_capital) or dry_capital <= 0:
         return "Trend DRY RUN capital must be positive"
-    if not math.isfinite(min_move_edge) or min_move_edge < 0:
-        return "Trend MOVE minimum edge must be zero or greater"
-    if not math.isfinite(max_move_jump) or not 0 <= max_move_jump <= 1:
-        return "Trend MOVE maximum jump probability must be between 0 and 1"
     return None
 
 
@@ -5623,6 +5615,13 @@ def api_engine_live():
     return jsonify(trend_engine_client.get_live_view(symbol))
 
 
+@app.route("/api/engine/live-history")
+def api_engine_live_history():
+    """Read-only Preview Decision score candles for the Trend Engine chart."""
+    symbol = request.args.get("symbol", "BTCUSD")
+    return jsonify(trend_engine_client.get_live_history(symbol))
+
+
 @app.route("/api/engine/health")
 def api_engine_health():
     return jsonify(trend_engine_client.get_health())
@@ -8366,128 +8365,6 @@ def _collect_trend_score_auto_signal() -> dict:
     return signal
 
 
-def _trend_score_auto_short_move_confirmation_pending(signal: dict) -> bool:
-    """Whether the engine is waiting to confirm a neutral SHORT_MOVE setup."""
-    reason = str(signal.get("zone_reason") or "").lower()
-    return bool(
-        signal.get("zone") == TREND_SCORE_MOVE_ZONE
-        and signal.get("zone_action_allowed") is not True
-        and "confirmation" in reason
-    )
-
-
-def _trend_score_auto_short_move_components_disagree(signal: dict) -> bool:
-    """Whether a neutral MOVE score is components cancelling, not a calm tape.
-
-    Matched by phrase for the same reason the confirmation wait is matched by
-    word (see ``_trend_score_auto_engine_action_ready``): ``zone_reason`` is
-    the only "why" that crosses the engine boundary.  The phrase is pinned
-    against the engine's own wording by
-    ``test_component_disagreement_reason_is_recognised_by_the_dashboard`` so
-    the two cannot drift apart silently.
-    """
-    reason = str(signal.get("zone_reason") or "").lower()
-    return bool(
-        signal.get("zone") == TREND_SCORE_MOVE_ZONE
-        and signal.get("zone_action_allowed") is not True
-        and "components disagree" in reason
-    )
-
-
-def _trend_score_auto_short_move_setup_pending(signal: dict) -> bool:
-    """Whether a MOVE setup is in progress but not yet executable.
-
-    Both blocked-setup reasons count: the engine is either still counting
-    confirmation bars, or holding back because the components behind the
-    neutral score cancel rather than agree.  Neither is a trade, and in both
-    the neutral band is a *new* setup forming.
-    """
-    return (_trend_score_auto_short_move_confirmation_pending(signal)
-            or _trend_score_auto_short_move_components_disagree(signal))
-
-
-def _trend_score_auto_release_setup_lock_for_short_move_setup(
-    user: str,
-    signal: dict,
-    *,
-    execution_mode: str,
-) -> dict | None:
-    """Release a completed setup lock while a fresh MOVE setup is pending.
-
-    The neutral band is a new setup in progress, not an executable trade.  A
-    completed CE/PE/MOVE setup must therefore not survive that wait and
-    suppress the next eligible score zone.  This deliberately does not touch a
-    position, signal record, or notification.
-
-    Applies to both reasons a forming MOVE setup can be blocked — the
-    confirmation window and component disagreement.  It originally covered
-    only the former, which left a stale lock suppressing the next zone
-    whenever the components blocked the MOVE instead; the persisted ledger key
-    keeps its original ``..._short_move_confirmation_released_at_utc`` spelling
-    so existing ledgers stay readable.
-    """
-    if not _trend_score_auto_short_move_setup_pending(signal):
-        return None
-    expected_mode = "live" if execution_mode.upper() == "LIVE" else "dry_run"
-    expected_dry_run = expected_mode == "dry_run"
-    data_dir = _mode_data_dir(expected_dry_run)
-    root_dir = _user_dir()
-    owner = (
-        f"trend-score-confirmation-release:{user}:{os.getpid()}:"
-        f"{time.time_ns()}"
-    )
-    with account_entry_lock(root_dir, owner) as exposure_lock:
-        if not exposure_lock:
-            raise RuntimeError(
-                "account exposure lock is busy; cannot release the prior "
-                "score-zone setup lock during SHORT_MOVE confirmation"
-            )
-        with account_file_lock(
-            root_dir,
-            "config",
-            owner,
-            stale_after_sec=30,
-            wait_sec=5,
-        ) as config_lock:
-            if not config_lock:
-                raise RuntimeError(
-                    "account configuration is busy; cannot release the prior "
-                    "score-zone setup lock during SHORT_MOVE confirmation"
-                )
-            mode = _trading_mode_payload()
-            if (
-                bool(mode.get("dry_run_mode")) != expected_dry_run
-                or mode.get("mode_revision")
-                != (signal.get("mode") or {}).get("mode_revision")
-                or _trend_score_auto_mode(_user_cfg()) != expected_mode
-            ):
-                raise RuntimeError(
-                    "trading mode changed before the SHORT_MOVE confirmation "
-                    "could release the prior setup lock"
-                )
-            ledger = _trend_score_auto_ledger(data_dir)
-            previous = _trend_score_auto_setup_lock(ledger)
-            if previous is None:
-                return None
-            ledger["setup_lock"] = None
-            # A release is intentional state-machine behavior, never an
-            # accident for the one-time legacy-lock recovery to undo.
-            ledger["setup_lock_semantics_v2_migrated"] = True
-            ledger["setup_lock_short_move_confirmation_released_at_utc"] = (
-                datetime.now(timezone.utc).isoformat()
-            )
-            _trend_score_auto_write_ledger(data_dir, ledger)
-    _trend_audit("trend_score_auto_setup_lock_released_for_short_move_confirmation", {
-        "execution_mode": expected_mode,
-        "previous_zone": previous.get("target_zone"),
-        "source_signal_key": previous.get("source_signal_key"),
-        "confirmation_signal_key": signal.get("signal_key"),
-        "order_submitted": False,
-        "exchange_api_called": False,
-    })
-    return previous
-
-
 def _trend_score_auto_engine_action_ready(
     user: str,
     cycle_at: str,
@@ -8497,11 +8374,9 @@ def _trend_score_auto_engine_action_ready(
 ) -> bool:
     """Do not mutate a position until the engine has approved this zone.
 
-    In particular, a SHORT_MOVE candidate remains non-actionable until the
-    engine has seen six consecutive closed 5m scores inside ±15.  Treating
-    that pending confirmation as a zone switch would close an existing Trend
-    position before a replacement is permitted, so it is an explicit no-op.
-    The same fail-safe rule applies to any other engine action gate.
+    A SHORT_MOVE is actionable only when the engine confirms the current
+    closed 5m score is neutral and its 5m ADX is below 35. The same fail-safe
+    rule applies to every other engine action gate.
     """
     if signal.get("zone") == TREND_SCORE_HOLD_ZONE:
         # HOLD can still carry an exit-only invalidation for an existing CE/PE
@@ -8511,38 +8386,12 @@ def _trend_score_auto_engine_action_ready(
     if signal.get("zone_action_allowed") is True:
         return True
     reason = str(signal.get("zone_reason") or "engine action gate is closed")
-    # Matched on the bare word, not "30-minute confirmation": the window is a
-    # tuned parameter (15m -> 30m on 2026-07-27) and pinning the minute count
-    # here means a silent behaviour change the next time it moves. No other
-    # zone_reason the engine emits contains "confirmation".
-    is_confirmation = _trend_score_auto_short_move_confirmation_pending(signal)
-    # A forming MOVE setup releases the previous lock whichever way it is
-    # blocked, but only the confirmation wait is reported as
-    # "awaiting_confirmation": component disagreement is not a wait, and
-    # labelling it one would tell the operator that time alone resolves it.
-    setup_pending = _trend_score_auto_short_move_setup_pending(signal)
-    released_lock = None
-    if setup_pending:
-        released_lock = _trend_score_auto_release_setup_lock_for_short_move_setup(
-            user,
-            signal,
-            execution_mode=execution_mode,
-        )
-    released_note = (
-        "released the prior score-zone setup lock; "
-        if released_lock is not None else ""
-    )
     _trend_score_auto_health_update(
         user,
-        status=("awaiting_confirmation" if is_confirmation else "blocked"),
+        status="blocked",
         last_cycle_utc=cycle_at,
-        last_action=(
-            f"{released_note}waiting for 30-minute SHORT_MOVE confirmation"
-            if is_confirmation
-            else f"{released_note}{execution_mode} score action is blocked "
-            f"by the Trend Engine"
-        ),
-        last_error=None if is_confirmation else reason,
+        last_action=f"{execution_mode} score action is blocked by the Trend Engine",
+        last_error=reason,
         direction_score=signal.get("score"),
         market_regime=signal.get("market_regime"),
         engine_zone=signal.get("zone"),
@@ -8658,35 +8507,17 @@ def _trend_score_auto_move_quote(symbol: str) -> dict:
     }
 
 
-def _trend_score_auto_short_move_edge(
-    signal: dict,
+def _trend_score_auto_short_move_eligibility(
     selection: dict,
     quote: dict,
 ) -> dict:
-    """Prove that a neutral score has positive *short-vol* economics.
+    """Validate the explicit SHORT MOVE contract-entry rules.
 
-    ``SHORT_MOVE`` is not justified merely because BTC has no directional
-    bias.  Premium must exceed a horizon-scaled realised-volatility estimate
-    plus both-side costs and an explicit edge buffer.  Missing forecast data
-    blocks the order rather than being treated as zero movement.
+    The Trend Engine supplies the calm-market signal. Contract selection then
+    requires only a quoted ATM MOVE premium above $300 and strictly more than
+    90 minutes to expiry. Forecast-value and jump-probability filters are not
+    part of this strategy.
     """
-    forecast = signal.get("forecast") if isinstance(signal, dict) else None
-    if not isinstance(forecast, dict):
-        raise RuntimeError("SHORT MOVE forecast is unavailable")
-    horizon = _trend_score_auto_number(
-        forecast.get("forecast_horizon_seconds"),
-        "SHORT MOVE forecast horizon", positive=True,
-    )
-    forecast_vol_bps = _trend_score_auto_number(
-        forecast.get("forecast_volatility_bps"),
-        "SHORT MOVE forecast volatility", positive=True,
-    )
-    jump_probability = _trend_score_auto_number(
-        forecast.get("jump_probability"),
-        "SHORT MOVE jump probability",
-    )
-    if not 0 <= jump_probability <= 1:
-        raise RuntimeError("SHORT MOVE jump probability is invalid")
     now = datetime.now(timezone.utc)
     expiry = datetime.fromisoformat(
         str(selection.get("expiry") or "").replace("Z", "+00:00")
@@ -8694,57 +8525,19 @@ def _trend_score_auto_short_move_edge(
     if expiry.tzinfo is None:
         expiry = expiry.replace(tzinfo=timezone.utc)
     tte_seconds = (expiry.astimezone(timezone.utc) - now).total_seconds()
-    if tte_seconds < MIN_TIME_TO_EXPIRY_SECONDS:
-        raise RuntimeError("SHORT MOVE contract is too close to expiry")
-
-    spot = _trend_score_auto_number(selection.get("spot"), "BTC spot", positive=True)
+    if tte_seconds <= MIN_TIME_TO_EXPIRY_SECONDS:
+        raise RuntimeError("SHORT MOVE needs more than 90 minutes until expiry")
     bid = _trend_score_auto_number(quote.get("bid"), "MOVE bid", positive=True)
-    contract_value = _trend_score_auto_number(
-        selection.get("contract_value"), "MOVE contract value", positive=True,
-    )
-    strike = _trend_score_auto_number(selection.get("strike"), "MOVE strike", positive=True)
-    # The engine forecast is for its stated horizon (normally 15 minutes).
-    # Scale a volatility estimate, not a directional return, to remaining TTE.
-    expected_move_bps = forecast_vol_bps * math.sqrt(tte_seconds / horizon)
-    expected_payout_per_lot = spot * expected_move_bps / 10_000 * contract_value
-    premium_per_lot = bid * contract_value
-    round_trip_fees = 2 * _option_fee_per_lot(bid, contract_value, strike)
-    net_edge_per_lot = premium_per_lot - expected_payout_per_lot - round_trip_fees
-    net_edge_pct = 100 * net_edge_per_lot / premium_per_lot
-    cfg = _user_cfg()
-    min_edge_pct = _trend_score_auto_number(
-        cfg.get("TREND_MOVE_MIN_EDGE_PCT") or 15,
-        "SHORT MOVE minimum net edge",
-    )
-    max_jump_probability = _trend_score_auto_number(
-        cfg.get("TREND_MOVE_MAX_JUMP_PROBABILITY") or 0.05,
-        "SHORT MOVE maximum jump probability",
-    )
-    if not 0 <= max_jump_probability <= 1:
-        raise RuntimeError("SHORT MOVE maximum jump probability is invalid")
-    if net_edge_pct < min_edge_pct:
+    if bid <= SHORT_MOVE_MIN_PREMIUM_USD:
         raise RuntimeError(
-            "SHORT MOVE premium does not cover forecast movement and costs "
-            f"({net_edge_pct:.1f}% < {min_edge_pct:.1f}% required)"
-        )
-    if jump_probability > max_jump_probability:
-        raise RuntimeError(
-            "SHORT MOVE tail-risk gate blocked entry "
-            f"({jump_probability:.1%} > {max_jump_probability:.1%})"
+            "SHORT MOVE premium must be above "
+            f"${SHORT_MOVE_MIN_PREMIUM_USD:,.0f} (currently ${bid:,.2f})"
         )
     return {
-        "forecast_horizon_seconds": round(horizon, 3),
-        "forecast_volatility_bps": round(forecast_vol_bps, 4),
-        "expected_move_to_expiry_bps": round(expected_move_bps, 4),
-        "expected_payout_per_lot_usd": round(expected_payout_per_lot, 8),
-        "premium_per_lot_usd": round(premium_per_lot, 8),
-        "round_trip_fees_per_lot_usd": round(round_trip_fees, 8),
-        "net_edge_per_lot_usd": round(net_edge_per_lot, 8),
-        "net_edge_pct": round(net_edge_pct, 4),
-        "minimum_edge_pct": round(min_edge_pct, 4),
-        "jump_probability": round(jump_probability, 6),
-        "maximum_jump_probability": round(max_jump_probability, 6),
+        "quoted_premium_usd": round(bid, 8),
+        "minimum_premium_usd": SHORT_MOVE_MIN_PREMIUM_USD,
         "time_to_expiry_seconds": round(tte_seconds, 3),
+        "minimum_time_to_expiry_seconds": MIN_TIME_TO_EXPIRY_SECONDS,
     }
 
 
@@ -8810,10 +8603,10 @@ def _prepare_trend_score_auto_entry(signal: dict) -> dict:
     )
     if not selection:
         raise RuntimeError(
-            "No operational ATM MOVE contract with at least 90 minutes remains"
+            "No operational ATM MOVE contract with more than 90 minutes remains"
         )
     quote = _trend_score_auto_move_quote(selection["symbol"])
-    move_edge = _trend_score_auto_short_move_edge(signal, selection, quote)
+    move_eligibility = _trend_score_auto_short_move_eligibility(selection, quote)
     return {
         **selection,
         "side": "short",
@@ -8824,7 +8617,7 @@ def _prepare_trend_score_auto_entry(signal: dict) -> dict:
         "quote_timestamp": datetime.now(timezone.utc).isoformat(),
         "entry_depth": quote["entry_depth"],
         "quote_snapshot": quote,
-        "move_edge": move_edge,
+        "move_eligibility": move_eligibility,
     }
 
 
@@ -12272,6 +12065,20 @@ def _maybe_auto_trend_score_cycle() -> bool:
                                 "the paper account remains flat and will retry this signal."
                             )
                         return True
+                    # No position has changed. Mark this intent rebuildable so
+                    # a refreshed quote for the *same* completed candle may be
+                    # evaluated again. Leaving it PREPARED would falsely mark
+                    # the signal as in-flight forever.
+                    transition.update({
+                        "phase": "REBUILD_REQUIRED",
+                        "entry_blocked_reason": (
+                            preparation_error
+                            or "target contract requires fresh revalidation"
+                        ),
+                        "updated_at_utc": datetime.now(timezone.utc).isoformat(),
+                    })
+                    ledger["current_transition"] = transition
+                    _trend_score_auto_write_ledger(data_dir, ledger)
                     _trend_score_auto_health_update(
                         user, status="blocked",
                         last_action="waiting for the exact 1,000-lot target contract",
@@ -12847,8 +12654,6 @@ _CONFIG_NUMERIC_BOUNDS = {
     "TREND_QUOTE_MAX_AGE_SECS": (1, 300), "TREND_MAX_MARK_IV": (0, 10),
     "TREND_RISK_BUDGET_USD": (1, 10_000_000),
     "TREND_DRY_RUN_CAPITAL_USD": (1, 10_000_000),
-    "TREND_MOVE_MIN_EDGE_PCT": (0, 1000),
-    "TREND_MOVE_MAX_JUMP_PROBABILITY": (0, 1),
     "TREND_MAX_SLIPPAGE_PCT": (0.01, 20), "TREND_ORDER_CHUNK_LOTS": (1, 5000),
     "MAX_ORDER_LOTS": (1, 5000),
     "TREND_REENTRY_COOLDOWN_MIN": (0, 1440),

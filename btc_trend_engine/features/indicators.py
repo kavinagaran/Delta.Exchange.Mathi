@@ -65,6 +65,60 @@ def rsi(values: Sequence[float], period: int = 14) -> float | None:
     return 100.0 - 100.0 / (1.0 + avg_gain / avg_loss)
 
 
+def adx(candles: Sequence[Candle], period: int = 14) -> float | None:
+    """Wilder Average Directional Index, returned on its usual 0..100 scale.
+
+    ADX measures trend *strength*, not direction.  Direction remains the job
+    of price structure and RSI; the regime classifier treats ADX below 35 as
+    a calm/sideways market.  ``None`` is returned until a complete Wilder
+    warm-up exists rather than inventing a weak-trend reading.
+    """
+    if period <= 0 or len(candles) < 2 * period + 1:
+        return None
+
+    true_ranges: list[float] = []
+    plus_moves: list[float] = []
+    minus_moves: list[float] = []
+    for previous, current in zip(candles, candles[1:]):
+        high, low = float(current.high), float(current.low)
+        previous_high, previous_low = float(previous.high), float(previous.low)
+        previous_close = float(previous.close)
+        up_move = high - previous_high
+        down_move = previous_low - low
+        plus_moves.append(up_move if up_move > down_move and up_move > 0 else 0.0)
+        minus_moves.append(down_move if down_move > up_move and down_move > 0 else 0.0)
+        true_ranges.append(max(high - low, abs(high - previous_close),
+                               abs(low - previous_close)))
+
+    smooth_tr = sum(true_ranges[:period])
+    smooth_plus = sum(plus_moves[:period])
+    smooth_minus = sum(minus_moves[:period])
+    dx_values: list[float] = []
+
+    def append_dx() -> None:
+        if smooth_tr <= 0:
+            return
+        plus_di = 100.0 * smooth_plus / smooth_tr
+        minus_di = 100.0 * smooth_minus / smooth_tr
+        denominator = plus_di + minus_di
+        if denominator > 0:
+            dx_values.append(100.0 * abs(plus_di - minus_di) / denominator)
+
+    append_dx()
+    for index in range(period, len(true_ranges)):
+        smooth_tr = smooth_tr - smooth_tr / period + true_ranges[index]
+        smooth_plus = smooth_plus - smooth_plus / period + plus_moves[index]
+        smooth_minus = smooth_minus - smooth_minus / period + minus_moves[index]
+        append_dx()
+
+    if len(dx_values) < period:
+        return None
+    value = sum(dx_values[:period]) / period
+    for dx_value in dx_values[period:]:
+        value = (value * (period - 1) + dx_value) / period
+    return value
+
+
 def directional_efficiency(values: Sequence[float], lookback: int) -> float | None:
     """Net displacement over path length, signed: +1 straight up, -1 straight
     down, ~0 churn.  (Kaufman efficiency ratio with direction retained.)"""

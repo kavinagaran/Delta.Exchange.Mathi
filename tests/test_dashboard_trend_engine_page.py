@@ -30,6 +30,7 @@ def test_trend_engine_page_is_registered_and_reads_only():
     assert "/trend-engine-legacy" not in TEMPLATE
     assert "jget('/api/engine/snapshot')" in TEMPLATE
     assert "jget('/api/engine/live')" in TEMPLATE
+    assert "jget('/api/engine/live-history')" in TEMPLATE
     assert "jget('/api/engine/status')" in TEMPLATE
     assert "Live preview" in TEMPLATE
     assert "Committed decision" in TEMPLATE
@@ -41,6 +42,24 @@ def test_trend_engine_page_is_registered_and_reads_only():
     assert "method: 'DELETE'" not in TEMPLATE
     assert "/api/trend-entry" not in TEMPLATE
     assert "/api/trend-engine'" not in TEMPLATE  # the legacy endpoint, not this page's
+
+
+def test_preview_score_chart_is_display_only_and_marks_every_zone_boundary():
+    assert 'id="te-preview-score-chart"' in TEMPLATE
+    assert "renderPreviewScoreChart(liveHistory)" in TEMPLATE
+    assert "drawPreviewScoreChart" in TEMPLATE
+    assert "PREVIEW_SCORE_ZONE_LEVELS" in TEMPLATE
+    for label in ("BUY CE +40", "SHORT MOVE +30", "SHORT MOVE −30", "BUY PE −40"):
+        assert label in TEMPLATE
+    # Zone separators are deliberately fine; the axes stay strong neutral grey.
+    assert "ctx.setLineDash([1, 6])" in TEMPLATE
+    assert "ctx.lineWidth = .6" in TEMPLATE
+    assert "ctx.strokeStyle = 'rgba(168, 178, 190, .94)'" in TEMPLATE
+    assert "ctx.lineWidth = 2" in TEMPLATE
+    # 75% of the previous 3x chart height (834px) is 626px.
+    assert "height: 626px" in STYLE
+    assert "PREVIEW DECISION SCORE" in TEMPLATE
+    assert ".te-preview-chart-stage canvas" in STYLE
 
 
 def test_live_and_committed_scores_have_separate_colored_circles():

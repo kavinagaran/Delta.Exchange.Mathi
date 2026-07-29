@@ -167,6 +167,31 @@
     </section>
   </div>
 
+  <section class="card te-preview-chart-card" aria-labelledby="te-preview-chart-title">
+    <div class="card-hd">
+      <div>
+        <span class="te-kicker">DISPLAY ONLY · LIVE PREVIEW</span>
+        <strong id="te-preview-chart-title">Preview Decision · 5-minute score candles</strong>
+      </div>
+      <span class="te-preview-chart-badge">5M LIVE</span>
+    </div>
+    <div class="card-bd">
+      <div class="te-preview-chart-intro">
+        <p>Each candle shows how the Preview Decision score moved during one forming five-minute market candle. It is visual context only; committed decisions remain the only trade input.</p>
+        <div class="te-preview-chart-legend" aria-label="Score zone levels">
+          <span class="is-ce"><i></i>Buy CE ≥ +40</span>
+          <span class="is-hold"><i></i>Hold +30…+40 / −40…−30</span>
+          <span class="is-move"><i></i>Short MOVE −30 to +30</span>
+          <span class="is-pe"><i></i>Buy PE ≤ −40</span>
+        </div>
+      </div>
+      <div class="te-preview-chart-stage">
+        <canvas id="te-preview-score-chart" role="img" aria-label="Five-minute Preview Decision score candlestick chart with colour-coded score zones"></canvas>
+        <div class="te-preview-chart-empty" id="te-preview-chart-empty">Collecting Preview Decision score samples. The first five-minute candle is forming.</div>
+      </div>
+    </div>
+  </section>
+
 </div>
 {% endblock %}
 
@@ -268,7 +293,12 @@ function regimeLabel(regime) {
 }
 
 function formatCode(name) {
-  return String(name || '').replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+  const fixed = {
+    rsi_momentum: 'RSI Momentum',
+    adx_trend_strength: 'ADX Trend Strength',
+  };
+  const key = String(name || '').toLowerCase();
+  return fixed[key] || String(name || '').replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
 }
 
 function dataQualityCopy(code) {
@@ -347,7 +377,7 @@ function tradeDecisionMeta(zone, actionAllowed = true, reason = '') {
       return {
         label: 'WAIT — 30-MIN CONFIRMATION',
         tone: 'is-blocked',
-        detail: 'The score must stay between −15 and +15 for six completed five-minute candles before an ATM MOVE straddle can be sold.',
+        detail: 'The score must stay between −30 and +30 for six completed five-minute candles before an ATM MOVE straddle can be sold.',
       };
     }
     return {
@@ -455,6 +485,218 @@ function renderHero(snapshot, liveView) {
     committedScore,
     snapshot.data_quality,
   );
+}
+
+const PREVIEW_SCORE_ZONE_LEVELS = [
+  { value: 40, label: 'BUY CE +40', color: '#39f0ad' },
+  { value: 30, label: 'SHORT MOVE +30', color: '#d9e1ea' },
+  { value: -30, label: 'SHORT MOVE −30', color: '#d9e1ea' },
+  { value: -40, label: 'BUY PE −40', color: '#ff5f7e' },
+];
+
+function formatPreviewChartTime(value) {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return '—';
+  const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', {
+    timeZone: IST_TIME_ZONE,
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: true,
+  }).formatToParts(parsed).filter(part => part.type !== 'literal')
+    .map(part => [part.type, part.value]));
+  return `${parts.hour}:${parts.minute} ${parts.dayPeriod}`;
+}
+
+function renderPreviewScoreChart(history) {
+  const canvas = document.getElementById('te-preview-score-chart');
+  const empty = document.getElementById('te-preview-chart-empty');
+  const candidates = Array.isArray(history?.candles) ? history.candles : [];
+  const candles = candidates.map(candle => ({
+    ...candle,
+    open: Number(candle?.open),
+    high: Number(candle?.high),
+    low: Number(candle?.low),
+    close: Number(candle?.close),
+  })).filter(candle => (
+    finite(candle.open) && finite(candle.high)
+    && finite(candle.low) && finite(candle.close)
+  ));
+
+  if (!history?.available || !candles.length) {
+    canvas.hidden = true;
+    empty.hidden = false;
+    empty.textContent = history?.available === false
+      ? 'Preview score history is temporarily unavailable. The score dials will continue to refresh.'
+      : 'Collecting Preview Decision score samples. The first five-minute candle is forming.';
+    return;
+  }
+
+  canvas.hidden = false;
+  empty.hidden = true;
+  const latest = candles[candles.length - 1];
+  canvas.setAttribute(
+    'aria-label',
+    `Five-minute Preview Decision score candles. Latest score ${signedScore(latest.close)}.`,
+  );
+  drawPreviewScoreChart(canvas, candles);
+}
+
+function drawPreviewScoreChart(canvas, candles) {
+  const rect = canvas.getBoundingClientRect();
+  const width = Math.max(320, Math.floor(rect.width || canvas.clientWidth || 320));
+  const height = Math.max(250, Math.floor(rect.height || canvas.clientHeight || 292));
+  const pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
+  if (canvas.width !== Math.floor(width * pixelRatio)
+      || canvas.height !== Math.floor(height * pixelRatio)) {
+    canvas.width = Math.floor(width * pixelRatio);
+    canvas.height = Math.floor(height * pixelRatio);
+  }
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+  ctx.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+  ctx.clearRect(0, 0, width, height);
+
+  const plot = { left: 62, top: 22, right: width - 18, bottom: height - 44 };
+  const plotWidth = Math.max(1, plot.right - plot.left);
+  const plotHeight = Math.max(1, plot.bottom - plot.top);
+  const scoreY = value => plot.top + ((100 - Math.max(-100, Math.min(100, value))) / 200) * plotHeight;
+  const scoreLabel = value => `${value > 0 ? '+' : ''}${value}`;
+
+  const backdrop = ctx.createLinearGradient(0, plot.top, 0, plot.bottom);
+  backdrop.addColorStop(0, 'rgba(18, 77, 122, .32)');
+  backdrop.addColorStop(.52, 'rgba(6, 28, 55, .46)');
+  backdrop.addColorStop(1, 'rgba(65, 12, 45, .30)');
+  ctx.fillStyle = backdrop;
+  ctx.fillRect(plot.left, plot.top, plotWidth, plotHeight);
+  const glow = ctx.createRadialGradient(plot.right, plot.top, 2, plot.right, plot.top, plotWidth * .62);
+  glow.addColorStop(0, 'rgba(55, 166, 255, .18)');
+  glow.addColorStop(1, 'rgba(55, 166, 255, 0)');
+  ctx.fillStyle = glow;
+  ctx.fillRect(plot.left, plot.top, plotWidth, plotHeight);
+
+  // Zone shading makes the action bands readable at a glance without turning
+  // the chart into an execution surface.  The boundaries themselves are
+  // drawn below as deliberately thin dotted lines.
+  const fillScoreBand = (upper, lower, colour) => {
+    const top = scoreY(upper);
+    ctx.fillStyle = colour;
+    ctx.fillRect(plot.left, top, plotWidth, scoreY(lower) - top);
+  };
+  fillScoreBand(100, 40, 'rgba(57, 240, 173, .075)');
+  fillScoreBand(40, 30, 'rgba(142, 153, 166, .14)');
+  fillScoreBand(30, -30, 'rgba(217, 225, 234, .075)');
+  fillScoreBand(-30, -40, 'rgba(142, 153, 166, .14)');
+  fillScoreBand(-40, -100, 'rgba(255, 95, 126, .075)');
+
+  ctx.font = '800 11px Inter, Segoe UI, sans-serif';
+  ctx.textBaseline = 'middle';
+  for (const level of [-100, -50, 0, 50, 100]) {
+    const y = scoreY(level);
+    ctx.setLineDash(level === 0 ? [] : [2, 5]);
+    ctx.lineWidth = level === 0 ? 1 : .55;
+    ctx.strokeStyle = level === 0 ? 'rgba(185, 194, 205, .58)' : 'rgba(171, 181, 193, .22)';
+    ctx.beginPath();
+    ctx.moveTo(plot.left, y);
+    ctx.lineTo(plot.right, y);
+    ctx.stroke();
+    ctx.fillStyle = level === 0 ? '#edf1f5' : '#c4cbd3';
+    ctx.textAlign = 'right';
+    ctx.fillText(scoreLabel(level), plot.left - 10, y);
+  }
+
+  for (const zone of PREVIEW_SCORE_ZONE_LEVELS) {
+    const y = scoreY(zone.value);
+    ctx.save();
+    ctx.setLineDash([1, 6]);
+    ctx.lineWidth = .6;
+    ctx.strokeStyle = zone.color;
+    ctx.globalAlpha = .9;
+    ctx.beginPath();
+    ctx.moveTo(plot.left, y);
+    ctx.lineTo(plot.right, y);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.globalAlpha = 1;
+    ctx.font = '800 9px Inter, Segoe UI, sans-serif';
+    const labelWidth = ctx.measureText(zone.label).width + 12;
+    const labelX = plot.right - labelWidth - 5;
+    ctx.fillStyle = 'rgba(4, 20, 39, .88)';
+    ctx.fillRect(labelX, y - 8, labelWidth, 16);
+    ctx.fillStyle = zone.color;
+    ctx.textAlign = 'left';
+    ctx.fillText(zone.label, labelX + 6, y);
+    ctx.restore();
+  }
+  ctx.setLineDash([]);
+
+  // Strong, neutral-grey axes distinguish the chart frame from the thin
+  // zone and grid dots without competing with the score candles.
+  ctx.save();
+  ctx.strokeStyle = 'rgba(168, 178, 190, .94)';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(plot.left, plot.top);
+  ctx.lineTo(plot.left, plot.bottom);
+  ctx.lineTo(plot.right, plot.bottom);
+  ctx.stroke();
+  ctx.restore();
+
+  const slot = plotWidth / candles.length;
+  const candleWidth = Math.max(3, Math.min(16, slot * .58));
+  candles.forEach((candle, index) => {
+    const x = plot.left + slot * (index + .5);
+    const rising = candle.close >= candle.open;
+    const colour = rising ? '#36eab2' : '#ff5478';
+    const wickTop = scoreY(Math.max(candle.open, candle.high, candle.low, candle.close));
+    const wickBottom = scoreY(Math.min(candle.open, candle.high, candle.low, candle.close));
+    const bodyTop = scoreY(Math.max(candle.open, candle.close));
+    const bodyBottom = scoreY(Math.min(candle.open, candle.close));
+    const bodyHeight = Math.max(2, bodyBottom - bodyTop);
+    ctx.save();
+    ctx.strokeStyle = colour;
+    ctx.fillStyle = colour;
+    ctx.shadowColor = colour;
+    ctx.shadowBlur = candle.forming ? 12 : 7;
+    ctx.globalAlpha = candle.forming ? 1 : .87;
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    ctx.moveTo(x, wickTop);
+    ctx.lineTo(x, wickBottom);
+    ctx.stroke();
+    if (candle.forming) {
+      ctx.fillStyle = 'rgba(8, 35, 61, .96)';
+      ctx.fillRect(x - candleWidth / 2, bodyTop, candleWidth, bodyHeight);
+      ctx.strokeStyle = colour;
+      ctx.strokeRect(x - candleWidth / 2, bodyTop, candleWidth, bodyHeight);
+    } else {
+      ctx.fillRect(x - candleWidth / 2, bodyTop, candleWidth, bodyHeight);
+    }
+    ctx.restore();
+  });
+
+  const labelCount = Math.min(6, candles.length);
+  const labelStep = Math.max(1, Math.floor((candles.length - 1) / Math.max(1, labelCount - 1)));
+  const labelIndexes = new Set([0, candles.length - 1]);
+  for (let index = labelStep; index < candles.length - 1; index += labelStep) {
+    labelIndexes.add(index);
+  }
+  ctx.font = '800 10px Inter, Segoe UI, sans-serif';
+  ctx.fillStyle = '#d6dce3';
+  ctx.textBaseline = 'top';
+  ctx.textAlign = 'center';
+  [...labelIndexes].sort((a, b) => a - b).forEach(index => {
+    const x = plot.left + slot * (index + .5);
+    ctx.fillText(formatPreviewChartTime(candles[index].start_utc), x, plot.bottom + 12);
+  });
+  ctx.fillStyle = '#c2cbd5';
+  ctx.textAlign = 'left';
+  ctx.font = '800 9px Inter, Segoe UI, sans-serif';
+  ctx.fillText('PREVIEW DECISION SCORE', plot.left, 5);
+  if (candles[candles.length - 1].forming) {
+    ctx.textAlign = 'right';
+    ctx.fillStyle = '#dbeeff';
+    ctx.fillText('FORMING', plot.right, 5);
+  }
 }
 
 function renderComponents(components) {
@@ -608,12 +850,14 @@ async function renderEngineHealth() {
 async function load() {
   document.getElementById('trend-engine-page').setAttribute('aria-busy', 'true');
   try {
-    const [snapshot, liveView] = await Promise.all([
+    const [snapshot, liveView, liveHistory] = await Promise.all([
       jget('/api/engine/snapshot'),
       jget('/api/engine/live').catch(() => ({ available: false })),
+      jget('/api/engine/live-history').catch(() => ({ available: false, candles: [] })),
     ]);
     renderError(snapshot);
     renderHero(snapshot, liveView);
+    renderPreviewScoreChart(liveHistory);
     renderComponents(snapshot.components);
     renderTimeframes(snapshot.timeframes);
     renderGates(snapshot.gates);

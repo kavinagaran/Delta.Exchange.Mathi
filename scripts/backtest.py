@@ -48,7 +48,8 @@ async def fetch(symbol: str, days: int, resolution: str) -> int:
     config = load_config(environ={"ENGINE_TOKEN": "fetch-only"})
     client = DeltaRestClient(config.market_data.rest_url,
                              config.market_data.rate_limit)
-    step = {"5m": 300, "15m": 900, "1h": 3600, "4h": 14400}[resolution]
+    step = {"5m": 300, "15m": 900, "30m": 1800, "1h": 3600,
+            "4h": 14400}[resolution]
     end = int(time.time())
     floor = end - days * 86_400
     rows: dict[int, dict] = {}
@@ -156,7 +157,7 @@ def build_report(symbol: str, candles, folds: int, warmup: int,
     add(f"- Range: {first:%Y-%m-%d %H:%M} → {last:%Y-%m-%d %H:%M} UTC "
         f"({(last - first).days} days)")
     add(f"- Warmup per window: {warmup:,} candles "
-        f"(the 4h timeframe needs 60 closed candles)\n")
+        f"(the 1h timeframe needs 60 closed candles)\n")
 
     if baseline is not None and baseline_performance is not None:
         add("## Baseline — retired direction-only defaults\n")

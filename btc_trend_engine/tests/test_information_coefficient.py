@@ -172,22 +172,22 @@ def test_calibration_buckets_by_the_live_zone_edges():
     observations = ([_scored(50.0, 0.01)] * 10 + [_scored(0.0, 0.0)] * 5
                     + [_scored(-50.0, -0.01)] * 8)
     buckets = {b.label: b for b in score_calibration(observations, 60)}
-    assert buckets["+35..+100"].n == 10
-    assert buckets["-15..+15"].n == 5
-    assert buckets["-100..-35"].n == 8
+    assert buckets["+40..+100"].n == 10
+    assert buckets["-30..+30"].n == 5
+    assert buckets["-100..-40"].n == 8
 
 
 def test_hit_rate_is_signed_by_the_band():
     """A bearish band that correctly predicts falls must score high, not low."""
     bullish = score_calibration([_scored(50.0, 0.01)] * 4, 60)
     bearish = score_calibration([_scored(-50.0, -0.01)] * 4, 60)
-    assert next(b for b in bullish if b.low == 35).hit_rate == 1.0
-    assert next(b for b in bearish if b.high == -35).hit_rate == 1.0
+    assert next(b for b in bullish if b.low == 40).hit_rate == 1.0
+    assert next(b for b in bearish if b.high == -40).hit_rate == 1.0
 
 
 def test_a_useless_signal_calibrates_to_a_coin_toss():
     observations = [_scored(50.0, 0.01 if i % 2 else -0.01) for i in range(100)]
-    bucket = next(b for b in score_calibration(observations, 60) if b.low == 35)
+    bucket = next(b for b in score_calibration(observations, 60) if b.low == 40)
     assert bucket.hit_rate == pytest.approx(0.5)
     assert bucket.mean_return == pytest.approx(0.0, abs=1e-9)
 

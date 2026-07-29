@@ -6,5 +6,5 @@ computation, regime classification and TrendSnapshot generation.  It holds no
 trading credentials, never touches ``users/``, and cannot place an order.
 """
 
-__version__ = "0.5.0"  # phase 8a: shadow comparison (/shadow/legacy-decision, /shadow/summary)
-ENGINE_SCHEMA_VERSION = "1.0.0"  # docs/trend-snapshot-contract.md
+__version__ = "0.5.3"  # 5m ADX calm gate and +/-30/40 zones
+ENGINE_SCHEMA_VERSION = "1.3.0"  # docs/trend-snapshot-contract.md

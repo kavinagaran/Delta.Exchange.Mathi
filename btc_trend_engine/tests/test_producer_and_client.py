@@ -19,15 +19,11 @@ from btc_trend_engine.clock import FixedClock
 from btc_trend_engine.config import load_config
 from btc_trend_engine.market_data.messages import Candle
 from btc_trend_engine.service import EngineService
-from btc_trend_engine.signals.producer import (
-    SHORT_MOVE_CONFIRMATION_BARS,
-    SnapshotProducer,
-    spread_bps_from,
-)
+from btc_trend_engine.signals.producer import SnapshotProducer, spread_bps_from
 from btc_trend_engine.signals.regime import Regime
 
 T0 = datetime(2026, 7, 25, 12, 0, tzinfo=timezone.utc)
-SECONDS = {"5m": 300, "15m": 900, "1h": 3600, "4h": 14400}
+SECONDS = {"5m": 300, "15m": 900, "30m": 1800, "1h": 3600}
 
 
 def _series(resolution: str, closes: list[float], symbol: str = "BTCUSD"):
@@ -56,7 +52,7 @@ def _zigzag(n=120, start=60000.0):
 
 def _all_timeframes(closes=None):
     closes = closes or _zigzag()
-    return {tf: _series(tf, closes) for tf in ("4h", "1h", "15m", "5m")}
+    return {tf: _series(tf, closes) for tf in ("1h", "30m", "15m", "5m")}
 
 
 TICKER = {"mark_price": "63941.7", "spot_price": "63940.0",
@@ -77,7 +73,11 @@ def test_produces_schema_valid_snapshot_from_closed_candles():
                   "components", "timeframes", "gates", "reason_codes",
                   "data_quality", "feature_set_version", "model_version"):
         assert field in snapshot, field
-    assert snapshot["schema_version"] == "1.2.0"
+    assert snapshot["schema_version"] == "1.3.0"
+    assert snapshot["model_version"] == "trend-rules-v1.3.0"
+    assert [row["timeframe"] for row in snapshot["timeframes"]] == [
+        "1h", "30m", "15m", "5m",
+    ]
     assert -100.0 <= snapshot["trend_score"] <= 100.0
     assert snapshot["signal_ttl_seconds"] > 0
     assert abs(sum(c["weight"] for c in snapshot["components"]) - 1.0) < 1e-9
@@ -113,7 +113,7 @@ def test_invalid_book_blocks_entry_and_names_the_gate():
 
 def test_short_history_is_reported_not_silently_defaulted():
     producer = SnapshotProducer("BTCUSD")
-    short = {tf: _series(tf, _zigzag(n=10)) for tf in ("4h", "1h", "15m", "5m")}
+    short = {tf: _series(tf, _zigzag(n=10)) for tf in ("1h", "30m", "15m", "5m")}
     snapshot = producer.produce(
         now=T0, candles=short, ticker=TICKER, data_quality="OK",
         book_valid=True, spread_bps=1.0)
@@ -163,37 +163,6 @@ def test_history_is_bounded_and_ordered():
                          data_quality="OK", book_valid=True, spread_bps=1.0)
     assert len(producer.history(100)) == 3
     assert producer.latest() == producer.history(100)[-1]
-
-
-def test_short_move_requires_a_full_window_of_closed_neutral_bars():
-    """±15 is only a candidate; a full run of adjacent closed 5m scores
-    confirms it.
-
-    Built from SHORT_MOVE_CONFIRMATION_BARS rather than a literal count, so
-    retuning the window (15m -> 30m on 2026-07-27) cannot leave this test
-    quietly asserting the old behaviour.
-    """
-    producer = SnapshotProducer("BTCUSD")
-    prior_bars = SHORT_MOVE_CONFIRMATION_BARS - 1   # the rest is the current bar
-    producer._history.extend([
-        {
-            "candle_close_utc": (T0 + timedelta(minutes=5 * i)).strftime(
-                "%Y-%m-%dT%H:%M:%SZ"
-            ),
-            "trend_score": 14.9 if i % 2 else 0.0,   # inside ±15 throughout
-            "data_quality": "OK",
-        }
-        for i in range(prior_bars)
-    ])
-    confirm_at = T0 + timedelta(minutes=5 * prior_bars)
-    assert producer._short_move_confirmed(
-        score=-15.0, candle_close=confirm_at, data_quality="OK") is True
-
-    # Dropping the most recent prior bar leaves a gap immediately before the
-    # decision, which breaks the continuity guarantee.
-    producer._history.pop()
-    assert producer._short_move_confirmed(
-        score=0.0, candle_close=confirm_at, data_quality="OK") is False
 
 
 def test_spread_bps_helper_handles_missing_and_zero_sides():
@@ -251,7 +220,7 @@ def test_trend_endpoints_require_token_and_serve_the_contract(config, service):
         assert http.get("/trend/latest").status_code == 401
         latest = http.get("/trend/latest", headers=headers)
         assert latest.status_code == 200
-        assert latest.json()["schema_version"] == "1.2.0"
+        assert latest.json()["schema_version"] == "1.3.0"
         assert http.get("/trend/history?limit=5",
                         headers=headers).json()["snapshots"]
         assert http.get("/regime/latest", headers=headers).json()["regime"]
@@ -432,6 +401,28 @@ def test_health_and_status_never_raise(monkeypatch):
     _patch_get(monkeypatch, ConnectionError("refused"))
     assert client.get_health()["ok"] is False
     assert client.get_status()["available"] is False
+
+
+def test_live_history_client_is_display_only_and_never_a_decision(monkeypatch):
+    _patch_get(monkeypatch, _Response(200, {
+        "symbol": "BTCUSD",
+        "resolution": "5m",
+        "display_only": True,
+        "candles": [{"start_utc": "2026-07-26T06:00:00Z", "open": 5,
+                     "high": 12, "low": 2, "close": 8, "forming": True}],
+    }))
+    history = client.get_live_history("BTCUSD")
+    assert history["available"] is True
+    assert history["display_only"] is True
+    assert history["candles"][0]["close"] == 8
+    assert "entry_allowed" not in history
+    assert "signal_id" not in history
+
+
+def test_live_history_client_fails_closed_as_display_data(monkeypatch):
+    _patch_get(monkeypatch, _Response(503, None))
+    history = client.get_live_history("BTCUSD")
+    assert history == {"available": False, "detail": "HTTP 503", "candles": []}
 
 
 def test_degraded_snapshot_is_shaped_like_the_contract():

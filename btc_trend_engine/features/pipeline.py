@@ -18,7 +18,7 @@ from typing import Any, Mapping, Sequence
 from ..market_data.messages import Candle
 from . import indicators as ind
 
-FEATURE_SET_VERSION = "v1.0.0"
+FEATURE_SET_VERSION = "v1.1.0"
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,6 +79,7 @@ def compute_timeframe_features(
     else:
         missing.append("vwap_distance_atr")
     put("rsi", ind.rsi(closes))
+    put("adx", ind.adx(candles))
 
     # ── market structure (§9.1/§9.2) ─────────────────────────────────────
     _structure_features(candles, atr_value, put, swing_strength)

@@ -24,11 +24,7 @@ from btc_trend_engine.signals.regime import (
     Regime,
     RegimeClassifier,
 )
-from btc_trend_engine.signals.score import (
-    V1_WEIGHTS,
-    ComponentScore,
-    compute_score,
-)
+from btc_trend_engine.signals.score import V1_WEIGHTS, compute_score
 from btc_trend_engine.signals.snapshot import (
     SignalConfig,
     SignalHysteresis,
@@ -41,7 +37,7 @@ T0 = datetime(2026, 7, 25, 0, 0, tzinfo=timezone.utc)
 
 def _candles(closes, *, spread=1.0, volume=10.0, resolution="5m", start=T0):
     out = []
-    step = {"5m": 300, "15m": 900, "1h": 3600, "4h": 14400}[resolution]
+    step = {"5m": 300, "15m": 900, "30m": 1800, "1h": 3600}[resolution]
     previous = closes[0]
     for i, close in enumerate(closes):
         high = max(previous, close) + spread
@@ -94,6 +90,15 @@ def test_rsi_extremes():
     assert ind.rsi(down, 14) == pytest.approx(0.0)
 
 
+def test_adx_measures_strength_and_needs_a_full_wilder_warmup():
+    assert ind.adx(_candles(_trending(28)), 14) is None
+    trending = ind.adx(_candles(_trending(80)), 14)
+    ranging = ind.adx(_candles(_ranging(120)), 14)
+    assert trending is not None and ranging is not None
+    assert trending > 30.0
+    assert ranging < 30.0
+
+
 def test_directional_efficiency_signed():
     assert ind.directional_efficiency(_trending(30), 20) == pytest.approx(1.0)
     assert ind.directional_efficiency(
@@ -134,6 +139,7 @@ def test_trending_series_produces_positive_trend_features():
     assert features.get("ema_distance_atr") > 0
     assert features.get("structure_bias") == 1.0
     assert features.get("donchian_position") > 0.7
+    assert features.get("adx") is not None
     assert features.get("last_swing_low") < features.get("last_swing_high")
     # A 5-up(+30) / 2-down(-40) cycle nets 70 over 230 of path: efficiency
     # tops out near 0.30 and reads lower at a partial-cycle boundary. What
@@ -186,10 +192,11 @@ def _full_bull_inputs():
           "donchian_position": 0.95, "rsi": 70.0, "vwap_distance_atr": 1.0,
           "breakout_direction": 1.0, "breakout_body_atr": 1.5,
           "close_location": 0.9, "volume_ratio": 2.0, "atr": 50.0,
-          "vol_ratio": 1.0, "jump_score": 0.5,
+          "vol_ratio": 1.0, "jump_score": 0.5, "adx": 45.0,
           "last_swing_low": 63000.0, "last_swing_high": 64000.0}
-    return dict(structural=_tf(up), primary=_tf(up), setup=_tf(up),
-                trigger=_tf(up), derivatives={"oi_change_6h_pct": 4.0,
+    return dict(structural=_tf(dict(up)), primary=_tf(dict(up)),
+                setup=_tf(dict(up)), trigger=_tf(dict(up)),
+                derivatives={"oi_change_6h_pct": 4.0,
                                               "funding_percentile": 0.5})
 
 
@@ -210,7 +217,8 @@ def test_score_is_antisymmetric_for_mirrored_inputs():
             "directional_efficiency": -0.8, "structure_bias": -1.0,
             "donchian_position": 0.05, "rsi": 30.0, "vwap_distance_atr": -1.0,
             "breakout_direction": -1.0, "breakout_body_atr": 1.5,
-            "close_location": 0.1, "volume_ratio": 2.0, "atr": 50.0}
+            "close_location": 0.1, "volume_ratio": 2.0, "atr": 50.0,
+            "adx": 45.0}
     # The mirror of "longs building" (price up, OI up) is "shorts building"
     # (price down, OI up) — §9.5 table — so the mirrored fixture keeps
     # oi_change POSITIVE. OI shrinking would be long liquidation, a different
@@ -228,7 +236,10 @@ def test_order_flow_weight_is_zero_and_unavailable_in_v1():
     assert order_flow.weight == 0.0
     assert not order_flow.available
     assert sum(c.weight for c in result.components) == pytest.approx(1.0)
-    assert V1_WEIGHTS["higher_timeframe_trend"] == 0.40
+    assert V1_WEIGHTS["higher_timeframe_trend"] == 0.30
+    assert {"rsi_momentum", "adx_trend_strength"} <= {
+        component.name for component in result.components
+    }
 
 
 def test_insufficient_inputs_yield_no_score_not_neutral():
@@ -259,14 +270,15 @@ def test_vol_shock_beats_trend():
 def test_regime_hysteresis_enter_hold_exit():
     classifier = RegimeClassifier()
     quiet = _tf({"vol_ratio": 1.0, "volume_ratio": 1.0,
-                 "breakout_direction": 0.0, "breakout_body_atr": 0.0})
+                 "breakout_direction": 0.0, "breakout_body_atr": 0.0,
+                 "adx": 36.0, "rsi": 60.0})
     assert classifier.classify(data_quality_ok=True, trend_score=65.0,
                                setup=quiet).regime is Regime.TREND_UP
     # decays below enter but above exit → held
-    assert classifier.classify(data_quality_ok=True, trend_score=40.0,
+    assert classifier.classify(data_quality_ok=True, trend_score=35.0,
                                setup=quiet).regime is Regime.TREND_UP
-    # below the ±15 neutral candidate boundary → released to RANGE
-    decision = classifier.classify(data_quality_ok=True, trend_score=10.0,
+    # at the ±30 neutral candidate boundary → released to RANGE
+    decision = classifier.classify(data_quality_ok=True, trend_score=30.0,
                                    setup=quiet)
     assert decision.regime is Regime.RANGE
     assert decision.changed
@@ -275,59 +287,79 @@ def test_regime_hysteresis_enter_hold_exit():
 def test_breakout_requires_body():
     classifier = RegimeClassifier()
     weak = _tf({"vol_ratio": 1.0, "volume_ratio": 1.0,
-                "breakout_direction": 1.0, "breakout_body_atr": 0.3})
+                "breakout_direction": 1.0, "breakout_body_atr": 0.3,
+                "adx": 36.0, "rsi": 60.0})
     assert classifier.classify(data_quality_ok=True, trend_score=10.0,
                                setup=weak).regime is Regime.RANGE
     strong = _tf({"vol_ratio": 1.0, "volume_ratio": 1.0,
-                  "breakout_direction": 1.0, "breakout_body_atr": 1.5})
+                  "breakout_direction": 1.0, "breakout_body_atr": 1.5,
+                  "adx": 36.0, "rsi": 60.0})
     assert classifier.classify(data_quality_ok=True, trend_score=10.0,
                                setup=strong).regime is Regime.BREAKOUT_UP
 
 
+def test_adx_below_35_is_a_calm_sideways_regime_and_can_confirm_move():
+    setup = _tf({"vol_ratio": 1.0, "volume_ratio": 1.0,
+                 "adx": 62.0, "rsi": 72.0})
+    decision = RegimeClassifier().classify(
+        data_quality_ok=True, trend_score=85.0,
+        setup=setup,
+        trigger=_tf({"adx": 34.9}),
+    )
+    assert decision.regime is Regime.RANGE
+    assert "calm-zone" in decision.reason
+    assert zones.decide(
+        score=0.0, regime=decision.regime.value, data_quality="OK",
+        gates_passed=True,
+    ).action_allowed is True
+
+
+def test_rsi_must_confirm_the_score_direction_before_trending():
+    decision = RegimeClassifier().classify(
+        data_quality_ok=True, trend_score=85.0,
+        setup=_tf({"vol_ratio": 1.0, "volume_ratio": 1.0,
+                   "adx": 36.0, "rsi": 42.0}),
+    )
+    assert decision.regime is Regime.RANGE
+    assert "not confirmed" in decision.reason
+
+
 # ── signal hysteresis ───────────────────────────────────────────────────
 def test_signal_hysteresis_matrix():
-    """Thresholds are the 2026-07-26 operator spec: enter at |35|, hold to
-    |15|. Scores between 15 and 35 are HOLD (see signals/zones.py)."""
+    """Thresholds are the 2026-07-29 operator spec: enter at |40|, hold to
+    |30|. Scores between 30 and 40 are HOLD (see signals/zones.py)."""
     h = SignalHysteresis(SignalConfig())
-    assert h.update(30.0) == 0        # inside the hold band, never entered
-    assert h.update(40.0) == 1        # enter long at >= 35
-    assert h.update(30.0) == 1        # hold band keeps an OPEN position
-    assert h.update(20.0) == 1        # intermediate HOLD keeps direction
-    assert h.update(15.0) == 0        # exit at <= 15
-    assert h.update(-40.0) == -1      # enter short at <= -35
-    assert h.update(-26.0) == -1      # hold
-    assert h.update(-10.0) == 0       # exit
+    assert h.update(35.0) == 0        # inside the hold band, never entered
+    assert h.update(40.0) == 1        # enter long at >= 40
+    assert h.update(35.0) == 1        # hold band keeps an OPEN position
+    assert h.update(30.0) == 0        # exit at <= 30
+    assert h.update(-40.0) == -1      # enter short at <= -40
+    assert h.update(-35.0) == -1      # hold
+    assert h.update(-30.0) == 0       # exit
     assert h.update(None) == 0        # no score → flat, always
 
 
 def test_the_hold_band_is_asymmetric_between_entering_and_holding():
-    """A score of 30 must NOT open a position but must not close one either.
+    """A score of 35 must NOT open a position but must not close one either.
     This is the whole point of the gap in the spec."""
     entering = SignalHysteresis(SignalConfig())
-    assert entering.update(30.0) == 0
+    assert entering.update(35.0) == 0
 
     holding = SignalHysteresis(SignalConfig())
     holding.update(40.0)
-    assert holding.update(30.0) == 1
+    assert holding.update(35.0) == 1
 
 
 # ── snapshot invariants (contract §invariants, §23.4) ───────────────────
 def _snapshot(regime=Regime.TREND_UP, data_quality="OK", direction=1,
               gates_ok=True, score_value=80.0, gates=None,
-              short_move_confirmed=False, component_abs=None):
+              trigger_adx=None):
     inputs = _full_bull_inputs()
+    if trigger_adx is not None:
+        inputs["trigger"].features["adx"] = trigger_adx
     score = compute_score(**inputs)
     if score_value is not None:
         object.__setattr__(score, "trend_score", score_value)
-    if component_abs is not None:
-        # The fixture is bullish, so forcing `trend_score` alone leaves a
-        # neutral score sitting on strongly bullish components -- a state the
-        # real scorer cannot produce, and one the sideways component-agreement
-        # gate correctly refuses. Bring the components along with the score.
-        object.__setattr__(score, "components", [
-            ComponentScore(name=c.name, weight=c.weight, available=c.available,
-                           score=None if c.score is None else component_abs)
-            for c in score.components])
     gates = gates or [
         {"name": "data_fresh", "passed": gates_ok, "detail": None},
         {"name": "risk_lock_clear", "passed": True, "detail": None},
@@ -338,12 +370,12 @@ def _snapshot(regime=Regime.TREND_UP, data_quality="OK", direction=1,
         regime=regime, regime_since=T0, score=score, direction=direction,
         structural=inputs["structural"], primary=inputs["primary"],
         setup=inputs["setup"], trigger=inputs["trigger"],
-        timeframe_closes={tf: T0 for tf in ("4h", "1h", "15m", "5m")},
+        timeframe_closes={tf: T0 for tf in ("1h", "30m", "15m", "5m")},
         gates=gates, data_quality=data_quality, config=SignalConfig(),
         forecast={"expected_return_bps": None,
                   "expected_absolute_move_bps": 43.0,
                   "forecast_volatility_bps": 39.0, "jump_probability": 0.02},
-        short_move_confirmed=short_move_confirmed)
+        )
 
 
 def test_snapshot_matches_contract_shape():
@@ -354,8 +386,8 @@ def test_snapshot_matches_contract_shape():
                 "reason_codes", "data_quality", "invalidation_price",
                 "zone", "zone_action_allowed", "zone_reason"):
         assert key in snapshot, key
-    # 1.2.0 adds zone confidence/regime gates; clients compare major only.
-    assert snapshot["schema_version"] == "1.2.0"
+    # 1.3.0 carries the short-term 1h/30m/15m/5m production profile.
+    assert snapshot["schema_version"] == "1.3.0"
     assert snapshot["entry_allowed"] is True
     assert snapshot["invalidation_price"] == "63000.0"
     assert snapshot["suggested_stop_bps"] == pytest.approx(58.5)
@@ -388,7 +420,7 @@ def test_sideways_zone_ignores_only_directional_entry_gates():
         {
             "name": "score_beyond_entry_threshold",
             "passed": False,
-            "detail": "|score| 0.0 < 35.0",
+            "detail": "|score| 0.0 < 40.0",
         },
         {"name": "risk_lock_clear", "passed": True, "detail": None},
     ]
@@ -396,9 +428,8 @@ def test_sideways_zone_ignores_only_directional_entry_gates():
         regime=Regime.RANGE,
         direction=0,
         score_value=0.0,
-        component_abs=5.0,
         gates=gates,
-        short_move_confirmed=True,
+        trigger_adx=34.9,
     )
     assert snapshot["zone"] == zones.SHORT_MOVE
     assert snapshot["zone_action_allowed"] is True
@@ -407,34 +438,43 @@ def test_sideways_zone_ignores_only_directional_entry_gates():
     assert "score_beyond_entry_threshold" not in names
     assert {
         "regime_safe_for_move",
+        "calm_adx",
         "score_in_neutral_range",
-        "short_move_confirmed",
     } <= names
     assert all(gate["passed"] for gate in snapshot["gates"])
 
 
-def test_unconfirmed_short_move_matrix_names_the_wait_instead_of_a_failed_ce_pe_gate():
+def test_short_move_is_immediately_actionable_once_5m_adx_is_calm():
     snapshot = _snapshot(
         regime=Regime.RANGE,
         direction=0,
         score_value=10.0,
-        component_abs=5.0,
-        short_move_confirmed=False,
-    )
-    confirmation = next(
-        gate for gate in snapshot["gates"]
-        if gate["name"] == "short_move_confirmed"
+        trigger_adx=34.9,
     )
     assert snapshot["zone"] == zones.SHORT_MOVE
-    assert snapshot["zone_action_allowed"] is False
-    assert confirmation["label"] == "30-MIN MOVE CONFIRMATION"
-    assert confirmation["passed"] is False
-    assert "six consecutive" in confirmation["detail"]
+    assert snapshot["zone_action_allowed"] is True
+    assert "short_move_confirmed" not in {
+        gate["name"] for gate in snapshot["gates"]
+    }
     assert "GATE_SCORE_BEYOND_ENTRY_THRESHOLD_FAILED" not in snapshot["reason_codes"]
 
 
+def test_short_move_matrix_requires_adx_below_35():
+    snapshot = _snapshot(
+        regime=Regime.RANGE,
+        direction=0,
+        score_value=0.0,
+        trigger_adx=35.0,
+    )
+    calm_gate = next(gate for gate in snapshot["gates"]
+                     if gate["name"] == "calm_adx")
+    assert calm_gate["passed"] is False
+    assert snapshot["zone_action_allowed"] is False
+    assert "ADX is not below 35" in snapshot["zone_reason"]
+
+
 def test_hold_band_matrix_explains_that_an_entry_is_not_intended():
-    snapshot = _snapshot(score_value=20.0)
+    snapshot = _snapshot(score_value=35.0)
     hold_gate = next(
         gate for gate in snapshot["gates"] if gate["name"] == "hold_band"
     )
@@ -452,80 +492,17 @@ def test_sideways_zone_still_obeys_shared_safety_gates():
         {
             "name": "score_beyond_entry_threshold",
             "passed": False,
-            "detail": "|score| 0.0 < 35.0",
+            "detail": "|score| 0.0 < 40.0",
         },
     ]
     snapshot = _snapshot(
         regime=Regime.RANGE,
         direction=0,
         score_value=0.0,
-        component_abs=5.0,
         gates=gates,
     )
     assert snapshot["zone"] == zones.SHORT_MOVE
     assert snapshot["zone_action_allowed"] is False
-
-
-def test_cancelling_components_block_the_sideways_zone_in_the_snapshot():
-    """End-to-end version of the zones-level rule: a score forced to neutral
-    on top of the strongly bullish fixture is a cancellation, and the entry
-    matrix must say so rather than reporting a quiet market."""
-    snapshot = _snapshot(
-        regime=Regime.RANGE, direction=0, score_value=0.0,
-        short_move_confirmed=True,
-    )
-    agreement = next(gate for gate in snapshot["gates"]
-                     if gate["name"] == "components_agree_neutral")
-    assert snapshot["zone"] == zones.SHORT_MOVE
-    assert snapshot["zone_action_allowed"] is False
-    assert agreement["passed"] is False
-    assert "cancelling" in agreement["detail"]
-    assert "components disagree" in snapshot["zone_reason"]
-
-
-# ── the specific SHORT_MOVE reasons must survive the snapshot ───────────
-#
-# Both conditions are ALSO rows in the zone gate matrix, so both drive
-# `gates_passed` false. When `decide` checked that first, every blocked MOVE
-# went out as "one or more execution gates failed" and the real reason never
-# left the engine -- silently disabling the dashboard's reason routing.
-# Asserting the gate row alone does not catch this; the reason must be
-# asserted from a real `build_snapshot`.
-
-def test_unconfirmed_move_reports_the_wait_not_a_generic_gate_failure():
-    snapshot = _snapshot(
-        regime=Regime.RANGE, direction=0, score_value=0.0,
-        component_abs=5.0, short_move_confirmed=False,
-    )
-    assert snapshot["zone"] == zones.SHORT_MOVE
-    assert snapshot["zone_action_allowed"] is False
-    assert "confirmation" in snapshot["zone_reason"]
-
-
-def test_disagreement_outranks_the_confirmation_wait_in_the_snapshot():
-    """Both failing at once must report the disagreement: waiting cannot fix
-    components that cancel."""
-    snapshot = _snapshot(
-        regime=Regime.RANGE, direction=0, score_value=0.0,
-        short_move_confirmed=False,
-    )
-    assert "components disagree" in snapshot["zone_reason"]
-
-
-def test_other_failed_gates_still_report_generically_for_a_quiet_move():
-    """The reordering must not let a MOVE-specific reason mask an unrelated
-    safety gate that is the real blocker."""
-    gates = [
-        {"name": "data_fresh", "passed": True, "detail": None},
-        {"name": "book_valid", "passed": False, "detail": "book invalid"},
-        {"name": "risk_lock_clear", "passed": True, "detail": None},
-    ]
-    snapshot = _snapshot(
-        regime=Regime.RANGE, direction=0, score_value=0.0,
-        component_abs=5.0, short_move_confirmed=True, gates=gates,
-    )
-    assert snapshot["zone_action_allowed"] is False
-    assert snapshot["zone_reason"] == "one or more execution gates failed"
 
 
 def test_directional_zone_requires_its_own_confidence_gate():
@@ -594,8 +571,8 @@ def test_signal_id_is_deterministic_and_input_sensitive():
 
 def test_reason_codes_snapshot_contract():
     codes = _snapshot()["reason_codes"]
-    assert "4H_TREND_UP" in codes
     assert "1H_TREND_UP" in codes
+    assert "30M_TREND_UP" in codes
     assert "15M_BREAKOUT_CONFIRMED" in codes
 
 

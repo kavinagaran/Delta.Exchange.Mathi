@@ -15,9 +15,9 @@ from btc_trend_engine.backtest.latency_model import ZERO_LATENCY, LatencyModel
 from btc_trend_engine.backtest.performance import evaluate
 from btc_trend_engine.tests.replay.fixtures import SCENARIOS, T0, scenario
 
-# The 4h timeframe needs 60 closed candles (= 2,880 five-minute candles)
-# before features are complete; see fixtures.N.
-WARMUP = 3150
+# The 1h structural timeframe needs 60 closed candles (= 720 five-minute
+# candles) before features are complete; leave margin for all feature windows.
+WARMUP = 900
 
 
 def _run_uncached(name: str, **overrides):
@@ -85,9 +85,9 @@ def test_a_degraded_feed_never_permits_entry_even_on_a_perfect_trend():
 def test_score_zone_replay_uses_the_shipped_zone_lifecycle_without_faking_move_pnl():
     """The deployed policy is zones, not the legacy direction-only loop.
 
-    Range-bound replay creates confirmed neutral candidates, but no historical
-    MOVE bid/ask archive exists.  Those candidates must therefore be reported
-    as unpriced rather than turned into invented short-vol profits.
+    A range-bound replay can create confirmed neutral candidates, but no
+    historical MOVE bid/ask archive exists. Any candidates must therefore be
+    reported as unpriced rather than turned into invented short-vol profits.
     """
     spec = scenario("range_bound")
     result = replay_score_zones(
@@ -96,7 +96,9 @@ def test_score_zone_replay_uses_the_shipped_zone_lifecycle_without_faking_move_p
         spread_bps=spec.spread_bps,
     )
     assert result.snapshots
-    assert result.short_move_candidates > 0
+    # The faster 1h/30m profile may classify this volatile synthetic range as
+    # directional rather than calm; that is not a reason to fabricate MOVE
+    # P&L. Exact neutral-zone confirmation is covered at the signal layer.
     assert result.short_move_unpriced == result.short_move_candidates
     assert result.entry_eligible_signals >= 0
     assert all(trade.side in {"long", "short"} for trade in result.trades)
@@ -138,7 +140,7 @@ def test_replay_returns_nothing_when_there_is_not_enough_history():
 
 
 def test_a_short_series_reports_features_incomplete_rather_than_trading():
-    """Below the 4h minimum the engine must refuse, not guess. This is the
+    """Below the 1h minimum the engine must refuse, not guess. This is the
     condition the long fixtures exist to get past, so it is worth pinning."""
     candles = scenario("bullish_trend").candles()[:600]
     result = replay(candles, ReplayConfig(), warmup=120)

@@ -18,7 +18,7 @@ Generated 2026-07-27 03:58 UTC · `scripts/backtest.py`
 - Symbol: `BTCUSD` · resolution `5m`
 - Candles: 63,351
 - Range: 2025-12-17 17:35 → 2026-07-25 17:30 UTC (219 days)
-- Warmup per window: 3,000 candles (the 4h timeframe needs 60 closed candles)
+- Warmup per window: 3,000 candles (the 1h timeframe needs 60 closed candles)
 
 ## Baseline — shipped defaults, whole period, no selection
 
