@@ -8524,36 +8524,6 @@ def _trend_score_auto_write_ledger(data_dir: Path, ledger: dict) -> None:
     _atomic_write_json(_trend_score_auto_ledger_path(data_dir), ledger)
 
 
-def _trend_score_auto_market_decision(snapshot: dict, engine_config: dict) -> dict:
-    """Evaluate direction only, excluding any existing strategy position."""
-    market_only = copy.deepcopy(snapshot)
-    market_only["positions"] = []
-    market_only["pending_orders"] = []
-    account = market_only.get("account")
-    if isinstance(account, dict):
-        account["open_risk"] = 0
-        account["current_exposure"] = 0
-    risk = market_only.get("risk")
-    if isinstance(risk, dict):
-        risk["position_state_consistent"] = True
-        risk["orders_state_known"] = True
-        risk["max_open_positions"] = 1
-    approved = dict(engine_config)
-    approved.setdefault("allow_unknown_event_risk", True)
-    decision = evaluate_trend(market_only, approved)
-    gates = decision.get("hard_gates")
-    if not isinstance(gates, dict) or gates.get("data_valid") is not True:
-        detail = ((decision.get("audit") or {}).get("validation_error")
-                  if isinstance(decision.get("audit"), dict) else None)
-        raise RuntimeError(
-            "Trend Engine market data is invalid or stale"
-            + (f": {detail}" if detail else "")
-        )
-    score = float(decision.get("direction_score"))
-    score_zone(score)  # validates finite range and exact policy boundaries
-    return decision
-
-
 def _collect_trend_score_auto_signal() -> dict:
     """Collect one completed-5m score event in the selected account namespace.
 
@@ -8572,7 +8542,12 @@ def _collect_trend_score_auto_signal() -> dict:
         raise RuntimeError(
             "Trend score automation does not match Account Trading Mode"
         )
-    engine_config = _trend_engine_config_overrides()
+    # No _trend_engine_config_overrides() call here. It used to be assigned to
+    # an `engine_config` local that nothing in this function read -- the score
+    # comes from btc_trend_engine and contract selection uses
+    # `strategy_config` -- but it was the live order path's last reference to
+    # the legacy engine's DEFAULT_CONFIG, so the legacy scorer had to stay
+    # imported for a value that was computed and discarded.
     strategy_config = _trend_engine_strategy_config()
     snapshot = collect_delta_trend_snapshot(
         http_get=req.get,

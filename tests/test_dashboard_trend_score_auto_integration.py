@@ -236,52 +236,6 @@ def test_score_auto_config_accepts_only_the_explicit_dry_isolated_profile():
     ) is None
 
 
-def test_score_market_evaluation_removes_positions_and_rejects_invalid_zero(
-        monkeypatch):
-    snapshot = {
-        "positions": [{"symbol": "MV-BTC-65000-230726", "side": "short"}],
-        "pending_orders": [{"id": "pending"}],
-        "account": {"open_risk": 500, "current_exposure": 500},
-        "risk": {
-            "position_state_consistent": False,
-            "orders_state_known": False,
-        },
-    }
-    evaluated = {}
-
-    def valid_engine(market_only, config):
-        evaluated["snapshot"] = market_only
-        evaluated["config"] = config
-        return {
-            "direction_score": -55,
-            "hard_gates": {"data_valid": True},
-        }
-
-    monkeypatch.setattr(dashboard, "evaluate_trend", valid_engine)
-    result = dashboard._trend_score_auto_market_decision(snapshot, {})
-
-    assert result["direction_score"] == -55
-    assert evaluated["snapshot"]["positions"] == []
-    assert evaluated["snapshot"]["pending_orders"] == []
-    assert evaluated["snapshot"]["account"]["open_risk"] == 0
-    assert evaluated["snapshot"]["account"]["current_exposure"] == 0
-    assert evaluated["snapshot"]["risk"]["position_state_consistent"] is True
-    assert evaluated["snapshot"]["risk"]["orders_state_known"] is True
-    assert evaluated["config"]["allow_unknown_event_risk"] is True
-    # The caller's evidence is immutable.
-    assert snapshot["positions"]
-    assert snapshot["pending_orders"]
-
-    monkeypatch.setattr(dashboard, "evaluate_trend", lambda *args, **kwargs: {
-        # The core's invalid-input fallback score must never become permission
-        # for the neutral-zone short MOVE action.
-        "direction_score": 0,
-        "hard_gates": {"data_valid": False},
-    })
-    with pytest.raises(RuntimeError, match="invalid or stale"):
-        dashboard._trend_score_auto_market_decision(snapshot, {})
-
-
 def test_score_signal_collector_is_dry_public_only_and_never_authenticates(
         isolated_score_account, monkeypatch):
     _write(isolated_score_account / "config.json", _safe_score_config())
@@ -320,14 +274,6 @@ def test_score_signal_collector_is_dry_public_only_and_never_authenticates(
         })
     monkeypatch.setattr(dashboard, "_trend_engine_config_overrides", lambda: {})
     monkeypatch.setattr(dashboard, "_trend_engine_strategy_config", lambda: {})
-    monkeypatch.setattr(
-        dashboard, "_trend_score_auto_market_decision",
-        lambda evidence, config: {
-            "direction_score": 55,
-            "market_regime": "TRENDING",
-            "decision_id": "decision-public-only",
-        },
-    )
 
     signal = dashboard._collect_trend_score_auto_signal()
 
