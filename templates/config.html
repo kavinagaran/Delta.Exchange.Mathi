@@ -3,19 +3,18 @@
 {% block content %}
 <section class="score-config-hero" aria-labelledby="config-title">
   <div>
-    <span class="strategy-kicker">ONE SCORE-ZONE CONTROLLER · {{ display_name | upper }}</span>
+    <span class="strategy-kicker">TREND ENGINE · {{ display_name | upper }}</span>
     <h2 id="config-title">Bot Config</h2>
-    <p>Configure the one automated Trend Engine workflow. It can hold only one position at a time: a 2-step ITM Call, 2-step ITM Put, or an ATM MOVE straddle.</p>
+    <p>Configure {{ display_name }}’s Trend Engine.</p>
   </div>
   <span class="pill idle" id="score-config-summary" role="status">Loading configuration…</span>
 </section>
 
-<div class="banner info">These settings apply only to <b>{{ display_name }}’s account</b>. Morning, Evening, and legacy Trend strategies are permanently disabled.</div>
 <div class="banner warn" id="config-load-banner">Loading verified account configuration — Save is locked.</div>
-<div class="banner warn" id="dry-banner">DRY RUN is active — score-zone entries, exits, and switches are simulated. No exchange orders are placed.</div>
+<div class="banner warn" id="dry-banner">DRY RUN — trades are simulated; no exchange orders are placed.</div>
 
 <section class="card">
-  <div class="card-hd">Score-zone automation</div>
+  <div class="card-hd">Trend Engine automation</div>
   <div class="card-bd">
     <div class="form-grid">
       <label class="fld"><span>Account trading mode</span>
@@ -34,27 +33,23 @@
         <em class="fld-hint">The automation choice must match the account trading mode.</em>
       </label>
       <label class="fld"><span>Order size</span>
-        <div class="config-static-value"><strong>1,000 lots</strong><small>Fixed for every eligible score-zone trade</small></div>
-      </label>
-      <label class="fld"><span>Order safety ceiling</span>
-        <input id="c-MAX_ORDER_LOTS" type="number" min="1000" max="5000" step="1">
-        <em class="fld-hint">Must allow the fixed 1,000-lot request.</em>
+        <input id="c-TREND_SCORE_AUTO_LOTS" type="number" min="1" max="5000" step="1">
+        <em class="fld-hint">Lots per new trade.</em>
       </label>
     </div>
 
     <div class="form-sec">
       <div class="form-sec-title">Score zones</div>
       <div class="score-zone-band-grid" aria-label="Score zone rules">
-        <div class="score-zone-band is-call"><strong>+40 to +100</strong><span>BUY CE · 2 ITM</span><small>Buy a 2-step in-the-money Call</small></div>
-        <div class="score-zone-band is-hold"><strong>Above +30 to below +40</strong><span>HOLD</span><small>Keep the current position; no new entry</small></div>
-        <div class="score-zone-band is-move"><strong>−30 to +30</strong><span>SHORT MOVE</span><small>Sell ATM MOVE when 5-minute ADX is below 35, premium is above $300, and more than 90 minutes remain</small></div>
-        <div class="score-zone-band is-hold"><strong>Above −40 to below −30</strong><span>HOLD</span><small>Keep the current position; no new entry</small></div>
-        <div class="score-zone-band is-put"><strong>−100 to −40</strong><span>BUY PE · 2 ITM</span><small>Buy a 2-step in-the-money Put</small></div>
+        <div class="score-zone-band is-call"><strong>+40 … +100</strong><span>BUY CE · 2 ITM</span></div>
+        <div class="score-zone-band is-hold"><strong>+30 &lt; score &lt; +40</strong><span>HOLD</span></div>
+        <div class="score-zone-band is-move"><strong>−30 … +30</strong><span>SHORT MOVE · ADX &lt; 30</span></div>
+        <div class="score-zone-band is-hold"><strong>−40 &lt; score &lt; −30</strong><span>HOLD</span></div>
+        <div class="score-zone-band is-put"><strong>−100 … −40</strong><span>BUY PE · 2 ITM</span></div>
       </div>
-      <p class="config-copy">A new valid zone exits the current score-zone position first. The controller opens the replacement only after the previous exit is proven. After an entry, that same zone is locked—even after TP, SL, or trailing stop—until the score enters a different zone or you deliberately reset it below.</p>
       <div class="btn-row" style="margin-top:12px">
-        <button class="btn setup-lock-reset" id="score-setup-lock-reset" type="button" onclick="resetScoreZoneSetupLock()" disabled aria-describedby="score-setup-lock-hint">Reset current score-zone setup lock</button>
-        <span class="hint" id="score-setup-lock-hint" style="align-self:center" role="status" aria-live="polite">No active setup lock — reset is unavailable.</span>
+        <button class="btn setup-lock-reset" id="score-setup-lock-reset" type="button" onclick="resetScoreZoneSetupLock()" disabled aria-describedby="score-setup-lock-hint">Reset Zone Lock</button>
+        <span class="hint" id="score-setup-lock-hint" style="align-self:center" role="status" aria-live="polite">Zone lock: none. It prevents repeat entries in the same zone.</span>
       </div>
     </div>
   </div>
@@ -64,21 +59,22 @@
   <section class="card">
     <div class="card-hd">Position protection</div>
     <div class="card-bd">
-      <p class="config-copy"><strong>Automatic on every filled entry:</strong> TP captures 100% of the entry premium, SL risks 50%, and TSL arms after a 25% gain and trails by 25%. The actual filled premium and lots set the dollar values for that specific trade.</p>
+      <p class="config-copy">Applied to each new trade as a percentage of its filled premium.</p>
       <div class="form-grid">
-        <label class="fld"><span>Take profit</span><div class="config-static-value"><strong>+100% of filled premium</strong><small>Long CE/PE target: 2× entry premium</small></div></label>
-        <label class="fld"><span>Stop loss</span><div class="config-static-value"><strong>−50% of filled premium</strong><small>Long CE/PE stop: 0.5× entry premium</small></div></label>
-        <label class="fld"><span>Trailing stop</span><div class="config-static-value"><strong>Arm +25% · trail 25%</strong><small>Locks break-even when the trail first arms</small></div></label>
-        <label class="fld"><span>Protection check seconds</span><input id="c-TP_POLL_SECS_TREND" type="number" min="10" max="300" step="1"><em class="fld-hint">Controls monitoring frequency only; it does not change the automatic formula.</em></label>
+        <label class="fld"><span>Take profit %</span><input id="c-TREND_TP_PREMIUM_PCT" type="number" min="0.01" max="1000" step="0.01"></label>
+        <label class="fld"><span>Stop loss %</span><input id="c-TREND_SL_PREMIUM_PCT" type="number" min="0.01" max="1000" step="0.01"></label>
+        <label class="fld"><span>Trailing stop arm %</span><input id="c-TREND_TSL_ARM_PREMIUM_PCT" type="number" min="0.01" max="1000" step="0.01"></label>
+        <label class="fld"><span>Trailing distance %</span><input id="c-TREND_TSL_TRAIL_PREMIUM_PCT" type="number" min="0.01" max="1000" step="0.01"></label>
+        <label class="fld"><span>Protection check seconds</span><input id="c-TP_POLL_SECS_TREND" type="number" min="10" max="300" step="1"></label>
       </div>
-      <p class="config-copy">To override an open trade later, edit its TP / SL / TSL monitor in Overview (LIVE) or Paper (DRY RUN) and save. A manual override affects only that open position; new entries continue to use the automatic premium rule.</p>
+      <p class="config-copy">Open trades keep their saved values; manual overrides remain available.</p>
     </div>
   </section>
 
   <section class="card">
     <div class="card-hd">Account risk limits</div>
     <div class="card-bd">
-      <p class="config-copy">These limits apply before every real score-zone entry. A failed check blocks the trade instead of reducing safety.</p>
+      <p class="config-copy">Checked before every entry.</p>
       <div class="form-grid">
         <label class="fld"><span>Risk budget per trade $</span><input id="c-TREND_RISK_BUDGET_USD" type="number" min="1" step="1"></label>
         <label class="fld"><span>Paper capital $</span><input id="c-TREND_DRY_RUN_CAPITAL_USD" type="number" min="1" step="1"><em class="fld-hint">Used to apply the same fixed-lot affordability checks in DRY RUN.</em></label>
@@ -103,7 +99,7 @@
 <section class="card">
   <div class="card-hd">Execution safeguards</div>
   <div class="card-bd">
-    <p class="config-copy">Every order is checked against a current executable quote. The controller needs visible depth for the full 1,000 lots and fails closed when it cannot prove price, depth, or account state.</p>
+    <p class="config-copy">Fresh quotes and sufficient depth are required for the configured order size.</p>
     <div class="score-execution-grid">
       <section>
         <h3>CE / PE entries</h3>
@@ -150,14 +146,16 @@
 <div class="btn-row">
   <button class="btn secondary" id="config-reset" type="button" onclick="resetToDefaults()" disabled>↺ Restore safe defaults</button>
   <button class="btn" id="config-save" type="button" onclick="saveConfig()" style="padding:10px 26px" disabled>💾 Save configuration</button>
-  <span class="hint" style="align-self:center">Saved settings apply to this account only. Retired Morning, Evening, and legacy Trend controllers remain disabled.</span>
+  <span class="hint" style="align-self:center">Saved settings apply only to {{ display_name }}.</span>
 </div>
 {% endblock %}
 
 {% block scripts %}
 <script>
 const KEYS = [
-  'DRY_RUN', 'TREND_ENGINE_SCORE_AUTO_MODE', 'MAX_ORDER_LOTS',
+  'DRY_RUN', 'TREND_ENGINE_SCORE_AUTO_MODE', 'TREND_SCORE_AUTO_LOTS',
+  'TREND_TP_PREMIUM_PCT', 'TREND_SL_PREMIUM_PCT',
+  'TREND_TSL_ARM_PREMIUM_PCT', 'TREND_TSL_TRAIL_PREMIUM_PCT',
   'TP_POLL_SECS_TREND',
   'TREND_RISK_BUDGET_USD', 'TREND_DRY_RUN_CAPITAL_USD', 'SHORT_MAX_RISK_USD',
   'MAX_TRADES_PER_DAY_GLOBAL', 'MAX_DAILY_LOSS_USD', 'MAX_OPEN_RISK_USD',
@@ -273,11 +271,11 @@ function applyScoreZoneSetupLockStatus(payload) {
   button.disabled = !active;
   button.setAttribute('aria-disabled', active ? 'false' : 'true');
   if (!active) {
-    hint.textContent = 'No active setup lock — reset is unavailable.';
+    hint.textContent = 'Zone lock: none. It prevents repeat entries in the same zone.';
     return;
   }
   const zone = String(lock.zone || 'current zone').replace(/_/g, ' ');
-  hint.textContent = `Active ${zone} lock — reset allows one fresh entry. It does not close a position or submit an order.`;
+  hint.textContent = `Zone lock: ${zone}. Prevents a repeat entry; reset permits one fresh entry.`;
 }
 
 async function refreshScoreZoneSetupLock() {
@@ -309,7 +307,10 @@ function rememberSavedPreservedValues(savedBody = null) {
 function setControlValue(key, config) {
   const element = document.getElementById('c-' + key);
   if (!element) return;
-  let value = (config[key] ?? DEFAULTS[key] ?? '').toString().trim();
+  let value = (config[key] ?? '').toString().trim();
+  if (!value && DEFAULTS[key] !== undefined) {
+    value = String(DEFAULTS[key]).trim();
+  }
   if (!value && key === 'MAX_TRADES_PER_DAY_GLOBAL') {
     value = (config.MAX_TRADES_PER_DAY || DEFAULTS[key] || '').toString();
   }
@@ -375,7 +376,7 @@ function resetToDefaults() {
     ? 'This changes the account to DRY RUN and turns score trading off until you choose an automation mode.'
     : `Trading Mode stays ${loadedDryRun === 'true' ? 'DRY RUN' : 'LIVE'} because it is currently locked.`;
   if (!confirm(
-      'Restore the safe score-zone defaults?\n\n' + modeText +
+      'Restore the safe Trend Engine defaults?\n\n' + modeText +
       '\n\nThis keeps Telegram credentials unchanged, does not close an open position, and keeps all retired controllers disabled. Review the values, then Save configuration.')) return;
   for (const key of KEYS) {
     const element = document.getElementById('c-' + key);
@@ -386,7 +387,7 @@ function resetToDefaults() {
   }
   modeDirty = document.getElementById('c-DRY_RUN').value !== loadedDryRun;
   controllerSummary();
-  toast('Safe score-zone defaults loaded — review them, then Save configuration', 'ok');
+  toast('Safe Trend Engine defaults loaded — review them, then Save configuration', 'ok');
 }
 
 function scoreAutoModeError(scoreMode, tradingModeDryRun) {
@@ -412,11 +413,11 @@ async function saveConfig() {
     return;
   }
   if (scoreMode === 'dry_run' && loadedScoreAutoMode !== 'dry_run' && !confirm(
-      'Enable automatic DRY RUN score-zone trading?\n\n' +
-      'Every eligible trade uses 1,000 lots. +40 or above buys a 2-step ITM Call; −40 or below buys a 2-step ITM Put; scores inside −30 to +30 sell ATM MOVE only when 5-minute ADX is below 35, the current bid is above $300, and more than 90 minutes remain. HOLD bands do not open or close a position.\n\n' +
+      'Enable automatic DRY RUN Trend trading?\n\n' +
+      `Every eligible trade uses ${Number(document.getElementById('c-TREND_SCORE_AUTO_LOTS').value || 0).toLocaleString()} lots. +40 or above buys a 2-step ITM Call; −40 or below buys a 2-step ITM Put; scores from −30 through +30 sell ATM MOVE only when 5-minute ADX is below 30, the current bid is above $300, and more than 90 minutes remain. HOLD bands do not open or close a position.\n\n` +
       'No exchange order will be placed.')) return;
   if (scoreMode === 'live' && loadedScoreAutoMode !== 'live' && !confirm(
-      'Enable LIVE automatic score-zone trading?\n\n' +
+      'Enable LIVE automatic Trend trading?\n\n' +
       'WARNING: the controller can place real exchange orders without manual confirmation. It holds at most one bot-owned position and fails closed when order, quote, position, risk, or protection evidence is incomplete.\n\n' +
       'Enable LIVE only after reviewing the limits and protection settings on this page.')) return;
 
@@ -478,11 +479,11 @@ async function testTelegram() {
 async function resetScoreZoneSetupLock() {
   await refreshScoreZoneSetupLock();
   if (document.getElementById('score-setup-lock-reset').disabled) {
-    toast('No active score-zone setup lock to reset', 'err');
+    toast('No active zone lock to reset', 'err');
     return;
   }
   if (!confirm(
-      'Reset the current score-zone setup lock?\n\n' +
+      'Reset the current zone lock?\n\n' +
       'This allows one new entry if the current zone is still eligible. It does not close any position or submit an order.')) return;
   try {
     const result = await jpost('/api/trend-engine/score-auto/setup-lock/reset');
@@ -492,7 +493,7 @@ async function resetScoreZoneSetupLock() {
     }
     toast(result.released
       ? `Setup lock for ${String(result.zone || '').replaceAll('_', ' ')} reset — the next eligible candle may enter once.`
-      : (result.message || 'No score-zone setup lock is active'), 'ok');
+      : (result.message || 'No zone lock is active'), 'ok');
     await refreshScoreZoneSetupLock();
   } catch (error) {
     toast('Setup-lock reset failed: ' + (error && error.message ? error.message : 'network error'), 'err');

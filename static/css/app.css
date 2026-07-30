@@ -373,22 +373,18 @@ body.native-app .toast { left: 12px; right: 12px; bottom: 16px; max-width: none;
 }
 .config-static-value strong { color: var(--text); font-size: 13px; }
 .config-static-value small { color: var(--muted); font-size: 10.5px; font-weight: 500; }
-.score-zone-band-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 9px; }
+.score-zone-band-grid { display: flex; flex-wrap: wrap; gap: 9px; }
 .score-zone-band {
-  display: grid; gap: 4px; min-width: 0; padding: 11px;
-  border: 1px solid var(--border); border-radius: 9px; background: var(--surface-subtle);
+  display: inline-flex; align-items: center; gap: 9px; min-width: 0;
+  padding: 7px 13px; border: 1px solid var(--border); border-radius: 999px;
+  color: #fff; box-shadow: inset 0 1px 0 rgba(255,255,255,.2), 0 5px 14px rgba(0,0,0,.18);
 }
-.score-zone-band strong { font-size: 11px; font-variant-numeric: tabular-nums; }
-.score-zone-band span { font-size: 10px; font-weight: 850; letter-spacing: .065em; }
-.score-zone-band small { color: var(--muted); font-size: 10.5px; line-height: 1.35; }
-.score-zone-band.is-call { border-color: color-mix(in srgb, var(--pos) 38%, var(--border)); background: var(--pos-soft); }
-.score-zone-band.is-call span { color: var(--pos); }
-.score-zone-band.is-put { border-color: color-mix(in srgb, var(--neg) 38%, var(--border)); background: var(--neg-soft); }
-.score-zone-band.is-put span { color: var(--neg); }
-.score-zone-band.is-move { border-color: color-mix(in srgb, #c8d2dc 48%, var(--border)); background: color-mix(in srgb, #c8d2dc 12%, var(--surface-subtle)); }
-.score-zone-band.is-move span { color: #d6dee7; }
-.score-zone-band.is-hold { border-color: color-mix(in srgb, #78818d 52%, var(--border)); background: color-mix(in srgb, #78818d 16%, var(--surface-subtle)); }
-.score-zone-band.is-hold span { color: #aeb7c2; }
+.score-zone-band strong { font-size: 10.5px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.score-zone-band span { font-size: 10px; font-weight: 850; letter-spacing: .055em; white-space: nowrap; }
+.score-zone-band.is-call { border-color: #42e7a8; background: linear-gradient(135deg, #075d48, #10a875 55%, #42d99f); }
+.score-zone-band.is-put { border-color: #ff6d89; background: linear-gradient(135deg, #771f3b, #c92f57 55%, #f05676); }
+.score-zone-band.is-move { border-color: #e4ebf2; background: linear-gradient(135deg, #506174, #8795a5 55%, #bdc7d1); color: #08111c; }
+.score-zone-band.is-hold { border-color: #7e8996; background: linear-gradient(135deg, #252d37, #4b5663 58%, #697481); }
 .config-copy { margin: 0 0 14px; color: var(--muted); font-size: 12px; line-height: 1.55; }
 .score-zone-band-grid + .config-copy { margin: 13px 0 0; }
 .score-config-pair { align-items: stretch; }
@@ -648,7 +644,7 @@ body.native-app .toast { left: 12px; right: 12px; bottom: 16px; max-width: none;
 @media (max-width: 900px) {
   .grid.cols-2 { grid-template-columns: 1fr; }
   .score-config-hero { align-items: flex-start; flex-direction: column; }
-  .score-zone-band-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .score-zone-band-grid { align-items: flex-start; }
   .score-execution-grid { grid-template-columns: 1fr; }
   .score-zone-trade-body { grid-template-columns: 1fr; min-height: 0; gap: 20px; }
   .score-zone-decision-pane { padding: 20px 0 0; border-left: 0; border-top: 1px solid var(--border); }

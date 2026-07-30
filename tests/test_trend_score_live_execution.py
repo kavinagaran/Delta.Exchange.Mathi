@@ -118,6 +118,7 @@ def _order(
     product_id: int = 101,
     side: str = "buy",
     filled: int = 1_000,
+    requested: int = 1_000,
     state: str = "filled",
     price: float = 220.0,
 ) -> dict:
@@ -125,14 +126,14 @@ def _order(
         "id": 9_001,
         "client_order_id": client_id,
         "product_id": product_id,
-        "size": 1_000,
+        "size": requested,
         "side": side,
         "order_type": "limit_order",
         "time_in_force": "ioc",
         "reduce_only": False,
         "state": state,
         "filled_size": filled,
-        "unfilled_size": 1_000 - filled,
+        "unfilled_size": requested - filled,
         "average_fill_price": price if filled else None,
         "paid_commission": 1.25 if filled else 0,
     }
@@ -179,11 +180,17 @@ def _run(
     )
     side = "sell" if zone == "SHORT_MOVE" else "buy"
     price = baseline_prepared["entry_price"]
+    requested_lots = int(
+        prepared.get("lots", LIVE_SCORE_LOTS)
+        if isinstance(prepared, dict) else LIVE_SCORE_LOTS
+    )
     filled_order = _order(
         client_id,
         product_id=baseline_prepared["product_id"],
         side=side,
         price=price,
+        filled=requested_lots,
+        requested=requested_lots,
     )
     saved = []
     durable = {"state": copy.deepcopy(existing_state)}
@@ -208,7 +215,7 @@ def _run(
             copy.deepcopy(filled_order), True
         )
     )
-    signed_size = -1_000 if side == "sell" else 1_000
+    signed_size = -requested_lots if side == "sell" else requested_lots
     get_position = get_position or (
         lambda product_id: {
             "product_id": product_id,
@@ -287,11 +294,14 @@ def test_transition_client_ids_are_stable_scoped_and_delta_sized():
 def test_filled_premium_policy_uses_exact_percentages_and_actual_fill_basis():
     requested = premium_percent_protection_policy(
         300.0, 0.001, LIVE_SCORE_LOTS, poll_secs=15,
+        tp_percent=80, sl_percent=40,
+        tsl_arm_percent=20, tsl_trail_percent=10,
     )
     assert requested["entry_premium_usd"] == 300.0
-    assert requested["tp_target_pnl"] == 300.0
-    assert requested["sl_target_pnl"] == 150.0
-    assert requested["tsl_arm_pnl"] == requested["tsl_trail_pnl"] == 75.0
+    assert requested["tp_target_pnl"] == 240.0
+    assert requested["sl_target_pnl"] == 120.0
+    assert requested["tsl_arm_pnl"] == 60.0
+    assert requested["tsl_trail_pnl"] == 30.0
     assert requested["poll_secs"] == 15
 
     # The selected quote was $300, but Delta filled at $220. The durable OPEN
@@ -301,9 +311,14 @@ def test_filled_premium_policy_uses_exact_percentages_and_actual_fill_basis():
     assert result["status"] == "OPEN"
     policy = result["state"]["protection_config"]
     assert policy["entry_premium_usd"] == 220.0
-    assert policy["tp_target_pnl"] == 220.0
-    assert policy["sl_target_pnl"] == 110.0
-    assert policy["tsl_arm_pnl"] == policy["tsl_trail_pnl"] == 55.0
+    assert policy["tp_target_pnl"] == 176.0
+    assert policy["sl_target_pnl"] == 88.0
+    assert policy["tsl_arm_pnl"] == 44.0
+    assert policy["tsl_trail_pnl"] == 22.0
+    assert policy["tp_percent_of_entry_premium"] == 80.0
+    assert policy["sl_percent_of_entry_premium"] == 40.0
+    assert policy["tsl_arm_percent_of_entry_premium"] == 20.0
+    assert policy["tsl_trail_percent_of_entry_premium"] == 10.0
     assert policy["protection_source"] == "automatic_filled_premium"
 
 
@@ -311,17 +326,16 @@ def test_filled_premium_policy_uses_exact_percentages_and_actual_fill_basis():
     "zone",
     ("CE_2_ITM", "PE_3_ITM", "SHORT_MOVE"),
 )
-def test_fixed_entry_validation_accepts_only_exact_policy_contract(zone):
+def test_entry_validation_accepts_configured_size_for_exact_policy_contract(zone):
     normalized = validate_fixed_entry(_prepared(zone))
     assert normalized["lots"] == 1_000
     assert normalized["exchange_side"] == (
         "sell" if zone == "SHORT_MOVE" else "buy"
     )
 
-    wrong_lots = _prepared(zone)
-    wrong_lots["lots"] = 999
-    with pytest.raises(LiveScoreExecutionError, match="exactly 1,000"):
-        validate_fixed_entry(wrong_lots)
+    configured_lots = _prepared(zone)
+    configured_lots["lots"] = 999
+    assert validate_fixed_entry(configured_lots)["lots"] == 999
 
     wrong_contract = _prepared(zone)
     wrong_contract["symbol"] = (
@@ -333,8 +347,9 @@ def test_fixed_entry_validation_accepts_only_exact_policy_contract(zone):
         validate_fixed_entry(wrong_contract)
 
     low_limit = _prepared(zone)
+    low_limit["lots"] = 1_000
     low_limit["max_order_lots"] = 999
-    with pytest.raises(LiveScoreExecutionError, match="1,000-lot order"):
+    with pytest.raises(LiveScoreExecutionError, match="requested order size"):
         validate_fixed_entry(low_limit)
 
 
@@ -372,12 +387,32 @@ def test_bounded_ioc_is_exactly_1000_and_rounds_inside_slippage(
     assert snapshot["limit_price"] == expected_limit
 
 
+def test_configured_order_size_survives_live_intent_fill_and_protection():
+    prepared = _prepared()
+    prepared["lots"] = 400
+    policy = premium_percent_protection_policy(
+        prepared["entry_price"], prepared["contract_value"], 400,
+    )
+
+    result, saved, _, _ = _run(
+        prepared_override=prepared,
+        protection_config_override=policy,
+    )
+
+    assert result["status"] == "OPEN"
+    assert saved[0]["pending_entry_payload"]["size"] == 400
+    assert result["state"]["requested_lots"] == 400
+    assert result["state"]["lots"] == 400
+    assert result["state"]["execution_snapshot"]["requested"] == 400
+    assert result["state"]["protection_config"]["entry_premium_usd"] == 88.0
+
+
 @pytest.mark.parametrize(
     ("change", "message"),
     (
         ({"quote_age_secs": 21}, "stale"),
         ({"bid": 200, "ask": 220}, "spread"),
-        ({"ask_size": 999}, "1,000-lot IOC"),
+        ({"ask_size": 999}, "requested IOC size"),
         ({"trading_status": "halted"}, "not operational"),
         ({"ask": 223}, "bounded buy limit"),
         ({"price_band": {"upper_limit": 221}}, "price band"),
@@ -1044,7 +1079,7 @@ def test_persisted_payload_corruption_blocks_recovery_before_exchange_calls():
     submit = Mock(side_effect=AssertionError("corrupt intent submitted"))
     lookup = Mock(side_effect=AssertionError("corrupt intent looked up"))
 
-    with pytest.raises(LiveScoreExecutionError, match="exactly 1,000"):
+    with pytest.raises(LiveScoreExecutionError, match="requested lots"):
         _run(
             existing_state=pending,
             fresh_quote_override=None,

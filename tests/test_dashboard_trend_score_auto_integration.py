@@ -215,7 +215,7 @@ def test_score_auto_mode_is_persisted_only_and_accepts_explicit_live(
         ({"MOVE_AUTO_ENTRY_MODE": "shadow"}, "legacy MOVE"),
         ({"MORNING_ENABLED": "true"}, "Morning"),
         ({"EVENING_ENABLED": "true"}, "Evening"),
-        ({"MAX_ORDER_LOTS": "999"}, "1,000-lot"),
+        ({"TREND_SCORE_AUTO_LOTS": "5001"}, "TREND_SCORE_AUTO_LOTS"),
     ],
 )
 def test_score_auto_config_rejects_live_or_competing_automation(
@@ -598,7 +598,7 @@ def test_score_open_state_is_ui_ready_protected_and_exactly_1000_lots(
     assert view["dry_protection"]["status"] == "starting"
 
 
-def test_score_open_state_refuses_any_downsized_order(monkeypatch):
+def test_score_open_state_requires_the_user_configured_order_size(monkeypatch):
     monkeypatch.setattr(dashboard, "_tp_policy", lambda slot: {
         "tp_target_pnl": 500,
         "sl_target_pnl": 250,
@@ -626,10 +626,19 @@ def test_score_open_state_refuses_any_downsized_order(monkeypatch):
         "contract_value": 0.001,
         "entry_price": 500,
     }
-    with pytest.raises(RuntimeError, match="exactly 1,000 lots"):
+    with pytest.raises(RuntimeError, match="differs from the configured"):
         dashboard._trend_score_auto_open_state(
             signal, prepared, "transition-downsized",
         )
+
+    monkeypatch.setattr(
+        dashboard, "_trend_score_auto_configured_lots", lambda *_: 999,
+    )
+    opened = dashboard._trend_score_auto_open_state(
+        signal, prepared, "transition-configured",
+    )
+    assert opened["lots"] == 999
+    assert opened["execution_snapshot"]["requested"] == 999
 
 
 def test_score_cycle_opens_once_and_never_reuses_same_bar_after_protection_exit(

@@ -250,6 +250,7 @@ def select_directional_option(
     spot: Any,
     zone: str,
     now: datetime,
+    lots: int = AUTO_TRADE_LOTS,
 ) -> dict[str, Any] | None:
     """Select the exact policy strike or return ``None`` without substitution.
 
@@ -258,9 +259,14 @@ def select_directional_option(
     ``ATM index + 2`` (2026-07-26 spec; PE was ``+3`` before, making the
     policy asymmetric).  ``PE_3_ITM`` is still accepted so a position opened
     under the old policy can be selected and closed.  If that exact product
-    is absent or not executable for all 1,000 lots, the function returns
+    is absent or not executable for the requested lot count, the function returns
     ``None``; it never shifts strike or tries a later expiry.
     """
+
+    try:
+        requested_lots = _positive_integer(lots, "requested lots")
+    except TrendScoreAutoInputError:
+        return None
 
     if zone == CE_2_ITM:
         option_type, steps, direction = "CE", 2, -1
@@ -336,7 +342,7 @@ def select_directional_option(
         or contract_strike != target_strike
         or contract_expiry != expiry
         or str(contract.get("option_type") or "").strip().upper() != option_type
-        or order_limit < AUTO_TRADE_LOTS
+        or order_limit < requested_lots
     ):
         return None
     status = str(contract.get("trading_status") or "operational").strip().lower()
@@ -348,7 +354,7 @@ def select_directional_option(
         )
     except TrendScoreAutoInputError:
         return None
-    if AUTO_TRADE_LOTS % lot_size:
+    if requested_lots % lot_size:
         return None
 
     return {
@@ -357,7 +363,7 @@ def select_directional_option(
         "side": "buy",
         "option_type": option_type,
         "itm_steps": steps,
-        "lots": AUTO_TRADE_LOTS,
+        "lots": requested_lots,
         "symbol": symbol,
         "product_id": product_id,
         "spot": current_spot,
@@ -379,8 +385,9 @@ def select_move_contract(
     *,
     spot: Any,
     now: datetime,
+    lots: int = AUTO_TRADE_LOTS,
 ) -> dict[str, Any] | None:
-    """Select the nearest-expiry ATM BTC MOVE contract for a 1,000-lot short.
+    """Select the nearest-expiry ATM BTC MOVE contract for a short entry.
 
     Eligibility depends only on the authoritative listing, exact settlement
     timestamp, and product limits.  There is deliberately no morning/evening
@@ -388,6 +395,10 @@ def select_move_contract(
     minutes remain; no maximum DTE is imposed.
     """
 
+    try:
+        requested_lots = _positive_integer(lots, "requested lots")
+    except TrendScoreAutoInputError:
+        return None
     current = _utc_time(now, "now")
     current_spot = _finite(spot, "spot")
     if current_spot <= 0:
@@ -470,14 +481,14 @@ def select_move_contract(
         )
     except TrendScoreAutoInputError:
         return None
-    if contract_value <= 0 or position_limit < AUTO_TRADE_LOTS:
+    if contract_value <= 0 or position_limit < requested_lots:
         return None
 
     return {
         "zone": SHORT_MOVE,
         "instrument": "BTC_MOVE",
         "side": "sell",
-        "lots": AUTO_TRADE_LOTS,
+        "lots": requested_lots,
         "symbol": target["symbol"],
         "product_id": product_id,
         "spot": current_spot,

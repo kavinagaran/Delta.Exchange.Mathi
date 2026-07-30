@@ -220,7 +220,10 @@ def test_config_page_is_fail_safe_until_verified_load():
     assert "resetButton.disabled = false" in html
     assert "Configuration could not be verified — Save remains locked" in html
     assert "function scoreAutoModeError(" in html
-    assert "Morning, Evening, and legacy Trend strategies are permanently disabled" in html
+    assert "Configure {{ display_name }}’s Trend Engine." in html
+    assert "These settings apply only to" not in html
+    assert "Order safety ceiling" not in html
+    assert ">Reset Zone Lock<" in html
     assert re.search(
         r'<button[^>]+id="score-setup-lock-reset"[^>]+\bdisabled\b', html,
     )
@@ -235,7 +238,7 @@ def test_config_reset_profile_covers_every_page_field_and_is_fail_safe():
         encoding="utf-8")
     page_keys = set(re.findall(r'id="c-([A-Z0-9_]+)"', html))
     preserved = set(dashboard.CONFIG_PAGE_PRESERVED_KEYS)
-    assert len(page_keys) == 25
+    assert len(page_keys) == 29
     assert preserved == {"TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"}
     assert page_keys - preserved == set(dashboard.CONFIG_PAGE_DEFAULTS)
     assert set(dashboard.CONFIG_PAGE_DEFAULTS) <= set(dashboard.CONFIG_KEYS)
@@ -259,6 +262,11 @@ def test_config_reset_profile_covers_every_page_field_and_is_fail_safe():
     defaults = dashboard.CONFIG_PAGE_DEFAULTS
     assert defaults["DRY_RUN"] == "true"
     assert defaults["TREND_ENGINE_SCORE_AUTO_MODE"] == "disabled"
+    assert defaults["TREND_SCORE_AUTO_LOTS"] == "1000"
+    assert defaults["TREND_TP_PREMIUM_PCT"] == "100"
+    assert defaults["TREND_SL_PREMIUM_PCT"] == "50"
+    assert defaults["TREND_TSL_ARM_PREMIUM_PCT"] == "25"
+    assert defaults["TREND_TSL_TRAIL_PREMIUM_PCT"] == "25"
     assert "MORNING_SIDE" not in page_keys
     assert "EVENING_SIDE" not in page_keys
     assert "MORNING_ENABLED" not in page_keys
@@ -291,7 +299,7 @@ def test_config_reset_profile_covers_every_page_field_and_is_fail_safe():
     assert "element.value = window._loadedPreservedValues[key]" in html
     assert "does not close an open position" in html
     assert "keeps all retired controllers disabled" in html
-    assert "Safe score-zone defaults loaded — review them, then Save configuration" in html
+    assert "Safe Trend Engine defaults loaded — review them, then Save configuration" in html
 
 
 def test_saving_reset_profile_preserves_credentials_and_off_page_protection(

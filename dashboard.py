@@ -422,6 +422,9 @@ CONFIG_KEYS = [
     "TREND_LOTS", "TP_TARGET_PNL_TREND", "TP_POLL_SECS_TREND",
     "SL_TARGET_PNL_TREND", "TSL_TARGET_PNL_TREND", "TSL_ARM_PNL_TREND",
     "TSL_TRAIL_PNL_TREND", "TSL_LOCK_MIN_PNL_TREND",
+    "TREND_SCORE_AUTO_LOTS", "TREND_TP_PREMIUM_PCT",
+    "TREND_SL_PREMIUM_PCT", "TREND_TSL_ARM_PREMIUM_PCT",
+    "TREND_TSL_TRAIL_PREMIUM_PCT",
     "TREND_AUTO_ENTRY_ENABLED", "TREND_AUTO_ENTRY_MODE",
     "TREND_EMA_GAP_PCT", "TREND_RSI_UP", "TREND_RSI_DOWN",
     "TREND_15M_SLOPE_BARS", "TREND_MIN_15M_SLOPE_PCT", "TREND_ADX_MIN",
@@ -467,9 +470,12 @@ CONFIG_PAGE_DEFAULTS = {
     # Score-zone controller
     "DRY_RUN": "true",
     "TREND_ENGINE_SCORE_AUTO_MODE": "disabled",
-    "MAX_ORDER_LOTS": "1000",
+    "TREND_SCORE_AUTO_LOTS": "1000",
     # Score-zone protection targets are derived from each filled premium.
-    # Only the monitor interval is account-configurable on this page.
+    "TREND_TP_PREMIUM_PCT": "100",
+    "TREND_SL_PREMIUM_PCT": "50",
+    "TREND_TSL_ARM_PREMIUM_PCT": "25",
+    "TREND_TSL_TRAIL_PREMIUM_PCT": "25",
     "TP_POLL_SECS_TREND": "30",
     # Account-wide risk limits
     "MAX_TRADES_PER_DAY_GLOBAL": "3",
@@ -1306,11 +1312,13 @@ def _trend_score_auto_config_error(config: dict | None = None) -> str | None:
     if _config_truthy(cfg.get("EVENING_ENABLED"), False):
         return "Disable the scheduled Evening strategy before enabling score automation"
     try:
-        if int(float(cfg.get("MAX_ORDER_LOTS") or TREND_SCORE_AUTO_LOTS)) \
-                < TREND_SCORE_AUTO_LOTS:
-            return "Maximum order lots must allow the fixed 1,000-lot score order"
+        order_size = float(
+            cfg.get("TREND_SCORE_AUTO_LOTS") or TREND_SCORE_AUTO_LOTS
+        )
+        if not order_size.is_integer() or not 1 <= order_size <= 5_000:
+            return "Order size must be a whole number from 1 to 5,000 lots"
     except (TypeError, ValueError, OverflowError):
-        return "Maximum order lots is invalid"
+        return "Order size is invalid"
 
     def number(key: str, default: float) -> float:
         try:
@@ -1325,6 +1333,15 @@ def _trend_score_auto_config_error(config: dict | None = None) -> str | None:
     dry_capital = number("TREND_DRY_RUN_CAPITAL_USD", 1000)
     if not math.isfinite(dry_capital) or dry_capital <= 0:
         return "Trend DRY RUN capital must be positive"
+    for key, label, default in (
+        ("TREND_TP_PREMIUM_PCT", "Take-profit percentage", 100),
+        ("TREND_SL_PREMIUM_PCT", "Stop-loss percentage", 50),
+        ("TREND_TSL_ARM_PREMIUM_PCT", "Trailing-arm percentage", 25),
+        ("TREND_TSL_TRAIL_PREMIUM_PCT", "Trailing percentage", 25),
+    ):
+        value = number(key, default)
+        if not math.isfinite(value) or not 0 < value <= 1_000:
+            return f"{label} must be above 0% and at most 1,000%"
     return None
 
 
@@ -3961,12 +3978,12 @@ def _trend_score_auto_premium_protection_policy(
     *,
     entry_price: float | None = None,
 ) -> dict:
-    """Snapshot the fixed premium-percentage rule for one score-zone entry.
+    """Snapshot the user's premium-percentage rule for one score-zone entry.
 
-    The account configuration retains only the monitor interval.  TP, SL, and
-    TSL amounts are derived from this entry's premium and never inherited from
-    an earlier trade.  LIVE fills are recalculated a second time against the
-    authoritative exchange average price inside ``trend_score_live_execution``.
+    TP, SL, and TSL amounts are derived from this entry's premium and never
+    inherited from an earlier trade. LIVE fills are recalculated a second time
+    against the authoritative exchange average price while preserving the
+    percentages captured in the pending entry.
     """
     reference = _trend_score_auto_number(
         entry_price if entry_price is not None else prepared.get("entry_price"),
@@ -3976,14 +3993,25 @@ def _trend_score_auto_premium_protection_policy(
         prepared.get("contract_value"), "contract value", positive=True,
     )
     lots = int(_trend_score_auto_number(
-        prepared.get("lots") or TREND_SCORE_AUTO_LOTS,
+        prepared.get("lots") or _trend_score_auto_configured_lots(),
         "entry lots", positive=True,
     ))
-    if lots != TREND_SCORE_AUTO_LOTS:
-        raise RuntimeError("Trend score automation requires exactly 1,000 lots")
+    configured_lots = _trend_score_auto_configured_lots()
+    if lots != configured_lots:
+        raise RuntimeError(
+            "Prepared order size differs from the configured Trend Engine size"
+        )
+    cfg = _user_cfg()
     poll_secs = _tp_policy("trend").get("poll_secs", 30)
     return build_premium_percent_protection_policy(
-        reference, contract_value, lots, poll_secs=poll_secs,
+        reference,
+        contract_value,
+        lots,
+        poll_secs=poll_secs,
+        tp_percent=cfg.get("TREND_TP_PREMIUM_PCT") or 100,
+        sl_percent=cfg.get("TREND_SL_PREMIUM_PCT") or 50,
+        tsl_arm_percent=cfg.get("TREND_TSL_ARM_PREMIUM_PCT") or 25,
+        tsl_trail_percent=cfg.get("TREND_TSL_TRAIL_PREMIUM_PCT") or 25,
     )
 
 
@@ -8651,6 +8679,19 @@ def _trend_score_auto_exact_int(
     return int(number)
 
 
+def _trend_score_auto_configured_lots(config: dict | None = None) -> int:
+    """Return the active user's validated score-controller order size."""
+    cfg = config if isinstance(config, dict) else _user_cfg()
+    lots = _trend_score_auto_exact_int(
+        cfg.get("TREND_SCORE_AUTO_LOTS") or TREND_SCORE_AUTO_LOTS,
+        "Trend Engine order size",
+        positive=True,
+    )
+    if lots > 5_000:
+        raise RuntimeError("Trend Engine order size must not exceed 5,000 lots")
+    return lots
+
+
 def _trend_score_auto_quote_age(timestamp, now: datetime) -> float:
     raw = str(timestamp or "").strip()
     if not raw:
@@ -8667,8 +8708,8 @@ def _trend_score_auto_quote_age(timestamp, now: datetime) -> float:
     return max(age, 0)
 
 
-def _trend_score_auto_move_quote(symbol: str) -> dict:
-    """Validate a public, executable 1,000-lot MOVE sell quote."""
+def _trend_score_auto_move_quote(symbol: str, lots: int) -> dict:
+    """Validate a public, executable MOVE sell quote for the configured size."""
     payload = req.get(f"{API_BASE}/v2/tickers/{symbol}", timeout=8).json()
     ticker = payload.get("result") if isinstance(payload, dict) else None
     if not isinstance(ticker, dict) or not ticker:
@@ -8691,8 +8732,8 @@ def _trend_score_auto_move_quote(symbol: str) -> dict:
     depth = _trend_score_auto_number(
         quote.get("bid_size"), "MOVE bid depth", positive=True,
     )
-    if depth < TREND_SCORE_AUTO_LOTS:
-        raise RuntimeError("MOVE bid depth cannot fill the exact 1,000-lot score order")
+    if depth < lots:
+        raise RuntimeError("MOVE bid depth cannot fill the configured order size")
     return {
         **quote,
         "entry_price": bid,
@@ -8748,6 +8789,7 @@ def _prepare_trend_score_auto_entry(signal: dict) -> dict:
     spot = _trend_score_auto_number(
         (snapshot.get("market") or {}).get("spot"), "BTC spot", positive=True,
     )
+    lots = _trend_score_auto_configured_lots()
     now = datetime.now(timezone.utc)
     if zone in {TREND_SCORE_CE_ZONE, TREND_SCORE_PE_ZONE}:
         selection = select_directional_option(
@@ -8756,6 +8798,7 @@ def _prepare_trend_score_auto_entry(signal: dict) -> dict:
             spot=spot,
             zone=zone,
             now=now,
+            lots=lots,
         )
         if not selection:
             label = "2-step ITM CALL" if zone == TREND_SCORE_CE_ZONE \
@@ -8772,9 +8815,9 @@ def _prepare_trend_score_auto_entry(signal: dict) -> dict:
             contract.get("ask_size") or contract.get("ask_quantity"),
             "option ask depth", positive=True,
         )
-        if depth < TREND_SCORE_AUTO_LOTS:
+        if depth < lots:
             raise RuntimeError(
-                "option ask depth cannot fill the exact 1,000-lot score order"
+                "option ask depth cannot fill the configured order size"
             )
         return {
             **selection,
@@ -8793,13 +8836,13 @@ def _prepare_trend_score_auto_entry(signal: dict) -> dict:
     if zone != TREND_SCORE_MOVE_ZONE:
         raise RuntimeError("unsupported Trend score zone")
     selection = select_move_contract(
-        _fetch_live_mv_products(), spot=spot, now=now,
+        _fetch_live_mv_products(), spot=spot, now=now, lots=lots,
     )
     if not selection:
         raise RuntimeError(
             "No operational ATM MOVE contract with more than 90 minutes remains"
         )
-    quote = _trend_score_auto_move_quote(selection["symbol"])
+    quote = _trend_score_auto_move_quote(selection["symbol"], lots)
     move_eligibility = _trend_score_auto_short_move_eligibility(selection, quote)
     return {
         **selection,
@@ -8829,8 +8872,13 @@ def _trend_score_auto_open_state(
     risk_snapshot: dict | None = None,
 ) -> dict:
     """Create the isolated paper record; never submit an order."""
-    if int(prepared.get("lots") or 0) != TREND_SCORE_AUTO_LOTS:
-        raise RuntimeError("Trend score automation requires exactly 1,000 lots")
+    lots = _trend_score_auto_exact_int(
+        prepared.get("lots"), "prepared order size", positive=True,
+    )
+    if lots != _trend_score_auto_configured_lots():
+        raise RuntimeError(
+            "Prepared order size differs from the configured Trend Engine size"
+        )
     now = datetime.now(timezone.utc)
     price = _trend_score_auto_number(
         prepared.get("entry_price"), "entry price", positive=True,
@@ -8845,7 +8893,6 @@ def _trend_score_auto_open_state(
         prepared.get("product_id"), "product id", positive=True,
     ))
     policy = _trend_score_auto_premium_protection_policy(prepared)
-    lots = TREND_SCORE_AUTO_LOTS
     fee = _option_fee_per_lot(price, contract_value, strike) * lots
     zone = signal["zone"]
     direction = (
@@ -8992,10 +9039,17 @@ def _trend_score_auto_owned_position(state: dict) -> dict | None:
         raise RuntimeError("The controller-owned Trend state has a pending order identity")
     try:
         lots = int(float(state.get("lots") or 0))
+        requested = int(float(
+            state.get("requested_lots")
+            or (state.get("execution_snapshot") or {}).get("requested")
+            or lots
+        ))
     except (TypeError, ValueError, OverflowError) as exc:
         raise RuntimeError("The controller-owned Trend lot count is invalid") from exc
-    if lots != TREND_SCORE_AUTO_LOTS:
-        raise RuntimeError("The controller-owned Trend position is not exactly 1,000 lots")
+    if not 1 <= lots <= 5_000 or lots != requested:
+        raise RuntimeError(
+            "The controller-owned paper position has an invalid order size"
+        )
     position_score_zone(state)
     return dict(state)
 
@@ -9397,13 +9451,18 @@ def _trend_score_auto_health_update(user: str, **fields) -> dict:
         mode = _trend_score_auto_mode()
     except Exception:
         mode = str(health.get("mode") or "invalid")
+    try:
+        configured_lots = _trend_score_auto_configured_lots()
+    except Exception:
+        configured_lots = TREND_SCORE_AUTO_LOTS
     health.update({
         "user": user,
         "mode": mode,
         "enabled": mode in {"dry_run", "live"},
         "dry_run_only": mode == "dry_run",
         "live_orders_enabled": mode == "live",
-        "fixed_lots": TREND_SCORE_AUTO_LOTS,
+        "fixed_lots": configured_lots,
+        "configured_lots": configured_lots,
     })
     return health
 
@@ -9448,13 +9507,9 @@ def _trend_score_auto_live_owned_position(state: dict) -> dict | None:
         "controller-owned LIVE Trend requested lot count",
         positive=True,
     )
-    if not 1 <= lots <= TREND_SCORE_AUTO_LOTS:
+    if not 1 <= lots <= requested <= 5_000:
         raise RuntimeError(
-            "The controller-owned LIVE Trend fill is outside the 1–1,000 lot range"
-        )
-    if requested != TREND_SCORE_AUTO_LOTS:
-        raise RuntimeError(
-            "The controller-owned LIVE Trend order did not request exactly 1,000 lots"
+            "The controller-owned LIVE Trend fill exceeds its requested order size"
         )
     _trend_score_auto_exact_int(
         state.get("product_id"),
@@ -9626,11 +9681,11 @@ def _trend_score_auto_risk_snapshot(
     unrealized_pnl_usd: float = 0.0,
     available_usd: float | None = None,
 ) -> dict:
-    """Prove that the fixed 1,000-lot request fits every configured risk cap.
+    """Prove that the configured request fits every configured risk cap.
 
     The calculation is deliberately shared by DRY RUN and LIVE.  Paper uses a
     configured virtual USD balance, while LIVE revalidates the exchange wallet;
-    all fixed-size, premium, short-stop, and account-ledger limits are identical.
+    all order-size, premium, short-stop, and account-ledger limits are identical.
     """
     cfg = _user_cfg()
     cv = _trend_score_auto_number(
@@ -9644,7 +9699,13 @@ def _trend_score_auto_risk_snapshot(
     quoted_price = _trend_score_auto_number(
         quote.get(side_price_key), f"fresh {side_price_key}", positive=True,
     )
-    lots = TREND_SCORE_AUTO_LOTS
+    lots = _trend_score_auto_exact_int(
+        prepared.get("lots"), "prepared order size", positive=True,
+    )
+    if lots != _trend_score_auto_configured_lots(cfg):
+        raise RuntimeError(
+            "Prepared order size differs from the configured Trend Engine size"
+        )
     reference_price = _trend_score_auto_number(
         prepared.get("entry_price"),
         "selected option reference price", positive=True,
@@ -9715,7 +9776,7 @@ def _trend_score_auto_risk_snapshot(
             premium_at_risk + fee_per_lot * lots
         ):
             raise RuntimeError(
-                "Available USD balance cannot fund the fixed 1,000-lot option order"
+                "Available USD balance cannot fund the configured option order"
             )
         premium_cap = _trend_score_auto_number(
             cfg.get("MAX_ACCOUNT_PREMIUM_AT_RISK_USD") or 500,
@@ -9724,11 +9785,11 @@ def _trend_score_auto_risk_snapshot(
         )
         if premium_at_risk > premium_cap:
             raise RuntimeError(
-                "Fixed 1,000-lot option premium exceeds the account premium cap"
+                "Configured option premium exceeds the account premium cap"
             )
     if proposed_risk > risk_budget:
         raise RuntimeError(
-            "Fixed 1,000-lot request exceeds the configured Trend risk budget"
+            "Configured order size exceeds the Trend risk budget"
         )
 
     decision = evaluate_entry(
@@ -10686,7 +10747,7 @@ def _trend_score_auto_live_entry_result(
                 f"Regime » <code>{signal['market_regime']}</code>\n"
                 f"Rule » <code>{signal['zone']}</code> · "
                 f"Fill » <code>{int(state.get('lots') or 0):,}/"
-                f"{TREND_SCORE_AUTO_LOTS:,}</code> lots\n"
+                f"{int(state.get('requested_lots') or state.get('lots') or 0):,}</code> lots\n"
                 "Exchange order and TP / SL / TSL protection were verified."
             )
         elif status == "UNPROTECTED_OPEN":
@@ -11771,7 +11832,7 @@ def _maybe_auto_trend_score_live_cycle(
                         user,
                         status="flat_waiting_contract",
                         last_action=(
-                            "waiting for the exact executable 1,000-lot "
+                            "waiting for the exact executable configured-size "
                             "LIVE target contract"
                         ),
                         last_error=transition[
@@ -12259,8 +12320,8 @@ def _maybe_auto_trend_score_cycle() -> bool:
                         _trend_score_auto_health_update(
                             user, status="flat_waiting_contract",
                             last_action=(
-                                "previous score zone exited; waiting for the exact "
-                                "1,000-lot target contract"
+                                "previous score zone exited; waiting for the "
+                                "configured-size target contract"
                             ),
                             last_error=transition["entry_blocked_reason"],
                             current_zone=None,
@@ -12272,7 +12333,7 @@ def _maybe_auto_trend_score_cycle() -> bool:
                                 f"🤖 <b>TREND ENGINE DRY RUN — {user.upper()}</b>\n"
                                 f"Exited <code>{closed.get('symbol', '')}</code> after the "
                                 f"score moved to <code>{signal['zone']}</code>.\n"
-                                "The exact new 1,000-lot contract is not executable yet; "
+                                "The configured-size contract is not executable yet; "
                                 "the paper account remains flat and will retry this signal."
                             )
                         return True
@@ -12292,7 +12353,7 @@ def _maybe_auto_trend_score_cycle() -> bool:
                     _trend_score_auto_write_ledger(data_dir, ledger)
                     _trend_score_auto_health_update(
                         user, status="blocked",
-                        last_action="waiting for the exact 1,000-lot target contract",
+                        last_action="waiting for the configured-size target contract",
                         last_error=(preparation_error or
                                     "contract will be revalidated next cycle"),
                         current_zone=None,
@@ -12481,6 +12542,10 @@ def api_trend_engine_score_auto_status():
     state = _load_json(
         _slot_file("trend", dry_run=namespace_dry_run), {},
     )
+    try:
+        configured_lots = _trend_score_auto_configured_lots(cfg)
+    except Exception:
+        configured_lots = None
     payload = {
         **health,
         "user": user,
@@ -12491,7 +12556,8 @@ def api_trend_engine_score_auto_status():
         "execution_mode": mode if active_mode else "disabled",
         "data_namespace": namespace,
         "ownership": ownership,
-        "fixed_lots": TREND_SCORE_AUTO_LOTS,
+        "fixed_lots": configured_lots,
+        "configured_lots": configured_lots,
         "config_error": error,
     }
     try:
@@ -12865,6 +12931,11 @@ _CONFIG_NUMERIC_BOUNDS = {
     "TREND_QUOTE_MAX_AGE_SECS": (1, 300), "TREND_MAX_MARK_IV": (0, 10),
     "TREND_RISK_BUDGET_USD": (1, 10_000_000),
     "TREND_DRY_RUN_CAPITAL_USD": (1, 10_000_000),
+    "TREND_SCORE_AUTO_LOTS": (1, 5_000),
+    "TREND_TP_PREMIUM_PCT": (0.01, 1_000),
+    "TREND_SL_PREMIUM_PCT": (0.01, 1_000),
+    "TREND_TSL_ARM_PREMIUM_PCT": (0.01, 1_000),
+    "TREND_TSL_TRAIL_PREMIUM_PCT": (0.01, 1_000),
     "TREND_MAX_SLIPPAGE_PCT": (0.01, 20), "TREND_ORDER_CHUNK_LOTS": (1, 5000),
     "MAX_ORDER_LOTS": (1, 5000),
     "TREND_REENTRY_COOLDOWN_MIN": (0, 1440),
@@ -12970,6 +13041,12 @@ def _validate_config_update(data: dict, current: dict) -> str | None:
             return f"{key} must be numeric"
         if not math.isfinite(value) or not low <= value <= high:
             return f"{key} must be between {low} and {high}"
+    if "TREND_SCORE_AUTO_LOTS" in data:
+        try:
+            if not float(data["TREND_SCORE_AUTO_LOTS"]).is_integer():
+                return "Order size must be a whole number of lots"
+        except (TypeError, ValueError, OverflowError):
+            return "Order size must be a whole number of lots"
     merged = {**current, **data}
     if score_auto_mode in {"dry_run", "live"}:
         score_auto_error = _trend_score_auto_config_error(merged)
