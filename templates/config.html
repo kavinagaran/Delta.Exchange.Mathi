@@ -16,7 +16,7 @@
 <section class="card">
   <div class="card-hd">Trend Engine automation</div>
   <div class="card-bd">
-    <div class="form-grid">
+    <div class="form-grid score-automation-controls">
       <label class="fld"><span>Account trading mode</span>
         <select id="c-DRY_RUN" onchange="modeSelectionChanged()" disabled aria-describedby="mode-lock-hint">
           <option value="true">DRY RUN — simulate</option>
@@ -47,9 +47,9 @@
         <div class="score-zone-band is-hold"><strong>−40 &lt; score &lt; −30</strong><span>HOLD</span></div>
         <div class="score-zone-band is-put"><strong>−100 … −40</strong><span>BUY PE · 2 ITM</span></div>
       </div>
-      <div class="btn-row" style="margin-top:12px">
+      <div class="btn-row score-zone-lock-row">
         <button class="btn setup-lock-reset" id="score-setup-lock-reset" type="button" onclick="resetScoreZoneSetupLock()" disabled aria-describedby="score-setup-lock-hint">Reset Zone Lock</button>
-        <span class="hint" id="score-setup-lock-hint" style="align-self:center" role="status" aria-live="polite">Zone lock: none. It prevents repeat entries in the same zone.</span>
+        <span class="hint" id="score-setup-lock-hint" role="status" aria-live="polite">Zone lock: none. It prevents repeat entries in the same zone.</span>
       </div>
     </div>
   </div>
