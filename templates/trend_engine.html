@@ -173,7 +173,7 @@
         <span class="te-kicker">DISPLAY ONLY · LIVE PREVIEW</span>
         <strong id="te-preview-chart-title">Preview Decision · 5-minute score candles</strong>
       </div>
-      <span class="te-preview-chart-badge">5M LIVE</span>
+      <span class="te-preview-chart-badge">24H · 5M</span>
     </div>
     <div class="card-bd">
       <div class="te-preview-chart-intro">
@@ -186,7 +186,9 @@
         </div>
       </div>
       <div class="te-preview-chart-controls" id="te-preview-chart-controls">
-        Drag the bottom time axis to expand or compress the candle view. Drag the left score axis to zoom vertically. Double-click either axis to reset it.
+        <span>Drag inside the chart to pan in any direction. Drag an axis or use the mouse wheel to zoom. Double-click the chart to return to the latest score-aware view.</span>
+        <span class="te-preview-chart-window" id="te-preview-chart-window">24-hour history · automatic score range</span>
+        <button class="te-preview-chart-reset" id="te-preview-chart-reset" type="button">Reset view</button>
       </div>
       <div class="te-preview-chart-stage">
         <canvas id="te-preview-score-chart" role="img" aria-label="Five-minute Preview Decision score candlestick chart with colour-coded score zones"></canvas>
@@ -497,17 +499,26 @@ const PREVIEW_SCORE_ZONE_LEVELS = [
   { value: -40, label: 'BUY PE −40', color: '#ff5f7e' },
 ];
 
-function formatPreviewChartTime(value) {
+function formatPreviewChartTime(value, includeDate = false) {
   const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime())) return '—';
-  const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', {
+  const options = {
     timeZone: IST_TIME_ZONE,
     hour: '2-digit',
     minute: '2-digit',
     hour12: true,
-  }).formatToParts(parsed).filter(part => part.type !== 'literal')
+  };
+  if (includeDate) {
+    options.day = '2-digit';
+    options.month = 'short';
+  }
+  const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', options)
+    .formatToParts(parsed).filter(part => part.type !== 'literal')
     .map(part => [part.type, part.value]));
-  return `${parts.hour}:${parts.minute} ${parts.dayPeriod}`;
+  const time = `${parts.hour}:${parts.minute} ${parts.dayPeriod}`;
+  return includeDate
+    ? `${String(parts.day || '').padStart(2, '0')} ${String(parts.month || '').toUpperCase()} · ${time}`
+    : time;
 }
 
 function renderPreviewScoreChart(history) {
@@ -539,6 +550,14 @@ function renderPreviewScoreChart(history) {
   });
   const candles = [...candlesByStart.values()].sort((left, right) =>
     left._sortKey - right._sortKey);
+  const trades = (Array.isArray(history?.trade_markers)
+    ? history.trade_markers : []).map(raw => {
+      const timeMillis = Date.parse(raw?.time_utc);
+      const code = String(raw?.code || '').toUpperCase();
+      return { timeMillis, code };
+    }).filter(marker =>
+      Number.isFinite(marker.timeMillis)
+      && ['CE', 'PE', 'MV'].includes(marker.code));
 
   if (!history?.available || !candles.length) {
     canvas.hidden = true;
@@ -554,9 +573,9 @@ function renderPreviewScoreChart(history) {
   const latest = candles[candles.length - 1];
   canvas.setAttribute(
     'aria-label',
-    `Five-minute Preview Decision score candles. Latest score ${signedScore(latest.close)}. Drag the bottom axis to change the time scale or the left axis to change the score scale.`,
+    `Five-minute Preview Decision score candles covering up to 24 hours. Latest score ${signedScore(latest.close)}. Drag the plot in any direction and drag either axis to zoom.`,
   );
-  drawPreviewScoreChart(canvas, candles);
+  drawPreviewScoreChart(canvas, candles, trades);
 }
 
 const previewScoreChartStates = new WeakMap();
@@ -565,9 +584,13 @@ function previewScoreChartState(canvas) {
   let state = previewScoreChartStates.get(canvas);
   if (!state) {
     state = {
-      xScale: 1,
-      scoreSpan: 200,
+      visibleBars: 48,
+      rightOffset: 0,
+      yZoom: 1,
+      yPan: 0,
+      manualY: false,
       candles: [],
+      trades: [],
       geometry: null,
       drag: null,
       interactionsInstalled: false,
@@ -579,6 +602,17 @@ function previewScoreChartState(canvas) {
 
 function clampPreviewChart(value, minimum, maximum) {
   return Math.min(maximum, Math.max(minimum, value));
+}
+
+function nicePreviewScoreStep(rawStep) {
+  const safe = Math.max(.1, Number(rawStep) || 1);
+  const power = 10 ** Math.floor(Math.log10(safe));
+  const fraction = safe / power;
+  const niceFraction = fraction <= 1 ? 1
+    : fraction <= 2 ? 2
+    : fraction <= 2.5 ? 2.5
+    : fraction <= 5 ? 5 : 10;
+  return niceFraction * power;
 }
 
 function previewChartPointer(canvas, event) {
@@ -601,13 +635,31 @@ function previewChartAxisAt(state, point) {
       && point.y >= plot.top && point.y <= plot.bottom) {
     return 'y';
   }
+  if (point.x >= plot.left && point.x <= plot.right
+      && point.y >= plot.top && point.y <= plot.bottom) {
+    return 'plot';
+  }
   return null;
 }
 
 function redrawPreviewChartFromState(canvas, state) {
   if (Array.isArray(state.candles) && state.candles.length) {
-    drawPreviewScoreChart(canvas, state.candles);
+    drawPreviewScoreChart(canvas, state.candles, state.trades);
   }
+}
+
+function resetPreviewScoreChart(canvas, axes = 'both') {
+  const state = previewScoreChartState(canvas);
+  if (axes === 'both' || axes === 'x') {
+    state.visibleBars = 48;
+    state.rightOffset = 0;
+  }
+  if (axes === 'both' || axes === 'y') {
+    state.yZoom = 1;
+    state.yPan = 0;
+    state.manualY = false;
+  }
+  redrawPreviewChartFromState(canvas, state);
 }
 
 function installPreviewScoreChartInteractions(canvas, state) {
@@ -625,12 +677,17 @@ function installPreviewScoreChartInteractions(canvas, state) {
       pointerId: event.pointerId,
       startX: point.x,
       startY: point.y,
-      initialXScale: state.xScale,
-      initialScoreSpan: state.scoreSpan,
+      initialVisibleBars: state.visibleBars,
+      initialRightOffset: state.rightOffset,
+      initialYZoom: state.yZoom,
+      initialYPan: state.yPan,
+      slot: state.geometry?.slot || 12,
+      pixelsPerScore: state.geometry?.pixelsPerScore || 1,
     };
     canvas.setPointerCapture?.(event.pointerId);
     canvas.dataset.axisDrag = axis;
-    canvas.style.cursor = axis === 'x' ? 'ew-resize' : 'ns-resize';
+    canvas.style.cursor = axis === 'x' ? 'ew-resize'
+      : axis === 'y' ? 'ns-resize' : 'grabbing';
   });
 
   canvas.addEventListener('pointermove', event => {
@@ -638,24 +695,41 @@ function installPreviewScoreChartInteractions(canvas, state) {
     const drag = state.drag;
     if (!drag || drag.pointerId !== event.pointerId) {
       const axis = previewChartAxisAt(state, point);
-      canvas.style.cursor = axis === 'x' ? 'ew-resize' : axis === 'y' ? 'ns-resize' : 'default';
+      canvas.style.cursor = axis === 'x' ? 'ew-resize'
+        : axis === 'y' ? 'ns-resize'
+        : axis === 'plot' ? 'grab' : 'default';
       return;
     }
     event.preventDefault();
     if (drag.axis === 'x') {
-      // Drag right to magnify the time axis and left to show more candles.
-      state.xScale = clampPreviewChart(
-        drag.initialXScale * Math.exp((point.x - drag.startX) / 180),
-        0.35,
-        5,
+      state.visibleBars = clampPreviewChart(
+        drag.initialVisibleBars * Math.exp((drag.startX - point.x) / 210),
+        12,
+        Math.max(12, Math.min(288, state.candles.length)),
       );
+    } else if (drag.axis === 'y') {
+      state.yZoom = clampPreviewChart(
+        drag.initialYZoom * Math.exp((drag.startY - point.y) / 190),
+        .35,
+        8,
+      );
+      state.manualY = true;
     } else {
-      // Drag upward to magnify scores around zero and down to compress them.
-      state.scoreSpan = clampPreviewChart(
-        drag.initialScoreSpan * Math.exp((point.y - drag.startY) / 190),
-        60,
-        260,
+      const maximumOffset = Math.max(
+        0,
+        state.candles.length - Math.min(state.visibleBars, state.candles.length),
       );
+      state.rightOffset = clampPreviewChart(
+        drag.initialRightOffset + (point.x - drag.startX) / drag.slot,
+        0,
+        maximumOffset,
+      );
+      state.yPan = clampPreviewChart(
+        drag.initialYPan + (point.y - drag.startY) / drag.pixelsPerScore,
+        -200,
+        200,
+      );
+      state.manualY = Math.abs(state.yPan) > .001 || state.yZoom !== 1;
     }
     redrawPreviewChartFromState(canvas, state);
   });
@@ -666,7 +740,9 @@ function installPreviewScoreChartInteractions(canvas, state) {
     state.drag = null;
     delete canvas.dataset.axisDrag;
     const axis = previewChartAxisAt(state, previewChartPointer(canvas, event));
-    canvas.style.cursor = axis === 'x' ? 'ew-resize' : axis === 'y' ? 'ns-resize' : 'default';
+    canvas.style.cursor = axis === 'x' ? 'ew-resize'
+      : axis === 'y' ? 'ns-resize'
+      : axis === 'plot' ? 'grab' : 'default';
   };
   canvas.addEventListener('pointerup', stopDragging);
   canvas.addEventListener('pointercancel', stopDragging);
@@ -675,15 +751,116 @@ function installPreviewScoreChartInteractions(canvas, state) {
     const axis = previewChartAxisAt(state, previewChartPointer(canvas, event));
     if (!axis) return;
     event.preventDefault();
-    if (axis === 'x') state.xScale = 1;
-    else state.scoreSpan = 200;
-    redrawPreviewChartFromState(canvas, state);
+    resetPreviewScoreChart(canvas, axis === 'plot' ? 'both' : axis);
   });
+
+  canvas.addEventListener('wheel', event => {
+    const point = previewChartPointer(canvas, event);
+    const axis = previewChartAxisAt(state, point);
+    if (!axis) return;
+    event.preventDefault();
+    if (axis === 'y' || event.shiftKey) {
+      state.yZoom = clampPreviewChart(
+        state.yZoom * Math.exp(-event.deltaY * .0015),
+        .35,
+        8,
+      );
+      state.manualY = true;
+    } else {
+      const oldBars = state.visibleBars;
+      const maximumBars = Math.max(12, Math.min(288, state.candles.length));
+      const newBars = clampPreviewChart(
+        oldBars * Math.exp(event.deltaY * .0015),
+        12,
+        maximumBars,
+      );
+      const plot = state.geometry?.plot;
+      const fromRight = plot
+        ? clampPreviewChart((plot.right - point.x) / (plot.right - plot.left), 0, 1)
+        : .5;
+      state.rightOffset = clampPreviewChart(
+        state.rightOffset + (oldBars - newBars) * fromRight,
+        0,
+        Math.max(0, state.candles.length - newBars),
+      );
+      state.visibleBars = newBars;
+    }
+    redrawPreviewChartFromState(canvas, state);
+  }, { passive: false });
+
+  window.addEventListener('resize', () =>
+    redrawPreviewChartFromState(canvas, state));
 }
 
-function drawPreviewScoreChart(canvas, candles) {
+function previewChartRoundedPath(ctx, x, y, width, height, radius) {
+  const r = Math.min(radius, Math.abs(width) / 2, Math.abs(height) / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + width - r, y);
+  ctx.quadraticCurveTo(x + width, y, x + width, y + r);
+  ctx.lineTo(x + width, y + height - r);
+  ctx.quadraticCurveTo(
+    x + width,
+    y + height,
+    x + width - r,
+    y + height,
+  );
+  ctx.lineTo(x + r, y + height);
+  ctx.quadraticCurveTo(x, y + height, x, y + height - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
+}
+
+function drawPreviewTradeMarker(ctx, x, anchorY, code, stack, plot) {
+  const palette = {
+    CE: { fill: '#20d991', text: '#031d16', glow: '#45f7b7' },
+    PE: { fill: '#ff4f72', text: '#26020a', glow: '#ff7891' },
+    MV: { fill: '#e2e9f0', text: '#071929', glow: '#c8e7ff' },
+  };
+  const tone = palette[code];
+  if (!tone) return;
+  const width = code === 'MV' ? 32 : 30;
+  const height = 20;
+  let top = anchorY - 31 - stack * 24;
+  let below = false;
+  if (top < plot.top + 4) {
+    below = true;
+    top = anchorY + 11 + stack * 24;
+  }
+  top = clampPreviewChart(top, plot.top + 4, plot.bottom - height - 4);
+  const left = clampPreviewChart(
+    x - width / 2,
+    plot.left + 2,
+    plot.right - width - 2,
+  );
+  ctx.save();
+  ctx.strokeStyle = tone.glow;
+  ctx.fillStyle = tone.fill;
+  ctx.shadowColor = tone.glow;
+  ctx.shadowBlur = 14;
+  ctx.lineWidth = 1.2;
+  ctx.beginPath();
+  ctx.moveTo(x, below ? anchorY + 2 : anchorY - 2);
+  ctx.lineTo(x, below ? top : top + height);
+  ctx.stroke();
+  previewChartRoundedPath(ctx, left, top, width, height, 7);
+  ctx.fill();
+  ctx.shadowBlur = 0;
+  ctx.strokeStyle = 'rgba(255, 255, 255, .72)';
+  ctx.stroke();
+  ctx.fillStyle = tone.text;
+  ctx.font = '900 10px Inter, Segoe UI, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(code, left + width / 2, top + height / 2 + .3);
+  ctx.restore();
+}
+
+function drawPreviewScoreChart(canvas, candles, trades = []) {
   const state = previewScoreChartState(canvas);
   state.candles = candles;
+  state.trades = trades;
   installPreviewScoreChartInteractions(canvas, state);
   const rect = canvas.getBoundingClientRect();
   const width = Math.max(320, Math.floor(rect.width || canvas.clientWidth || 320));
@@ -705,11 +882,77 @@ function drawPreviewScoreChart(canvas, candles) {
   const plot = { left: 62, top: 22, right: width - zoneLabelLane - 12, bottom: height - 44 };
   const plotWidth = Math.max(1, plot.right - plot.left);
   const plotHeight = Math.max(1, plot.bottom - plot.top);
-  const scoreMaximum = state.scoreSpan / 2;
-  const scoreMinimum = -scoreMaximum;
-  const scoreY = value => plot.top + ((scoreMaximum - value) / state.scoreSpan) * plotHeight;
-  const scoreLabel = value => `${value > 0 ? '+' : ''}${value}`;
-  state.geometry = { width, height, plot };
+
+  // A 24-hour buffer contains 288 bars. Keep the default viewport tight
+  // enough for substantial candles, then let horizontal zoom/pan expose the
+  // complete day without aggregating or discarding any bar.
+  const maximumVisibleBars = Math.max(12, Math.min(288, candles.length));
+  state.visibleBars = clampPreviewChart(state.visibleBars, 12, maximumVisibleBars);
+  const visibleCount = Math.max(
+    1,
+    Math.min(candles.length, Math.round(state.visibleBars)),
+  );
+  const maximumRightOffset = Math.max(0, candles.length - visibleCount);
+  state.rightOffset = clampPreviewChart(
+    state.rightOffset,
+    0,
+    maximumRightOffset,
+  );
+  const endIndex = Math.max(
+    visibleCount,
+    candles.length - Math.round(state.rightOffset),
+  );
+  const startIndex = Math.max(0, endIndex - visibleCount);
+  const visibleCandles = candles.slice(startIndex, endIndex);
+  const slotCount = Math.max(
+    1,
+    Math.min(Math.round(state.visibleBars), candles.length),
+  );
+  const slot = plotWidth / slotCount;
+  const visiblePlotWidth = slot * visibleCandles.length;
+  const candleOffset = Math.max(0, plotWidth - visiblePlotWidth);
+
+  // The vertical axis follows only the OHLC range actually on screen. A
+  // small "nice number" margin preserves wicks and markers while avoiding the
+  // old fixed −100…+100 scale that flattened meaningful score movement.
+  const visibleLow = Math.min(...visibleCandles.map(candle => candle.low));
+  const visibleHigh = Math.max(...visibleCandles.map(candle => candle.high));
+  const rawRange = Math.max(.5, visibleHigh - visibleLow);
+  const padding = Math.max(2, rawRange * .20);
+  const autoTick = nicePreviewScoreStep((rawRange + padding * 2) / 6);
+  let autoMinimum = Math.floor((visibleLow - padding) / autoTick) * autoTick;
+  let autoMaximum = Math.ceil((visibleHigh + padding) / autoTick) * autoTick;
+  if (autoMaximum - autoMinimum < 8) {
+    const midpoint = (autoMaximum + autoMinimum) / 2;
+    autoMinimum = midpoint - 4;
+    autoMaximum = midpoint + 4;
+  }
+  if (visibleLow >= -100 && visibleHigh <= 100) {
+    autoMinimum = Math.max(-100, autoMinimum);
+    autoMaximum = Math.min(100, autoMaximum);
+  }
+  const autoCenter = (autoMaximum + autoMinimum) / 2;
+  const autoSpan = Math.max(4, autoMaximum - autoMinimum);
+  const scoreSpan = autoSpan / state.yZoom;
+  const scoreCenter = autoCenter + state.yPan;
+  const scoreMaximum = scoreCenter + scoreSpan / 2;
+  const scoreMinimum = scoreCenter - scoreSpan / 2;
+  const scoreY = value =>
+    plot.top + ((scoreMaximum - value) / scoreSpan) * plotHeight;
+  const scoreLabel = value => {
+    const rounded = Math.abs(value) < 10 && Math.abs(value % 1) > .001
+      ? value.toFixed(1) : value.toFixed(0);
+    return `${value > 0 ? '+' : ''}${rounded}`;
+  };
+  state.geometry = {
+    width,
+    height,
+    plot,
+    slot,
+    scoreMinimum,
+    scoreMaximum,
+    pixelsPerScore: plotHeight / scoreSpan,
+  };
 
   const backdrop = ctx.createLinearGradient(0, plot.top, 0, plot.bottom);
   backdrop.addColorStop(0, 'rgba(18, 77, 122, .32)');
@@ -740,7 +983,7 @@ function drawPreviewScoreChart(canvas, candles) {
   fillScoreBand(-30, -40, 'rgba(142, 153, 166, .14)');
   fillScoreBand(-40, -100, 'rgba(255, 95, 126, .075)');
 
-  const preferredTick = state.scoreSpan <= 80 ? 20 : state.scoreSpan <= 150 ? 25 : 50;
+  const preferredTick = nicePreviewScoreStep(scoreSpan / 6);
   const firstTick = Math.ceil(scoreMinimum / preferredTick) * preferredTick;
   const scoreTicks = [];
   for (let value = firstTick; value <= scoreMaximum + .001; value += preferredTick) {
@@ -801,13 +1044,7 @@ function drawPreviewScoreChart(canvas, candles) {
   ctx.stroke();
   ctx.restore();
 
-  const baseSlot = plotWidth / Math.min(Math.max(candles.length, 1), 48);
-  const slot = clampPreviewChart(baseSlot * state.xScale, 6, 48);
-  const visibleCount = Math.max(1, Math.min(candles.length, Math.floor(plotWidth / slot)));
-  const visibleCandles = candles.slice(-visibleCount);
-  const visiblePlotWidth = slot * visibleCandles.length;
-  const candleOffset = Math.max(0, plotWidth - visiblePlotWidth);
-  const candleWidth = Math.max(3, Math.min(16, slot * .58));
+  const candleWidth = Math.max(5, Math.min(26, slot * .68));
   ctx.save();
   ctx.beginPath();
   ctx.rect(plot.left, plot.top, plotWidth, plotHeight);
@@ -827,30 +1064,87 @@ function drawPreviewScoreChart(canvas, candles) {
     const wickBottom = scoreY(Math.min(candle.open, candle.high, candle.low, candle.close));
     const rawBodyTop = scoreY(Math.max(candle.open, candle.close));
     const rawBodyBottom = scoreY(Math.min(candle.open, candle.close));
-    const bodyHeight = isDoji ? 1.5 : Math.max(2, rawBodyBottom - rawBodyTop);
+    const bodyHeight = isDoji ? 3 : Math.max(4, rawBodyBottom - rawBodyTop);
     const bodyTop = isDoji ? scoreY(candle.open) - bodyHeight / 2 : rawBodyTop;
     ctx.save();
     ctx.strokeStyle = colour;
-    ctx.fillStyle = colour;
     ctx.shadowColor = colour;
-    ctx.shadowBlur = candle.forming ? 12 : 7;
-    ctx.globalAlpha = isPartial ? .48 : candle.forming ? 1 : .87;
-    ctx.lineWidth = 1.4;
+    ctx.shadowBlur = candle.forming ? 15 : 8;
+    ctx.globalAlpha = isPartial ? .48 : candle.forming ? 1 : .94;
+    ctx.lineWidth = Math.max(1.6, Math.min(2.4, candleWidth * .09));
     if (isPartial) ctx.setLineDash([3, 3]);
     ctx.beginPath();
     ctx.moveTo(x, wickTop);
     ctx.lineTo(x, wickBottom);
     ctx.stroke();
     ctx.setLineDash([]);
+    const bodyGradient = ctx.createLinearGradient(
+      x - candleWidth / 2,
+      bodyTop,
+      x + candleWidth / 2,
+      bodyTop + bodyHeight,
+    );
+    if (isPartial || isDoji) {
+      bodyGradient.addColorStop(0, colour);
+      bodyGradient.addColorStop(1, colour);
+    } else if (rising) {
+      bodyGradient.addColorStop(0, '#79ffd2');
+      bodyGradient.addColorStop(.48, '#2ce4aa');
+      bodyGradient.addColorStop(1, '#10986f');
+    } else {
+      bodyGradient.addColorStop(0, '#ff8ba0');
+      bodyGradient.addColorStop(.48, '#ff5478');
+      bodyGradient.addColorStop(1, '#a9183b');
+    }
+    previewChartRoundedPath(
+      ctx,
+      x - candleWidth / 2,
+      bodyTop,
+      candleWidth,
+      bodyHeight,
+      Math.min(3, bodyHeight / 2),
+    );
     if (candle.forming) {
       ctx.fillStyle = 'rgba(8, 35, 61, .96)';
-      ctx.fillRect(x - candleWidth / 2, bodyTop, candleWidth, bodyHeight);
+      ctx.fill();
       ctx.strokeStyle = colour;
-      ctx.strokeRect(x - candleWidth / 2, bodyTop, candleWidth, bodyHeight);
+      ctx.stroke();
     } else {
-      ctx.fillRect(x - candleWidth / 2, bodyTop, candleWidth, bodyHeight);
+      ctx.fillStyle = bodyGradient;
+      ctx.fill();
+      ctx.strokeStyle = colour;
+      ctx.globalAlpha *= .78;
+      ctx.stroke();
     }
     ctx.restore();
+  });
+
+  const visibleBuckets = new Map();
+  visibleCandles.forEach((candle, index) => {
+    if (Number.isFinite(candle._sortKey)) {
+      visibleBuckets.set(Math.floor(candle._sortKey / 300_000), {
+        candle,
+        index,
+      });
+    }
+  });
+  const markerStacks = new Map();
+  trades.forEach(marker => {
+    const bucket = Math.floor(marker.timeMillis / 300_000);
+    const match = visibleBuckets.get(bucket);
+    if (!match) return;
+    const stack = markerStacks.get(bucket) || 0;
+    markerStacks.set(bucket, stack + 1);
+    const x = plot.left + candleOffset + slot * (match.index + .5);
+    const anchorY = scoreY(match.candle.high);
+    drawPreviewTradeMarker(
+      ctx,
+      x,
+      anchorY,
+      marker.code,
+      stack,
+      plot,
+    );
   });
   ctx.restore();
 
@@ -864,9 +1158,27 @@ function drawPreviewScoreChart(canvas, candles) {
   ctx.fillStyle = '#d6dce3';
   ctx.textBaseline = 'top';
   ctx.textAlign = 'center';
+  const visibleStartMillis = Date.parse(visibleCandles[0].start_utc);
+  const visibleEndMillis = Date.parse(
+    visibleCandles[visibleCandles.length - 1].start_utc,
+  );
+  const includeDate = Number.isFinite(visibleStartMillis)
+    && Number.isFinite(visibleEndMillis)
+    && (
+      visibleEndMillis - visibleStartMillis >= 12 * 60 * 60 * 1000
+      || new Date(visibleStartMillis).toLocaleDateString('en-CA', {
+        timeZone: IST_TIME_ZONE,
+      }) !== new Date(visibleEndMillis).toLocaleDateString('en-CA', {
+        timeZone: IST_TIME_ZONE,
+      })
+    );
   [...labelIndexes].sort((a, b) => a - b).forEach(index => {
     const x = plot.left + candleOffset + slot * (index + .5);
-    ctx.fillText(formatPreviewChartTime(visibleCandles[index].start_utc), x, plot.bottom + 12);
+    ctx.fillText(
+      formatPreviewChartTime(visibleCandles[index].start_utc, includeDate),
+      x,
+      plot.bottom + 12,
+    );
   });
   ctx.fillStyle = '#c2cbd5';
   ctx.textAlign = 'left';
@@ -876,6 +1188,15 @@ function drawPreviewScoreChart(canvas, candles) {
     ctx.textAlign = 'right';
     ctx.fillStyle = '#dbeeff';
     ctx.fillText('FORMING', plot.right, 5);
+  }
+  const windowLabel = document.getElementById('te-preview-chart-window');
+  if (windowLabel) {
+    const rangeLabel =
+      `${scoreLabel(scoreMinimum)} to ${scoreLabel(scoreMaximum)}`;
+    const positionLabel = state.rightOffset < .5 ? 'latest'
+      : `${Math.round(state.rightOffset)} bars back`;
+    windowLabel.textContent =
+      `${visibleCandles.length} of ${candles.length} candles · score ${rangeLabel} · ${positionLabel}`;
   }
 }
 
@@ -1054,6 +1375,8 @@ async function load() {
 
 document.getElementById('te-refresh').addEventListener('click', load);
 document.getElementById('te-retry').addEventListener('click', load);
+document.getElementById('te-preview-chart-reset').addEventListener('click', () =>
+  resetPreviewScoreChart(document.getElementById('te-preview-score-chart')));
 load();
 setInterval(load, 5_000);
 </script>

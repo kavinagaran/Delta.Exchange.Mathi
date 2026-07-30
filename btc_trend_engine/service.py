@@ -16,9 +16,11 @@ import asyncio
 import json
 import logging
 import math
+import os
 import shutil
 from collections import deque
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 import websockets
@@ -55,6 +57,9 @@ _EVENT_FEED = {
     EventType.MARK_PRICE: "mark",
     EventType.FUNDING: "funding",
 }
+
+_PREVIEW_SCORE_HISTORY_LIMIT = 288  # 24 hours of five-minute candles
+_PREVIEW_SCORE_HISTORY_FILE = "preview_score_history.json"
 
 
 class EngineService:
@@ -104,12 +109,18 @@ class EngineService:
         self._restore_signal_state()
         self.last_ticker: dict[str, Any] = {}
         self.live_view: dict[str, Any] | None = None
-        # The Preview Decision intentionally has a separate, in-memory display
-        # history.  It records the repainting score inside the forming trigger
-        # candle so the UI can draw score candles, but it is never persisted as
-        # a decision and is never exposed to the order consumer.
-        self._preview_score_candles: deque[dict[str, Any]] = deque(maxlen=144)
+        # The Preview Decision has a separate display-only history. Completed
+        # bars are persisted so a routine service restart does not erase the
+        # chart's rolling 24-hour context. This file is never read by the
+        # producer or order consumer and contains no signal/permission fields.
+        self._preview_score_history_path = (
+            config.storage.data_path / _PREVIEW_SCORE_HISTORY_FILE
+        )
+        self._preview_score_candles: deque[dict[str, Any]] = deque(
+            maxlen=_PREVIEW_SCORE_HISTORY_LIMIT,
+        )
         self._preview_score_forming: dict[str, Any] | None = None
+        self._restore_preview_score_history()
         self.raw_capture_enabled = True
         self.dispatch_errors = 0
         self.snapshot_errors = 0
@@ -139,6 +150,104 @@ class EngineService:
                 log.info("restored %d committed trend snapshots", restored)
         except Exception:
             log.exception("trend signal state restore failed; starting fail-closed")
+
+    def _restore_preview_score_history(self) -> None:
+        """Restore validated completed display bars from the rolling file.
+
+        Corrupt display history must never prevent the market-data engine from
+        starting. Each row is normalised defensively and decision-shaped keys
+        are deliberately discarded.
+        """
+        try:
+            payload = json.loads(
+                self._preview_score_history_path.read_text(encoding="utf-8")
+            )
+        except FileNotFoundError:
+            return
+        except (OSError, TypeError, ValueError):
+            log.warning("preview score history restore skipped: invalid file")
+            return
+
+        rows = payload.get("candles") if isinstance(payload, dict) else None
+        if not isinstance(rows, list):
+            log.warning("preview score history restore skipped: invalid rows")
+            return
+
+        restored: dict[str, dict[str, Any]] = {}
+        for row in rows[-_PREVIEW_SCORE_HISTORY_LIMIT:]:
+            if not isinstance(row, dict):
+                continue
+            start = row.get("start_utc")
+            if not isinstance(start, str) or not start:
+                continue
+            try:
+                open_score = float(row["open"])
+                high_score = float(row["high"])
+                low_score = float(row["low"])
+                close_score = float(row["close"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if not all(math.isfinite(value) for value in (
+                open_score, high_score, low_score, close_score,
+            )):
+                continue
+            try:
+                samples = max(1, int(row.get("samples") or 1))
+            except (TypeError, ValueError):
+                samples = 1
+            restored[start] = {
+                "start_utc": start,
+                "end_utc": (
+                    row.get("end_utc")
+                    if isinstance(row.get("end_utc"), str)
+                    else self._preview_candle_end(start)
+                ),
+                "open": open_score,
+                "high": max(open_score, high_score, low_score, close_score),
+                "low": min(open_score, high_score, low_score, close_score),
+                "close": close_score,
+                "samples": samples,
+                "partial": bool(row.get("partial")),
+                "last_sample_utc": str(row.get("last_sample_utc") or ""),
+                "data_quality": row.get("data_quality"),
+                "forming": False,
+            }
+        for row in sorted(restored.values(), key=lambda item: item["start_utc"]):
+            self._preview_score_candles.append(row)
+        if restored:
+            log.info(
+                "restored %d display-only preview score candles",
+                len(self._preview_score_candles),
+            )
+
+    def _persist_preview_score_history(self) -> None:
+        """Atomically persist completed display-only bars.
+
+        Failure is logged and ignored: chart retention cannot interrupt market
+        capture or change a trading decision.
+        """
+        path = Path(self._preview_score_history_path)
+        temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        payload = {
+            "schema_version": 1,
+            "symbol": self.config.engine.symbol,
+            "resolution": "5m",
+            "display_only": True,
+            "candles": list(self._preview_score_candles),
+        }
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temporary.write_text(
+                json.dumps(payload, separators=(",", ":"), ensure_ascii=True),
+                encoding="utf-8",
+            )
+            os.replace(temporary, path)
+        except OSError:
+            log.exception("preview score history write failed")
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     # ── wiring ───────────────────────────────────────────────────────────
     def _channel_spec(self) -> list[dict[str, Any]]:
@@ -243,8 +352,8 @@ class EngineService:
         """Fold one provisional sample into a 5-minute score OHLC candle.
 
         This deliberately consumes only the display-only ``produce_live``
-        result.  The records stay in process memory, have no signal ID or
-        entry permission, and are returned only by the display-history API.
+        result. The records have no signal ID or entry permission and are
+        returned only by the display-history API.
         """
         start = view.get("forming_candle_start")
         if not isinstance(start, str) or not start:
@@ -253,7 +362,10 @@ class EngineService:
             # Chart precision is deliberately separate from the rounded dial
             # score.  Retain a compatibility fallback for test fixtures and
             # older producer responses during a rolling deployment.
-            score = float(view.get("chart_score", view["live_score"]))
+            raw_score = view.get("chart_score")
+            if raw_score is None:
+                raw_score = view["live_score"]
+            score = float(raw_score)
         except (KeyError, TypeError, ValueError):
             return
         if not math.isfinite(score):
@@ -270,6 +382,7 @@ class EngineService:
                 completed = dict(current)
                 completed["forming"] = False
                 self._preview_score_candles.append(completed)
+                self._persist_preview_score_history()
             self._preview_score_forming = {
                 "start_utc": start,
                 "end_utc": self._preview_candle_end(start),
@@ -322,13 +435,16 @@ class EngineService:
             # an end label rather than fabricating a time.
             return ""
 
-    def live_score_history(self, limit: int = 60) -> dict[str, Any]:
+    def live_score_history(
+        self,
+        limit: int = _PREVIEW_SCORE_HISTORY_LIMIT,
+    ) -> dict[str, Any]:
         """Return recent display-only Preview Decision score candles.
 
-        The history is intentionally ephemeral: a restart starts a new chart
-        rather than presenting provisional scores as durable trade evidence.
+        Completed display bars survive restarts for visual continuity. They
+        remain non-decision data and are never presented as trade evidence.
         """
-        safe_limit = max(1, min(int(limit), 144))
+        safe_limit = max(1, min(int(limit), _PREVIEW_SCORE_HISTORY_LIMIT))
         candles = [dict(candle) for candle in self._preview_score_candles]
         if self._preview_score_forming is not None:
             candles.append(dict(self._preview_score_forming))

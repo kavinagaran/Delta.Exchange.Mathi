@@ -63,19 +63,61 @@ def test_preview_score_chart_is_display_only_and_marks_every_zone_boundary():
 
 
 def test_preview_score_chart_supports_axis_drag_scaling_and_reserves_zone_label_lane():
-    assert "Drag the bottom time axis to expand or compress the candle view." in TEMPLATE
+    assert "Drag inside the chart to pan in any direction." in TEMPLATE
+    assert "24H · 5M" in TEMPLATE
     assert "previewScoreChartStates" in TEMPLATE
     assert "installPreviewScoreChartInteractions" in TEMPLATE
     assert "canvas.addEventListener('pointerdown'" in TEMPLATE
     assert "canvas.addEventListener('pointermove'" in TEMPLATE
+    assert "canvas.addEventListener('wheel'" in TEMPLATE
     assert "canvas.addEventListener('dblclick'" in TEMPLATE
-    assert "state.xScale" in TEMPLATE
-    assert "state.scoreSpan" in TEMPLATE
+    assert "state.visibleBars" in TEMPLATE
+    assert "state.rightOffset" in TEMPLATE
+    assert "state.yZoom" in TEMPLATE
+    assert "state.yPan" in TEMPLATE
+    assert "axis === 'plot'" in TEMPLATE
+    assert "Math.min(288, candles.length)" in TEMPLATE
+    assert "const visibleLow" in TEMPLATE
+    assert "const visibleHigh" in TEMPLATE
+    assert "nicePreviewScoreStep" in TEMPLATE
     # Candles render only through plot.right; zone labels begin after it.
     assert "const zoneLabelLane" in TEMPLATE
     assert "const labelX = plot.right + 6" in TEMPLATE
     assert "ctx.rect(plot.left, plot.top, plotWidth, plotHeight)" in TEMPLATE
     assert "touch-action: none" in STYLE
+
+
+def test_preview_score_chart_marks_account_trades_without_order_details():
+    assert "history?.trade_markers" in TEMPLATE
+    assert "drawPreviewTradeMarker" in TEMPLATE
+    for code in ("CE", "PE", "MV"):
+        assert f"{code}:" in TEMPLATE
+    assert "timeMillis" in TEMPLATE
+    assert "marker.timeMillis / 300_000" in TEMPLATE
+    assert "order_id" not in TEMPLATE
+    assert "fill_id" not in TEMPLATE
+
+
+@pytest.mark.skipif(NODE is None, reason="Node.js is required for frontend tests")
+def test_trend_engine_script_is_valid_javascript():
+    script = r"""
+const fs = require('fs');
+const source = fs.readFileSync('templates/trend_engine.html', 'utf8');
+const start = source.indexOf('<script>') + '<script>'.length;
+const end = source.lastIndexOf('</script>');
+if (start < '<script>'.length || end <= start) {
+  throw new Error('script block not found');
+}
+new Function(source.slice(start, end));
+"""
+    result = subprocess.run(
+        [NODE, "-e", script],
+        cwd=Path(dashboard.BASE),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_preview_score_chart_normalises_ohlc_and_treats_flat_scores_as_neutral_dojis():

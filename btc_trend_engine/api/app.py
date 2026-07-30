@@ -107,7 +107,7 @@ def create_app(config: EngineConfig,
 
     @app.get("/trend/live/history", dependencies=[Depends(require_token)])
     async def trend_live_history(request: Request, symbol: str | None = None,
-                                 limit: int = 60) -> dict[str, object]:
+                                 limit: int = 288) -> dict[str, object]:
         """Recent Preview Decision score candles for the dashboard chart.
 
         This is display data only: it contains no committed decision fields

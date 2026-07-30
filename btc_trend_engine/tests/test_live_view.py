@@ -264,6 +264,62 @@ def test_live_history_endpoint_requires_token_and_is_display_only(config, servic
     }
 
 
+def test_preview_score_history_keeps_a_full_24_hours(service):
+    base = datetime(2026, 7, 26, 0, 0, tzinfo=timezone.utc)
+    for index in range(300):
+        start = base + timedelta(minutes=index * 5)
+        service._preview_score_candles.append({
+            "start_utc": start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "end_utc": (start + timedelta(minutes=5)).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            ),
+            "open": float(index),
+            "high": float(index + 1),
+            "low": float(index - 1),
+            "close": float(index),
+            "samples": 2,
+            "partial": False,
+            "last_sample_utc": start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "data_quality": "OK",
+            "forming": False,
+        })
+    history = service.live_score_history(limit=999)
+    assert len(history["candles"]) == 288
+    assert history["candles"][0]["open"] == 12.0
+    assert history["candles"][-1]["open"] == 299.0
+
+
+def test_completed_preview_score_history_survives_restart(config):
+    first = EngineService(config, clock=FixedClock(T0))
+    first._record_preview_score({
+        "forming_candle_start": "2026-07-26T06:00:00Z",
+        "as_of": "2026-07-26T06:00:05Z",
+        "chart_score": 12.5,
+        "data_quality": "OK",
+    })
+    first._record_preview_score({
+        "forming_candle_start": "2026-07-26T06:05:00Z",
+        "as_of": "2026-07-26T06:05:05Z",
+        "chart_score": 18.5,
+        "data_quality": "OK",
+    })
+    first.event_store.close()
+    first.data_lock.release()
+
+    restored = EngineService(config, clock=FixedClock(T0))
+    try:
+        history = restored.live_score_history()
+        assert len(history["candles"]) == 1
+        assert history["candles"][0]["start_utc"] == "2026-07-26T06:00:00Z"
+        assert history["candles"][0]["close"] == 12.5
+        assert history["candles"][0]["forming"] is False
+        assert "signal_id" not in history["candles"][0]
+        assert "entry_allowed" not in history["candles"][0]
+    finally:
+        restored.event_store.close()
+        restored.data_lock.release()
+
+
 def test_refresh_live_view_never_raises_into_the_housekeeping_loop(service):
     """It runs on the same loop that flushes the event store; an exception
     here would take market-data capture down with it."""

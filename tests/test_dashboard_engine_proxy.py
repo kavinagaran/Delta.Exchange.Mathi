@@ -6,6 +6,8 @@ code path; they only ever call through to the fail-closed client, which
 never raises (ADR 0001).
 """
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
+import json
 from unittest.mock import patch
 
 import dashboard
@@ -73,8 +75,72 @@ def test_live_history_route_proxies_display_only_score_candles(tmp_path):
             ) as mocked:
         resp = client.get("/api/engine/live-history?symbol=BTCUSD")
     assert resp.status_code == 200
-    assert resp.get_json() == history
-    mocked.assert_called_once_with("BTCUSD")
+    assert resp.get_json() == {
+        **history,
+        "history_window_hours": 24,
+        "trade_marker_mode": "dry_run",
+        "trade_markers": [],
+    }
+    mocked.assert_called_once_with("BTCUSD", limit=288)
+
+
+def test_live_history_trade_markers_are_account_and_mode_scoped(tmp_path):
+    now = datetime.now(timezone.utc)
+    users = tmp_path / "users"
+    for username, _code, zone, symbol in (
+        ("nithi", "CE", "CE_2_ITM", "C-BTC-65000-300726"),
+        ("mathi", "PE", "PE_2_ITM", "P-BTC-65000-300726"),
+    ):
+        data_dir = users / username / "dry_run"
+        data_dir.mkdir(parents=True)
+        (data_dir / "trade_history.json").write_text(json.dumps([{
+            "status": "CLOSED",
+            "dry_run": True,
+            "execution_mode": "dry_run",
+            "trend_score_zone": zone,
+            "symbol": symbol,
+            "entry_at_utc": (
+                now - timedelta(minutes=5)
+            ).isoformat().replace("+00:00", "Z"),
+        }]), encoding="utf-8")
+
+    with dashboard.app.test_request_context(), \
+            patch.object(dashboard, "DASH_USER", "nithi"), \
+            patch.object(dashboard, "USERS_DIR", users), \
+            patch.object(dashboard, "_user_cfg", return_value={
+                "DRY_RUN": "true",
+                "TREND_ENGINE_SCORE_AUTO_MODE": "dry_run",
+            }):
+        markers, marker_mode = dashboard._trend_chart_trade_markers()
+
+    assert marker_mode == "dry_run"
+    assert [marker["code"] for marker in markers] == ["CE"]
+    assert all(set(marker) == {"time_utc", "code"} for marker in markers)
+
+
+def test_bad_trade_marker_history_never_hides_score_candles(tmp_path):
+    history = {
+        "available": True,
+        "display_only": True,
+        "resolution": "5m",
+        "candles": [{"open": 5, "high": 10, "low": 2, "close": 7}],
+    }
+    with _authenticated_client(tmp_path) as client, \
+            patch.object(
+                trend_engine_client, "get_live_history", return_value=history
+            ), \
+            patch.object(
+                dashboard,
+                "_trend_chart_trade_markers",
+                side_effect=ValueError("bad local history"),
+            ):
+        response = client.get("/api/engine/live-history")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["candles"] == history["candles"]
+    assert payload["trade_markers"] == []
+    assert payload["trade_marker_mode"] == "unavailable"
 
 
 def test_snapshot_route_never_raises_into_the_dashboard(tmp_path):

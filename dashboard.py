@@ -5837,11 +5837,122 @@ def api_engine_live():
     return jsonify(trend_engine_client.get_live_view(symbol))
 
 
+def _trend_chart_trade_code(record: dict) -> str:
+    """Return the compact chart marker for one score-driven trade."""
+    zone = str(
+        record.get("trend_score_zone") or record.get("engine_zone") or ""
+    ).strip().upper().replace(" ", "_")
+    option_type = str(record.get("option_type") or "").strip().upper()
+    instrument = str(record.get("instrument_kind") or "").strip().upper()
+    symbol = str(record.get("symbol") or "").strip().upper()
+    if (
+        zone == TREND_SCORE_MOVE_ZONE
+        or option_type == "MOVE"
+        or instrument == "BTC_MOVE"
+        or symbol.startswith("MV-BTC")
+    ):
+        return "MV"
+    if (
+        zone == TREND_SCORE_CE_ZONE
+        or option_type in {"CE", "CALL"}
+        or symbol.startswith("C-BTC")
+    ):
+        return "CE"
+    if (
+        zone == TREND_SCORE_PE_ZONE
+        or option_type in {"PE", "PUT"}
+        or symbol.startswith("P-BTC")
+    ):
+        return "PE"
+    return ""
+
+
+def _trend_chart_trade_markers() -> tuple[list[dict], str]:
+    """Return the active account's last 24 hours of score-trade entries.
+
+    The current DRY/LIVE namespace is selected exactly as the account's
+    controller selects it. Only entry time and the compact CE/PE/MV marker are
+    exposed; order IDs, fills, credentials, and another user's records never
+    reach the chart.
+    """
+    config = _user_cfg()
+    controller_mode = _trend_score_auto_mode(config)
+    if controller_mode == "live":
+        dry_run = False
+        marker_mode = "live"
+    elif controller_mode == "dry_run":
+        dry_run = True
+        marker_mode = "dry_run"
+    else:
+        dry_run = _config_truthy(config.get("DRY_RUN"), True)
+        marker_mode = "dry_run" if dry_run else "live"
+
+    records = _load_json(_hist_file(dry_run=dry_run), [])
+    candidates = [
+        dict(row) for row in records
+        if isinstance(row, dict) and _is_dry_record(row) == dry_run
+    ] if isinstance(records, list) else []
+    current = _load_json(_slot_file("trend", dry_run=dry_run), {})
+    if (
+        isinstance(current, dict)
+        and str(current.get("status") or "").upper() == "OPEN"
+        and _is_dry_record(current) == dry_run
+    ):
+        candidates.append(dict(current))
+
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(hours=24)
+    unique: dict[tuple[int, str, str], dict] = {}
+    for record in candidates:
+        score_driven = bool(
+            record.get("trend_score_zone")
+            or record.get("engine_zone")
+            or record.get("entry_trigger") == TREND_SCORE_AUTO_TRIGGER
+            or record.get("strategy") == "trend_engine_score_zone"
+        )
+        if not score_driven:
+            continue
+        code = _trend_chart_trade_code(record)
+        entered = _utc_trade_entry_at(record)
+        if not code or entered is None or entered < cutoff:
+            continue
+        # A small future tolerance accommodates an exchange timestamp just
+        # ahead of the dashboard clock without admitting unrelated history.
+        if entered > now + timedelta(minutes=5):
+            continue
+        symbol = str(record.get("symbol") or "")
+        key = (int(entered.timestamp()), code, symbol)
+        unique[key] = {
+            "time_utc": entered.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "code": code,
+        }
+    return (
+        sorted(unique.values(), key=lambda item: item["time_utc"]),
+        marker_mode,
+    )
+
+
 @app.route("/api/engine/live-history")
 def api_engine_live_history():
     """Read-only Preview Decision score candles for the Trend Engine chart."""
     symbol = request.args.get("symbol", "BTCUSD")
-    return jsonify(trend_engine_client.get_live_history(symbol))
+    history = trend_engine_client.get_live_history(symbol, limit=288)
+    try:
+        markers, marker_mode = _trend_chart_trade_markers()
+    except Exception as exc:
+        # Marker history is presentation-only. A malformed local ledger must
+        # not hide otherwise healthy engine score candles.
+        print(
+            f"Trend chart marker warning for {_active_user()}: "
+            f"{type(exc).__name__}: {exc}"
+        )
+        markers, marker_mode = [], "unavailable"
+    return jsonify({
+        **history,
+        "history_window_hours": 24,
+        "trade_markers": markers,
+        "trade_marker_mode": marker_mode,
+    })
 
 
 @app.route("/api/engine/health")
