@@ -918,7 +918,14 @@ function drawPreviewScoreChart(canvas, candles, trades = []) {
   const visibleLow = Math.min(...visibleCandles.map(candle => candle.low));
   const visibleHigh = Math.max(...visibleCandles.map(candle => candle.high));
   const rawRange = Math.max(.5, visibleHigh - visibleLow);
-  const padding = Math.max(2, rawRange * .20);
+  // 8%, not 20%. At 20% each side the data occupied 1/1.4 = 71% of the plot
+  // height; at 8% it occupies 86%, so every body is ~20% taller for the same
+  // score move. That is a real gain but a modest one -- it is NOT the whole
+  // reason bodies look flat. A 1-2 point score move inside a five-minute
+  // candle is genuinely small next to a 15-point visible range, and a
+  // zoomed-out view (yZoom < 1) compresses it much further than any padding
+  // choice. Reset view restores the fitted scale.
+  const padding = Math.max(1, rawRange * .08);
   const autoTick = nicePreviewScoreStep((rawRange + padding * 2) / 6);
   let autoMinimum = Math.floor((visibleLow - padding) / autoTick) * autoTick;
   let autoMaximum = Math.ceil((visibleHigh + padding) / autoTick) * autoTick;
@@ -1044,7 +1051,11 @@ function drawPreviewScoreChart(canvas, candles, trades = []) {
   ctx.stroke();
   ctx.restore();
 
-  const candleWidth = Math.max(5, Math.min(26, slot * .68));
+  // 26px bodies over a 4-8px height read as horizontal pills, not candles.
+  // Real terminals keep bodies narrow and let height carry the information:
+  // half the slot, capped at 13px, so a body is taller than it is wide for any
+  // move worth seeing.
+  const candleWidth = Math.max(3, Math.min(13, slot * .5));
   ctx.save();
   ctx.beginPath();
   ctx.rect(plot.left, plot.top, plotWidth, plotHeight);
@@ -1064,57 +1075,61 @@ function drawPreviewScoreChart(canvas, candles, trades = []) {
     const wickBottom = scoreY(Math.min(candle.open, candle.high, candle.low, candle.close));
     const rawBodyTop = scoreY(Math.max(candle.open, candle.close));
     const rawBodyBottom = scoreY(Math.min(candle.open, candle.close));
-    const bodyHeight = isDoji ? 3 : Math.max(4, rawBodyBottom - rawBodyTop);
-    const bodyTop = isDoji ? scoreY(candle.open) - bodyHeight / 2 : rawBodyTop;
+    // A doji is a single line at the open, the way every terminal draws it --
+    // a 3px rounded block reads as a real body and overstates a flat score.
+    const bodyHeight = isDoji ? 1 : Math.max(1, rawBodyBottom - rawBodyTop);
+    const bodyTop = isDoji ? Math.round(scoreY(candle.open)) : rawBodyTop;
+    // Snap the wick to a half-pixel so a 1px line lands on one device pixel
+    // instead of smearing across two.
+    const wickX = Math.round(x) + .5;
     ctx.save();
     ctx.strokeStyle = colour;
-    ctx.shadowColor = colour;
-    ctx.shadowBlur = candle.forming ? 15 : 8;
+    // Glow only on the bar still forming. Blurring all 21 bodies was the other
+    // half of the soft, un-charty look; crisp edges are what make a candle
+    // read as data rather than decoration.
+    if (candle.forming) {
+      ctx.shadowColor = colour;
+      ctx.shadowBlur = 10;
+    }
     ctx.globalAlpha = isPartial ? .48 : candle.forming ? 1 : .94;
-    ctx.lineWidth = Math.max(1.6, Math.min(2.4, candleWidth * .09));
+    ctx.lineWidth = 1;
     if (isPartial) ctx.setLineDash([3, 3]);
     ctx.beginPath();
-    ctx.moveTo(x, wickTop);
-    ctx.lineTo(x, wickBottom);
+    ctx.moveTo(wickX, Math.round(wickTop));
+    ctx.lineTo(wickX, Math.round(wickBottom));
     ctx.stroke();
     ctx.setLineDash([]);
-    const bodyGradient = ctx.createLinearGradient(
-      x - candleWidth / 2,
-      bodyTop,
-      x + candleWidth / 2,
-      bodyTop + bodyHeight,
-    );
-    if (isPartial || isDoji) {
-      bodyGradient.addColorStop(0, colour);
-      bodyGradient.addColorStop(1, colour);
-    } else if (rising) {
-      bodyGradient.addColorStop(0, '#79ffd2');
-      bodyGradient.addColorStop(.48, '#2ce4aa');
-      bodyGradient.addColorStop(1, '#10986f');
-    } else {
-      bodyGradient.addColorStop(0, '#ff8ba0');
-      bodyGradient.addColorStop(.48, '#ff5478');
-      bodyGradient.addColorStop(1, '#a9183b');
-    }
-    previewChartRoundedPath(
-      ctx,
-      x - candleWidth / 2,
-      bodyTop,
-      candleWidth,
-      bodyHeight,
-      Math.min(3, bodyHeight / 2),
-    );
-    if (candle.forming) {
+    // Square, pixel-snapped body. The three-stop gradient across a 26px pill
+    // was the most "web dashboard" part of the old look; a flat fill with a
+    // one-pixel outline is what a chart reads as.
+    const bodyLeft = Math.round(x - candleWidth / 2);
+    const bodyRight = Math.round(x + candleWidth / 2);
+    const snappedWidth = Math.max(1, bodyRight - bodyLeft);
+    const snappedTop = Math.round(bodyTop);
+    const snappedHeight = Math.max(1, Math.round(bodyHeight));
+
+    if (isDoji) {
+      // Open == close: just the crossbar.
+      ctx.beginPath();
+      ctx.moveTo(bodyLeft, snappedTop + .5);
+      ctx.lineTo(bodyLeft + snappedWidth, snappedTop + .5);
+      ctx.stroke();
+    } else if (candle.forming) {
+      // Hollow while still forming, so the live bar is distinguishable at a
+      // glance from the settled ones without relying on the glow alone.
       ctx.fillStyle = 'rgba(8, 35, 61, .96)';
-      ctx.fill();
-      ctx.strokeStyle = colour;
-      ctx.stroke();
+      ctx.fillRect(bodyLeft, snappedTop, snappedWidth, snappedHeight);
+      ctx.strokeRect(bodyLeft + .5, snappedTop + .5,
+                     snappedWidth - 1, snappedHeight - 1);
     } else {
-      ctx.fillStyle = bodyGradient;
-      ctx.fill();
-      ctx.strokeStyle = colour;
-      ctx.globalAlpha *= .78;
-      ctx.stroke();
+      ctx.fillStyle = colour;
+      ctx.fillRect(bodyLeft, snappedTop, snappedWidth, snappedHeight);
+      // Outline in the same hue keeps a 1px body visible against the plot fill
+      // without the halo the old 0.78-alpha stroke produced.
+      if (snappedHeight > 2) {
+        ctx.strokeRect(bodyLeft + .5, snappedTop + .5,
+                       snappedWidth - 1, snappedHeight - 1);
+      }
     }
     ctx.restore();
   });
