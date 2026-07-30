@@ -1164,6 +1164,40 @@ def test_score_auto_status_keeps_lock_reset_available_after_config_save(
     assert payload["setup_lock"]["zone"] == dashboard.TREND_SCORE_CE_ZONE
 
 
+def test_score_auto_status_does_not_show_previous_zone_lock_as_active(
+        score_cycle):
+    assert dashboard._maybe_auto_trend_score_cycle() is True
+    dashboard._trend_score_auto_health["alice"]["engine_zone"] = (
+        dashboard.TREND_SCORE_PE_ZONE
+    )
+
+    with dashboard.app.test_request_context(
+            "/api/trend-engine/score-auto/status"):
+        payload = dashboard.api_trend_engine_score_auto_status().get_json()
+
+    assert payload["setup_lock"]["active"] is False
+    assert payload["setup_lock"]["stale"] is True
+    assert payload["setup_lock"]["zone"] == dashboard.TREND_SCORE_CE_ZONE
+    assert payload["setup_lock"]["current_zone"] == dashboard.TREND_SCORE_PE_ZONE
+
+
+def test_score_auto_status_keeps_prior_actionable_lock_during_hold(
+        score_cycle):
+    assert dashboard._maybe_auto_trend_score_cycle() is True
+    dashboard._trend_score_auto_health["alice"]["engine_zone"] = (
+        dashboard.TREND_SCORE_HOLD_ZONE
+    )
+
+    with dashboard.app.test_request_context(
+            "/api/trend-engine/score-auto/status"):
+        payload = dashboard.api_trend_engine_score_auto_status().get_json()
+
+    assert payload["setup_lock"]["active"] is True
+    assert payload["setup_lock"]["stale"] is False
+    assert payload["setup_lock"]["zone"] == dashboard.TREND_SCORE_CE_ZONE
+    assert payload["setup_lock"]["current_zone"] == dashboard.TREND_SCORE_HOLD_ZONE
+
+
 def test_setup_lock_reset_endpoint_clears_only_the_lock(score_cycle):
     assert dashboard._maybe_auto_trend_score_cycle() is True
     state_path = score_cycle["dry"] / "trend_state.json"
@@ -1183,3 +1217,59 @@ def test_setup_lock_reset_endpoint_clears_only_the_lock(score_cycle):
     assert score_cycle["notify"].call_count == 1
     for mock in score_cycle["forbidden"].values():
         mock.assert_not_called()
+
+
+def test_actionable_zone_change_releases_old_lock_even_if_entry_is_unavailable(
+        score_cycle, monkeypatch):
+    state_path = score_cycle["dry"] / "trend_state.json"
+    assert dashboard._maybe_auto_trend_score_cycle() is True
+    opened = json.loads(state_path.read_text(encoding="utf-8"))
+
+    monkeypatch.setattr(
+        dashboard, "_dry_run_mark_and_pnl",
+        lambda state: (230.0, 9.98, 10.0, 0.01),
+    )
+    with dashboard.account_file_lock(
+        score_cycle["dry"], "close-trend", "test-zone-change-lock-close",
+    ) as acquired:
+        assert acquired
+        assert dashboard._close_dry_simulation_locked(
+            "trend", opened, trigger="take_profit_simulated",
+        )["status"] == "CLOSED"
+
+    score_cycle["holder"]["signal"] = _score_signal(
+        score_cycle["mode"], score=-60,
+        zone=dashboard.TREND_SCORE_PE_ZONE, suffix="10:05:00Z",
+    )
+    score_cycle["prepare"].side_effect = RuntimeError(
+        "new-zone contract is temporarily unavailable"
+    )
+
+    assert dashboard._maybe_auto_trend_score_cycle() is False
+    ledger = dashboard._trend_score_auto_ledger(score_cycle["dry"])
+    assert ledger["setup_lock"] is None
+    release_events = [
+        call for call in score_cycle["audit"].call_args_list
+        if call.args and call.args[0] == "trend_score_auto_setup_lock_released"
+    ]
+    assert len(release_events) == 1
+    assert release_events[0].args[1]["previous_zone"] == (
+        dashboard.TREND_SCORE_CE_ZONE
+    )
+    assert release_events[0].args[1]["new_zone"] == (
+        dashboard.TREND_SCORE_PE_ZONE
+    )
+
+
+def test_hold_does_not_release_setup_lock(score_cycle):
+    assert dashboard._maybe_auto_trend_score_cycle() is True
+    ledger = dashboard._trend_score_auto_ledger(score_cycle["dry"])
+    hold_signal = _score_signal(
+        score_cycle["mode"], score=35,
+        zone=dashboard.TREND_SCORE_HOLD_ZONE, suffix="10:05:00Z",
+    )
+
+    assert dashboard._trend_score_auto_release_setup_lock_for_zone_change(
+        ledger, hold_signal,
+    ) is None
+    assert ledger["setup_lock"]["target_zone"] == dashboard.TREND_SCORE_CE_ZONE

@@ -9214,6 +9214,34 @@ def _trend_score_auto_setup_lock_matches(ledger: dict, signal: dict) -> bool:
     return str(lock.get("target_zone") or "") == str(signal["zone"])
 
 
+def _trend_score_auto_release_setup_lock_for_zone_change(
+    ledger: dict,
+    signal: dict,
+) -> dict | None:
+    """Retire the prior setup lock after a new actionable zone is confirmed.
+
+    HOLD is deliberately excluded: a brief visit to either hold band must not
+    re-arm the same CE, PE, or SHORT_MOVE setup.  Moving between actionable
+    zones is a genuine setup change and must allow one fresh entry if all
+    other gates pass.
+    """
+    lock = _trend_score_auto_setup_lock(ledger)
+    if lock is None:
+        return None
+    new_zone = str(signal.get("zone") or "").strip()
+    if new_zone not in {
+        TREND_SCORE_CE_ZONE,
+        TREND_SCORE_PE_ZONE,
+        TREND_SCORE_MOVE_ZONE,
+    }:
+        return None
+    if str(lock.get("target_zone") or "") == new_zone:
+        return None
+    released = dict(lock)
+    ledger["setup_lock"] = None
+    return released
+
+
 def _trend_score_auto_lock_setup(
     ledger: dict,
     signal: dict,
@@ -11282,7 +11310,16 @@ def _maybe_auto_trend_score_live_cycle(
                         dry_run=False,
                     )
                 )
-                if migration_checked or semantics_migration_checked:
+                released_setup_lock = (
+                    _trend_score_auto_release_setup_lock_for_zone_change(
+                        ledger, current_signal,
+                    )
+                )
+                if (
+                    migration_checked
+                    or semantics_migration_checked
+                    or released_setup_lock is not None
+                ):
                     _trend_score_auto_write_ledger(data_dir, ledger)
                 if legacy_setup_lock is not None:
                     _trend_audit("trend_score_auto_live_setup_lock_backfilled", {
@@ -11299,6 +11336,17 @@ def _maybe_auto_trend_score_live_cycle(
                         "source_signal_key": recovered_setup_lock.get(
                             "source_signal_key"
                         ),
+                        "order_submitted": False,
+                        "exchange_api_called": False,
+                    })
+                if released_setup_lock is not None:
+                    _trend_audit("trend_score_auto_live_setup_lock_released", {
+                        "previous_zone": released_setup_lock["target_zone"],
+                        "new_zone": current_signal["zone"],
+                        "source_signal_key": released_setup_lock.get(
+                            "source_signal_key"
+                        ),
+                        "reset_by": "actionable_zone_change",
                         "order_submitted": False,
                         "exchange_api_called": False,
                     })
@@ -12091,7 +12139,16 @@ def _maybe_auto_trend_score_cycle() -> bool:
                         dry_run=True,
                     )
                 )
-                if migration_checked or semantics_migration_checked:
+                released_setup_lock = (
+                    _trend_score_auto_release_setup_lock_for_zone_change(
+                        ledger, signal,
+                    )
+                )
+                if (
+                    migration_checked
+                    or semantics_migration_checked
+                    or released_setup_lock is not None
+                ):
                     _trend_score_auto_write_ledger(data_dir, ledger)
                 if legacy_setup_lock is not None:
                     _trend_audit("trend_score_auto_setup_lock_backfilled", {
@@ -12108,6 +12165,17 @@ def _maybe_auto_trend_score_cycle() -> bool:
                         "source_signal_key": recovered_setup_lock.get(
                             "source_signal_key"
                         ),
+                        "order_submitted": False,
+                        "exchange_api_called": False,
+                    })
+                if released_setup_lock is not None:
+                    _trend_audit("trend_score_auto_setup_lock_released", {
+                        "previous_zone": released_setup_lock["target_zone"],
+                        "new_zone": signal["zone"],
+                        "source_signal_key": released_setup_lock.get(
+                            "source_signal_key"
+                        ),
+                        "reset_by": "actionable_zone_change",
                         "order_submitted": False,
                         "exchange_api_called": False,
                     })
@@ -12560,6 +12628,29 @@ def api_trend_engine_score_auto_status():
         "configured_lots": configured_lots,
         "config_error": error,
     }
+    engine_zone = str(payload.get("engine_zone") or "").strip().upper()
+    if not engine_zone and active_mode:
+        # Process-memory health can be empty immediately after a dashboard
+        # restart.  Use the read-only engine snapshot so the reset control
+        # never presents a previous zone's lock as blocking the current one.
+        try:
+            engine_snapshot = trend_engine_client.get_snapshot("BTCUSD")
+            candidate_zone = str(
+                engine_snapshot.get("zone") or ""
+            ).strip().upper()
+            if (
+                engine_snapshot.get("data_quality") == "OK"
+                and candidate_zone in {
+                    TREND_SCORE_CE_ZONE,
+                    TREND_SCORE_PE_ZONE,
+                    TREND_SCORE_MOVE_ZONE,
+                    TREND_SCORE_HOLD_ZONE,
+                }
+            ):
+                engine_zone = candidate_zone
+                payload["engine_zone"] = candidate_zone
+        except Exception:
+            pass
     try:
         setup_lock = _trend_score_auto_setup_lock(
             _trend_score_auto_ledger(_mode_data_dir(namespace_dry_run))
@@ -12569,15 +12660,34 @@ def api_trend_engine_score_auto_status():
         # status endpoint readable so the operator can see that condition.
         setup_lock = None
         payload["setup_lock_error"] = str(exc)[:300]
-    # A setup lock survives Bot Config saves by design.  Its zone—not the
-    # configuration revision captured for audit—is its identity.  Requiring
-    # a revision match here made the reset control disagree with the
-    # controller and left valid locks impossible to reset from the UI.
-    lock_active = bool(setup_lock and active_mode)
+    # A setup lock survives Bot Config saves and HOLD readings, but it blocks
+    # only its own actionable zone.  A prior zone's durable record must never
+    # make the reset control claim that the current setup is locked.
+    lock_zone = (
+        str(setup_lock.get("target_zone") or "").strip().upper()
+        if setup_lock else ""
+    )
+    engine_zone_is_actionable = engine_zone in {
+        TREND_SCORE_CE_ZONE,
+        TREND_SCORE_PE_ZONE,
+        TREND_SCORE_MOVE_ZONE,
+    }
+    lock_stale = bool(
+        setup_lock
+        and engine_zone_is_actionable
+        and lock_zone != engine_zone
+    )
+    lock_active = bool(
+        setup_lock
+        and active_mode
+        and not lock_stale
+    )
     if setup_lock:
         payload["setup_lock"] = {
             "active": lock_active,
-            "zone": setup_lock["target_zone"],
+            "zone": lock_zone,
+            "current_zone": engine_zone or None,
+            "stale": lock_stale,
             "recorded_at_utc": setup_lock.get("recorded_at_utc"),
             "source_signal_key": setup_lock.get("source_signal_key"),
         }

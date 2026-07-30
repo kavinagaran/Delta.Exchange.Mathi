@@ -271,6 +271,11 @@ function applyScoreZoneSetupLockStatus(payload) {
   button.disabled = !active;
   button.setAttribute('aria-disabled', active ? 'false' : 'true');
   if (!active) {
+    if (lock.stale === true) {
+      const currentZone = String(lock.current_zone || 'new zone').replace(/_/g, ' ');
+      hint.textContent = `Zone lock: none. ${currentZone} is a fresh setup.`;
+      return;
+    }
     hint.textContent = 'Zone lock: none. It prevents repeat entries in the same zone.';
     return;
   }

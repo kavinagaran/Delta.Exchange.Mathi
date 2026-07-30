@@ -460,6 +460,51 @@ def test_live_setup_lock_blocks_later_same_zone_after_a_completed_position(
     assert dashboard._trend_score_auto_health["alice"]["status"] == "setup_locked"
 
 
+def test_live_actionable_zone_change_replaces_the_previous_setup_lock(
+    live_account,
+    monkeypatch,
+):
+    first = _signal(
+        dashboard._trading_mode_payload(), 75, suffix="10:00:00Z",
+    )
+    changed_zone = _signal(
+        dashboard._trading_mode_payload(), -60, suffix="10:05:00Z",
+    )
+    collector = Mock(side_effect=[first, changed_zone])
+    prepare = Mock(
+        side_effect=lambda value: copy.deepcopy(_prepared(value["zone"]))
+    )
+
+    def execute(**kwargs):
+        return _open_result(kwargs["signal"], kwargs["prepared"])
+
+    executor = Mock(side_effect=execute)
+    monkeypatch.setattr(dashboard, "_collect_trend_score_auto_signal", collector)
+    monkeypatch.setattr(dashboard, "_prepare_trend_score_auto_entry", prepare)
+    monkeypatch.setattr(dashboard, "_trend_score_auto_live_execute", executor)
+
+    assert dashboard._maybe_auto_trend_score_cycle() is True
+    _write(live_account / "trend_state.json", {
+        "status": "CLOSED", "execution_mode": "live", "dry_run": False,
+    })
+    assert dashboard._maybe_auto_trend_score_cycle() is True
+
+    ledger = dashboard._trend_score_auto_ledger(live_account)
+    assert ledger["setup_lock"]["target_zone"] == dashboard.TREND_SCORE_PE_ZONE
+    release_events = [
+        call for call in dashboard._trend_audit.call_args_list
+        if call.args
+        and call.args[0] == "trend_score_auto_live_setup_lock_released"
+    ]
+    assert len(release_events) == 1
+    assert release_events[0].args[1]["previous_zone"] == (
+        dashboard.TREND_SCORE_CE_ZONE
+    )
+    assert release_events[0].args[1]["new_zone"] == (
+        dashboard.TREND_SCORE_PE_ZONE
+    )
+
+
 def test_no_fill_blocks_same_zone_until_the_score_zone_changes(
     live_account,
     monkeypatch,
