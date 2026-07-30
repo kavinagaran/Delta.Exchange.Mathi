@@ -84,6 +84,23 @@ class SnapshotProducer:
             if short_timeframes and data_quality == "OK" else data_quality
         )
 
+        # No funding_history argument, and that omission is now deliberate.
+        #
+        # Without it `derivatives_features` cannot compute funding_percentile,
+        # so `_derivatives_context`'s crowding term never fires and the
+        # component reduces to OI change plus basis. That was originally an
+        # accident -- the history was simply never wired up -- but measurement
+        # says the accident is the better signal. Over 114k bars
+        # (docs/signal-study.md) derivatives_context scores IC +0.035 at 120m
+        # and +0.054 at 240m WITHOUT the percentile, both |t| > 2, against
+        # +0.017 and +0.027 WITH it, neither significant. Adding the crowding
+        # term roughly halves the only component in the model whose IC is
+        # positive at all.
+        #
+        # So do not "finish" this by passing a funding history. If that is ever
+        # revisited, re-run `scripts/signal_study.py --derivatives` (with and
+        # without `--as-running`) and let the ICs decide, rather than
+        # completing the feature because it looks unfinished.
         derivatives = derivatives_features(ticker)
         score = compute_score(
             structural=features[STRUCTURAL], primary=features[PRIMARY],

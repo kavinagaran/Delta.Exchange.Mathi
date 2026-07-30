@@ -181,6 +181,31 @@ def test_derivatives_features_from_live_ticker_shape():
     assert features["oi_change_6h_pct"] == pytest.approx(4.893, abs=0.01)
 
 
+def test_production_derivatives_omit_funding_percentile():
+    """The omission is a measured decision, not an unfinished feature.
+
+    derivatives_context is the only component in the model with a positive IC,
+    and the crowding term built on funding_percentile roughly halves it:
+    +0.035/+0.054 at 120m/240m without it (both |t| > 2) against +0.017/+0.027
+    with it (neither significant), over 114k bars in docs/signal-study.md.
+
+    SnapshotProducer therefore calls derivatives_features(ticker) with no
+    funding history. This pins that, so "completing" the feature has to be a
+    deliberate argued change rather than a tidy-up that quietly halves the one
+    thing pointing the right way.
+    """
+    ticker = {"mark_price": "63941.76", "spot_price": "63969.8",
+              "funding_rate": 0.01, "oi_value_usd": "75899519.76",
+              "oi_change_usd_6h": "3713941.12"}
+
+    as_production = derivatives_features(ticker)
+    assert "funding_percentile" not in as_production
+    # The rest of the component must still be live, or this would be testing
+    # that derivatives_context is simply switched off.
+    assert "mark_spot_basis_pct" in as_production
+    assert "oi_change_6h_pct" in as_production
+
+
 # ── score ───────────────────────────────────────────────────────────────
 def _tf(features: dict) -> TimeframeFeatures:
     return TimeframeFeatures(timeframe="x", features=features, missing=[])
