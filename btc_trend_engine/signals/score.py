@@ -52,28 +52,52 @@ from .regime import CALM_ADX_MAX
 #                                         that ADX predicts anything.
 #   breakout_quality        0.08 -> 0.15  raised: least negative of the
 #                                         significant price components at 120m
-#   derivatives_context     0.07 -> 0.15  raised and CAPPED.  Only positive IC
-#                                         and the only orthogonal input
-#                                         (rho <= +0.267 against every price
-#                                         component).  An unconstrained
-#                                         optimiser wants 96.5% here; it is a
-#                                         lead at |t| = 0.9, not a result, and
-#                                         letting an unproven estimate size
-#                                         itself is how the previous weights
-#                                         went wrong.
+#   derivatives_context     0.07 -> 0.25  see below; raised twice, on better
+#                                         measurement each time
+#
+# 2026-07-30, second pass on derivatives_context (0.15 -> 0.25).  The first
+# pass measured it with funding_percentile included, which is NOT what
+# production computes (see the comment at signals/producer.py where the
+# omission is deliberate).  Re-measured in the production variant over the
+# same 114k bars, it is a different component:
+#
+#     IC @120m          +0.036   (vs +0.017 diluted)
+#     IC @240m          +0.054   |t| = 2.5 -- the only significant positive
+#                                cell anywhere in this model
+#     correlation vs every price component:  |rho| <= 0.04
+#
+# That last line is the reason for the raise, more than the IC.  Diluted, this
+# component correlated +0.267 with higher_timeframe_trend; undiluted it is
+# effectively orthogonal to the entire price block (+0.038 at most).  It is
+# the only genuinely independent evidence in the score.
+#
+# Composite IC at 120m, production variant:
+#     current (0.15)                       -0.028
+#     this vector (0.25)                   -0.017
+#     unconstrained optimiser at 0.25      -0.009
+#
+# The optimiser reaches -0.009 by zeroing market_structure and
+# lower_timeframe_momentum outright and pushing adx_trend_strength and
+# breakout_quality to 0.29 each.  Deliberately not taken: that is a corner
+# solution on one 13-month sample, it leaves 58% of the score resting on two
+# components whose near-zero IC is itself an estimate, and it would blind the
+# score to structure and momentum entirely if their negative IC turns out to
+# be regime-specific.  The freed 0.10 comes instead from the two
+# best-measured negatives, in the direction the optimiser points, without
+# following it off the edge.
 #
 # Note that weights are normalised to 1.0, so they can only change the mix,
 # never the amount of conviction.  To act less on a negative signal the levers
 # are the tanh gain below, ZonePolicy's entry threshold, and position size.
 V1_WEIGHTS: dict[str, float] = {
     "higher_timeframe_trend": 0.24,
-    "market_structure": 0.12,
-    "lower_timeframe_momentum": 0.14,
+    "market_structure": 0.07,
+    "lower_timeframe_momentum": 0.09,
     "rsi_momentum": 0.00,
     "adx_trend_strength": 0.20,
     "order_flow": 0.00,
     "breakout_quality": 0.15,
-    "derivatives_context": 0.15,
+    "derivatives_context": 0.25,
 }
 
 
