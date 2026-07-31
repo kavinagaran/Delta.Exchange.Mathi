@@ -61,6 +61,30 @@ def _get(margin_field=True):
     return get
 
 
+def test_wallet_uses_delta_fixed_usd_inr_conversion(tmp_path):
+    def get(url, **_kwargs):
+        assert url.endswith("/v2/wallet/balances")
+        return _Response({
+            "success": True,
+            "result": [{
+                "asset_symbol": "USD",
+                "balance": "590.62",
+                "available_balance": "580.25",
+            }],
+        })
+
+    with _authenticated_client(tmp_path) as client, \
+            patch.object(dashboard, "_active_creds", return_value=("key", "secret")), \
+            patch.object(dashboard, "_sign", return_value={}), \
+            patch.object(dashboard.req, "get", side_effect=get):
+        resp = client.get("/api/wallet")
+
+    assert resp.status_code == 200
+    wallet = resp.get_json()
+    assert wallet["usd_inr_rate"] == 85.0
+    assert wallet["inr_balance"] == 50202.7
+
+
 def test_all_positions_reports_margin_and_liquidation_when_the_venue_sends_them(tmp_path):
     with _authenticated_client(tmp_path) as client, \
             patch.object(dashboard, "_active_creds", return_value=("key", "secret")), \

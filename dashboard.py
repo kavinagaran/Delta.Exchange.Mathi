@@ -5562,20 +5562,11 @@ def _product_info(product_id: int) -> dict:
     return info
 
 
-_fx_cache = {"rate": 0.0, "ts": 0.0}
+DELTA_USD_INR_RATE = 85.0
 
 def _usd_inr_rate() -> float:
-    """USD->INR, cached for an hour (display-only, precision not critical)."""
-    if _fx_cache["rate"] and time.time() - _fx_cache["ts"] < 3600:
-        return _fx_cache["rate"]
-    try:
-        r = req.get("https://open.er-api.com/v6/latest/USD", timeout=8).json()
-        rate = float(r.get("rates", {}).get("INR") or 0)
-        if rate > 0:
-            _fx_cache.update(rate=rate, ts=time.time())
-        return rate
-    except Exception:
-        return _fx_cache["rate"]
+    """Return Delta Exchange's fixed USD-to-INR display conversion."""
+    return DELTA_USD_INR_RATE
 
 
 # ─────────────────────────────────────────────────────────────
