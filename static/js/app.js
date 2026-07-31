@@ -136,7 +136,8 @@ function statusFromSlots(st) {
   const realOpen = slots.filter(s => s && s.status === 'OPEN' && !s.dry_run);
   if (realOpen.length) {
     const pnl = realOpen.reduce((a, s) => a + (+s.live_pnl || 0), 0);
-    return { cls: 'live', text: `LIVE ${f$(pnl)}`, pnl };
+    const cls = pnl > 0 ? 'live-profit' : (pnl < 0 ? 'live-loss' : 'live');
+    return { cls, text: `LIVE ${f$(pnl)}`, pnl };
   }
   if (st.latest_closed_trade) return _closedPill(st.latest_closed_trade);
   const closed = slots.filter(s => s && s.status === 'CLOSED' && !s.dry_run);
@@ -154,14 +155,7 @@ async function refreshTopbar() {
     const btc = document.getElementById('tb-btc');
     if (btc) {
       const price = +st.btc_futures_price;
-      const previous = window._lastBtcPrice;
       const valid = Number.isFinite(price) && price > 0;
-      btc.classList.remove('btc-up', 'btc-down');
-      if (valid && Number.isFinite(previous)) {
-        if (price > previous) btc.classList.add('btc-up');
-        else if (price < previous) btc.classList.add('btc-down');
-      }
-      if (valid) window._lastBtcPrice = price;
       btc.innerHTML = `BTC <b>$${fN(valid ? price : null)}</b>`;
     }
     const pill = document.getElementById('tb-pill');

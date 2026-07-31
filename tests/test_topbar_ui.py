@@ -80,8 +80,18 @@ const live = statusFromSlots({
   status: 'OPEN', live_pnl: -1.25,
   latest_closed_trade: {pnl_usd: 20, closed_at_utc: '2026-07-15T11:57:21Z'},
 });
-if (live.cls !== 'live' || live.text !== 'LIVE -$1.25') {
+if (live.cls !== 'live-loss' || live.text !== 'LIVE -$1.25') {
   throw new Error(`live position did not take precedence: ${JSON.stringify(live)}`);
+}
+
+const liveProfit = statusFromSlots({status: 'OPEN', live_pnl: 8.4});
+if (liveProfit.cls !== 'live-profit' || liveProfit.text !== 'LIVE +$8.40') {
+  throw new Error(`live profit was not color-coded: ${JSON.stringify(liveProfit)}`);
+}
+
+const liveFlat = statusFromSlots({status: 'OPEN', live_pnl: 0});
+if (liveFlat.cls !== 'live' || liveFlat.text !== 'LIVE +$0.00') {
+  throw new Error(`flat live position was not neutral: ${JSON.stringify(liveFlat)}`);
 }
 
 const overnight = _closedAtMs({

@@ -9,7 +9,7 @@
 <div class="greeting overview-hero">
   <div class="greeting-txt">
     <h2>Welcome Back, {{ display_name }} 👋</h2>
-    <p>Trend Engine-driven MOVE and CE/PE positions, at a glance.</p>
+    <p>Your Trades, at a glance!</p>
   </div>
 </div>
 
@@ -17,19 +17,6 @@
   <div class="stat performance-stat neutral"><div class="lbl">Trading mode</div><div class="val" id="tile-mode">—</div></div>
   <div class="stat performance-stat neutral"><div class="lbl">Engine health</div><div class="val" id="tile-engine">—</div></div>
   <div class="stat performance-stat neutral"><div class="lbl">Day P&amp;L</div><div class="val" id="tile-day-pnl">—</div><div class="sub" id="tile-day-pnl-note"></div></div>
-</div>
-
-<div class="section-title">
-  <span>Next scheduled action</span>
-  <small>MOVE entry/exit times are your configured schedule; the engine items are the read-only Trend Engine</small>
-</div>
-<div class="next-actions" id="next-actions">
-  <div class="next-action"><div class="lbl">Morning entry</div><div class="val">—</div></div>
-  <div class="next-action"><div class="lbl">Morning exit</div><div class="val">—</div></div>
-  <div class="next-action"><div class="lbl">Evening entry</div><div class="val">—</div></div>
-  <div class="next-action"><div class="lbl">Evening exit</div><div class="val">—</div></div>
-  <div class="next-action"><div class="lbl">Next snapshot</div><div class="val">—</div></div>
-  <div class="next-action"><div class="lbl">Signal TTL</div><div class="val">—</div></div>
 </div>
 
 <div class="stats" id="stats"></div>
@@ -115,41 +102,6 @@ async function loadStatusTiles(st, todayRows) {
     el.textContent = 'Unreachable';
     el.className = 'val c-muted';
     setTone('tile-engine', 'negative');
-  }
-}
-
-/* ── Next scheduled action strip ───────────────────────────*/
-function setNextAction(index, label, value) {
-  const box = document.querySelectorAll('#next-actions .next-action')[index];
-  box.querySelector('.lbl').textContent = label;
-  box.querySelector('.val').textContent = value;
-}
-
-async function loadNextActions(st) {
-  setNextAction(0, 'Morning entry', st.morning_entry_ist || '—');
-  setNextAction(1, 'Morning exit', st.morning_exit_ist || '—');
-  setNextAction(2, 'Evening entry', st.entry_ist || '—');
-  setNextAction(3, 'Evening exit', st.exit_ist || '—');
-  try {
-    const snapshot = await jget('/api/engine/snapshot');
-    const stamp = Date.parse(snapshot.timestamp || '');
-    const ttl = Number(snapshot.signal_ttl_seconds) || 0;
-    if (Number.isFinite(stamp) && ttl > 0) {
-      const remaining = Math.max(0, Math.round(ttl - (Date.now() - stamp) / 1000));
-      setNextAction(5, 'Signal TTL', `${remaining}s`);
-    } else {
-      setNextAction(5, 'Signal TTL', '—');
-    }
-    // Snapshots are produced once per closed 5-minute UTC candle.
-    const now = new Date();
-    const nextCandle = new Date(now);
-    nextCandle.setUTCSeconds(0, 0);
-    nextCandle.setUTCMinutes(Math.ceil((now.getUTCMinutes() + 1) / 5) * 5);
-    const secsLeft = Math.max(0, Math.round((nextCandle - now) / 1000));
-    setNextAction(4, 'Next snapshot', `${Math.floor(secsLeft / 60)}m ${secsLeft % 60}s`);
-  } catch (e) {
-    setNextAction(4, 'Next snapshot', '—');
-    setNextAction(5, 'Signal TTL', '—');
   }
 }
 
@@ -453,7 +405,6 @@ document.addEventListener('keydown', e => {
 async function loadAll() {
   const [st, todayRows] = await Promise.all([loadSlots(), loadToday(), loadStatsInto('stats')]);
   loadStatusTiles(st, todayRows);
-  loadNextActions(st);
   refreshTopbar();
 }
 loadAll();
