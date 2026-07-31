@@ -2569,3 +2569,53 @@ body.login-body {
   background: linear-gradient(90deg, color-mix(in srgb, var(--accent-soft) 70%, transparent), transparent 68%);
 }
 :root .section-title span { color: var(--accent-dark); }
+
+/* ── Exposure ─────────────────────────────────────────────
+   A compact account snapshot and one authoritative open-position ledger. */
+.content:has(.exposure-page) { max-width: none; }
+.exposure-page { display: grid; gap: 18px; }
+.exposure-summary {
+  grid-template-columns: repeat(6, minmax(145px, 1fr));
+  gap: 12px; margin: 0;
+}
+.exposure-summary .stat { min-height: 114px; }
+.exposure-summary .val { font-size: clamp(19px, 1.35vw, 24px); }
+.exposure-positions-card { margin: 0; }
+.exposure-count { margin-left: 3px; }
+.badge.neutral { background: var(--surface-subtle); color: var(--muted); }
+.exposure-updated { font-variant-numeric: tabular-nums; }
+.exposure-positions-table { table-layout: fixed; }
+.exposure-positions-table th:nth-child(1) { width: 18%; }
+.exposure-positions-table th:nth-child(2) { width: 9%; }
+.exposure-positions-table th:nth-child(3) { width: 8%; }
+.exposure-positions-table th:nth-child(4) { width: 7%; }
+.exposure-positions-table th:nth-child(5),
+.exposure-positions-table th:nth-child(6),
+.exposure-positions-table th:nth-child(7),
+.exposure-positions-table th:nth-child(9) { width: 10%; }
+.exposure-positions-table th:nth-child(8),
+.exposure-positions-table th:nth-child(10) { width: 9%; }
+.exposure-positions-table td.numeric { text-align: right; }
+.exposure-positions-table td.contract {
+  overflow: hidden; text-overflow: ellipsis; font-weight: 700;
+}
+.exposure-empty {
+  display: grid; justify-items: center; gap: 5px;
+  padding: 14px; white-space: normal;
+}
+.exposure-empty strong { color: var(--text); font-size: 14px; }
+.exposure-empty span { color: var(--muted); }
+.exposure-empty.error strong { color: var(--neg); }
+@media (max-width: 1180px) {
+  .exposure-summary { grid-template-columns: repeat(3, minmax(160px, 1fr)); }
+  .exposure-positions-card .tbl-wrap { overflow-x: auto; }
+  .exposure-positions-table { min-width: 1050px; table-layout: auto; }
+}
+@media (max-width: 680px) {
+  .exposure-summary { grid-template-columns: repeat(2, minmax(140px, 1fr)); }
+  .exposure-positions-card .card-hd { flex-wrap: wrap; }
+  .exposure-updated { order: 3; width: 100%; }
+}
+@media (max-width: 420px) {
+  .exposure-summary { grid-template-columns: 1fr; }
+}
