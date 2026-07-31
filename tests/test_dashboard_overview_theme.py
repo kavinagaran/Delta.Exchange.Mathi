@@ -8,16 +8,15 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_overview_uses_performance_style_cards_and_table_header():
     overview = (ROOT / "templates" / "overview.html").read_text(encoding="utf-8")
     styles = (ROOT / "static" / "css" / "app.css").read_text(encoding="utf-8")
-    stats = (ROOT / "static" / "js" / "stats.js").read_text(encoding="utf-8")
 
     assert 'class="overview-page"' in overview
-    assert 'class="greeting overview-hero"' in overview
+    assert 'class="stats today-summary"' in overview
+    assert "stat performance-stat accent" in overview
     assert "stat performance-stat neutral" in overview
-    assert "setTone('tile-day-pnl'" in overview
+    assert "setTodaySummaryTone('today-pnl'" in overview
     assert "overview-today-card" in overview
-    assert ".overview-hero" in styles
-    assert ".overview-page .next-action" in styles
-    assert "stat performance-stat ${tone(+s.total_pnl)}" in stats
+    assert ".today-summary" in styles
+    assert ".today-trades-table td.numeric" in styles
 
 
 def test_overview_inherits_the_shared_table_header_instead_of_restating_it():
@@ -36,4 +35,4 @@ def test_overview_inherits_the_shared_table_header_instead_of_restating_it():
     assert ":root table thead th" in styles
     # The rule only reaches Overview if the card holds a real <table><thead>.
     card = overview.split('class="card overview-today-card"', 1)[1]
-    assert "<table>" in card and "<thead>" in card
+    assert "<table" in card and "<thead>" in card

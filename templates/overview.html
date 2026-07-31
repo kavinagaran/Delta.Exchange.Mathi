@@ -1,412 +1,136 @@
 {% extends "base.html" %}
 
-{% block head %}
-<script src="/static/js/vendor/chart.umd.min.js?v={{ asset_v('js/vendor/chart.umd.min.js') }}"></script>
-{% endblock %}
-
 {% block content %}
 <div class="overview-page">
-<div class="greeting overview-hero">
-  <div class="greeting-txt">
-    <h2>Welcome Back, {{ display_name }} 👋</h2>
-    <p>Your Trades, at a glance!</p>
-  </div>
-</div>
-
-<div class="stats" id="status-tiles">
-  <div class="stat performance-stat neutral"><div class="lbl">Trading mode</div><div class="val" id="tile-mode">—</div></div>
-  <div class="stat performance-stat neutral"><div class="lbl">Engine health</div><div class="val" id="tile-engine">—</div></div>
-  <div class="stat performance-stat neutral"><div class="lbl">Day P&amp;L</div><div class="val" id="tile-day-pnl">—</div><div class="sub" id="tile-day-pnl-note"></div></div>
-</div>
-
-<div class="stats" id="stats"></div>
-
-<div class="card overview-positions-card">
-  <div class="card-hd">Open Positions <span class="spacer"></span><span class="hint">Bot-managed and external, in one place</span></div>
-  <div class="card-bd" id="positions-body"><div class="no-pos">Loading…</div></div>
-</div>
-
-<div class="modal-back" id="payoff-modal" onclick="if(event.target===this)closePayoff()">
-  <div class="modal">
-    <div class="modal-hd">
-      <h3 id="payoff-title">Payoff at settlement</h3>
-      <button class="x" onclick="closePayoff()" aria-label="Close">×</button>
+  <div class="stats today-summary" id="today-summary">
+    <div class="stat performance-stat accent">
+      <div class="lbl">Trades today</div>
+      <div class="val" id="today-trade-total">—</div>
+      <div class="sub">All entries opened today</div>
     </div>
-    <div class="chart-box" style="height:300px"><canvas id="payoff-chart"></canvas></div>
-    <div class="payoff-facts" id="payoff-facts"></div>
-  </div>
-</div>
-
-<div class="drawer-back" id="protection-drawer-back" onclick="if(event.target===this)closeProtectionDrawer()">
-  <div class="drawer">
-    <div class="drawer-hd">
-      <h3 id="drawer-title">Manage protection</h3>
-      <button class="x" onclick="closeProtectionDrawer()" aria-label="Close">×</button>
+    <div class="stat performance-stat neutral">
+      <div class="lbl">Open trades</div>
+      <div class="val" id="today-open-total">—</div>
+      <div class="sub">Currently running</div>
     </div>
-    <div class="drawer-fields" id="drawer-fields"></div>
-    <div class="btn-row">
-      <button class="btn secondary sm" id="drawer-save" type="button" onclick="saveDrawerProtection()">Save</button>
-      <button class="btn sm" id="drawer-toggle" type="button" onclick="toggleDrawerTp()">Start</button>
+    <div class="stat performance-stat neutral">
+      <div class="lbl">Closed trades</div>
+      <div class="val" id="today-closed-total">—</div>
+      <div class="sub" id="today-result-note">—</div>
     </div>
-    <div class="drawer-note" id="drawer-note"></div>
+    <div class="stat performance-stat neutral">
+      <div class="lbl">Day P&amp;L</div>
+      <div class="val" id="today-pnl">—</div>
+      <div class="sub">Open mark plus realised P&amp;L</div>
+    </div>
   </div>
-</div>
 
-<div class="card overview-today-card">
-  <div class="card-hd">Today's Trades</div>
-  <div class="tbl-wrap">
-    <table>
-      <thead><tr>
-        <th>Contract</th><th>Strike</th><th>Lots</th><th>Entry</th><th>Exit / Mark</th><th>P&L</th><th>Status</th>
-      </tr></thead>
-      <tbody id="today-body"><tr class="empty-row"><td colspan="7">Loading…</td></tr></tbody>
-    </table>
+  <div class="card overview-today-card">
+    <div class="card-hd">
+      Today's Trades
+      <span class="spacer"></span>
+      <span class="hint" id="today-table-note">Loading…</span>
+    </div>
+    <div class="tbl-wrap">
+      <table class="today-trades-table">
+        <thead><tr>
+          <th>Contract</th>
+          <th>Direction</th>
+          <th>Strike</th>
+          <th>Lots</th>
+          <th>Entry</th>
+          <th>Exit / Mark</th>
+          <th>P&amp;L</th>
+          <th>Status</th>
+        </tr></thead>
+        <tbody id="today-body">
+          <tr class="empty-row"><td colspan="8">Loading…</td></tr>
+        </tbody>
+      </table>
+    </div>
   </div>
-</div>
 </div>
 {% endblock %}
 
 {% block scripts %}
 <script>
-/* ── Status tiles ───────────────────────────────────────── */
-async function loadStatusTiles(st, todayRows) {
-  const setTone = (elementId, tone) => {
-    const card = document.getElementById(elementId).closest('.stat');
-    card.className = `stat performance-stat ${tone}`;
-  };
-  const modeEl = document.getElementById('tile-mode');
-  const known = st.dry_run_mode === true || st.dry_run_mode === false;
-  modeEl.textContent = known ? (st.dry_run_mode ? 'DRY RUN' : 'LIVE') : '—';
-  modeEl.className = 'val ' + (known ? (st.dry_run_mode ? 'c-warn' : 'c-pos') : 'c-muted');
-  setTone('tile-mode', known ? (st.dry_run_mode ? 'warning' : 'positive') : 'neutral');
-
-  const dayPnl = (todayRows || []).reduce((sum, t) => {
-    if (t.dry_run) return sum;
-    return sum + (+(t._live ? t.live_pnl : t.pnl_usd) || 0);
-  }, 0);
-  const pnlEl = document.getElementById('tile-day-pnl');
-  pnlEl.textContent = f$(dayPnl);
-  pnlEl.className = 'val ' + pnlCls(dayPnl);
-  setTone('tile-day-pnl', dayPnl > 0 ? 'positive' : dayPnl < 0 ? 'negative' : 'neutral');
-  document.getElementById('tile-day-pnl-note').textContent =
-    `${(todayRows || []).filter(t => !t.dry_run).length} trade(s) today`;
-
-  try {
-    const health = await jget('/api/engine/health');
-    const el = document.getElementById('tile-engine');
-    el.textContent = health.ok ? 'Reachable' : 'Unreachable';
-    el.className = 'val ' + (health.ok ? 'c-pos' : 'c-muted');
-    setTone('tile-engine', health.ok ? 'positive' : 'negative');
-  } catch (e) {
-    const el = document.getElementById('tile-engine');
-    el.textContent = 'Unreachable';
-    el.className = 'val c-muted';
-    setTone('tile-engine', 'negative');
-  }
+function todayTradePnl(trade) {
+  return +(trade?._live ? trade.live_pnl : trade?.pnl_usd) || 0;
 }
 
-/* ── Unified open-positions list ────────────────────────────
- * One row per open bot slot + every external position, replacing the old
- * always-visible morning/evening/trend cards. Protection controls live in
- * the slide-out drawer (#protection-drawer-back) instead of an inline box. */
-const SLOT_ICON = { morning: '🌅', evening: '🌇', trend: '📈' };
-let _drawer = null;   // { controlSlot, displaySlot, protectionRunning }
-
-function botPosRowActionsHtml(controlSlot, displaySlot, running) {
-  return `
-    <button class="btn secondary sm" onclick="openProtectionDrawer('${controlSlot}', '${displaySlot}')">
-      ${running ? 'Manage protection' : 'Set up protection'}
-    </button>
-    <button class="btn danger sm" onclick="squareOff('${controlSlot}', '${displaySlot}', 'live')">Exit</button>
-    <button class="btn secondary sm" onclick="showPayoff('${displaySlot}')" title="Payoff at settlement">Payoff</button>`;
+function setTodaySummaryTone(elementId, tone) {
+  const value = document.getElementById(elementId);
+  const card = value?.closest('.stat');
+  if (card) card.className = `stat performance-stat ${tone}`;
 }
 
-function botPosRowHtml(slot, state, tp) {
-  const controlSlot = ['morning', 'evening', 'trend'].includes(state?.control_slot)
-    ? state.control_slot : slot;
-  const t = (tp || {})[controlSlot] || {};
-  const pending = state.status !== 'OPEN';   // ENTRY_PENDING / CLOSE_PENDING
-  const pnl = pending ? null : state.live_pnl;
-  return `<div class="pos-row">
-    <span class="pos-slot-icon">${SLOT_ICON[slot] || '📈'}</span>
-    <div class="pos-main">
-      <strong>${esc(state.symbol)} <span class="badge live">BOT</span>${pending ? ' <span class="badge sim">PENDING</span>' : ''}</strong>
-      <small>${esc(tradeTimeIst(state))} · ${esc((state.side || 'long').toUpperCase())} · ${fN(state.lots)} lots ·
-        ${pending ? '<span class="c-muted">transition in progress — actions unavailable</span>'
-          : (t.running ? '<span class="c-pos">protection active</span>' : '<span class="c-muted">no protection set</span>')}</small>
-    </div>
-    <div class="pos-pnl ${pnlCls(pnl)}">${f$(pnl)}</div>
-    <div class="pos-actions">${pending ? '' : botPosRowActionsHtml(controlSlot, slot, !!t.running)}</div>
-  </div>`;
+function updateTodaySummary(rows) {
+  const trades = Array.isArray(rows) ? rows : [];
+  const open = trades.filter(trade => trade?._live);
+  const closed = trades.filter(trade => !trade?._live);
+  const wins = closed.filter(trade => todayTradePnl(trade) > 0).length;
+  const losses = closed.filter(trade => todayTradePnl(trade) < 0).length;
+  const pnl = trades.reduce((total, trade) => total + todayTradePnl(trade), 0);
+
+  document.getElementById('today-trade-total').textContent = fN(trades.length);
+  document.getElementById('today-open-total').textContent = fN(open.length);
+  document.getElementById('today-closed-total').textContent = fN(closed.length);
+  document.getElementById('today-result-note').textContent =
+    closed.length ? `${wins} win${wins === 1 ? '' : 's'} · ${losses} loss${losses === 1 ? '' : 'es'}` : 'No closed trades';
+
+  const pnlEl = document.getElementById('today-pnl');
+  pnlEl.textContent = f$(pnl);
+  pnlEl.className = `val ${pnlCls(pnl)}`;
+
+  setTodaySummaryTone('today-trade-total', trades.length ? 'accent' : 'neutral');
+  setTodaySummaryTone('today-open-total', open.length ? 'warning' : 'neutral');
+  setTodaySummaryTone('today-closed-total', closed.length ? 'accent' : 'neutral');
+  setTodaySummaryTone('today-pnl', pnl > 0 ? 'positive' : pnl < 0 ? 'negative' : 'neutral');
+  document.getElementById('today-table-note').textContent =
+    `${trades.length} trade${trades.length === 1 ? '' : 's'} today`;
 }
 
-/* ownership carries the same distinctions the exchange-sync reconciliation
- * already computes (dashboard.py: _sync_states_from_exchange_unlocked) — a
- * plain external position reads differently from one mid-reconciliation or
- * left behind by a broken Trend cycle, and that difference used to be the
- * whole point of the OWNERSHIP_AMBIGUOUS card copy. Carry it into the badge
- * rather than flattening every non-bot row to the same "external" label. */
-const EXTERNAL_OWNERSHIP_COPY = {
-  pending_trend_reconciliation: { badge: 'RECONCILING', note: 'Reconciling with an existing Trend position — protection continuity is being verified.' },
-  external_after_trend_cycle_close: { badge: 'DETACHED', note: 'The Trend cycle that opened this closed before this position appeared — automation was detached and its old protection orders are being removed.' },
-  bot_conflict: { badge: 'CONFLICT', note: 'Conflicts with an existing bot-tracked position on this product — not adopted automatically.' },
-};
-
-function externalPosRowHtml(p) {
-  const copy = EXTERNAL_OWNERSHIP_COPY[p.ownership];
-  return `<div class="pos-row">
-    <span class="pos-slot-icon">🔗</span>
-    <div class="pos-main">
-      <strong>${esc(p.symbol)} <span class="badge ${copy ? 'sim' : 'sim'}">${copy ? copy.badge : 'NOT BOT-OWNED'}</span></strong>
-      <small>${esc((p.side || '').toUpperCase())} · ${fN(p.lots)} lots · ${esc(copy ? copy.note : 'not managed by Trend')}</small>
-    </div>
-    <div class="pos-pnl ${pnlCls(p.live_pnl)}">${f$(p.live_pnl)}</div>
-    <div class="pos-actions"><span class="badge sim">EXTERNAL</span></div>
-  </div>`;
-}
-
-const BOT_ROW_STATUSES = new Set(['OPEN', 'ENTRY_PENDING', 'CLOSE_PENDING']);
-
-function renderPositions(displaySlots, externalOptions, tp) {
-  const body = document.getElementById('positions-body');
-  const rows = [];
-  for (const slot of ['morning', 'evening', 'trend']) {
-    const state = (displaySlots || {})[slot];
-    if (state && BOT_ROW_STATUSES.has(state.status) && !state.dry_run) {
-      rows.push(botPosRowHtml(slot, state, tp));
-    }
-  }
-  for (const p of externalOptions || []) {
-    rows.push(externalPosRowHtml(p));
-  }
-  body.innerHTML = rows.length ? rows.join('')
-    : '<div class="no-pos"><span class="icon">💤</span>No open positions</div>';
-}
-
-/* ── Protection drawer ─────────────────────────────────────*/
-function openProtectionDrawer(controlSlot, displaySlot) {
-  const tp = (window._lastTp || {})[controlSlot] || {};
-  _drawer = { controlSlot, displaySlot, running: !!tp.running };
-  document.getElementById('drawer-title').textContent =
-    `Manage protection — ${displaySlot.charAt(0).toUpperCase()}${displaySlot.slice(1)}`;
-  document.getElementById('drawer-fields').innerHTML = protectionDrawerFieldsHtml(tp);
-  document.getElementById('drawer-toggle').textContent = tp.running ? 'Stop' : 'Start';
-  document.getElementById('drawer-toggle').className = `btn sm ${tp.running ? 'warn' : 'success'}`;
-  document.getElementById('drawer-note').textContent =
-    '0 disables that protection · TSL activation, allowed giveback and minimum locked profit are configured independently.';
-  document.getElementById('protection-drawer-back').classList.add('show');
-}
-
-function closeProtectionDrawer() {
-  document.getElementById('protection-drawer-back').classList.remove('show');
-  _drawer = null;
-}
-
-async function saveDrawerProtection() {
-  if (!_drawer) return;
-  const values = readProtectionInputs(protectionDrawerIdFor());
-  const result = await saveProtectionConfig(_drawer.controlSlot, values);
-  if (result.ok) {
-    toast('Protection settings saved' + (result.tp_restarted?.length ? ' — monitor restarted' : ''), 'ok');
-    closeProtectionDrawer();
-    loadSlots();
-  } else if (result.error) {
-    toast('Save failed', 'err');
-  }
-}
-
-async function toggleDrawerTp() {
-  if (!_drawer) return;
-  const running = _drawer.running;
-  const d = await jpost(`/api/tp-monitor/${running ? 'stop' : 'start'}?slot=` + _drawer.controlSlot);
-  if (d.ok) {
-    toast(`TP monitor ${running ? 'stopped' : 'started'}`, 'ok');
-    closeProtectionDrawer();
-    loadSlots();
-  } else {
-    toast(d.error || 'TP monitor action failed', 'err');
-  }
-}
-
-/* ── Slot loading (status + protection state) ──────────────*/
-async function loadSlots() {
-  const [st, tp] = await Promise.all([jget('/api/status'), jget('/api/tp-monitor').catch(() => ({}))]);
-  window._dryRunMode = st.dry_run_mode === true;
-  window._modeRevision = st.mode_revision || '';
-  window._lastTp = tp;
-  const rawEvening = { ...st };
-  delete rawEvening.morning;
-  delete rawEvening.trend;
-  delete rawEvening.display_slots;
-  delete rawEvening.display_conflicts;
-  const displaySlots = st.display_slots || {
-    morning: st.morning || {},
-    evening: rawEvening,
-    trend: st.trend || {},
-  };
-  window._slots = {
-    morning: displaySlots.morning || {},
-    evening: displaySlots.evening || {},
-    trend: displaySlots.trend || {},
-    btc: +st.btc_futures_price || 0,
-  };
-  renderPositions(displaySlots, st.external_options || [], tp);
-  return st;
-}
-
-/* ── Today's trades ─────────────────────────────────────── */
 async function loadToday() {
   const rows = await jget('/api/today-trades');
   const body = document.getElementById('today-body');
+  updateTodaySummary(rows);
   if (!rows.length) {
-    body.innerHTML = '<tr class="empty-row"><td colspan="7">No trades today</td></tr>';
+    body.innerHTML = '<tr class="empty-row"><td colspan="8">No trades today</td></tr>';
     return rows;
   }
-  body.innerHTML = rows.map(t => {
-    const displaySlot = instrumentDisplaySlot(t, t.slot);
-    const icon = displaySlot === 'morning' ? '🌅 ' : displaySlot === 'evening' ? '🌇 ' : displaySlot === 'trend' ? '📈 ' : '';
-    if (t.dry_run) {
-      return `<tr><td>${icon}${esc(t.symbol)}</td><td>$${fN(t.strike)}</td>
-        <td>—</td><td>—</td><td>—</td><td>—</td>
-        <td><span class="badge sim">SIMULATED</span></td></tr>`;
-    }
-    const live = t._live;
-    const pnl  = live ? t.live_pnl : t.pnl_usd;
-    const exit = live ? t.current_mark : t.exit_mark;
-    const status = live ? '<span class="badge live">LIVE</span>'
-                 : (+pnl >= 0 ? '<span class="badge win">WIN</span>' : '<span class="badge loss">LOSS</span>');
+  body.innerHTML = rows.map(trade => {
+    const live = !!trade._live;
+    const pnl = todayTradePnl(trade);
+    const exit = live ? trade.current_mark : trade.exit_mark;
+    const direction = String(trade.side || '—').toUpperCase();
+    const directionClass = direction === 'LONG' ? 'long'
+      : direction === 'SHORT' ? 'short' : 'closed';
+    const status = live
+      ? '<span class="badge live">LIVE</span>'
+      : pnl > 0
+        ? '<span class="badge win">WIN</span>'
+        : pnl < 0
+          ? '<span class="badge loss">LOSS</span>'
+          : '<span class="badge closed">CLOSED</span>';
     return `<tr>
-      <td>${icon}${esc(t.symbol)}</td>
-      <td>$${fN(t.strike)}</td>
-      <td>${fN(t.lots)}</td>
-      <td>$${fN(t.entry_mark, 2)}</td>
-      <td>$${fN(exit, 2)}</td>
-      <td class="${pnlCls(pnl)}">${f$(pnl)}</td>
-      <td>${status}</td></tr>`;
+      <td>${esc(trade.symbol)}</td>
+      <td><span class="badge ${directionClass}">${esc(direction)}</span></td>
+      <td class="numeric">$${fN(trade.strike)}</td>
+      <td class="numeric">${fN(trade.lots)}</td>
+      <td class="numeric">$${fN(trade.entry_mark, 2)}</td>
+      <td class="numeric">$${fN(exit, 2)}</td>
+      <td class="numeric ${pnlCls(pnl)}">${f$(pnl)}</td>
+      <td>${status}</td>
+    </tr>`;
   }).join('');
   return rows;
 }
 
-/* ── Actions ────────────────────────────────────────────── */
-async function squareOff(controlSlot, displaySlot = controlSlot, targetMode = 'live') {
-  const s = (window._slots || {})[displaySlot] || {};
-  const adopted = +s.externally_added_lots_adopted || 0;
-  const scope = adopted > 0
-    ? `\n\nThis closes the complete ${fN(s.lots)}-lot aggregate, including externally added matching lots.`
-    : '';
-  if (!confirm(`Manually exit the ${displaySlot.toUpperCase()} position now at market price?${scope}`)) return;
-  const d = await jpost('/api/square-off?slot=' + controlSlot, {
-    target_mode: targetMode
-  });
-  if (d.ok) { toast(`Manual exit completed — P&L ${f$(d.pnl)}`, 'ok'); loadAll(); }
-  else toast('Manual exit failed: ' + JSON.stringify(d.error), 'err');
-}
-
-/* ── Payoff chart ───────────────────────────────────────── */
-let payoffChart = null;
-
-function _intrinsic(symbol, strike, S) {
-  // MV = move option (straddle): pays |move from strike|. C/P = vanilla.
-  if (symbol.startsWith('MV-')) return Math.abs(S - strike);
-  if (symbol.startsWith('P-'))  return Math.max(strike - S, 0);
-  return Math.max(S - strike, 0);
-}
-
-function showPayoff(slot) {
-  const s = (window._slots || {})[slot];
-  if (!s || s.status !== 'OPEN') { toast('No open position to chart', 'err'); return; }
-  const symbol = s.symbol || '';
-  const strike = +s.strike, entry = +s.entry_mark;
-  const lots   = +s.lots, cv = +s.contract_value || 0.001;
-  const sign   = s.side === 'short' ? -1 : 1;
-  const btc    = (window._slots || {}).btc || strike;
-
-  // Sweep settlement prices around strike & spot
-  const lo = Math.min(strike, btc) * 0.955, hi = Math.max(strike, btc) * 1.045;
-  const N = 120, xs = [], ys = [];
-  for (let i = 0; i <= N; i++) {
-    const S = lo + (hi - lo) * i / N;
-    xs.push(S);
-    ys.push(+((_intrinsic(symbol, strike, S) - entry) * cv * lots * sign).toFixed(2));
-  }
-  const pnlNow = +((_intrinsic(symbol, strike, btc) - entry) * cv * lots * sign).toFixed(2);
-
-  // Breakevens: where intrinsic == entry
-  const bes = symbol.startsWith('MV-') ? [strike - entry, strike + entry]
-            : symbol.startsWith('P-')  ? [strike - entry]
-            : [strike + entry];
-
-  document.getElementById('payoff-title').textContent =
-    `Payoff at settlement — ${symbol} (${(s.side || 'long').toUpperCase()} ${fN(lots)} lots)`;
-  document.getElementById('payoff-facts').innerHTML =
-    `<span class="f">Strike <b>$${fN(strike)}</b></span>` +
-    `<span class="f">Entry mark <b>$${fN(entry, 2)}</b></span>` +
-    bes.map(b => `<span class="f">Breakeven <b>$${fN(b)}</b></span>`).join('') +
-    `<span class="f">BTC now <b>$${fN(btc)}</b></span>` +
-    `<span class="f">At current BTC <b class="${pnlCls(pnlNow)}">${f$(pnlNow)}</b></span>`;
-
-  const css = getComputedStyle(document.documentElement);
-  const POS = css.getPropertyValue('--pos').trim(), NEG = css.getPropertyValue('--neg').trim();
-  const MUTED = css.getPropertyValue('--muted').trim();
-  const ACCENT = css.getPropertyValue('--accent').trim();
-  const GRID = css.getPropertyValue('--chart-grid').trim();
-  const ZERO = css.getPropertyValue('--chart-zero').trim();
-  const ctx = document.getElementById('payoff-chart').getContext('2d');
-  if (payoffChart) payoffChart.destroy();
-  payoffChart = new Chart(ctx, {
-    type: 'line',
-    data: {
-      labels: xs.map(v => Math.round(v)),
-      datasets: [
-        { label: 'P&L at settlement', data: ys, borderWidth: 2.5, pointRadius: 0, tension: 0,
-          borderColor: POS,
-          segment: { borderColor: c => (c.p1.parsed.y >= 0 ? POS : NEG) },
-          fill: { target: 'origin',
-                  above: 'rgba(8,135,93,.10)', below: 'rgba(217,45,32,.10)' } },
-        { label: 'Current BTC', data: xs.map((v, i) =>
-            (i === xs.reduce((a, _, j) => Math.abs(xs[j] - btc) < Math.abs(xs[a] - btc) ? j : a, 0)) ? pnlNow : null),
-          pointRadius: 5, pointBackgroundColor: ACCENT, borderColor: ACCENT,
-          showLine: false },
-      ],
-    },
-    options: {
-      responsive: true, maintainAspectRatio: false, animation: false,
-      interaction: { mode: 'index', intersect: false },
-      plugins: {
-        legend: { display: false },
-        tooltip: { callbacks: {
-          title: items => 'BTC $' + fN(+items[0].label),
-          label: c => c.datasetIndex === 0 ? ` P&L: ${f$(c.raw)}` : ` Current BTC: ${f$(c.raw)}`,
-        } },
-      },
-      scales: {
-        x: { ticks: { color: MUTED, font: { size: 10 }, maxTicksLimit: 10 },
-             grid: { color: GRID },
-             title: { display: true, text: 'BTC price at settlement', color: MUTED, font: { size: 11 } } },
-        y: { ticks: { color: MUTED, font: { size: 10 },
-               callback: v => (v >= 0 ? '+$' : '-$') + Math.abs(v).toLocaleString() },
-              grid: { color: c => c.tick.value === 0 ? ZERO : GRID,
-                     lineWidth: c => c.tick.value === 0 ? 1.5 : 1 } },
-      },
-    },
-  });
-  document.getElementById('payoff-modal').classList.add('show');
-}
-
-function closePayoff() {
-  document.getElementById('payoff-modal').classList.remove('show');
-}
-document.addEventListener('keydown', e => {
-  if (e.key !== 'Escape') return;
-  closePayoff();
-  closeProtectionDrawer();
-});
-
 async function loadAll() {
-  const [st, todayRows] = await Promise.all([loadSlots(), loadToday(), loadStatsInto('stats')]);
-  loadStatusTiles(st, todayRows);
+  await loadToday();
   refreshTopbar();
 }
+
 loadAll();
 setInterval(loadAll, 12_000);
 </script>

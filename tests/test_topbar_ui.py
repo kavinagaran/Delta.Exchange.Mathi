@@ -158,73 +158,18 @@ if (attributes['aria-pressed'] !== 'false' || !attributes['aria-label'].includes
     assert result.returncode == 0, result.stderr
 
 
-@pytest.mark.skipif(NODE is None, reason="Node.js is required for frontend JavaScript tests")
-def test_closed_positions_never_appear_on_the_unified_open_positions_card():
-    """UI-4 replaced slotHtml's per-slot CLOSED-state branch (dashboard_visible
-    hides a stale close, same-day shows it) with a structural filter: the
-    unified card only ever iterates OPEN, non-dry-run slots. A CLOSED slot --
-    stale or same-day -- can no longer leak financial detail onto this card
-    at all; same-day detail lives in Today's Trades instead."""
-    script = r"""
-const fs = require('fs');
-const vm = require('vm');
-const source = fs.readFileSync('templates/overview.html', 'utf8');
-const start = source.indexOf('const SLOT_ICON');
-const end = source.indexOf('function openProtectionDrawer');
-if (start < 0 || end <= start) throw new Error('Overview position-row functions not found');
+def test_today_page_has_no_separate_position_or_protection_surface():
+    source = (ROOT / "templates" / "overview.html").read_text(encoding="utf-8")
 
-const elements = {};
-function fakeElement() { return { innerHTML: '', className: '', textContent: '' }; }
-global.document = { getElementById: id => elements[id] || (elements[id] = fakeElement()) };
-global.fN = value => String(value ?? '');
-global.f$ = value => '$' + String(value ?? '');
-global.esc = value => String(value ?? '');
-global.utcToIst = value => String(value ?? '');
-global.tradeTimeIst = () => '—';
-global.pnlCls = () => 'c-neg';
-vm.runInThisContext(source.slice(start, end));
-
-const displaySlots = {
-  morning: { status: 'IDLE' },
-  evening: { status: 'IDLE' },
-  trend: {
-    status: 'CLOSED', dashboard_visible: false,
-    symbol: 'OLD-CONTRACT', pnl_usd: -99,
-  },
-};
-renderPositions(displaySlots, [], {});
-const html = elements['positions-body'].innerHTML;
-for (const stale of ['OLD-CONTRACT', '-99']) {
-  if (html.includes(stale)) throw new Error(`stale CLOSED detail leaked onto the open-positions card: ${stale}`);
-}
-if (!html.includes('No open positions')) {
-  throw new Error(`clean idle state was not rendered: ${html}`);
-}
-
-const withOpenTrend = {
-  morning: { status: 'IDLE' },
-  evening: { status: 'IDLE' },
-  trend: {
-    status: 'OPEN', symbol: 'TODAY-CONTRACT', side: 'long', lots: 3,
-    live_pnl: 5, control_slot: 'trend',
-  },
-};
-renderPositions(withOpenTrend, [], {});
-const current = elements['positions-body'].innerHTML;
-for (const currentDetail of ['TODAY-CONTRACT', '<span class="badge live">BOT</span>']) {
-  if (!current.includes(currentDetail)) {
-    throw new Error(`open position detail was hidden: ${currentDetail}`);
-  }
-}
-for (const inactive of ['aggregate lots targeted', 'Full-size exchange coverage',
-                        'current reconciliation', 'Auto-starts on entry']) {
-  if (current.includes(inactive)) {
-    throw new Error(`inactive protection remained on closed card: ${inactive}`);
-  }
-}
-"""
-    result = subprocess.run(
-        [NODE, "-e", script], cwd=ROOT, text=True, capture_output=True,
-        check=False,
-    )
-    assert result.returncode == 0, result.stderr
+    assert 'id="today-body"' in source
+    assert "jget('/api/today-trades')" in source
+    for removed in (
+        'id="positions-body"',
+        "renderPositions",
+        "botPosRowHtml",
+        "openProtectionDrawer",
+        "saveDrawerProtection",
+        "showPayoff",
+        "squareOff(",
+    ):
+        assert removed not in source

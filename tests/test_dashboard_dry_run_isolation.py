@@ -885,7 +885,6 @@ def test_dry_run_has_one_score_zone_position_and_manual_exit():
     assert "dry-slot-footer-panel" in template
     assert "height: 100%" in styles
     assert "\n          Exit\n" in template
-    assert ">Exit</button>" in overview
     assert "endDrySimulation('${controlSlot}')" in template
     assert (
         "function dryProtectionHtml(state, displaySlot, controlSlot = displaySlot)"
@@ -904,8 +903,7 @@ def test_dry_run_has_one_score_zone_position_and_manual_exit():
     for legacy_slot in ("dry-slot-morning", "dry-slot-evening", "dry-slot-trend"):
         assert legacy_slot not in template
 
-    # UI-4: Overview's unified position card is live-only now -- dry-run
-    # simulated positions moved exclusively to the Dry Run page's own card,
-    # so there is no dry_run-mode squareOff call site left on Overview.
-    assert "squareOff('${controlSlot}', '${displaySlot}', 'live')" in overview
-    assert "target_mode: targetMode" in overview
+    # Today is a daily ledger only. Position exit/protection actions remain on
+    # their dedicated Paper and Exposure surfaces.
+    assert "squareOff(" not in overview
+    assert "target_mode: targetMode" not in overview

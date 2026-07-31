@@ -937,58 +937,8 @@ body.login-body {
   font-size: 20px; color: var(--muted); line-height: 1;
 }
 .modal-hd .x:hover { color: var(--text); }
-.payoff-facts { display: flex; gap: 18px; flex-wrap: wrap; margin-top: 12px; }
-.payoff-facts .f { font-size: 12px; color: var(--muted); }
-.payoff-facts .f b { color: var(--text); font-variant-numeric: tabular-nums; }
 .mono { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; }
 .hint { color: var(--muted); font-size: 12px; }
-
-/* ── Protection drawer (UI-4) ───────────────────────────────
-   Slides in from the right instead of the old always-visible TP/SL box on
-   every position card, so a compact card can list several positions at
-   once. Same overlay mechanics as .modal-back, sliding panel instead of a
-   centered dialog. */
-.drawer-back {
-  position: fixed; inset: 0; z-index: 60;
-  background: rgba(13, 18, 32, .55);
-  display: none;
-}
-.drawer-back.show { display: block; }
-.drawer {
-  position: fixed; top: 0; right: 0; bottom: 0; z-index: 61;
-  width: 420px; max-width: 92vw;
-  background: var(--surface);
-  box-shadow: -18px 0 50px rgba(6, 12, 26, .35);
-  padding: 18px 20px 20px;
-  overflow-y: auto;
-  transform: translateX(100%);
-  transition: transform .22s ease;
-}
-.drawer-back.show .drawer { transform: translateX(0); }
-.drawer-hd { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
-.drawer-hd h3 { font-size: 15px; font-weight: 650; }
-.drawer-hd .x {
-  margin-left: auto; border: 0; background: none; cursor: pointer;
-  font-size: 20px; color: var(--muted); line-height: 1;
-}
-.drawer-hd .x:hover { color: var(--text); }
-.drawer-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 16px; }
-.drawer-note { font-size: 11px; color: var(--muted); margin-top: 6px; line-height: 1.5; }
-
-/* ── Unified position rows (UI-4) ───────────────────────────
-   One compact row per open position, replacing three always-open cards. */
-.pos-row {
-  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
-  padding: 12px 14px; border: 1px solid var(--border); border-radius: 10px;
-  margin-bottom: 8px; background: var(--surface-subtle);
-}
-.pos-row:last-child { margin-bottom: 0; }
-.pos-row .pos-slot-icon { font-size: 16px; flex: 0 0 auto; }
-.pos-row .pos-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1 1 220px; }
-.pos-row .pos-main strong { font-size: 13px; overflow-wrap: anywhere; }
-.pos-row .pos-main small { color: var(--muted); font-size: 11px; }
-.pos-row .pos-pnl { flex: 0 0 auto; min-width: 90px; text-align: right; font-weight: 700; font-variant-numeric: tabular-nums; }
-.pos-row .pos-actions { display: flex; gap: 6px; flex: 0 0 auto; margin-left: auto; }
 
 /* ── Filter chips + chart-view toggle (UI-4 Trades page) ─────*/
 .filter-chips { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
@@ -2421,27 +2371,20 @@ body.login-body {
   .te-decision-dot { animation: none; }
 }
 
-/* Overview: use the same high-contrast data hierarchy as Performance while
-   retaining the selected Red/Blue theme as the page accent. */
-.overview-hero {
-  margin-bottom: 18px; padding: 18px 20px; border: 1px solid color-mix(in srgb, var(--accent) 38%, var(--border));
-  border-radius: var(--radius);
-  background:
-    radial-gradient(circle at 100% 0%, color-mix(in srgb, var(--accent) 20%, transparent), transparent 46%),
-    linear-gradient(135deg, color-mix(in srgb, var(--accent-soft) 48%, var(--surface)), var(--surface));
-  box-shadow: var(--shadow);
+/* Today is deliberately a daily ledger: four same-day summary cards followed
+   by the full-width table. Account, engine and lifetime detail live elsewhere. */
+.today-summary { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.overview-today-card { margin-top: 18px; }
+.today-trades-table td.numeric {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
 }
-.overview-hero .greeting-txt { padding-left: 12px; border-left: 3px solid var(--accent); }
-.overview-page .next-action {
-  position: relative; overflow: hidden;
-  border-color: color-mix(in srgb, var(--accent) 28%, var(--border));
-  background: linear-gradient(135deg, color-mix(in srgb, var(--accent-soft) 55%, var(--surface-subtle)), var(--surface));
+@media (max-width: 920px) {
+  .today-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
-.overview-page .next-action::before {
-  content: ""; position: absolute; inset: 0 auto 0 0; width: 3px; background: var(--accent);
-  box-shadow: 0 0 14px color-mix(in srgb, var(--accent) 70%, transparent);
+@media (max-width: 560px) {
+  .today-summary { grid-template-columns: 1fr; }
 }
-.overview-page .next-action .val { color: var(--text); }
 :root .performance-stat.positive {
   color: #52e8ab; border-color: rgba(56, 217, 154, .48);
   background: linear-gradient(135deg, rgba(15, 74, 56, .94), rgba(7, 30, 28, .91));

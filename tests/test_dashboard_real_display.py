@@ -181,21 +181,24 @@ def test_live_display_projection_reports_a_same_frame_conflict_without_mutation(
     assert trend == original_trend
 
 
-def test_real_overview_has_only_current_trend_engine_position_copy():
-    """UI-4 replaced the three separate morning/evening/trend cards (each
-    with its own "Morning MOVE" / "Trend-based position (CE / PE)" label)
-    with one unified open-positions list -- slot identity now comes from
-    SLOT_ICON + the symbol/side shown per row, not a section header per
-    slot. The obsolete manual-entry copy this test guards against is
-    unaffected by that redesign."""
+def test_real_overview_is_a_same_day_trade_ledger_only():
     source = (ROOT / "templates" / "overview.html").read_text(encoding="utf-8")
 
-    assert "SLOT_ICON = { morning: '🌅', evening: '🌇', trend: '📈' }" in source
-    assert "for (const slot of ['morning', 'evening', 'trend'])" in source
-    assert 'id="positions-body"' in source
-    assert "No open positions" in source
-    assert "st.display_slots ||" in source
-    for obsolete in (
+    for required in (
+        'id="today-summary"',
+        'id="today-body"',
+        "jget('/api/today-trades')",
+    ):
+        assert required in source
+    for non_daily in (
+        'id="positions-body"',
+        "No open positions",
+        "st.display_slots ||",
+        "openProtectionDrawer",
+        "showPayoff",
+        "squareOff(",
+        "Trading mode",
+        "Engine health",
         "Scheduled forecast-driven entries only",
         "Automatic MOVE Forecast",
         "Waiting for the next scheduled decision cycle",
@@ -208,74 +211,68 @@ def test_real_overview_has_only_current_trend_engine_position_copy():
         "/api/trend-entry/preview",
         "jpost('/api/trend-entry'",
     ):
-        assert obsolete not in source
+        assert non_daily not in source
 
 
 @pytest.mark.skipif(NODE is None, reason="Node.js is required for frontend JavaScript tests")
-def test_real_cards_route_actions_to_source_slot_and_show_trade_time_first():
-    """UI-4: slotHtml's rich <dt>/<dd> fact list became botPosRowHtml's
-    compact row. Trade time is still the first fact shown (now the first
-    item in the row's <small> line); action buttons must still be wired to
-    the position's own control_slot, not the display slot it's projected
-    into -- wiring Exit to the wrong slot would close the wrong position."""
+def test_real_overview_summarises_and_renders_only_today_rows():
     script = r"""
 const fs = require('fs');
 const vm = require('vm');
 const source = fs.readFileSync('templates/overview.html', 'utf8');
-const start = source.indexOf('const SLOT_ICON');
-const end = source.indexOf('function openProtectionDrawer');
-if (start < 0 || end <= start) throw new Error('Overview position-row functions not found');
+const start = source.indexOf('function todayTradePnl');
+const end = source.indexOf('async function loadAll');
+if (start < 0 || end <= start) throw new Error('Today ledger functions not found');
 
+const elements = {};
+function element(id) {
+  if (!elements[id]) {
+    const card = { className: '' };
+    elements[id] = {
+      innerHTML: '', textContent: '', className: '',
+      closest(selector) { return selector === '.stat' ? card : null; },
+      card,
+    };
+  }
+  return elements[id];
+}
+global.document = { getElementById: element };
 global.fN = value => String(value ?? '—');
-global.f$ = value => String(value ?? '—');
-global.pnlCls = () => 'c-pos';
+global.f$ = value => {
+  const number = Number(value);
+  return `${number < 0 ? '-$' : '+$'}${Math.abs(number).toFixed(2)}`;
+};
+global.pnlCls = value => Number(value) < 0 ? 'c-neg' : 'c-pos';
 global.esc = value => String(value ?? '').replace(/&/g, '&amp;')
   .replace(/</g, '&lt;').replace(/>/g, '&gt;');
-global.tradeTimeIst = state => {
-  const explicit = String(state?.entry_at_utc || '').trim();
-  if (!explicit) return '—';
-  const d = new Date(explicit);
-  const total = (d.getUTCHours() * 60 + d.getUTCMinutes() + 330) % 1440;
-  const hh = Math.floor(total / 60), mm = total % 60;
-  const ap = hh >= 12 ? 'PM' : 'AM';
-  return `${((hh + 11) % 12) + 1}:${String(mm).padStart(2, '0')} ${ap} IST`;
+global.jget = async url => {
+  if (url !== '/api/today-trades') throw new Error(`unexpected endpoint: ${url}`);
+  return [
+    {symbol: 'C-BTC-65000', side: 'long', strike: 65000, lots: 1000,
+     entry_mark: 500, _live: true, current_mark: 525, live_pnl: 25},
+    {symbol: 'P-BTC-64000', side: 'long', strike: 64000, lots: 1000,
+     entry_mark: 450, exit_mark: 400, pnl_usd: -50},
+  ];
 };
 vm.runInThisContext(source.slice(start, end));
 
-const state = {
-  status: 'OPEN',
-  control_slot: 'trend',
-  entry_at_utc: '2026-07-23T01:50:00Z',
-  symbol: 'MV-BTC-65800-230726',
-  side: 'short',
-  lots: 1000,
-  live_pnl: 17.45,
-};
-const protection = {
-  trend: { running: true, protection_established: true, target_pnl: 500 },
-};
-const html = botPosRowHtml('morning', state, protection);
-const small = html.slice(html.indexOf('<small>') + '<small>'.length, html.indexOf('</small>'));
-if (!small.trim().startsWith('7:20 AM IST')) {
-  throw new Error(`trade time is not the first fact shown: ${small}`);
-}
-for (const required of [
-  "squareOff('trend', 'morning', 'live')",
-  "openProtectionDrawer('trend', 'morning')",
-  "showPayoff('morning')",
-]) {
-  if (!html.includes(required)) {
-    throw new Error(`source-aware action is missing (${required}): ${html}`);
+(async () => {
+  await loadToday();
+  if (elements['today-trade-total'].textContent !== '2') throw new Error('trade total is wrong');
+  if (elements['today-open-total'].textContent !== '1') throw new Error('open total is wrong');
+  if (elements['today-closed-total'].textContent !== '1') throw new Error('closed total is wrong');
+  if (elements['today-pnl'].textContent !== '-$25.00') throw new Error('day P&L is wrong');
+  const html = elements['today-body'].innerHTML;
+  for (const detail of ['C-BTC-65000', 'P-BTC-64000', 'LIVE', 'LOSS']) {
+    if (!html.includes(detail)) throw new Error(`missing today detail: ${detail}`);
   }
-}
-if (html.includes('Automatic MOVE Forecast')) {
-  throw new Error(`routed score position inherited scheduled copy: ${html}`);
-}
-
-const pending = botPosRowHtml('morning', { ...state, status: 'ENTRY_PENDING' }, protection);
-if (!pending.includes('PENDING') || pending.includes('squareOff(')) {
-  throw new Error(`pending entry exposed live actions or lost its pending badge: ${pending}`);
-}
+  for (const removed of ['Manage protection', 'Payoff', 'squareOff(']) {
+    if (html.includes(removed)) throw new Error(`non-daily control leaked: ${removed}`);
+  }
+})().catch(error => {
+  console.error(error);
+  process.exitCode = 1;
+});
 """
     result = subprocess.run(
         [NODE, "-e", script],

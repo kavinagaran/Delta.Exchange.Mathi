@@ -1,11 +1,9 @@
 """static/js/slots.js — shared slot-routing helpers.
 
-Added in Phase 2 as an additive extraction but left unreferenced by any page
-until UI-4 wired overview.html's loadToday() to call instrumentDisplaySlot()
-directly (previously each page kept its own copy: liveDisplaySlot in
-overview.html, a differently-ordered dryDisplaySlot equivalent in
-dry_run.html). This is the first direct test of the shared implementation
-now that a real page depends on it.
+Added in Phase 2 to centralize position routing across operational pages.
+Today no longer groups trades by the retired morning/evening/trend frames,
+but the helper remains the shared source wherever a position needs a display
+slot.
 """
 import shutil
 import subprocess
