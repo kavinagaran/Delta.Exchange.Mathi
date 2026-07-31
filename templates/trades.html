@@ -14,7 +14,7 @@
   <button class="btn secondary sm" id="refresh-history" type="button">↻ Refresh history</button>
 </div>
 
-<div class="stats" id="stats"></div>
+<div class="stats performance-metrics" id="stats"></div>
 
 <div class="card">
   <div class="card-hd">
@@ -120,8 +120,7 @@ function feeLabel(trade) {
   return fees.map(fee => `${fN(fee.amount, 8)} ${esc(fee.asset || 'fee units')}`).join(' · ');
 }
 
-function renderStats(trades) {
-  const el = document.getElementById('stats');
+function performanceMetrics(trades) {
   const symbols = new Set(trades.map(t => t.symbol).filter(Boolean));
   const lots = trades.reduce((total, trade) => total + Math.abs(+(trade.lots || 0)), 0);
   const open = trades.filter(trade => trade.status === 'OPEN').length;
@@ -130,8 +129,32 @@ function renderStats(trades) {
   const valued = trades.filter(trade => trade.net_pnl_usd != null && trade.status === 'CLOSED');
   const gross = grossValued.reduce((total, trade) => total + +trade.gross_pnl_usd, 0);
   const net = valued.reduce((total, trade) => total + +trade.net_pnl_usd, 0);
-  const winners = valued.filter(trade => +trade.net_pnl_usd >= 0).length;
-  const winRate = valued.length ? winners / valued.length * 100 : null;
+  const winners = valued.filter(trade => +trade.net_pnl_usd > 0);
+  const losers = valued.filter(trade => +trade.net_pnl_usd < 0);
+  const grossWins = winners.reduce((total, trade) => total + +trade.net_pnl_usd, 0);
+  const grossLosses = Math.abs(losers.reduce((total, trade) => total + +trade.net_pnl_usd, 0));
+  const winRate = valued.length ? winners.length / valued.length * 100 : null;
+  const averageWin = winners.length ? grossWins / winners.length : null;
+  const averageLoss = losers.length ? -grossLosses / losers.length : null;
+  const rewardRisk = averageWin != null && averageLoss != null
+    ? averageWin / Math.abs(averageLoss)
+    : null;
+  const profitFactor = grossLosses > 0 ? grossWins / grossLosses
+    : grossWins > 0 ? Infinity : null;
+  const expectancy = valued.length ? net / valued.length : null;
+
+  const chronological = valued.map((trade, index) => {
+    const parsed = Date.parse(trade.exit_at_utc || '');
+    const fallback = Number.isFinite(+trade.sort_timestamp) ? +trade.sort_timestamp * 1000 : index;
+    return { pnl: +trade.net_pnl_usd, closedAt: Number.isFinite(parsed) ? parsed : fallback, index };
+  }).sort((a, b) => a.closedAt - b.closedAt || a.index - b.index);
+  let equity = 0, peak = 0, maxDrawdown = 0;
+  for (const trade of chronological) {
+    equity += trade.pnl;
+    peak = Math.max(peak, equity);
+    maxDrawdown = Math.max(maxDrawdown, peak - equity);
+  }
+
   const fees = new Map();
   for (const trade of trades) {
     for (const fee of Array.isArray(trade.fees) ? trade.fees : []) {
@@ -139,16 +162,54 @@ function renderStats(trades) {
       fees.set(asset, (fees.get(asset) || 0) + +(fee.amount || 0));
     }
   }
-  const feeText = [...fees].map(([asset, value]) => `${fN(value, 8)} ${esc(asset)}`).join(' · ') || 'Not reported';
+  return {
+    symbols: symbols.size, lots, open, closed, grossValued: grossValued.length,
+    valued: valued.length, gross, net, winners: winners.length, losers: losers.length,
+    winRate, averageWin, averageLoss, rewardRisk, profitFactor, expectancy,
+    maxDrawdown, fees,
+  };
+}
+
+function feeMetricText(fees) {
+  if (!fees.size) return 'Not reported';
+  return [...fees].map(([asset, value]) => String(asset).toUpperCase() === 'USD'
+    ? `$${fN(value, 2)}`
+    : `${fN(value, 4)} ${esc(asset)}`).join(' · ');
+}
+
+function ratioText(value, riskPrefix = false) {
+  if (value == null) return '—';
+  if (!Number.isFinite(value)) return riskPrefix ? '1 : ∞' : '∞';
+  return riskPrefix ? `1 : ${fN(value, 2)}` : fN(value, 2);
+}
+
+function ratioTone(value) {
+  if (value == null) return 'neutral';
+  if (!Number.isFinite(value) || value >= 1) return 'positive';
+  return 'negative';
+}
+
+function renderStats(trades) {
+  const el = document.getElementById('stats');
+  const metrics = performanceMetrics(trades);
   const pnlClass = value => value == null ? 'neutral' : value >= 0 ? 'positive' : 'negative';
-  const valuedText = `${valued.length}/${closed} closed trades valued`;
+  const valuedText = `${metrics.valued}/${metrics.closed} closed trades valued`;
+  const drawdownText = metrics.valued
+    ? (metrics.maxDrawdown > 0 ? '-$' + fN(metrics.maxDrawdown, 2) : '$0.00')
+    : '—';
   el.innerHTML = `
-    <div class="stat performance-stat ${pnlClass(valued.length ? net : null)}"><div class="lbl">Est. net P/L</div><div class="val ${pnlCls(net)}">${valued.length ? f$(net) : '—'}</div><div class="sub">${valuedText}</div></div>
-    <div class="stat performance-stat ${pnlClass(grossValued.length ? gross : null)}"><div class="lbl">Est. gross P/L</div><div class="val ${pnlCls(gross)}">${grossValued.length ? f$(gross) : '—'}</div><div class="sub">${grossValued.length}/${closed} before USD fees</div></div>
-    <div class="stat performance-stat ${winRate == null ? 'neutral' : winRate >= 50 ? 'positive' : 'negative'}"><div class="lbl">Win rate</div><div class="val">${winRate == null ? '—' : fN(winRate, 1) + '%'}</div><div class="sub">${winners} winning completed trades</div></div>
-    <div class="stat performance-stat accent"><div class="lbl">Trades</div><div class="val">${fN(trades.length)}</div><div class="sub">${symbols.size} contracts · ${fN(lots, 6)} lots</div></div>
-    <div class="stat performance-stat ${open ? 'warning' : 'neutral'}"><div class="lbl">Open trades</div><div class="val">${fN(open)}</div><div class="sub">${fN(closed)} completed position cycles</div></div>
-    <div class="stat performance-stat warning"><div class="lbl">Fees reported</div><div class="val exchange-fees">${feeText}</div><div class="sub">Delta Exchange reported fees</div></div>`;
+    <div class="stat performance-stat ${pnlClass(metrics.valued ? metrics.net : null)}"><div class="lbl">Total P/L</div><div class="val ${pnlCls(metrics.net)}">${metrics.valued ? f$(metrics.net) : '—'}</div><div class="sub">Net of reported USD fees · ${valuedText}</div></div>
+    <div class="stat performance-stat ${pnlClass(metrics.grossValued ? metrics.gross : null)}"><div class="lbl">Gross P/L</div><div class="val ${pnlCls(metrics.gross)}">${metrics.grossValued ? f$(metrics.gross) : '—'}</div><div class="sub">${metrics.grossValued}/${metrics.closed} before fees</div></div>
+    <div class="stat performance-stat ${metrics.fees.size ? 'warning' : 'neutral'}"><div class="lbl">Total fees &amp; charges</div><div class="val exchange-fees">${feeMetricText(metrics.fees)}</div><div class="sub">All fees reported by Delta</div></div>
+    <div class="stat performance-stat ${metrics.winRate == null ? 'neutral' : metrics.winRate >= 50 ? 'positive' : 'negative'}"><div class="lbl">Win rate</div><div class="val">${metrics.winRate == null ? '—' : fN(metrics.winRate, 1) + '%'}</div><div class="sub">${metrics.winners} wins · ${metrics.losers} losses</div></div>
+    <div class="stat performance-stat ${metrics.averageWin == null ? 'neutral' : 'positive'}"><div class="lbl">Average win</div><div class="val ${metrics.averageWin == null ? '' : 'c-pos'}">${metrics.averageWin == null ? '—' : f$(metrics.averageWin)}</div><div class="sub">Across ${metrics.winners} winning trade${metrics.winners === 1 ? '' : 's'}</div></div>
+    <div class="stat performance-stat ${metrics.averageLoss == null ? 'neutral' : 'negative'}"><div class="lbl">Average loss</div><div class="val ${metrics.averageLoss == null ? '' : 'c-neg'}">${metrics.averageLoss == null ? '—' : f$(metrics.averageLoss)}</div><div class="sub">Across ${metrics.losers} losing trade${metrics.losers === 1 ? '' : 's'}</div></div>
+    <div class="stat performance-stat ${ratioTone(metrics.rewardRisk)}"><div class="lbl">Risk : reward</div><div class="val">${ratioText(metrics.rewardRisk, true)}</div><div class="sub">Average reward for every $1 lost</div></div>
+    <div class="stat performance-stat ${ratioTone(metrics.profitFactor)}"><div class="lbl">Profit factor</div><div class="val">${ratioText(metrics.profitFactor)}</div><div class="sub">Gross wins ÷ gross losses</div></div>
+    <div class="stat performance-stat ${pnlClass(metrics.expectancy)}"><div class="lbl">Expectancy / trade</div><div class="val ${pnlCls(metrics.expectancy)}">${metrics.expectancy == null ? '—' : f$(metrics.expectancy)}</div><div class="sub">Average net result per valued trade</div></div>
+    <div class="stat performance-stat ${metrics.maxDrawdown > 0 ? 'negative' : 'neutral'}"><div class="lbl">Maximum drawdown</div><div class="val ${metrics.maxDrawdown > 0 ? 'c-neg' : ''}">${drawdownText}</div><div class="sub">Largest peak-to-trough net P/L decline</div></div>
+    <div class="stat performance-stat accent"><div class="lbl">Trade cycles</div><div class="val">${fN(trades.length)}</div><div class="sub">${metrics.closed} closed · ${metrics.open} open</div></div>
+    <div class="stat performance-stat ${metrics.open ? 'warning' : 'neutral'}"><div class="lbl">Volume traded</div><div class="val">${fN(metrics.lots, 2)}</div><div class="sub">Lots across ${metrics.symbols} contract${metrics.symbols === 1 ? '' : 's'}</div></div>`;
 }
 
 function renderTable(trades) {
