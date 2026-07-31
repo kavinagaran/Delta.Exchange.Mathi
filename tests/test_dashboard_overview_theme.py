@@ -17,6 +17,10 @@ def test_overview_uses_performance_style_cards_and_table_header():
     assert "overview-today-card" in overview
     assert ".today-summary" in styles
     assert ".today-trades-table td.numeric" in styles
+    assert ".today-trade-actions" in styles
+    assert ".trade-action-link.protection" in styles
+    assert ".trade-action-link.payoff" in styles
+    assert ".trade-action-link.close" in styles
 
 
 def test_overview_inherits_the_shared_table_header_instead_of_restating_it():

@@ -17,6 +17,17 @@ def test_today_page_contains_only_same_day_trade_content():
         'id="today-body"',
         "jget('/api/today-trades')",
         "function updateTodaySummary(rows)",
+        "Close Position",
+        "Protection",
+        "Payoff",
+        "function closeTodayLiveTrade(index)",
+        "function openTodayProtection(index)",
+        "function showTodayPayoff(index)",
+        "'/api/square-off?slot='",
+        "target_mode: 'live'",
+        "jget('/api/tp-monitor')",
+        "saveProtectionConfig(",
+        'id="today-payoff-chart"',
     ):
         assert required in source
 
@@ -29,8 +40,6 @@ def test_today_page_contains_only_same_day_trade_content():
         'id="stats"',
         "Open Positions",
         'id="positions-body"',
-        "Manage protection",
-        "Payoff at settlement",
         "loadStatusTiles",
         "loadStatsInto",
         "loadSlots",
@@ -38,7 +47,6 @@ def test_today_page_contains_only_same_day_trade_content():
         "showPayoff",
         "squareOff",
         "/api/engine/health",
-        "/api/tp-monitor",
     ):
         assert removed not in source
 

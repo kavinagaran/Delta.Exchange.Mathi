@@ -158,11 +158,14 @@ if (attributes['aria-pressed'] !== 'false' || !attributes['aria-label'].includes
     assert result.returncode == 0, result.stderr
 
 
-def test_today_page_has_no_separate_position_or_protection_surface():
+def test_today_page_has_contextual_live_actions_without_a_position_section():
     source = (ROOT / "templates" / "overview.html").read_text(encoding="utf-8")
 
     assert 'id="today-body"' in source
     assert "jget('/api/today-trades')" in source
+    assert "closeTodayLiveTrade(" in source
+    assert "openTodayProtection(" in source
+    assert "showTodayPayoff(" in source
     for removed in (
         'id="positions-body"',
         "renderPositions",

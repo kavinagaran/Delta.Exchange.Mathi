@@ -937,8 +937,63 @@ body.login-body {
   font-size: 20px; color: var(--muted); line-height: 1;
 }
 .modal-hd .x:hover { color: var(--text); }
+.payoff-facts {
+  display: flex; gap: 16px; flex-wrap: wrap; margin-top: 14px;
+}
+.payoff-facts .f {
+  color: var(--muted); font-size: 12px;
+}
+.payoff-facts .f b {
+  color: var(--text); font-variant-numeric: tabular-nums;
+}
+.payoff-note {
+  margin-top: 10px; color: var(--muted); font-size: 10.5px; line-height: 1.45;
+}
 .mono { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; }
 .hint { color: var(--muted); font-size: 12px; }
+
+/* Contextual LIVE protection editor opened from a Today trade row. */
+.drawer-back {
+  position: fixed; inset: 0; z-index: 60;
+  display: none; background: rgba(3, 7, 14, .68);
+  backdrop-filter: blur(3px);
+}
+.drawer-back.show { display: block; }
+.drawer {
+  position: fixed; inset: 0 0 0 auto; z-index: 61;
+  width: 440px; max-width: 94vw; padding: 20px;
+  overflow-y: auto; background: var(--surface);
+  border-left: 1px solid color-mix(in srgb, var(--accent) 42%, var(--border));
+  box-shadow: -18px 0 52px rgba(0, 0, 0, .46);
+  transform: translateX(100%); transition: transform .22s ease;
+}
+.drawer-back.show .drawer { transform: translateX(0); }
+.drawer-hd {
+  display: flex; align-items: center; gap: 10px; margin-bottom: 14px;
+}
+.drawer-hd h3 { font-size: 15px; font-weight: 750; }
+.drawer-hd .x {
+  margin-left: auto; border: 0; background: none; cursor: pointer;
+  color: var(--muted); font-size: 21px; line-height: 1;
+}
+.drawer-hd .x:hover { color: var(--text); }
+.drawer-fields {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px; margin-top: 14px;
+}
+.drawer-note {
+  margin-top: 12px; color: var(--muted); font-size: 10.5px; line-height: 1.5;
+}
+.today-protection-context {
+  display: grid; gap: 4px; padding: 12px;
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border));
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--accent-soft) 48%, var(--surface-subtle));
+}
+.today-protection-context strong { font-size: 13px; overflow-wrap: anywhere; }
+.today-protection-context span { color: var(--muted); font-size: 11px; }
+.today-protection-context span.c-pos { color: var(--pos); }
+.today-protection-context span.c-neg { color: var(--neg); }
 
 /* ── Filter chips + chart-view toggle (UI-4 Trades page) ─────*/
 .filter-chips { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
@@ -2379,11 +2434,44 @@ body.login-body {
   text-align: right;
   font-variant-numeric: tabular-nums;
 }
+.today-trade-actions {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  min-width: 250px;
+}
+.trade-action-link {
+  appearance: none; padding: 4px 8px;
+  border: 1px solid var(--border); border-radius: 999px;
+  background: var(--surface-subtle); color: var(--muted);
+  font: inherit; font-size: 10.5px; font-weight: 750;
+  line-height: 1.2; white-space: nowrap; cursor: pointer;
+  transition: border-color .16s ease, color .16s ease,
+              background .16s ease, transform .16s ease;
+}
+.trade-action-link:hover { transform: translateY(-1px); }
+.trade-action-link.protection {
+  color: var(--accent-dark);
+  border-color: color-mix(in srgb, var(--accent) 48%, var(--border));
+  background: color-mix(in srgb, var(--accent-soft) 72%, var(--surface));
+}
+.trade-action-link.payoff {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 42%, var(--border));
+  background: color-mix(in srgb, var(--warn-soft) 68%, var(--surface));
+}
+.trade-action-link.close {
+  color: var(--neg);
+  border-color: color-mix(in srgb, var(--neg) 48%, var(--border));
+  background: color-mix(in srgb, var(--neg-soft) 72%, var(--surface));
+}
+.today-payoff-modal { width: min(780px, 96vw); }
+.today-payoff-modal .chart-box { height: 380px; }
 @media (max-width: 920px) {
   .today-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 560px) {
   .today-summary { grid-template-columns: 1fr; }
+  .drawer-fields { grid-template-columns: 1fr; }
+  .today-payoff-modal .chart-box { height: 300px; }
 }
 :root .performance-stat.positive {
   color: #52e8ab; border-color: rgba(56, 217, 154, .48);

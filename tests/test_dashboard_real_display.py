@@ -188,6 +188,9 @@ def test_real_overview_is_a_same_day_trade_ledger_only():
         'id="today-summary"',
         'id="today-body"',
         "jget('/api/today-trades')",
+        "Close Position",
+        "Protection",
+        "Payoff",
     ):
         assert required in source
     for non_daily in (
@@ -195,7 +198,7 @@ def test_real_overview_is_a_same_day_trade_ledger_only():
         "No open positions",
         "st.display_slots ||",
         "openProtectionDrawer",
-        "showPayoff",
+        "showPayoff(",
         "squareOff(",
         "Trading mode",
         "Engine health",
@@ -220,7 +223,7 @@ def test_real_overview_summarises_and_renders_only_today_rows():
 const fs = require('fs');
 const vm = require('vm');
 const source = fs.readFileSync('templates/overview.html', 'utf8');
-const start = source.indexOf('function todayTradePnl');
+const start = source.indexOf('const TODAY_CONTROL_SLOTS');
 const end = source.indexOf('async function loadAll');
 if (start < 0 || end <= start) throw new Error('Today ledger functions not found');
 
@@ -228,15 +231,22 @@ const elements = {};
 function element(id) {
   if (!elements[id]) {
     const card = { className: '' };
+    const classes = new Set();
     elements[id] = {
       innerHTML: '', textContent: '', className: '',
       closest(selector) { return selector === '.stat' ? card : null; },
+      classList: {
+        add(value) { classes.add(value); },
+        remove(value) { classes.delete(value); },
+        contains(value) { return classes.has(value); },
+      },
       card,
     };
   }
   return elements[id];
 }
-global.document = { getElementById: element };
+global.document = { getElementById: element, addEventListener() {} };
+global.window = {};
 global.fN = value => String(value ?? '—');
 global.f$ = value => {
   const number = Number(value);
@@ -245,14 +255,36 @@ global.f$ = value => {
 global.pnlCls = value => Number(value) < 0 ? 'c-neg' : 'c-pos';
 global.esc = value => String(value ?? '').replace(/&/g, '&amp;')
   .replace(/</g, '&lt;').replace(/>/g, '&gt;');
+global.confirm = () => true;
+global.toast = () => {};
+global.protectionDrawerFieldsHtml = record =>
+  `<input id="pdw-target" value="${record.target_pnl}">`;
+global.protectionDrawerIdFor = () => ({});
+global.saveProtectionConfig = async () => ({ok: true});
+let posted = null;
+global.jpost = async (url, body) => {
+  posted = {url, body};
+  return {ok: false, error: 'intentional test stop'};
+};
 global.jget = async url => {
-  if (url !== '/api/today-trades') throw new Error(`unexpected endpoint: ${url}`);
-  return [
-    {symbol: 'C-BTC-65000', side: 'long', strike: 65000, lots: 1000,
-     entry_mark: 500, _live: true, current_mark: 525, live_pnl: 25},
-    {symbol: 'P-BTC-64000', side: 'long', strike: 64000, lots: 1000,
-     entry_mark: 450, exit_mark: 400, pnl_usd: -50},
-  ];
+  if (url === '/api/today-trades') {
+    return [
+      {symbol: 'C-BTC-65000', side: 'long', strike: 65000, lots: 1000,
+       entry_mark: 500, _live: true, current_mark: 525, live_pnl: 25,
+       slot: 'trend'},
+      {symbol: 'P-BTC-64000', side: 'long', strike: 64000, lots: 1000,
+       entry_mark: 450, exit_mark: 400, pnl_usd: -50, slot: 'trend'},
+    ];
+  }
+  if (url === '/api/tp-monitor') {
+    return {trend: {
+      running: true, target_pnl: 500, sl_pnl: 250, tsl_arm_pnl: 125,
+      tsl_trail_pnl: 125, tsl_lock_min_pnl: 0, poll_secs: 10,
+      protection_source: 'automatic_filled_premium',
+      coverage_status: 'exchange_protected',
+    }};
+  }
+  throw new Error(`unexpected endpoint: ${url}`);
 };
 vm.runInThisContext(source.slice(start, end));
 
@@ -263,11 +295,29 @@ vm.runInThisContext(source.slice(start, end));
   if (elements['today-closed-total'].textContent !== '1') throw new Error('closed total is wrong');
   if (elements['today-pnl'].textContent !== '-$25.00') throw new Error('day P&L is wrong');
   const html = elements['today-body'].innerHTML;
-  for (const detail of ['C-BTC-65000', 'P-BTC-64000', 'LIVE', 'LOSS']) {
+  for (const detail of [
+    'C-BTC-65000', 'P-BTC-64000', 'LIVE', 'LOSS',
+    'Close Position', 'Protection', 'Payoff',
+  ]) {
     if (!html.includes(detail)) throw new Error(`missing today detail: ${detail}`);
   }
-  for (const removed of ['Manage protection', 'Payoff', 'squareOff(']) {
-    if (html.includes(removed)) throw new Error(`non-daily control leaked: ${removed}`);
+  const closedRow = html.slice(html.indexOf('P-BTC-64000'));
+  if (closedRow.includes('Close Position') || closedRow.includes('Protection') ||
+      closedRow.includes('Payoff</button>')) {
+    throw new Error(`closed trade exposed LIVE actions: ${closedRow}`);
+  }
+  await closeTodayLiveTrade(0);
+  if (!posted || posted.url !== '/api/square-off?slot=trend' ||
+      posted.body?.target_mode !== 'live') {
+    throw new Error(`LIVE close was not explicitly routed: ${JSON.stringify(posted)}`);
+  }
+  await openTodayProtection(0);
+  if (!elements['today-protection-back'].classList.contains('show') ||
+      !elements['today-protection-fields'].innerHTML.includes('pdw-target')) {
+    throw new Error('LIVE protection editor did not open with active values');
+  }
+  for (const removed of ['Open Positions', 'Engine health']) {
+    if (html.includes(removed)) throw new Error(`non-daily section leaked: ${removed}`);
   }
 })().catch(error => {
   console.error(error);

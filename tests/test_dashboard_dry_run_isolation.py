@@ -904,6 +904,8 @@ def test_dry_run_has_one_score_zone_position_and_manual_exit():
         assert legacy_slot not in template
 
     # Today is a daily ledger only. Position exit/protection actions remain on
-    # their dedicated Paper and Exposure surfaces.
+    # each LIVE trade record and can never target the DRY RUN namespace.
     assert "squareOff(" not in overview
     assert "target_mode: targetMode" not in overview
+    assert "closeTodayLiveTrade(" in overview
+    assert "target_mode: 'live'" in overview

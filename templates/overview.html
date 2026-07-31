@@ -1,5 +1,9 @@
 {% extends "base.html" %}
 
+{% block head %}
+<script src="/static/js/vendor/chart.umd.min.js?v={{ asset_v('js/vendor/chart.umd.min.js') }}"></script>
+{% endblock %}
+
 {% block content %}
 <div class="overview-page">
   <div class="stats today-summary" id="today-summary">
@@ -42,11 +46,56 @@
           <th>Exit / Mark</th>
           <th>P&amp;L</th>
           <th>Status</th>
+          <th>Actions</th>
         </tr></thead>
         <tbody id="today-body">
-          <tr class="empty-row"><td colspan="8">Loading…</td></tr>
+          <tr class="empty-row"><td colspan="9">Loading…</td></tr>
         </tbody>
       </table>
+    </div>
+  </div>
+
+  <div class="drawer-back" id="today-protection-back"
+       onclick="if(event.target===this)closeTodayProtection()">
+    <div class="drawer" role="dialog" aria-modal="true"
+         aria-labelledby="today-protection-title">
+      <div class="drawer-hd">
+        <h3 id="today-protection-title">LIVE trade protection</h3>
+        <button class="x" type="button" onclick="closeTodayProtection()"
+                aria-label="Close protection settings">×</button>
+      </div>
+      <div class="today-protection-context" id="today-protection-context">
+        Loading active protection…
+      </div>
+      <div class="drawer-fields" id="today-protection-fields"></div>
+      <div class="btn-row">
+        <button class="btn sm" id="today-protection-save" type="button"
+                onclick="saveTodayProtection()">Save Changes</button>
+        <button class="btn success sm" id="today-protection-start" type="button"
+                onclick="startTodayProtection()" hidden>Start Monitor</button>
+      </div>
+      <div class="drawer-note">
+        Changes override the automatic premium-based values for this open LIVE
+        trade. They do not close the position.
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-back" id="today-payoff-back"
+       onclick="if(event.target===this)closeTodayPayoff()">
+    <div class="modal today-payoff-modal" role="dialog" aria-modal="true"
+         aria-labelledby="today-payoff-title">
+      <div class="modal-hd">
+        <h3 id="today-payoff-title">Payoff at settlement</h3>
+        <button class="x" type="button" onclick="closeTodayPayoff()"
+                aria-label="Close payoff chart">×</button>
+      </div>
+      <div class="chart-box"><canvas id="today-payoff-chart"></canvas></div>
+      <div class="payoff-facts" id="today-payoff-facts"></div>
+      <p class="payoff-note">
+        Settlement payoff estimate before exit fees. The current mark and
+        protection monitor remain authoritative for the running trade.
+      </p>
     </div>
   </div>
 </div>
@@ -54,8 +103,21 @@
 
 {% block scripts %}
 <script>
+const TODAY_CONTROL_SLOTS = new Set(['morning', 'evening', 'trend']);
+let todayProtection = null;
+let todayPayoffChart = null;
+const todayClosing = new Set();
+
 function todayTradePnl(trade) {
   return +(trade?._live ? trade.live_pnl : trade?.pnl_usd) || 0;
+}
+
+function todayControlSlot(trade) {
+  for (const value of [trade?.control_slot, trade?.slot]) {
+    const slot = String(value || '').toLowerCase();
+    if (TODAY_CONTROL_SLOTS.has(slot)) return slot;
+  }
+  return '';
 }
 
 function setTodaySummaryTone(elementId, tone) {
@@ -94,11 +156,12 @@ async function loadToday() {
   const rows = await jget('/api/today-trades');
   const body = document.getElementById('today-body');
   updateTodaySummary(rows);
+  window._todayLiveTrades = {};
   if (!rows.length) {
-    body.innerHTML = '<tr class="empty-row"><td colspan="8">No trades today</td></tr>';
+    body.innerHTML = '<tr class="empty-row"><td colspan="9">No trades today</td></tr>';
     return rows;
   }
-  body.innerHTML = rows.map(trade => {
+  body.innerHTML = rows.map((trade, index) => {
     const live = !!trade._live;
     const pnl = todayTradePnl(trade);
     const exit = live ? trade.current_mark : trade.exit_mark;
@@ -112,6 +175,20 @@ async function loadToday() {
         : pnl < 0
           ? '<span class="badge loss">LOSS</span>'
           : '<span class="badge closed">CLOSED</span>';
+    const controlSlot = live ? todayControlSlot(trade) : '';
+    if (live && controlSlot) {
+      window._todayLiveTrades[index] = { ...trade, controlSlot };
+    }
+    const actions = live && controlSlot
+      ? `<div class="today-trade-actions">
+          <button class="trade-action-link close" type="button"
+                  onclick="closeTodayLiveTrade(${index})">Close Position</button>
+          <button class="trade-action-link protection" type="button"
+                  onclick="openTodayProtection(${index})">Protection</button>
+          <button class="trade-action-link payoff" type="button"
+                  onclick="showTodayPayoff(${index})">Payoff</button>
+        </div>`
+      : '<span class="c-muted">—</span>';
     return `<tr>
       <td>${esc(trade.symbol)}</td>
       <td><span class="badge ${directionClass}">${esc(direction)}</span></td>
@@ -121,15 +198,313 @@ async function loadToday() {
       <td class="numeric">$${fN(exit, 2)}</td>
       <td class="numeric ${pnlCls(pnl)}">${f$(pnl)}</td>
       <td>${status}</td>
+      <td>${actions}</td>
     </tr>`;
   }).join('');
   return rows;
+}
+
+function todayLiveTrade(index) {
+  return (window._todayLiveTrades || {})[index] || null;
+}
+
+async function closeTodayLiveTrade(index) {
+  const trade = todayLiveTrade(index);
+  if (!trade || !trade.controlSlot || todayClosing.has(index)) {
+    if (!trade) toast('This LIVE trade is no longer available', 'err');
+    return;
+  }
+  const adopted = +trade.externally_added_lots_adopted || 0;
+  const scope = adopted > 0
+    ? `\n\nThis closes all ${fN(trade.lots)} matching lots, including ${fN(adopted)} externally added lots.`
+    : '';
+  if (!confirm(
+      `Close ${trade.symbol} manually at market price?` +
+      `\n\nThis submits a reduce-only LIVE exit order.${scope}`)) return;
+  todayClosing.add(index);
+  try {
+    const result = await jpost(
+      '/api/square-off?slot=' + encodeURIComponent(trade.controlSlot),
+      { target_mode: 'live' },
+    );
+    if (result.ok) {
+      toast(`LIVE position closed — P&L ${f$(result.pnl)}`, 'ok');
+      await loadAll();
+    } else {
+      toast(result.error || 'Manual LIVE close failed', 'err');
+    }
+  } finally {
+    todayClosing.delete(index);
+  }
+}
+
+function protectionSourceLabel(record) {
+  const source = String(record?.protection_source || '').toLowerCase();
+  if (source === 'automatic_filled_premium') return 'Automatic premium-based';
+  if (source === 'manual_override') return 'Manual override';
+  return 'Configured protection';
+}
+
+function renderTodayProtectionContext(trade, record) {
+  const monitorTone = record.running ? 'c-pos' : 'c-neg';
+  const coverage = String(record.coverage_status || 'verifying')
+    .replaceAll('_', ' ').toUpperCase();
+  const premium = +record.entry_premium_usd > 0
+    ? ` · Entry premium $${fN(record.entry_premium_usd, 2)}` : '';
+  document.getElementById('today-protection-context').innerHTML = `
+    <strong>${esc(trade.symbol)}</strong>
+    <span>${fN(trade.lots)} lots · ${esc(protectionSourceLabel(record))}${premium}</span>
+    <span class="${monitorTone}">Monitor ${record.running ? 'ACTIVE' : 'NOT RUNNING'} · ${esc(coverage)}</span>`;
+}
+
+async function openTodayProtection(index) {
+  const trade = todayLiveTrade(index);
+  if (!trade) {
+    toast('This LIVE trade is no longer available', 'err');
+    return;
+  }
+  const back = document.getElementById('today-protection-back');
+  back.classList.add('show');
+  document.getElementById('today-protection-title').textContent =
+    `Protection — ${trade.symbol}`;
+  document.getElementById('today-protection-context').textContent =
+    'Loading active protection…';
+  document.getElementById('today-protection-fields').innerHTML = '';
+  try {
+    const status = await jget('/api/tp-monitor');
+    const record = status?.[trade.controlSlot];
+    if (!record) throw new Error('Protection status is unavailable');
+    todayProtection = { trade, record };
+    renderTodayProtectionContext(trade, record);
+    document.getElementById('today-protection-fields').innerHTML =
+      protectionDrawerFieldsHtml(record);
+    document.getElementById('today-protection-start').hidden = !!record.running;
+    document.getElementById('today-protection-save').disabled = false;
+  } catch (error) {
+    todayProtection = null;
+    document.getElementById('today-protection-context').innerHTML =
+      `<span class="c-neg">${esc(error.message || 'Protection status is unavailable')}</span>`;
+    document.getElementById('today-protection-save').disabled = true;
+    document.getElementById('today-protection-start').hidden = true;
+  }
+}
+
+function closeTodayProtection() {
+  document.getElementById('today-protection-back').classList.remove('show');
+  todayProtection = null;
+}
+
+async function refreshTodayProtection() {
+  if (!todayProtection) return;
+  const trade = todayProtection.trade;
+  const status = await jget('/api/tp-monitor');
+  const record = status?.[trade.controlSlot];
+  if (!record) throw new Error('Protection status is unavailable');
+  todayProtection = { trade, record };
+  renderTodayProtectionContext(trade, record);
+  document.getElementById('today-protection-fields').innerHTML =
+    protectionDrawerFieldsHtml(record);
+  document.getElementById('today-protection-start').hidden = !!record.running;
+}
+
+async function saveTodayProtection() {
+  if (!todayProtection) return;
+  const save = document.getElementById('today-protection-save');
+  save.disabled = true;
+  try {
+    const values = readProtectionInputs(protectionDrawerIdFor());
+    const result = await saveProtectionConfig(
+      todayProtection.trade.controlSlot, values);
+    if (!result.ok) {
+      toast(result.error || 'Protection update failed', 'err');
+      return;
+    }
+    toast(
+      'LIVE protection updated' +
+      (result.tp_restarted?.length ? ' — monitor restarted' : ''),
+      'ok',
+    );
+    await refreshTodayProtection();
+  } finally {
+    save.disabled = false;
+  }
+}
+
+async function startTodayProtection() {
+  if (!todayProtection) return;
+  const result = await jpost(
+    '/api/tp-monitor/start?slot=' +
+      encodeURIComponent(todayProtection.trade.controlSlot),
+  );
+  if (!result.ok) {
+    toast(result.error || 'Protection monitor could not be started', 'err');
+    return;
+  }
+  toast('LIVE protection monitor started', 'ok');
+  await refreshTodayProtection();
+}
+
+function todayIntrinsic(symbol, strike, settlement) {
+  const upper = String(symbol || '').toUpperCase();
+  if (upper.startsWith('MV-')) return Math.abs(settlement - strike);
+  if (upper.startsWith('P-')) return Math.max(strike - settlement, 0);
+  return Math.max(settlement - strike, 0);
+}
+
+async function showTodayPayoff(index) {
+  const trade = todayLiveTrade(index);
+  if (!trade) {
+    toast('This LIVE trade is no longer available', 'err');
+    return;
+  }
+  let btc = +window._lastStatus?.btc_futures_price;
+  if (!Number.isFinite(btc) || btc <= 0) {
+    try {
+      const status = await jget('/api/status');
+      btc = +status.btc_futures_price;
+    } catch (_) { /* use strike fallback below */ }
+  }
+  const symbol = String(trade.symbol || '');
+  const strike = +trade.strike;
+  const entry = +trade.entry_mark;
+  const lots = +trade.lots;
+  const contractValue = +trade.contract_value || 0.001;
+  const sign = String(trade.side || 'long').toLowerCase() === 'short' ? -1 : 1;
+  if (![strike, entry, lots, contractValue].every(
+      value => Number.isFinite(value) && value > 0)) {
+    toast('Payoff inputs are incomplete for this LIVE trade', 'err');
+    return;
+  }
+  if (!Number.isFinite(btc) || btc <= 0) btc = strike;
+
+  const low = Math.min(strike, btc) * 0.955;
+  const high = Math.max(strike, btc) * 1.045;
+  const count = 120;
+  const prices = [];
+  const payoffs = [];
+  for (let i = 0; i <= count; i += 1) {
+    const settlement = low + (high - low) * i / count;
+    prices.push(settlement);
+    payoffs.push(
+      +((todayIntrinsic(symbol, strike, settlement) - entry) *
+        contractValue * lots * sign).toFixed(2),
+    );
+  }
+  const currentPnl = +((todayIntrinsic(symbol, strike, btc) - entry) *
+    contractValue * lots * sign).toFixed(2);
+  const breakevens = symbol.toUpperCase().startsWith('MV-')
+    ? [strike - entry, strike + entry]
+    : symbol.toUpperCase().startsWith('P-')
+      ? [strike - entry] : [strike + entry];
+
+  document.getElementById('today-payoff-title').textContent =
+    `Payoff — ${symbol}`;
+  document.getElementById('today-payoff-facts').innerHTML =
+    `<span class="f">Side <b>${esc(String(trade.side || 'long').toUpperCase())}</b></span>` +
+    `<span class="f">Strike <b>$${fN(strike)}</b></span>` +
+    `<span class="f">Entry <b>$${fN(entry, 2)}</b></span>` +
+    breakevens.map(value =>
+      `<span class="f">Breakeven <b>$${fN(value, 2)}</b></span>`).join('') +
+    `<span class="f">BTC now <b>$${fN(btc, 2)}</b></span>` +
+    `<span class="f">At current BTC <b class="${pnlCls(currentPnl)}">${f$(currentPnl)}</b></span>`;
+
+  const css = getComputedStyle(document.documentElement);
+  const positive = css.getPropertyValue('--pos').trim();
+  const negative = css.getPropertyValue('--neg').trim();
+  const muted = css.getPropertyValue('--muted').trim();
+  const accent = css.getPropertyValue('--accent').trim();
+  const grid = css.getPropertyValue('--chart-grid').trim();
+  const zero = css.getPropertyValue('--chart-zero').trim();
+  const context = document.getElementById('today-payoff-chart').getContext('2d');
+  if (todayPayoffChart) todayPayoffChart.destroy();
+  todayPayoffChart = new Chart(context, {
+    type: 'line',
+    data: {
+      labels: prices.map(value => Math.round(value)),
+      datasets: [
+        {
+          label: 'P&L at settlement', data: payoffs, borderWidth: 2.5,
+          pointRadius: 0, tension: 0, borderColor: positive,
+          segment: {
+            borderColor: context => context.p1.parsed.y >= 0
+              ? positive : negative,
+          },
+          fill: {
+            target: 'origin',
+            above: 'rgba(56,217,154,.12)',
+            below: 'rgba(255,97,114,.12)',
+          },
+        },
+        {
+          label: 'Current BTC',
+          data: prices.map((value, i) => i === prices.reduce(
+            (best, _, candidate) =>
+              Math.abs(prices[candidate] - btc) <
+              Math.abs(prices[best] - btc) ? candidate : best, 0,
+          ) ? currentPnl : null),
+          pointRadius: 5, pointBackgroundColor: accent,
+          borderColor: accent, showLine: false,
+        },
+      ],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            title: items => `BTC $${fN(+items[0].label)}`,
+            label: context => context.datasetIndex === 0
+              ? ` P&L: ${f$(context.raw)}`
+              : ` Current BTC: ${f$(context.raw)}`,
+          },
+        },
+      },
+      scales: {
+        x: {
+          ticks: { color: muted, font: { size: 10 }, maxTicksLimit: 10 },
+          grid: { color: grid },
+          title: {
+            display: true, text: 'BTC price at settlement',
+            color: muted, font: { size: 11 },
+          },
+        },
+        y: {
+          ticks: {
+            color: muted, font: { size: 10 },
+            callback: value =>
+              `${value >= 0 ? '+$' : '-$'}${Math.abs(value).toLocaleString()}`,
+          },
+          grid: {
+            color: context => context.tick.value === 0 ? zero : grid,
+            lineWidth: context => context.tick.value === 0 ? 1.5 : 1,
+          },
+        },
+      },
+    },
+  });
+  document.getElementById('today-payoff-back').classList.add('show');
+}
+
+function closeTodayPayoff() {
+  document.getElementById('today-payoff-back').classList.remove('show');
+  if (todayPayoffChart) {
+    todayPayoffChart.destroy();
+    todayPayoffChart = null;
+  }
 }
 
 async function loadAll() {
   await loadToday();
   refreshTopbar();
 }
+
+document.addEventListener('keydown', event => {
+  if (event.key !== 'Escape') return;
+  closeTodayProtection();
+  closeTodayPayoff();
+});
 
 loadAll();
 setInterval(loadAll, 12_000);
