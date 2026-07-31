@@ -1095,3 +1095,44 @@ def test_tp_sl_tsl_exchange_flags_require_fresh_matching_strict_proofs(
     legacy_payload = payload_for(legacy_claim_only)
     assert legacy_payload["tp_on_exchange"] is False
     assert legacy_payload["sl_on_exchange"] is False
+
+
+def test_tp_status_reports_adopted_local_aggregate_as_protected(
+        isolated_user):
+    state = _trend_squareoff_state(
+        lots=500,
+        protection_lots=500,
+        owned_entry_lots=100,
+        original_owned_entry_lots=100,
+        externally_added_lots_adopted=400,
+        protection_revision=8,
+        continuity_revision=6,
+        tsl_stop_order_id=None,
+        tp_stop_order_id=None,
+    )
+    _write(isolated_user / "trend_state.json", state)
+    health = _trend_continuity_health(
+        state,
+        status="healthy",
+        protected_lots=500,
+        exchange_position_size=500,
+        exchange_protected_lots=0,
+        local_fallback_active=True,
+        protection_established=True,
+    )
+
+    with patch.object(
+            dashboard, "_tp_health",
+            side_effect=lambda _user, slot: health if slot == "trend" else {}), \
+            patch.object(
+                dashboard, "_tp_running",
+                side_effect=lambda _user, slot: slot == "trend"), \
+            dashboard.app.test_request_context("/api/tp-monitor"):
+        payload = dashboard.tp_monitor_status().get_json()["trend"]
+
+    assert payload["coverage_status"] == "local_fallback"
+    assert payload["protection_established"] is True
+    assert payload["protected_lots"] == 500
+    assert payload["exchange_position_lots"] == 500
+    assert payload["bot_entry_lots"] == 100
+    assert payload["external_protected_lots"] == 400

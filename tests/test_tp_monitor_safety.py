@@ -196,7 +196,7 @@ class TpMonitorSafetyTests(unittest.TestCase):
         self.assertEqual(health["protection_revision"], 1)
         self.assertTrue(health["continuity_verified"])
 
-    def test_live_score_position_never_adopts_same_product_growth(self):
+    def test_live_score_position_adopts_verified_same_product_growth(self):
         self.write_state(
             lots=3,
             owned_entry_lots=3,
@@ -206,6 +206,7 @@ class TpMonitorSafetyTests(unittest.TestCase):
             position_cycle_id="trend-cycle-test",
             entry_mark=1.0,
             entry_fees_usd=0.10,
+            exchange_protection_supported=False,
             protection_config={
                 "tp_target_pnl": 100,
                 "sl_target_pnl": 50,
@@ -227,6 +228,7 @@ class TpMonitorSafetyTests(unittest.TestCase):
                  return_value=self.continuity(),
              ), \
              patch.object(tp_monitor, "get_order") as get_order, \
+             patch.object(tp_monitor, "get_mark", return_value=1.4), \
              patch.object(tp_monitor, "place_stop_order") as place, \
              patch.object(tp_monitor, "edit_stop_price") as edit, \
              patch.object(tp_monitor, "send_telegram") as telegram, \
@@ -235,23 +237,28 @@ class TpMonitorSafetyTests(unittest.TestCase):
                 tp_monitor.main()
 
         state = self.read_state()
-        self.assertEqual(state["lots"], 3)
+        self.assertEqual(state["lots"], 6)
+        self.assertEqual(state["protection_lots"], 6)
         self.assertEqual(state["owned_entry_lots"], 3)
-        self.assertNotIn("externally_added_lots_adopted", state)
+        self.assertEqual(state["original_owned_entry_lots"], 3)
+        self.assertEqual(state["externally_added_lots_adopted"], 3)
+        self.assertEqual(state["entry_mark"], 1.5)
+        self.assertEqual(state["position_composition"], "mixed_bot_and_external")
+        self.assertEqual(state["protection_scope"], "trend_plus_same_product_external")
         get_order.assert_not_called()
         place.assert_not_called()
         edit.assert_not_called()
         self.assertTrue(any(
-            "fixed-size LIVE score ownership" in call.args[0]
+            "EXTERNAL LOTS PROTECTED" in call.args[0]
             for call in telegram.call_args_list
         ))
         health = json.loads(self.health_file.read_text(encoding="utf-8"))
-        self.assertEqual(health["status"], "degraded")
-        self.assertEqual(health["adoption_status"], "blocked_score_fixed_size")
+        self.assertEqual(health["status"], "healthy")
+        self.assertEqual(health["adoption_status"], "adopted")
         self.assertEqual(health["exchange_position_size"], 6)
-        self.assertEqual(health["protected_lots"], 3)
-        self.assertEqual(health["unprotected_same_product_lots"], 3)
-        self.assertFalse(health["protection_established"])
+        self.assertEqual(health["protected_lots"], 6)
+        self.assertTrue(health["local_fallback_active"])
+        self.assertTrue(health["protection_established"])
 
     def test_failed_resize_keeps_old_orders_and_reports_partial_coverage(self):
         self.write_state(
@@ -830,7 +837,7 @@ class TpMonitorSafetyTests(unittest.TestCase):
         health = json.loads(self.health_file.read_text(encoding="utf-8"))
         self.assertEqual(health["status"], "healthy")
 
-    def test_unsupported_exchange_protection_alerts_and_uses_local_fallback(self):
+    def test_unsupported_exchange_protection_uses_quiet_healthy_local_fallback(self):
         self.write_state(protection_config={
             "tp_target_pnl": 100, "sl_target_pnl": 50,
             "tsl_arm_pnl": 0, "tsl_trail_pnl": 0, "poll_secs": 30,
@@ -850,12 +857,43 @@ class TpMonitorSafetyTests(unittest.TestCase):
              patch.object(tp_monitor.time, "sleep", side_effect=_StopLoop):
             with self.assertRaises(_StopLoop):
                 tp_monitor.main()
-        telegram.assert_called_once()
-        self.assertIn("local monitor fallback", telegram.call_args.args[0])
+        telegram.assert_not_called()
         health = json.loads(self.health_file.read_text(encoding="utf-8"))
-        self.assertEqual(health["status"], "degraded")
+        self.assertEqual(health["status"], "healthy")
+        self.assertEqual(health["last_error"], "")
+        self.assertEqual(health["protection_runtime_mode"], "local_monitor")
+        self.assertTrue(health["protection_established"])
         self.assertTrue(health["local_fallback_active"])
         self.assertFalse(health["exchange_protection_complete"])
+
+    def test_local_fallback_alerts_only_after_three_consecutive_poll_failures(self):
+        self.write_state(
+            exchange_protection_supported=False,
+            protection_config={
+                "tp_target_pnl": 100, "sl_target_pnl": 50,
+                "tsl_arm_pnl": 0, "tsl_trail_pnl": 0, "poll_secs": 30,
+            },
+        )
+        with patch.object(tp_monitor, "REMOVE_PROTECTION", False), \
+             patch.object(tp_monitor, "install_signal_handlers"), \
+             patch.object(tp_monitor, "get_exchange_size", return_value=10), \
+             patch.object(tp_monitor, "get_exchange_position", return_value={
+                 "product_id": 101, "size": 10, "entry_price": "1.0",
+             }), \
+             patch.object(tp_monitor, "get_mark",
+                          side_effect=RuntimeError("ticker unavailable")), \
+             patch.object(tp_monitor, "send_telegram") as telegram, \
+             patch.object(tp_monitor.time, "sleep",
+                          side_effect=[None, None, _StopLoop()]):
+            with self.assertRaises(_StopLoop):
+                tp_monitor.main()
+
+        telegram.assert_called_once()
+        message = telegram.call_args.args[0]
+        self.assertIn("local protection failed 3 consecutive checks", message)
+        health = json.loads(self.health_file.read_text(encoding="utf-8"))
+        self.assertEqual(health["status"], "degraded")
+        self.assertEqual(health["consecutive_errors"], 3)
 
     def test_close_does_not_remove_protection_until_zero_position_is_confirmed(self):
         self.write_state(tp_stop_order_id="tp-1")

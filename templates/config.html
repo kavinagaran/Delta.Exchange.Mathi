@@ -267,10 +267,20 @@ function applyScoreZoneSetupLockStatus(payload) {
   const hint = document.getElementById('score-setup-lock-hint');
   const lock = payload && typeof payload.setup_lock === 'object'
     ? payload.setup_lock : {};
+  const retry = payload && typeof payload.no_fill_retry === 'object'
+    ? payload.no_fill_retry : {};
   const active = lock.active === true;
   button.disabled = !active;
   button.setAttribute('aria-disabled', active ? 'false' : 'true');
   if (!active) {
+    if (retry.active === true) {
+      const zone = String(retry.zone || 'current zone').replace(/_/g, ' ');
+      const retryAt = retry.retry_not_before_utc
+        ? new Date(retry.retry_not_before_utc).toLocaleString()
+        : 'after the liquidity cooldown';
+      hint.textContent = `Liquidity retry: ${zone}, automatic at ${retryAt}. No reset needed.`;
+      return;
+    }
     if (lock.stale === true) {
       const currentZone = String(lock.current_zone || 'new zone').replace(/_/g, ' ');
       hint.textContent = `Zone lock: none. ${currentZone} is a fresh setup.`;

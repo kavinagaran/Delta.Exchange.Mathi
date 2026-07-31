@@ -3442,11 +3442,16 @@ def main():
             exch_unsupported = True
             local_fallback_active = True
             save_state_fields(exchange_protection_supported=False,
-                              exchange_protection_error=f"{what} unsupported")
-            log.warning("%s is unsupported on this product; local fallback is active.", what)
-            alert_once("exchange_orders_unsupported",
-                       f"{symbol}: exchange-resident {what.lower()} is unsupported; "
-                       f"local monitor fallback is active every {local_fallback_poll}s")
+                              exchange_protection_error=f"{what} unsupported",
+                              protection_runtime_mode="local_monitor")
+            # This is an exchange capability result, not a protection outage.
+            # The monitor immediately switches to the faster local loop and
+            # retains the same reduce-only close path.  Telegram is reserved
+            # for failure of that fallback, not its expected activation.
+            log.warning(
+                "%s is unsupported on this product; healthy local protection "
+                "is active every %ds.", what, local_fallback_poll,
+            )
             return True
         return False
 
@@ -4437,40 +4442,6 @@ def main():
                     sleep_secs = local_fallback_poll
                     raise _RetryMonitorCycle()
 
-                score_owned_live = (
-                    SLOT == "trend"
-                    and str(state.get("ownership") or "").lower()
-                    == "trend_score_auto_live"
-                    and str(state.get("entry_trigger") or "").lower()
-                    == "trend_engine_score_zone_auto"
-                )
-                if new_lots > lots and score_owned_live:
-                    message = (
-                        "exchange position grew beyond the proven score fill "
-                        f"({new_lots} > {lots}); fixed-size LIVE score ownership "
-                        "never adopts externally added lots"
-                    )
-                    write_monitor_health(
-                        "degraded",
-                        last_error=message,
-                        state_status=state.get("status"),
-                        exchange_position_size=live,
-                        protected_lots=lots,
-                        owned_entry_lots=owned_cap,
-                        unprotected_same_product_lots=max(new_lots - lots, 0),
-                        stop_order_id=stop_id,
-                        tp_order_id=tp_id,
-                        protection_established=False,
-                        adoption_status="blocked_score_fixed_size",
-                        continuity_verified=bool(continuity.get("verified")),
-                        continuity_status=continuity.get("status"),
-                    )
-                    alert_once(
-                        "score_same_product_growth_blocked",
-                        f"{symbol}: {message}",
-                    )
-                    sleep_secs = local_fallback_poll
-                    raise _RetryMonitorCycle()
                 if new_lots > lots and SLOT == "trend":
                     try:
                         previous_lots = lots
@@ -4825,10 +4796,18 @@ def main():
                     tp_complete or tp_local_fallback
                 ) and (stop_complete or stop_local_fallback)
                 sleep_secs = local_fallback_poll if local_fallback_active else poll_secs
-                status = "healthy" if exchange_complete else "degraded"
-                error = "" if exchange_complete else (
-                    "exchange protection incomplete; executable local fallback active"
-                    if local_fallback_active else "protection coverage is unverified"
+                # A proven, executable local fallback is a supported
+                # protection mode for products on which Delta rejects resting
+                # stop orders.  Keep the distinction in structured fields,
+                # but do not label a functioning protection loop as degraded.
+                protection_healthy = exchange_complete or (
+                    exch_unsupported
+                    and local_fallback_active
+                    and protection_established
+                )
+                status = "healthy" if protection_healthy else "degraded"
+                error = "" if protection_healthy else (
+                    "protection coverage is unverified"
                 )
                 write_monitor_health(
                     status, last_error=error, identity_state=state,
@@ -4854,6 +4833,13 @@ def main():
                     local_fallback_active=local_fallback_active,
                     local_tp_fallback_active=tp_local_fallback,
                     local_stop_fallback_active=stop_local_fallback,
+                    protection_runtime_mode=(
+                        "exchange_orders"
+                        if exchange_complete else "local_monitor"
+                        if exch_unsupported and local_fallback_active
+                        else "local_fallback_degraded"
+                        if local_fallback_active else "unverified"
+                    ),
                     protection_established=protection_established,
                     continuity_verified=continuity_verified,
                     continuity_status=continuity.get("status"),
@@ -4861,16 +4847,32 @@ def main():
                     continuity_verified_at_utc=continuity.get("verified_at_utc") or _utc_now(),
                     consecutive_errors=0, next_poll_secs=sleep_secs,
                 )
+                if consecutive_errors:
+                    # A recovered fallback must be allowed to report a future
+                    # independent outage once, instead of suppressing it for
+                    # the lifetime of the position.
+                    recovered_code = "local_fallback_monitor_failed"
+                    if recovered_code in alert_codes:
+                        alert_codes.discard(recovered_code)
+                        save_state_fields(
+                            protection_alert_codes=sorted(alert_codes),
+                            local_fallback_recovered_at_utc=_utc_now(),
+                        )
                 consecutive_errors = 0
 
                 notification_pending = bool(
                     adopted_lots or state.get("external_adoption_notification_pending")
                 )
-                if notification_pending and exchange_complete:
+                if notification_pending and protection_established:
+                    coverage = (
+                        "TP + SL/TSL verified on exchange"
+                        if exchange_complete else
+                        f"Local TP/SL/TSL monitor active every {local_fallback_poll}s"
+                    )
                     send_telegram(
                         f"🛡️ <b>EXTERNAL LOTS PROTECTED — {_slot_label()} ({USER.upper()})</b>\n"
                         f"<code>{symbol}</code>\nTotal  » <code>{lots:,}</code> matching lots\n"
-                        f"Coverage » <code>TP + SL/TSL verified on exchange</code>\n"
+                        f"Coverage » <code>{coverage}</code>\n"
                         f"Basis  » <code>${entry_mark:.4f}</code> aggregate entry"
                     )
                     save_state_fields(external_adoption_notification_pending=False,
@@ -4924,6 +4926,13 @@ def main():
                 protection_established=bool(stop_id or tp_id),
                 consecutive_errors=consecutive_errors,
             )
+            if local_fallback_active and consecutive_errors >= 3:
+                alert_once(
+                    "local_fallback_monitor_failed",
+                    f"{symbol}: local protection failed "
+                    f"{consecutive_errors} consecutive checks; immediate "
+                    f"attention is required ({str(exc)[:180]})",
+                )
             sleep_secs = min(60, max(local_fallback_poll, 2 ** min(consecutive_errors, 5)))
 
         time.sleep(sleep_secs)

@@ -505,7 +505,7 @@ def test_live_actionable_zone_change_replaces_the_previous_setup_lock(
     )
 
 
-def test_no_fill_blocks_same_zone_until_the_score_zone_changes(
+def test_no_fill_throttles_same_zone_until_retry_or_zone_change(
     live_account,
     monkeypatch,
 ):
@@ -546,7 +546,8 @@ def test_no_fill_blocks_same_zone_until_the_score_zone_changes(
     assert dashboard._maybe_auto_trend_score_cycle() is False
     assert prepare.call_count == 1
     assert executor.call_count == 1
-    dashboard._trend_score_auto_notify.assert_called_once()
+    # A zero-fill is not a trade event and must not produce Telegram noise.
+    dashboard._trend_score_auto_notify.assert_not_called()
 
     ledger_path = live_account / dashboard.TREND_SCORE_AUTO_LEDGER_FILE
     ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
@@ -563,8 +564,116 @@ def test_no_fill_blocks_same_zone_until_the_score_zone_changes(
     assert dashboard._maybe_auto_trend_score_cycle() is True
     assert prepare.call_count == 2
     assert executor.call_count == 2
+    dashboard._trend_score_auto_notify.assert_called_once()
     ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
     assert ledger["no_fill_setup"] is None
+
+
+def test_no_fill_retries_automatically_on_a_later_candle_after_cooldown(
+    live_account,
+    monkeypatch,
+):
+    first = _signal(
+        dashboard._trading_mode_payload(), -75, suffix="10:00:00Z",
+    )
+    retry = _signal(
+        dashboard._trading_mode_payload(), -60, suffix="10:05:00Z",
+    )
+    collector = Mock(side_effect=[first, retry])
+    prepare = Mock(side_effect=lambda value: copy.deepcopy(_prepared(value["zone"])))
+
+    def execute(**kwargs):
+        signal = kwargs["signal"]
+        if signal["signal_key"] == first["signal_key"]:
+            return {
+                "ok": False,
+                "status": "NO_FILL",
+                "consume_signal": True,
+                "order_submitted": True,
+                "filled_lots": 0,
+                "state": {
+                    "slot": "trend", "status": "IDLE", "dry_run": False,
+                    "execution_mode": "live",
+                },
+            }
+        return _open_result(signal, kwargs["prepared"])
+
+    executor = Mock(side_effect=execute)
+    monkeypatch.setattr(dashboard, "_collect_trend_score_auto_signal", collector)
+    monkeypatch.setattr(dashboard, "_prepare_trend_score_auto_entry", prepare)
+    monkeypatch.setattr(dashboard, "_trend_score_auto_live_execute", executor)
+
+    assert dashboard._maybe_auto_trend_score_cycle() is True
+    ledger_path = live_account / dashboard.TREND_SCORE_AUTO_LEDGER_FILE
+    ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+    assert ledger["no_fill_setup"]["attempt_count"] == 1
+    assert ledger["no_fill_setup"]["retry_delay_seconds"] == 15 * 60
+    dashboard._trend_score_auto_notify.assert_not_called()
+
+    # Simulate the durable cooldown elapsing.  The next completed candle in
+    # the unchanged zone must rebuild and execute without a manual reset.
+    ledger["no_fill_setup"]["retry_not_before_utc"] = (
+        datetime.now(timezone.utc) - timedelta(seconds=1)
+    ).isoformat()
+    ledger_path.write_text(json.dumps(ledger), encoding="utf-8")
+
+    assert dashboard._maybe_auto_trend_score_cycle() is True
+    assert prepare.call_count == 2
+    assert executor.call_count == 2
+    dashboard._trend_score_auto_notify.assert_called_once()
+    ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+    assert ledger["no_fill_setup"] is None
+    assert ledger["setup_lock"]["target_zone"] == dashboard.TREND_SCORE_PE_ZONE
+    release_events = [
+        call for call in dashboard._trend_audit.call_args_list
+        if call.args[0] == "trend_score_auto_live_no_fill_retry_released"
+    ]
+    assert len(release_events) == 1
+
+
+def test_repeated_no_fill_uses_exponential_backoff_without_alerts(
+    live_account,
+    monkeypatch,
+):
+    first = _signal(
+        dashboard._trading_mode_payload(), -75, suffix="10:00:00Z",
+    )
+    retry = _signal(
+        dashboard._trading_mode_payload(), -60, suffix="10:05:00Z",
+    )
+    collector = Mock(side_effect=[first, retry])
+    prepare = Mock(side_effect=lambda value: copy.deepcopy(_prepared(value["zone"])))
+    no_fill = {
+        "ok": False,
+        "status": "NO_FILL",
+        "consume_signal": True,
+        "order_submitted": True,
+        "filled_lots": 0,
+        "state": {
+            "slot": "trend", "status": "IDLE", "dry_run": False,
+            "execution_mode": "live",
+        },
+    }
+    executor = Mock(side_effect=lambda **_: copy.deepcopy(no_fill))
+    monkeypatch.setattr(dashboard, "_collect_trend_score_auto_signal", collector)
+    monkeypatch.setattr(dashboard, "_prepare_trend_score_auto_entry", prepare)
+    monkeypatch.setattr(dashboard, "_trend_score_auto_live_execute", executor)
+
+    assert dashboard._maybe_auto_trend_score_cycle() is True
+    ledger_path = live_account / dashboard.TREND_SCORE_AUTO_LEDGER_FILE
+    ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+    ledger["no_fill_setup"]["retry_not_before_utc"] = (
+        datetime.now(timezone.utc) - timedelta(seconds=1)
+    ).isoformat()
+    ledger_path.write_text(json.dumps(ledger), encoding="utf-8")
+
+    assert dashboard._maybe_auto_trend_score_cycle() is True
+    ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+    assert ledger["no_fill_setup"]["attempt_count"] == 2
+    assert ledger["no_fill_setup"]["retry_delay_seconds"] == 30 * 60
+    assert prepare.call_count == 2
+    assert executor.call_count == 2
+    dashboard._trend_score_auto_notify.assert_not_called()
 
 
 def test_no_fill_block_can_be_explicitly_rearmed_by_a_saved_config_change(

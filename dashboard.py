@@ -140,6 +140,11 @@ TREND_SCORE_AUTO_OWNERSHIP = "trend_score_auto_dry_run"
 TREND_SCORE_AUTO_LIVE_OWNERSHIP = "trend_score_auto_live"
 TREND_SCORE_AUTO_TRIGGER = "trend_engine_score_zone_auto"
 TREND_SCORE_AUTO_LEDGER_SIGNAL_LIMIT = 576
+# A zero-fill IOC is a transient liquidity outcome, not a completed trading
+# setup.  Retry only on a later completed candle and back off aggressively so
+# an unchanged zone cannot create an order/alert storm.
+TREND_SCORE_AUTO_NO_FILL_RETRY_BASE_SECONDS = 15 * 60
+TREND_SCORE_AUTO_NO_FILL_RETRY_MAX_SECONDS = 60 * 60
 # Fixed strategy rule: both DRY RUN and LIVE use the same quoted ATM MOVE
 # premium floor before a SHORT MOVE can be opened.
 SHORT_MOVE_MIN_PREMIUM_USD = 300.0
@@ -4066,12 +4071,12 @@ def tp_monitor_status():
         )
         if not continuity_ok:
             coverage_status = "attention"
-        elif running and exchange_lots > exchange_protected_lots:
-            coverage_status = "resizing"
         elif exchange_complete:
             coverage_status = "exchange_protected"
         elif local_fallback and health.get("protection_established"):
             coverage_status = "local_fallback"
+        elif running and exchange_lots > protected_lots:
+            coverage_status = "resizing"
         elif running and not verified_health:
             coverage_status = "verifying"
         else:
@@ -9245,6 +9250,80 @@ def _trend_score_auto_no_fill_setup_matches(
     )
 
 
+def _trend_score_auto_no_fill_attempt_count(setup: dict) -> int:
+    """Return the durable count of zero-fill exchange attempts."""
+    raw = setup.get("attempt_count", 1)
+    try:
+        count = int(raw)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise RuntimeError(
+            "Trend score-auto NO_FILL attempt count is invalid"
+        ) from exc
+    if count < 1:
+        raise RuntimeError(
+            "Trend score-auto NO_FILL attempt count is invalid"
+        )
+    return count
+
+
+def _trend_score_auto_no_fill_retry_delay_seconds(attempt_count: int) -> int:
+    """Exponential 15m/30m/60m retry delay, capped at one hour."""
+    exponent = max(0, min(int(attempt_count) - 1, 16))
+    return min(
+        TREND_SCORE_AUTO_NO_FILL_RETRY_BASE_SECONDS * (2 ** exponent),
+        TREND_SCORE_AUTO_NO_FILL_RETRY_MAX_SECONDS,
+    )
+
+
+def _trend_score_auto_no_fill_retry_not_before(setup: dict) -> datetime:
+    """Resolve an explicit or backward-compatible automatic retry time."""
+    explicit = setup.get("retry_not_before_utc")
+    if explicit not in (None, ""):
+        retry_at = _parse_utc_stamp(explicit)
+        if retry_at is None:
+            raise RuntimeError(
+                "Trend score-auto NO_FILL retry timestamp is invalid"
+            )
+        return retry_at
+    recorded_at = _parse_utc_stamp(setup.get("recorded_at_utc"))
+    if recorded_at is None:
+        raise RuntimeError(
+            "Trend score-auto NO_FILL recorded timestamp is invalid"
+        )
+    return recorded_at + timedelta(
+        seconds=_trend_score_auto_no_fill_retry_delay_seconds(
+            _trend_score_auto_no_fill_attempt_count(setup)
+        )
+    )
+
+
+def _trend_score_auto_no_fill_retry_due(
+    ledger: dict,
+    signal: dict,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    """Allow a same-zone retry only after cooldown and a newer candle."""
+    if not _trend_score_auto_no_fill_setup_matches(ledger, signal):
+        return False
+    setup = _trend_score_auto_no_fill_setup(ledger)
+    signal_close = _parse_utc_stamp(signal.get("signal_bar_close_utc"))
+    prior_close = _parse_utc_stamp(setup.get("signal_bar_close_utc"))
+    if signal_close is None or prior_close is None:
+        raise RuntimeError(
+            "Trend score-auto NO_FILL signal timestamp is invalid"
+        )
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    else:
+        current = current.astimezone(timezone.utc)
+    return (
+        signal_close > prior_close
+        and current >= _trend_score_auto_no_fill_retry_not_before(setup)
+    )
+
+
 def _trend_score_auto_release_no_fill_setup_if_reset(
     ledger: dict,
     signal: dict,
@@ -10712,7 +10791,8 @@ def _trend_score_auto_live_entry_result(
     record_action = (
         action if status == "OPEN" and result.get("ok") else status
     )
-    now = datetime.now(timezone.utc).isoformat()
+    now_dt = datetime.now(timezone.utc)
+    now = now_dt.isoformat()
     transition.update({
         "phase": "COMPLETE" if consume else status,
         "action": record_action,
@@ -10743,12 +10823,24 @@ def _trend_score_auto_live_entry_result(
                 transition_id=handled_transition_id,
                 action=record_action,
             )
-        if status == "NO_FILL":
-            # One bounded IOC attempt has already been made for this setup.
-            # Keep the block durable so later completed candles in the same
-            # score zone cannot re-submit or repeat the Telegram alert.
+        prior_no_fill = _trend_score_auto_no_fill_setup(ledger)
+        if status == "NO_FILL" and filled_lots == 0:
+            # Treat a zero-fill as transient liquidity.  Preserve a durable
+            # backoff across processes/restarts, then rebuild the contract and
+            # quote from a later completed candle without operator reset.
+            previous_attempts = (
+                _trend_score_auto_no_fill_attempt_count(prior_no_fill)
+                if prior_no_fill is not None
+                and _trend_score_auto_no_fill_setup_matches(ledger, signal)
+                else 0
+            )
+            attempt_count = previous_attempts + 1
+            retry_delay_seconds = (
+                _trend_score_auto_no_fill_retry_delay_seconds(attempt_count)
+            )
             ledger["no_fill_setup"] = {
                 "recorded_at_utc": now,
+                "last_attempt_at_utc": now,
                 "source_signal_key": handled_signal_key,
                 "source_transition_id": handled_transition_id,
                 "signal_bar_close_utc": signal["signal_bar_close_utc"],
@@ -10757,11 +10849,22 @@ def _trend_score_auto_live_entry_result(
                     (signal.get("mode") or {}).get("mode_revision") or ""
                 ),
                 "order_submitted": bool(result.get("order_submitted")),
+                "attempt_count": attempt_count,
+                "retry_delay_seconds": retry_delay_seconds,
+                "retry_not_before_utc": (
+                    now_dt + timedelta(seconds=retry_delay_seconds)
+                ).isoformat(),
             }
+        elif prior_no_fill is not None and (
+            _trend_score_auto_no_fill_setup_matches(ledger, signal)
+        ):
+            # A fill or another terminal outcome ends this liquidity retry.
+            ledger["no_fill_setup"] = None
     ledger["current_transition"] = transition
     event_id = f"{handled_transition_id}:{status.lower()}"
     should_notify = (
         consume
+        and status != "NO_FILL"
         and _trend_score_auto_register_notification(
             ledger,
             event_id,
@@ -10816,7 +10919,10 @@ def _trend_score_auto_live_entry_result(
         last_action = (
             "LIVE order was rejected"
             if status == "REJECTED"
-            else "LIVE bounded IOC filled zero lots"
+            else (
+                "LIVE bounded IOC filled zero lots; an automatic liquidity "
+                "retry is scheduled without requiring a zone-lock reset"
+            )
         )
         last_error = str(result.get("error") or "")[:500] or None
     else:
@@ -11275,6 +11381,12 @@ def _maybe_auto_trend_score_live_cycle(
         guessed_same_no_fill_setup = _trend_score_auto_no_fill_setup_matches(
             guessed_ledger, current_signal,
         )
+        guessed_no_fill_blocked = (
+            guessed_same_no_fill_setup
+            and not _trend_score_auto_no_fill_retry_due(
+                guessed_ledger, current_signal,
+            )
+        )
         guessed_setup_locked = _trend_score_auto_setup_lock_matches(
             guessed_ledger, current_signal,
         )
@@ -11306,7 +11418,7 @@ def _maybe_auto_trend_score_live_cycle(
                 )
                 if (
                     guessed_plan["action"] in {"OPEN", "CLOSE_THEN_OPEN"}
-                    and not guessed_same_no_fill_setup
+                    and not guessed_no_fill_blocked
                     and not guessed_setup_locked
                 ):
                     prepared = _prepare_trend_score_auto_entry(
@@ -11679,12 +11791,19 @@ def _maybe_auto_trend_score_live_cycle(
                         )
                         return False
 
-                    if (
+                    same_no_fill_setup = (
                         plan["action"] == "OPEN"
                         and _trend_score_auto_no_fill_setup_matches(
                             ledger, current_signal,
                         )
-                    ):
+                    )
+                    no_fill_retry_due = (
+                        same_no_fill_setup
+                        and _trend_score_auto_no_fill_retry_due(
+                            ledger, current_signal,
+                        )
+                    )
+                    if same_no_fill_setup and not no_fill_retry_due:
                         blocked_setup = _trend_score_auto_no_fill_setup(ledger)
                         suppressed_transition_id = (
                             _trend_score_auto_transition_id(
@@ -11712,6 +11831,11 @@ def _maybe_auto_trend_score_live_cycle(
                             "suppressed_by_signal_key": blocked_setup.get(
                                 "source_signal_key"
                             ),
+                            "retry_not_before_utc": (
+                                _trend_score_auto_no_fill_retry_not_before(
+                                    blocked_setup
+                                ).isoformat()
+                            ),
                             "updated_at_utc": datetime.now(
                                 timezone.utc
                             ).isoformat(),
@@ -11725,6 +11849,16 @@ def _maybe_auto_trend_score_live_cycle(
                                 "source_signal_key": blocked_setup.get(
                                     "source_signal_key"
                                 ),
+                                "attempt_count": (
+                                    _trend_score_auto_no_fill_attempt_count(
+                                        blocked_setup
+                                    )
+                                ),
+                                "retry_not_before_utc": (
+                                    _trend_score_auto_no_fill_retry_not_before(
+                                        blocked_setup
+                                    ).isoformat()
+                                ),
                                 "order_submitted": False,
                                 "exchange_api_called": False,
                             },
@@ -11733,10 +11867,9 @@ def _maybe_auto_trend_score_live_cycle(
                             user,
                             status="no_fill_suppressed",
                             last_action=(
-                                "same LIVE score zone remains blocked after "
-                                "a zero-fill IOC; entry and alert are "
-                                "suppressed until the zone or saved "
-                                "configuration changes"
+                                "waiting for the automatic zero-fill "
+                                "liquidity retry; no reset or Telegram "
+                                "alert is required"
                             ),
                             last_error=None,
                             current_zone=None,
@@ -11745,6 +11878,26 @@ def _maybe_auto_trend_score_live_cycle(
                             last_transition_id=suppressed_transition_id,
                         )
                         return False
+
+                    if no_fill_retry_due:
+                        retry_setup = _trend_score_auto_no_fill_setup(ledger)
+                        _trend_audit(
+                            "trend_score_auto_live_no_fill_retry_released",
+                            {
+                                "signal_key": current_signal["signal_key"],
+                                "target_zone": current_signal["zone"],
+                                "previous_signal_key": retry_setup.get(
+                                    "source_signal_key"
+                                ),
+                                "previous_attempt_count": (
+                                    _trend_score_auto_no_fill_attempt_count(
+                                        retry_setup
+                                    )
+                                ),
+                                "order_submitted": False,
+                                "exchange_api_called": False,
+                            },
+                        )
 
                     if _trend_score_auto_entry_is_setup_locked(
                         ledger, current_signal, plan,
@@ -12728,15 +12881,35 @@ def api_trend_engine_score_auto_status():
                 payload["engine_zone"] = candidate_zone
         except Exception:
             pass
+    no_fill_setup = None
+    no_fill_retry_payload = {"active": False}
     try:
-        setup_lock = _trend_score_auto_setup_lock(
-            _trend_score_auto_ledger(_mode_data_dir(namespace_dry_run))
+        status_ledger = _trend_score_auto_ledger(
+            _mode_data_dir(namespace_dry_run)
         )
+        setup_lock = _trend_score_auto_setup_lock(status_ledger)
+        if mode == "live":
+            no_fill_setup = _trend_score_auto_no_fill_setup(status_ledger)
+        if no_fill_setup:
+            no_fill_retry_payload = {
+                "active": True,
+                "zone": no_fill_setup.get("target_zone"),
+                "attempt_count": _trend_score_auto_no_fill_attempt_count(
+                    no_fill_setup
+                ),
+                "retry_not_before_utc": (
+                    _trend_score_auto_no_fill_retry_not_before(
+                        no_fill_setup
+                    ).isoformat()
+                ),
+                "source_signal_key": no_fill_setup.get("source_signal_key"),
+            }
     except Exception as exc:
         # The controller will fail closed on a corrupt ledger.  Keep the
         # status endpoint readable so the operator can see that condition.
         setup_lock = None
         payload["setup_lock_error"] = str(exc)[:300]
+    payload["no_fill_retry"] = no_fill_retry_payload
     # A setup lock survives Bot Config saves and HOLD readings, but it blocks
     # only its own actionable zone.  A prior zone's durable record must never
     # make the reset control claim that the current setup is locked.
