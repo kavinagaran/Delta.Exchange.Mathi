@@ -6,6 +6,29 @@
 
 {% block content %}
 <div class="overview-page">
+  <article class="card today-current-trade-card" aria-labelledby="today-current-trade-title">
+    <div class="card-hd slot-hd">
+      <span aria-hidden="true">◉</span>
+      <span id="today-current-trade-title">Current Trade</span>
+      <span class="spacer"></span>
+      <span class="hint">One active position at a time</span>
+    </div>
+    <div class="card-bd today-current-trade-body">
+      <section class="today-current-position-pane" aria-labelledby="today-current-position-title">
+        <h3 id="today-current-position-title">Current position</h3>
+        <div id="today-current-position" aria-live="polite">
+          <div class="no-pos">Loading current trade…</div>
+        </div>
+      </section>
+      <section class="today-engine-decision-pane" aria-labelledby="today-engine-decision-title">
+        <h3 id="today-engine-decision-title">Latest engine decision</h3>
+        <div id="today-engine-decision" aria-live="polite">
+          <div class="no-pos">Loading decision…</div>
+        </div>
+      </section>
+    </div>
+  </article>
+
   <div class="stats today-summary" id="today-summary">
     <div class="stat performance-stat accent">
       <div class="lbl">Trades today</div>
@@ -120,6 +143,109 @@ function todayControlSlot(trade) {
   return '';
 }
 
+function todayTradeTimeIst(trade) {
+  const clock = String(trade?.entry_time_utc || trade?.entry_time || '').trim();
+  if (!clock) return '—';
+  if (typeof utcToIst === 'function') return utcToIst(clock) || '—';
+  const parts = clock.split(':').map(Number);
+  if (parts.length < 2 || parts.some(value => !Number.isFinite(value))) return clock;
+  const total = (parts[0] * 60 + parts[1] + 330) % 1440;
+  const hour = Math.floor(total / 60);
+  const minute = total % 60;
+  return `${(hour + 11) % 12 + 1}:${String(minute).padStart(2, '0')} ${hour >= 12 ? 'PM' : 'AM'} IST`;
+}
+
+function todayTradeType(trade) {
+  const symbol = String(trade?.symbol || '').toUpperCase();
+  if (symbol.startsWith('MV-')) return 'MV';
+  if (symbol.startsWith('C-')) return 'CE';
+  if (symbol.startsWith('P-')) return 'PE';
+  return String(trade?.trade_type || trade?.trend_score_zone || '—').toUpperCase();
+}
+
+function renderTodayCurrentTrade(trade, index) {
+  const root = document.getElementById('today-current-position');
+  if (!trade) {
+    root.innerHTML = `<div class="no-pos score-zone-empty">
+      <span class="icon">◇</span><strong>No live trade is open</strong>
+      <small>The next approved engine entry will appear here.</small>
+    </div>`;
+    return;
+  }
+  const pnl = todayTradePnl(trade);
+  const direction = String(trade.side || '—').toUpperCase();
+  const directionClass = direction === 'SHORT' ? 'short' : 'long';
+  const slot = todayControlSlot(trade);
+  root.innerHTML = `<div class="dry-state-line">
+      <span class="badge live">LIVE OPEN</span><span>Exchange position</span>
+    </div>
+    <div class="big-pnl ${pnlCls(pnl)}">${f$(pnl)}<small>Live P&amp;L</small></div>
+    <dl class="kv">
+      <dt>Time of trade</dt><dd>${esc(todayTradeTimeIst(trade))}</dd>
+      <dt>Trade type</dt><dd>${esc(todayTradeType(trade))}</dd>
+      <dt>Contract</dt><dd>${esc(trade.symbol || '—')}</dd>
+      <dt>Side</dt><dd><span class="badge ${directionClass}">${esc(direction)}</span></dd>
+      <dt>Lots</dt><dd>${fN(trade.lots)}</dd>
+      <dt>Entry</dt><dd>$${fN(trade.entry_mark, 4)}</dd>
+      <dt>Current mark</dt><dd>$${fN(trade.current_mark, 4)}</dd>
+    </dl>
+    ${slot ? `<div class="today-current-actions">
+      <button class="btn danger sm" type="button" onclick="closeTodayLiveTrade(${index})">Close Position</button>
+      <button class="btn secondary sm" type="button" onclick="openTodayProtection(${index})">Protection</button>
+      <button class="btn secondary sm" type="button" onclick="showTodayPayoff(${index})">Payoff</button>
+    </div>` : ''}`;
+}
+
+function todayDecisionLabel(value) {
+  return String(value || 'Unavailable').replace(/_/g, ' ');
+}
+
+function todayDecisionTime(value) {
+  if (!value) return '—';
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? String(value) : parsed.toLocaleString('en-IN', {
+    timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short',
+  });
+}
+
+function renderTodayEngineDecision(status) {
+  const root = document.getElementById('today-engine-decision');
+  if (!status) {
+    root.innerHTML = `<section class="dry-engine-panel is-unavailable">
+      <div class="dry-engine-hd"><div><span>TREND SCORE AUTOMATION</span>
+      <strong>Decision status is unavailable</strong></div><span class="dry-engine-decision">WAITING</span></div>
+      <p>The latest controller state could not be loaded. It will refresh automatically.</p>
+    </section>`;
+    return;
+  }
+  const zone = String(status.engine_zone || status.current_zone || '').toUpperCase();
+  const targets = {CE_2_ITM: 'Buy 2-step ITM Call', PE_2_ITM: 'Buy 2-step ITM Put',
+    SHORT_MOVE: 'Sell ATM MOVE straddle', HOLD: 'Hold the open position — no new entry'};
+  const action = targets[zone] || 'Waiting for a valid closed-bar score';
+  const tone = zone === 'CE_2_ITM' ? 'is-buy-ce' : zone === 'PE_2_ITM' ? 'is-buy-pe'
+    : zone === 'HOLD' ? 'is-hold' : 'is-waiting';
+  const score = Number.isFinite(Number(status.direction_score)) ? fN(status.direction_score, 1) : 'Waiting';
+  const lots = Number.isFinite(Number(status.lots)) ? fN(status.lots) : '—';
+  root.innerHTML = `<section class="dry-engine-panel ${tone}" aria-label="Latest live engine decision">
+    <div class="dry-engine-hd"><div><span>TREND SCORE AUTOMATION · LIVE</span>
+      <strong>Entries, exits and trade transitions happen automatically</strong></div>
+      <span class="dry-engine-decision">${esc(todayDecisionLabel(status.status || zone).toUpperCase())}</span></div>
+    <dl class="dry-engine-metrics">
+      <div class="wide"><dt>Current automatic action</dt><dd>${esc(action)}</dd></div>
+      <div><dt>Direction score</dt><dd>${esc(score)}</dd></div>
+      <div><dt>Market regime</dt><dd>${esc(todayDecisionLabel(status.market_regime || 'Waiting'))}</dd></div>
+      <div><dt>Trade type</dt><dd>${esc(todayDecisionLabel(zone || 'Waiting'))}</dd></div>
+      <div><dt>Lots</dt><dd>${esc(lots)}</dd></div>
+      <div class="wide"><dt>Selected / open contract</dt><dd>${esc(status.symbol || 'Waiting for an eligible contract')}</dd></div>
+      <div class="wide"><dt>Last automatic action</dt><dd>${esc(todayDecisionLabel(status.last_action || 'No automatic transition yet'))}</dd></div>
+      <div><dt>Signal bar closed</dt><dd>${esc(todayDecisionTime(status.signal_bar_close_utc))}</dd></div>
+      <div><dt>Last controller cycle</dt><dd>${esc(todayDecisionTime(status.last_cycle_utc))}</dd></div>
+    </dl>
+    ${status.last_error ? `<p class="dry-engine-action-copy c-neg">Latest controller error: ${esc(status.last_error)}</p>` : ''}
+    <div class="dry-engine-actions"><a href="/trend-engine" class="btn secondary sm">View Trend Engine</a></div>
+  </section>`;
+}
+
 function setTodaySummaryTone(elementId, tone) {
   const value = document.getElementById(elementId);
   const card = value?.closest('.stat');
@@ -153,10 +279,21 @@ function updateTodaySummary(rows) {
 }
 
 async function loadToday() {
-  const rows = await jget('/api/today-trades');
+  const [rows, engineStatus] = await Promise.all([
+    jget('/api/today-trades'),
+    jget('/api/trend-engine/score-auto/status').catch(() => null),
+  ]);
   const body = document.getElementById('today-body');
   updateTodaySummary(rows);
   window._todayLiveTrades = {};
+  const currentIndex = rows.findIndex(trade => trade?._live);
+  const currentTrade = currentIndex >= 0 ? rows[currentIndex] : null;
+  if (currentTrade) {
+    const controlSlot = todayControlSlot(currentTrade);
+    if (controlSlot) window._todayLiveTrades[currentIndex] = { ...currentTrade, controlSlot };
+  }
+  renderTodayCurrentTrade(currentTrade, currentIndex);
+  renderTodayEngineDecision(engineStatus);
   if (!rows.length) {
     body.innerHTML = '<tr class="empty-row"><td colspan="9">No trades today</td></tr>';
     return rows;

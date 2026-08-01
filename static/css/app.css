@@ -2445,8 +2445,25 @@ body.login-body {
   .te-decision-dot { animation: none; }
 }
 
-/* Today is deliberately a daily ledger: four same-day summary cards followed
-   by the full-width table. Account, engine and lifetime detail live elsewhere. */
+/* Today leads with the active trade and its latest engine decision. Daily
+   summary cards and the full ledger follow as supporting context. */
+.today-current-trade-card { min-width: 0; overflow: hidden; margin-bottom: 18px; }
+.today-current-trade-card > .card-hd { min-height: 50px; }
+.today-current-trade-body {
+  display: grid; grid-template-columns: minmax(300px, .84fr) minmax(400px, 1.16fr);
+  gap: 24px; min-height: 365px;
+}
+.today-current-position-pane,
+.today-engine-decision-pane { min-width: 0; display: flex; flex-direction: column; }
+.today-engine-decision-pane { padding-left: 24px; border-left: 1px solid var(--border); }
+.today-current-position-pane > h3,
+.today-engine-decision-pane > h3 {
+  margin: 0 0 12px; color: var(--muted); font-size: 10px; font-weight: 850;
+  letter-spacing: .08em; text-transform: uppercase;
+}
+#today-current-position, #today-engine-decision { flex: 1 1 auto; display: flex; flex-direction: column; }
+#today-engine-decision > .dry-engine-panel { height: 100%; box-sizing: border-box; margin-top: 0; }
+.today-current-actions { display: flex; justify-content: center; gap: 8px; flex-wrap: wrap; margin-top: 16px; }
 .today-summary { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .overview-today-card { margin-top: 18px; }
 .today-trades-table td.numeric {
@@ -2485,6 +2502,8 @@ body.login-body {
 .today-payoff-modal { width: min(780px, 96vw); }
 .today-payoff-modal .chart-box { height: 380px; }
 @media (max-width: 920px) {
+  .today-current-trade-body { grid-template-columns: 1fr; min-height: 0; gap: 20px; }
+  .today-engine-decision-pane { padding: 20px 0 0; border-left: 0; border-top: 1px solid var(--border); }
   .today-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 560px) {
