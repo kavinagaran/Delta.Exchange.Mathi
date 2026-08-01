@@ -1136,3 +1136,32 @@ def test_tp_status_reports_adopted_local_aggregate_as_protected(
     assert payload["exchange_position_lots"] == 500
     assert payload["bot_entry_lots"] == 100
     assert payload["external_protected_lots"] == 400
+
+
+def test_wait_for_protection_accepts_fresh_matching_local_fallback(
+        isolated_user):
+    state = _trend_squareoff_state(
+        status="OPEN",
+        tsl_stop_order_id=None,
+        tp_stop_order_id=None,
+    )
+    _write(isolated_user / "trend_state.json", state)
+    health = _trend_continuity_health(
+        state,
+        status="healthy",
+        protected_lots=6,
+        exchange_position_size=6,
+        exchange_protected_lots=0,
+        exchange_protection_complete=False,
+        local_fallback_active=True,
+        protection_established=True,
+    )
+
+    started_at = datetime.now(timezone.utc)
+    with patch.object(dashboard, "_tp_health", return_value=health):
+        verified, returned = dashboard._wait_for_protection(
+            "alice", "trend", started_at, timeout_secs=0.2,
+        )
+
+    assert verified is True
+    assert returned is health

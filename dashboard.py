@@ -364,7 +364,8 @@ def _wait_for_protection(user: str, slot: str, started_at: datetime,
             current_run = False
         active = bool(
             latest.get("protection_established")
-            and latest.get("exchange_protection_complete") is True
+            and (latest.get("exchange_protection_complete") is True
+                 or latest.get("local_fallback_active") is True)
         )
         if (current_run and active and _tp_health_matches(latest, expected_state, user, slot)
                 and latest.get("status") in {"healthy", "degraded", "running"}):

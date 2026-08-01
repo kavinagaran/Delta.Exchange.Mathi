@@ -144,10 +144,11 @@ RECONCILE_SECS = max(int(_f("TP_ORDER_RECONCILE_SECS", 60)), 30)
 LOCAL_FALLBACK_POLL_SECS = max(
     10, min(POLL_SECS, int(_f("TP_LOCAL_FALLBACK_POLL_SECS", 10)))
 )
-# LIVE protection is exchange-only. The local loop remains responsible for
-# reconciliation and emergency flattening, but it is never accepted as the
-# TP/SL/TSL protection layer for an open position.
-EXCHANGE_ONLY_PROTECTION = True
+# Delta rejects exchange-resident stop orders for some MOVE/option products.
+# In that case, retain the verified 10-second local TP/SL/TSL monitor instead
+# of opening a position and immediately flattening it.  The exchange-only
+# safety path remains available as an explicit future policy switch.
+EXCHANGE_ONLY_PROTECTION = False
 OPTION_FEE_RATE = max(_f("OPTION_FEE_RATE", 0.00010), 0)
 OPTION_FEE_CAP_PCT = max(_f("OPTION_FEE_CAP_PCT", 0.035), 0)
 

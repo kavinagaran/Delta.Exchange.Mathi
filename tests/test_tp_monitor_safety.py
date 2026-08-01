@@ -841,7 +841,38 @@ class TpMonitorSafetyTests(unittest.TestCase):
         health = json.loads(self.health_file.read_text(encoding="utf-8"))
         self.assertEqual(health["status"], "healthy")
 
-    def test_unsupported_exchange_protection_triggers_safety_close(self):
+    def test_unsupported_exchange_protection_uses_quiet_healthy_local_fallback(self):
+        self.write_state(protection_config={
+            "tp_target_pnl": 100, "sl_target_pnl": 50,
+            "tsl_arm_pnl": 0, "tsl_trail_pnl": 0, "poll_secs": 30,
+        })
+        unsupported = {"success": False, "error": {"code": "unsupported"}}
+        with patch.object(tp_monitor, "REMOVE_PROTECTION", False), \
+             patch.object(tp_monitor, "install_signal_handlers"), \
+             patch.object(tp_monitor, "get_exchange_size", return_value=10), \
+             patch.object(tp_monitor, "get_exchange_position", return_value={
+                 "product_id": 101, "size": 10, "entry_price": "1.0",
+             }), \
+             patch.object(tp_monitor, "get_mark", return_value=1.0), \
+             patch.object(tp_monitor, "place_stop_order", return_value=unsupported), \
+             patch.object(tp_monitor, "get_order_by_client_id",
+                          return_value=({}, True)), \
+             patch.object(tp_monitor, "close_position") as close, \
+             patch.object(tp_monitor, "send_telegram") as telegram, \
+             patch.object(tp_monitor.time, "sleep", side_effect=_StopLoop):
+            with self.assertRaises(_StopLoop):
+                tp_monitor.main()
+        close.assert_not_called()
+        telegram.assert_not_called()
+        health = json.loads(self.health_file.read_text(encoding="utf-8"))
+        self.assertEqual(health["status"], "healthy")
+        self.assertEqual(health["last_error"], "")
+        self.assertEqual(health["protection_runtime_mode"], "local_monitor")
+        self.assertTrue(health["protection_established"])
+        self.assertTrue(health["local_fallback_active"])
+        self.assertFalse(health["exchange_protection_complete"])
+
+    def test_opt_in_exchange_only_protection_triggers_safety_close(self):
         self.write_state(protection_config={
             "tp_target_pnl": 100, "sl_target_pnl": 50,
             "tsl_arm_pnl": 0, "tsl_trail_pnl": 0, "poll_secs": 30,
