@@ -18,6 +18,7 @@ misreports.
 
 from __future__ import annotations
 
+import math
 import os
 import queue
 import threading
@@ -370,6 +371,83 @@ def get_live_history(symbol: str = "BTCUSD", *, limit: int = 288) -> dict[str, A
     except Exception as exc:
         return {"available": False, "detail": f"{type(exc).__name__}: {exc}",
                 "candles": []}
+
+
+def get_decision_history(
+    symbol: str = "BTCUSD",
+    *,
+    limit: int = 288,
+) -> dict[str, Any]:
+    """Committed five-minute decision scores for display. Never raises.
+
+    The engine's history endpoint returns complete TrendSnapshot objects.
+    The dashboard chart needs only the immutable commit timestamp, score, and
+    zone, so this client deliberately strips every permission, gate, and
+    signal identifier before returning the browser-facing payload.
+    """
+    try:
+        safe_limit = max(1, min(int(limit), 500))
+        response = requests.get(
+            f"{engine_base_url()}/trend/history",
+            params={"symbol": symbol, "limit": safe_limit},
+            headers={"X-Engine-Token": os.getenv("ENGINE_TOKEN", "")},
+            timeout=_timeout(),
+        )
+        if response.status_code != 200:
+            return {
+                "available": False,
+                "detail": f"HTTP {response.status_code}",
+                "decisions": [],
+            }
+        payload = response.json()
+        snapshots = payload.get("snapshots") if isinstance(payload, dict) else None
+        if not isinstance(snapshots, list):
+            return {
+                "available": False,
+                "detail": "malformed decision history",
+                "decisions": [],
+            }
+
+        decisions_by_time: dict[str, dict[str, Any]] = {}
+        for snapshot in snapshots:
+            if not isinstance(snapshot, dict):
+                continue
+            # ``timestamp`` is when the closed-candle snapshot was actually
+            # committed. In the current engine contract ``candle_close_utc``
+            # retains the trigger Candle's start timestamp, so using it here
+            # would draw every decision (and its trade marker) one bar early.
+            stamp = _parse_iso(snapshot.get("timestamp"))
+            try:
+                score = float(snapshot.get("trend_score"))
+            except (TypeError, ValueError):
+                continue
+            if stamp is None or not math.isfinite(score):
+                continue
+            time_utc = stamp.astimezone(timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            )
+            decisions_by_time[time_utc] = {
+                "time_utc": time_utc,
+                "committed_score": score,
+                "zone": str(snapshot.get("zone") or "").strip().upper(),
+            }
+
+        return {
+            "available": True,
+            "symbol": payload.get("symbol") or symbol,
+            "resolution": "5m",
+            "source": "committed_decisions",
+            "decisions": [
+                decisions_by_time[stamp]
+                for stamp in sorted(decisions_by_time)
+            ][-safe_limit:],
+        }
+    except Exception as exc:
+        return {
+            "available": False,
+            "detail": f"{type(exc).__name__}: {exc}",
+            "decisions": [],
+        }
 
 
 def get_shadow_summary() -> dict[str, Any]:

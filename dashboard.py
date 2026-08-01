@@ -5863,12 +5863,12 @@ def _trend_chart_trade_code(record: dict) -> str:
 
 
 def _trend_chart_trade_markers() -> tuple[list[dict], str]:
-    """Return the active account's last 24 hours of score-trade entries.
+    """Return the active account's last 24 hours of score-trade events.
 
     The current DRY/LIVE namespace is selected exactly as the account's
-    controller selects it. Only entry time and the compact CE/PE/MV marker are
-    exposed; order IDs, fills, credentials, and another user's records never
-    reach the chart.
+    controller selects it. Only event time, entry/exit action, and the compact
+    CE/PE/MV marker are exposed; order IDs, fills, credentials, and another
+    user's records never reach the chart.
     """
     config = _user_cfg()
     controller_mode = _trend_score_auto_mode(config)
@@ -5890,14 +5890,14 @@ def _trend_chart_trade_markers() -> tuple[list[dict], str]:
     current = _load_json(_slot_file("trend", dry_run=dry_run), {})
     if (
         isinstance(current, dict)
-        and str(current.get("status") or "").upper() == "OPEN"
+        and str(current.get("status") or "").upper() in {"OPEN", "CLOSED"}
         and _is_dry_record(current) == dry_run
     ):
         candidates.append(dict(current))
 
     now = datetime.now(timezone.utc)
     cutoff = now - timedelta(hours=24)
-    unique: dict[tuple[int, str, str], dict] = {}
+    unique: dict[tuple[int, str, str, str], dict] = {}
     for record in candidates:
         score_driven = bool(
             record.get("trend_score_zone")
@@ -5909,18 +5909,23 @@ def _trend_chart_trade_markers() -> tuple[list[dict], str]:
             continue
         code = _trend_chart_trade_code(record)
         entered = _utc_trade_entry_at(record)
-        if not code or entered is None or entered < cutoff:
+        if not code:
             continue
-        # A small future tolerance accommodates an exchange timestamp just
-        # ahead of the dashboard clock without admitting unrelated history.
-        if entered > now + timedelta(minutes=5):
-            continue
+        exited = _utc_trade_exit_at(record)
         symbol = str(record.get("symbol") or "")
-        key = (int(entered.timestamp()), code, symbol)
-        unique[key] = {
-            "time_utc": entered.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "code": code,
-        }
+        for action, event_at in (("ENTRY", entered), ("EXIT", exited)):
+            if event_at is None or event_at < cutoff:
+                continue
+            # A small future tolerance accommodates an exchange timestamp just
+            # ahead of the dashboard clock without admitting unrelated history.
+            if event_at > now + timedelta(minutes=5):
+                continue
+            key = (int(event_at.timestamp()), code, symbol, action)
+            unique[key] = {
+                "time_utc": event_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "code": code,
+                "action": action,
+            }
     return (
         sorted(unique.values(), key=lambda item: item["time_utc"]),
         marker_mode,
@@ -5937,6 +5942,29 @@ def api_engine_live_history():
     except Exception as exc:
         # Marker history is presentation-only. A malformed local ledger must
         # not hide otherwise healthy engine score candles.
+        print(
+            f"Trend chart marker warning for {_active_user()}: "
+            f"{type(exc).__name__}: {exc}"
+        )
+        markers, marker_mode = [], "unavailable"
+    return jsonify({
+        **history,
+        "history_window_hours": 24,
+        "trade_markers": markers,
+        "trade_marker_mode": marker_mode,
+    })
+
+
+@app.route("/api/engine/decision-history")
+def api_engine_decision_history():
+    """Committed score points and account-scoped trade chart events."""
+    symbol = request.args.get("symbol", "BTCUSD")
+    history = trend_engine_client.get_decision_history(symbol, limit=288)
+    try:
+        markers, marker_mode = _trend_chart_trade_markers()
+    except Exception as exc:
+        # Marker history is presentation-only. A malformed local ledger must
+        # not hide otherwise healthy committed decisions.
         print(
             f"Trend chart marker warning for {_active_user()}: "
             f"{type(exc).__name__}: {exc}"

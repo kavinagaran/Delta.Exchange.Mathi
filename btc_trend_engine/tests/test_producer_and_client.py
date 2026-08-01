@@ -425,6 +425,84 @@ def test_live_history_client_fails_closed_as_display_data(monkeypatch):
     assert history == {"available": False, "detail": "HTTP 503", "candles": []}
 
 
+def test_decision_history_client_projects_only_committed_chart_fields(monkeypatch):
+    _patch_get(monkeypatch, _Response(200, {
+        "symbol": "BTCUSD",
+        "snapshots": [
+            {
+                "timestamp": "2026-08-01T10:05:00Z",
+                "candle_close_utc": "2026-08-01T10:00:00Z",
+                "trend_score": -44.25,
+                "zone": "PE_2_ITM",
+                "signal_id": "must-not-reach-the-chart",
+                "entry_allowed": True,
+                "gates": [{"name": "quality", "passed": True}],
+            },
+            {
+                "timestamp": "2026-08-01T10:00:00+00:00",
+                "candle_close_utc": "2026-08-01T09:55:00Z",
+                "trend_score": 41,
+                "zone": "ce_2_itm",
+            },
+            # A repeated commit timestamp is replaced by the last committed row.
+            {
+                "timestamp": "2026-08-01T10:05:00Z",
+                "candle_close_utc": "2026-08-01T10:00:00Z",
+                "trend_score": -46,
+                "zone": "PE_2_ITM",
+            },
+            {"timestamp": "bad", "trend_score": 10, "zone": "HOLD"},
+            {"timestamp": "2026-08-01T10:10:00Z", "trend_score": "nan"},
+        ],
+    }))
+
+    history = client.get_decision_history("BTCUSD")
+
+    assert history == {
+        "available": True,
+        "symbol": "BTCUSD",
+        "resolution": "5m",
+        "source": "committed_decisions",
+        "decisions": [
+            {
+                "time_utc": "2026-08-01T10:00:00Z",
+                "committed_score": 41.0,
+                "zone": "CE_2_ITM",
+            },
+            {
+                "time_utc": "2026-08-01T10:05:00Z",
+                "committed_score": -46.0,
+                "zone": "PE_2_ITM",
+            },
+        ],
+    }
+    assert "signal_id" not in str(history)
+    assert "entry_allowed" not in str(history)
+    assert "gates" not in str(history)
+
+
+def test_decision_history_client_fails_closed_as_read_only_display_data(
+        monkeypatch):
+    _patch_get(monkeypatch, _Response(503, None))
+    history = client.get_decision_history("BTCUSD")
+    assert history == {
+        "available": False,
+        "detail": "HTTP 503",
+        "decisions": [],
+    }
+
+
+def test_decision_history_client_rejects_malformed_snapshot_collection(
+        monkeypatch):
+    _patch_get(monkeypatch, _Response(200, {"snapshots": "not-a-list"}))
+    history = client.get_decision_history("BTCUSD")
+    assert history == {
+        "available": False,
+        "detail": "malformed decision history",
+        "decisions": [],
+    }
+
+
 def test_degraded_snapshot_is_shaped_like_the_contract():
     snapshot = client.degraded_snapshot("BTCUSD", client.ENGINE_UNREACHABLE,
                                         "detail", T0)

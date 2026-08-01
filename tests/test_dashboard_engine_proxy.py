@@ -84,6 +84,32 @@ def test_live_history_route_proxies_display_only_score_candles(tmp_path):
     mocked.assert_called_once_with("BTCUSD", limit=288)
 
 
+def test_decision_history_route_proxies_only_committed_score_points(tmp_path):
+    history = {
+        "available": True,
+        "source": "committed_decisions",
+        "resolution": "5m",
+        "decisions": [{
+            "time_utc": "2026-08-01T10:00:00Z",
+            "committed_score": 42.5,
+            "zone": "CE_2_ITM",
+        }],
+    }
+    with _authenticated_client(tmp_path) as client, \
+            patch.object(
+                trend_engine_client, "get_decision_history", return_value=history
+            ) as mocked:
+        resp = client.get("/api/engine/decision-history?symbol=BTCUSD")
+    assert resp.status_code == 200
+    assert resp.get_json() == {
+        **history,
+        "history_window_hours": 24,
+        "trade_marker_mode": "dry_run",
+        "trade_markers": [],
+    }
+    mocked.assert_called_once_with("BTCUSD", limit=288)
+
+
 def test_live_history_trade_markers_are_account_and_mode_scoped(tmp_path):
     now = datetime.now(timezone.utc)
     users = tmp_path / "users"
@@ -102,6 +128,9 @@ def test_live_history_trade_markers_are_account_and_mode_scoped(tmp_path):
             "entry_at_utc": (
                 now - timedelta(minutes=5)
             ).isoformat().replace("+00:00", "Z"),
+            "exit_at_utc": (
+                now - timedelta(minutes=2)
+            ).isoformat().replace("+00:00", "Z"),
         }]), encoding="utf-8")
 
     with dashboard.app.test_request_context(), \
@@ -114,8 +143,51 @@ def test_live_history_trade_markers_are_account_and_mode_scoped(tmp_path):
         markers, marker_mode = dashboard._trend_chart_trade_markers()
 
     assert marker_mode == "dry_run"
-    assert [marker["code"] for marker in markers] == ["CE"]
-    assert all(set(marker) == {"time_utc", "code"} for marker in markers)
+    assert [(marker["code"], marker["action"]) for marker in markers] == [
+        ("CE", "ENTRY"),
+        ("CE", "EXIT"),
+    ]
+    assert all(
+        set(marker) == {"time_utc", "code", "action"}
+        for marker in markers
+    )
+
+
+def test_trade_marker_exit_is_kept_when_entry_is_outside_chart_window(tmp_path):
+    now = datetime.now(timezone.utc)
+    users = tmp_path / "users"
+    data_dir = users / "nithi" / "dry_run"
+    data_dir.mkdir(parents=True)
+    (data_dir / "trade_history.json").write_text(json.dumps([{
+        "status": "CLOSED",
+        "dry_run": True,
+        "execution_mode": "dry_run",
+        "trend_score_zone": "PE_2_ITM",
+        "symbol": "P-BTC-65000-300726",
+        "entry_at_utc": (
+            now - timedelta(hours=26)
+        ).isoformat().replace("+00:00", "Z"),
+        "exit_at_utc": (
+            now - timedelta(minutes=10)
+        ).isoformat().replace("+00:00", "Z"),
+    }]), encoding="utf-8")
+
+    with dashboard.app.test_request_context(), \
+            patch.object(dashboard, "DASH_USER", "nithi"), \
+            patch.object(dashboard, "USERS_DIR", users), \
+            patch.object(dashboard, "_user_cfg", return_value={
+                "DRY_RUN": "true",
+                "TREND_ENGINE_SCORE_AUTO_MODE": "dry_run",
+            }):
+        markers, marker_mode = dashboard._trend_chart_trade_markers()
+
+    assert marker_mode == "dry_run"
+    assert len(markers) == 1
+    assert markers[0]["code"] == "PE"
+    assert markers[0]["action"] == "EXIT"
+    assert datetime.fromisoformat(
+        markers[0]["time_utc"].replace("Z", "+00:00")
+    ) > now - timedelta(hours=1)
 
 
 def test_bad_trade_marker_history_never_hides_score_candles(tmp_path):
@@ -139,6 +211,35 @@ def test_bad_trade_marker_history_never_hides_score_candles(tmp_path):
     assert response.status_code == 200
     payload = response.get_json()
     assert payload["candles"] == history["candles"]
+    assert payload["trade_markers"] == []
+    assert payload["trade_marker_mode"] == "unavailable"
+
+
+def test_bad_trade_marker_history_never_hides_committed_decisions(tmp_path):
+    history = {
+        "available": True,
+        "source": "committed_decisions",
+        "resolution": "5m",
+        "decisions": [{
+            "time_utc": "2026-08-01T10:00:00Z",
+            "committed_score": -45.0,
+            "zone": "PE_2_ITM",
+        }],
+    }
+    with _authenticated_client(tmp_path) as client, \
+            patch.object(
+                trend_engine_client, "get_decision_history", return_value=history
+            ), \
+            patch.object(
+                dashboard,
+                "_trend_chart_trade_markers",
+                side_effect=ValueError("bad local history"),
+            ):
+        response = client.get("/api/engine/decision-history")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["decisions"] == history["decisions"]
     assert payload["trade_markers"] == []
     assert payload["trade_marker_mode"] == "unavailable"
 

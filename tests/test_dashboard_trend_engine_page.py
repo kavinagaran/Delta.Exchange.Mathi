@@ -30,7 +30,7 @@ def test_trend_engine_page_is_registered_and_reads_only():
     assert "/trend-engine-legacy" not in TEMPLATE
     assert "jget('/api/engine/snapshot')" in TEMPLATE
     assert "jget('/api/engine/live')" in TEMPLATE
-    assert "jget('/api/engine/live-history')" in TEMPLATE
+    assert "jget('/api/engine/decision-history')" in TEMPLATE
     assert "jget('/api/engine/status')" in TEMPLATE
     assert "Live preview" in TEMPLATE
     assert "Committed decision" in TEMPLATE
@@ -44,11 +44,15 @@ def test_trend_engine_page_is_registered_and_reads_only():
     assert "/api/trend-engine'" not in TEMPLATE  # the legacy endpoint, not this page's
 
 
-def test_preview_score_chart_is_display_only_and_marks_every_zone_boundary():
+def test_committed_score_chart_is_a_zone_colored_line_with_every_boundary():
     assert 'id="te-preview-score-chart"' in TEMPLATE
-    assert "renderPreviewScoreChart(liveHistory)" in TEMPLATE
-    assert "drawPreviewScoreChart" in TEMPLATE
-    assert "PREVIEW_SCORE_ZONE_LEVELS" in TEMPLATE
+    assert "renderCommittedDecisionChart(decisionHistory)" in TEMPLATE
+    assert "drawCommittedDecisionChart" in TEMPLATE
+    assert "COMMITTED_SCORE_ZONE_LEVELS" in TEMPLATE
+    assert "COMMITTED_ZONE_COLOURS" in TEMPLATE
+    assert "normaliseCommittedZone" in TEMPLATE
+    assert "const colour = COMMITTED_ZONE_COLOURS[decision.zone]" in TEMPLATE
+    assert "ctx.lineTo(decisionX(index), scoreY(decision.score))" in TEMPLATE
     for label in ("BUY CE +40", "SHORT MOVE +30", "SHORT MOVE −30", "BUY PE −40"):
         assert label in TEMPLATE
     # Zone separators are deliberately fine; the axes stay strong neutral grey.
@@ -58,12 +62,12 @@ def test_preview_score_chart_is_display_only_and_marks_every_zone_boundary():
     assert "ctx.lineWidth = 2" in TEMPLATE
     # 75% of the previous 3x chart height (834px) is 626px.
     assert "height: 626px" in STYLE
-    assert "PREVIEW DECISION SCORE" in TEMPLATE
+    assert "COMMITTED DECISION SCORE" in TEMPLATE
     assert ".te-preview-chart-stage canvas" in STYLE
 
 
-def test_preview_score_chart_supports_axis_drag_scaling_and_reserves_zone_label_lane():
-    assert "Drag inside the chart to pan in any direction." in TEMPLATE
+def test_committed_score_chart_supports_axis_drag_scaling_and_zone_label_lane():
+    assert "Drag inside the chart to pan." in TEMPLATE
     assert "24H · 5M" in TEMPLATE
     assert "previewScoreChartStates" in TEMPLATE
     assert "installPreviewScoreChartInteractions" in TEMPLATE
@@ -76,10 +80,13 @@ def test_preview_score_chart_supports_axis_drag_scaling_and_reserves_zone_label_
     assert "state.yZoom" in TEMPLATE
     assert "state.yPan" in TEMPLATE
     assert "axis === 'plot'" in TEMPLATE
-    assert "Math.min(288, candles.length)" in TEMPLATE
+    assert "Math.min(288, decisions.length)" in TEMPLATE
     assert "const visibleLow" in TEMPLATE
     assert "const visibleHigh" in TEMPLATE
     assert "nicePreviewScoreStep" in TEMPLATE
+    assert "position < labelCount" in TEMPLATE
+    assert "position * (visibleDecisions.length - 1) / (labelCount - 1)" in TEMPLATE
+    assert "const labelStep" not in TEMPLATE
     # Candles render only through plot.right; zone labels begin after it.
     assert "const zoneLabelLane" in TEMPLATE
     assert "const labelX = plot.right + 6" in TEMPLATE
@@ -87,13 +94,21 @@ def test_preview_score_chart_supports_axis_drag_scaling_and_reserves_zone_label_
     assert "touch-action: none" in STYLE
 
 
-def test_preview_score_chart_marks_account_trades_without_order_details():
+def test_committed_line_marks_trade_lifecycle_with_large_signed_dots():
     assert "history?.trade_markers" in TEMPLATE
-    assert "drawPreviewTradeMarker" in TEMPLATE
+    assert "drawCommittedTradeMarker" in TEMPLATE
     for code in ("CE", "PE", "MV"):
         assert f"{code}:" in TEMPLATE
+    assert "CE: { fill: '#20d991'" in TEMPLATE
+    assert "PE: { fill: '#ff4f72'" in TEMPLATE
+    assert "MV: { fill: '#a9b3bf'" in TEMPLATE
+    assert "const radius = 12" in TEMPLATE
+    assert "ctx.arc(markerX, markerY, radius" in TEMPLATE
+    assert "action === 'EXIT' ? '×' : '+'" in TEMPLATE
+    assert "raw?.action" in TEMPLATE
     assert "timeMillis" in TEMPLATE
-    assert "marker.timeMillis / 300_000" in TEMPLATE
+    assert "nearestVisibleDecision(marker.timeMillis)" in TEMPLATE
+    assert "markerStacks.get(match.index)" in TEMPLATE
     assert "order_id" not in TEMPLATE
     assert "fill_id" not in TEMPLATE
 
@@ -120,13 +135,51 @@ new Function(source.slice(start, end));
     assert result.returncode == 0, result.stderr
 
 
-def test_preview_score_chart_normalises_ohlc_and_treats_flat_scores_as_neutral_dojis():
-    assert "const candlesByStart = new Map()" in TEMPLATE
-    assert "high: Math.max(open, high, low, close)" in TEMPLATE
-    assert "low: Math.min(open, high, low, close)" in TEMPLATE
-    assert "const isDoji = Math.abs(movement) < .01" in TEMPLATE
-    assert "const isPartial = candle.partial === true && !candle.forming" in TEMPLATE
-    assert "const colour = isPartial ? '#8492a6' : isDoji ? '#c0cad5'" in TEMPLATE
+def test_committed_score_chart_normalises_decision_points_not_preview_ohlc():
+    assert "history?.decisions" in TEMPLATE
+    assert "raw?.committed_score" in TEMPLATE
+    assert "const decisionsByTime = new Map()" in TEMPLATE
+    assert "zone: normaliseCommittedZone(raw?.zone, score)" in TEMPLATE
+    assert "const isDoji" not in TEMPLATE
+    assert "candlesByStart" not in TEMPLATE
+
+
+@pytest.mark.skipif(NODE is None, reason="Node.js is required for frontend tests")
+def test_committed_zone_normalisation_prefers_the_engine_zone():
+    script = r"""
+const fs = require('fs');
+const vm = require('vm');
+const source = fs.readFileSync('templates/trend_engine.html', 'utf8');
+const start = source.indexOf('function normaliseCommittedZone');
+const end = source.indexOf('function formatPreviewChartTime', start);
+if (start < 0 || end <= start) throw new Error('zone normaliser not found');
+vm.runInThisContext(source.slice(start, end));
+
+const cases = [
+  ['CE_2_ITM', 0, 'CE'],
+  ['PE_2_ITM', 0, 'PE'],
+  ['SHORT_MOVE', -45, 'MV'],
+  ['HOLD', 90, 'HOLD'],
+  ['', 40, 'CE'],
+  ['', 30, 'MV'],
+  ['', -30, 'MV'],
+  ['', -40, 'PE'],
+];
+for (const [zone, score, expected] of cases) {
+  const actual = normaliseCommittedZone(zone, score);
+  if (actual !== expected) {
+    throw new Error(`${zone || '(score fallback)'} ${score}: ${actual} != ${expected}`);
+  }
+}
+"""
+    result = subprocess.run(
+        [NODE, "-e", script],
+        cwd=Path(dashboard.BASE),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_live_and_committed_scores_have_separate_colored_circles():

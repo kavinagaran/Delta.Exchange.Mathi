@@ -1886,8 +1886,8 @@ body.login-body {
   to { box-shadow: 0 0 18px color-mix(in srgb, var(--te-tone) 70%, transparent), 0 0 36px color-mix(in srgb, var(--te-tone) 35%, transparent); }
 }
 
-/* Preview Decision score chart — strictly visual; it never carries a
-   committed signal or an order permission. */
+/* Committed Decision history chart. Existing preview-prefixed selectors are
+   retained because the canvas and layout hooks are shared with older builds. */
 .te-preview-chart-card {
   border-color: color-mix(in srgb, var(--accent) 42%, var(--border));
   background:
@@ -1951,6 +1951,20 @@ body.login-body {
   border-radius: 50%;
   background: currentColor;
   box-shadow: 0 0 9px currentColor;
+}
+.te-preview-chart-legend b {
+  display: inline-grid;
+  width: 15px;
+  height: 15px;
+  place-items: center;
+  border: 1px solid rgba(210, 232, 248, .62);
+  border-radius: 50%;
+  color: #fff;
+  background: rgba(36, 75, 108, .82);
+  box-shadow: 0 0 8px rgba(93, 190, 255, .24);
+  font-size: 11px;
+  font-style: normal;
+  line-height: 1;
 }
 .te-preview-chart-legend .is-ce { color: #39f0ad; }
 .te-preview-chart-legend .is-hold { color: #aeb7c2; }

@@ -170,29 +170,31 @@
   <section class="card te-preview-chart-card" aria-labelledby="te-preview-chart-title">
     <div class="card-hd">
       <div>
-        <span class="te-kicker">DISPLAY ONLY · LIVE PREVIEW</span>
-        <strong id="te-preview-chart-title">Preview Decision · 5-minute score candles</strong>
+        <span class="te-kicker">TRADE INPUT · COMMITTED DECISIONS</span>
+        <strong id="te-preview-chart-title">Committed Decision · 5-minute score line</strong>
       </div>
       <span class="te-preview-chart-badge">24H · 5M</span>
     </div>
     <div class="card-bd">
       <div class="te-preview-chart-intro">
-        <p>Each candle shows how the Preview Decision score moved during one forming five-minute market candle. It is visual context only; committed decisions remain the only trade input.</p>
-        <div class="te-preview-chart-legend" aria-label="Score zone levels">
+        <p>Each point is the committed score from a completed five-minute decision. Line colour shows the active score zone used by automation.</p>
+        <div class="te-preview-chart-legend" aria-label="Committed score zones and trade markers">
           <span class="is-ce"><i></i>Buy CE ≥ +40</span>
           <span class="is-hold"><i></i>Hold +30…+40 / −40…−30</span>
           <span class="is-move"><i></i>Short MOVE −30 to +30</span>
           <span class="is-pe"><i></i>Buy PE ≤ −40</span>
+          <span><b aria-hidden="true">+</b>Entry</span>
+          <span><b aria-hidden="true">×</b>Exit</span>
         </div>
       </div>
       <div class="te-preview-chart-controls" id="te-preview-chart-controls">
-        <span>Drag inside the chart to pan in any direction. Drag an axis or use the mouse wheel to zoom. Double-click the chart to return to the latest score-aware view.</span>
+        <span>Drag inside the chart to pan. Drag an axis or use the mouse wheel to zoom. Double-click to return to the latest score-aware view.</span>
         <span class="te-preview-chart-window" id="te-preview-chart-window">24-hour history · automatic score range</span>
         <button class="te-preview-chart-reset" id="te-preview-chart-reset" type="button">Reset view</button>
       </div>
       <div class="te-preview-chart-stage">
-        <canvas id="te-preview-score-chart" role="img" aria-label="Five-minute Preview Decision score candlestick chart with colour-coded score zones"></canvas>
-        <div class="te-preview-chart-empty" id="te-preview-chart-empty">Collecting Preview Decision score samples. The first five-minute candle is forming.</div>
+        <canvas id="te-preview-score-chart" role="img" aria-label="Five-minute committed-decision score line with colour-coded zones and trade entry and exit markers"></canvas>
+        <div class="te-preview-chart-empty" id="te-preview-chart-empty">Collecting committed decision scores. The first completed five-minute decision will appear here.</div>
       </div>
     </div>
   </section>
@@ -492,12 +494,33 @@ function renderHero(snapshot, liveView) {
   );
 }
 
-const PREVIEW_SCORE_ZONE_LEVELS = [
+const COMMITTED_SCORE_ZONE_LEVELS = [
   { value: 40, label: 'BUY CE +40', color: '#39f0ad' },
   { value: 30, label: 'SHORT MOVE +30', color: '#d9e1ea' },
   { value: -30, label: 'SHORT MOVE −30', color: '#d9e1ea' },
   { value: -40, label: 'BUY PE −40', color: '#ff5f7e' },
 ];
+
+const COMMITTED_ZONE_COLOURS = {
+  CE: '#39f0ad',
+  HOLD: '#aeb7c2',
+  MV: '#d9e1ea',
+  PE: '#ff5f7e',
+};
+
+function normaliseCommittedZone(value, score) {
+  const raw = String(value || '').trim().toUpperCase().replaceAll('-', '_');
+  if (raw === 'CE' || raw.startsWith('CE_')
+      || raw.includes('BUY_CE') || raw.includes('CALL')) return 'CE';
+  if (raw === 'PE' || raw.startsWith('PE_')
+      || raw.includes('BUY_PE') || raw.includes('PUT')) return 'PE';
+  if (raw === 'MV' || raw.includes('MOVE') || raw.includes('STRADDLE')) return 'MV';
+  if (raw.includes('HOLD')) return 'HOLD';
+  if (score >= 40) return 'CE';
+  if (score <= -40) return 'PE';
+  if (score >= -30 && score <= 30) return 'MV';
+  return 'HOLD';
+}
 
 function formatPreviewChartTime(value, includeDate = false) {
   const parsed = new Date(value);
@@ -521,61 +544,72 @@ function formatPreviewChartTime(value, includeDate = false) {
     : time;
 }
 
-function renderPreviewScoreChart(history) {
+function renderCommittedDecisionChart(history) {
   const canvas = document.getElementById('te-preview-score-chart');
   const empty = document.getElementById('te-preview-chart-empty');
-  const candidates = Array.isArray(history?.candles) ? history.candles : [];
-  // Defensive normalisation keeps the display chart valid during a rolling
-  // engine deployment or after an interrupted refresh.  It does not alter
-  // any decision data: this endpoint is strictly display-only.
-  const candlesByStart = new Map();
+  const candidates = Array.isArray(history?.decisions)
+    ? history.decisions
+    : Array.isArray(history?.committed_decisions)
+      ? history.committed_decisions : [];
+  // Prefer the dedicated committed-decision payload. Aliases keep the chart
+  // readable during a rolling deployment without changing any engine data.
+  const decisionsByTime = new Map();
   candidates.forEach((raw, index) => {
-    const open = Number(raw?.open);
-    const high = Number(raw?.high);
-    const low = Number(raw?.low);
-    const close = Number(raw?.close);
-    if (![open, high, low, close].every(finite)) return;
-    const start = String(raw?.start_utc || '');
-    const startMillis = Date.parse(start);
-    const candle = {
+    const scoreValue = raw?.committed_score ?? raw?.trend_score
+      ?? raw?.score;
+    if (!finite(scoreValue)) return;
+    const score = Number(scoreValue);
+    const time = String(raw?.time_utc || raw?.candle_close_utc
+      || raw?.timestamp || raw?.end_utc || raw?.start_utc || '');
+    const timeMillis = Date.parse(time);
+    if (!Number.isFinite(timeMillis)) return;
+    const decision = {
       ...raw,
-      open,
-      high: Math.max(open, high, low, close),
-      low: Math.min(open, high, low, close),
-      close,
-      _sortKey: Number.isFinite(startMillis) ? startMillis : index,
+      score,
+      zone: normaliseCommittedZone(raw?.zone, score),
+      time_utc: time,
+      _sortKey: timeMillis,
     };
-    // Prefer the most recently supplied version of a still-forming bar.
-    candlesByStart.set(start || `unknown-${index}`, candle);
+    // Prefer the latest copy if a refresh overlaps an existing decision.
+    decisionsByTime.set(time, decision);
   });
-  const candles = [...candlesByStart.values()].sort((left, right) =>
+  const decisions = [...decisionsByTime.values()].sort((left, right) =>
     left._sortKey - right._sortKey);
   const trades = (Array.isArray(history?.trade_markers)
     ? history.trade_markers : []).map(raw => {
       const timeMillis = Date.parse(raw?.time_utc);
-      const code = String(raw?.code || '').toUpperCase();
-      return { timeMillis, code };
+      const rawCode = String(raw?.code || raw?.trade_type || raw?.zone || '')
+        .trim().toUpperCase();
+      const code = rawCode.includes('CE') || rawCode.includes('CALL') ? 'CE'
+        : rawCode.includes('PE') || rawCode.includes('PUT') ? 'PE'
+        : rawCode === 'MV' || rawCode.includes('MOVE') || rawCode.includes('STRADDLE')
+          ? 'MV' : rawCode;
+      const rawAction = String(raw?.action || raw?.event || raw?.kind
+        || raw?.marker_type || 'ENTRY').trim().toUpperCase();
+      const action = rawAction.includes('EXIT') || rawAction.includes('CLOSE')
+        ? 'EXIT' : 'ENTRY';
+      return { timeMillis, code, action };
     }).filter(marker =>
       Number.isFinite(marker.timeMillis)
       && ['CE', 'PE', 'MV'].includes(marker.code));
 
-  if (!history?.available || !candles.length) {
+  if (!history?.available || !decisions.length) {
     canvas.hidden = true;
     empty.hidden = false;
     empty.textContent = history?.available === false
-      ? 'Preview score history is temporarily unavailable. The score dials will continue to refresh.'
-      : 'Collecting Preview Decision score samples. The first five-minute candle is forming.';
+      ? 'Committed decision history is temporarily unavailable. The score dials will continue to refresh.'
+      : 'Collecting committed decision scores. The first completed five-minute decision will appear here.';
     return;
   }
 
   canvas.hidden = false;
   empty.hidden = true;
-  const latest = candles[candles.length - 1];
+  const latest = decisions[decisions.length - 1];
   canvas.setAttribute(
     'aria-label',
-    `Five-minute Preview Decision score candles covering up to 24 hours. Latest score ${signedScore(latest.close)}. Drag the plot in any direction and drag either axis to zoom.`,
+    `Five-minute committed-decision score line covering up to 24 hours. Latest score ${signedScore(latest.score)} in the ${latest.zone} zone. Entry markers use a plus sign and exit markers use a multiplication sign.`,
   );
-  drawPreviewScoreChart(canvas, candles, trades);
+  drawCommittedDecisionChart(canvas, decisions, trades);
 }
 
 const previewScoreChartStates = new WeakMap();
@@ -589,7 +623,7 @@ function previewScoreChartState(canvas) {
       yZoom: 1,
       yPan: 0,
       manualY: false,
-      candles: [],
+      decisions: [],
       trades: [],
       geometry: null,
       drag: null,
@@ -643,8 +677,8 @@ function previewChartAxisAt(state, point) {
 }
 
 function redrawPreviewChartFromState(canvas, state) {
-  if (Array.isArray(state.candles) && state.candles.length) {
-    drawPreviewScoreChart(canvas, state.candles, state.trades);
+  if (Array.isArray(state.decisions) && state.decisions.length) {
+    drawCommittedDecisionChart(canvas, state.decisions, state.trades);
   }
 }
 
@@ -705,7 +739,7 @@ function installPreviewScoreChartInteractions(canvas, state) {
       state.visibleBars = clampPreviewChart(
         drag.initialVisibleBars * Math.exp((drag.startX - point.x) / 210),
         12,
-        Math.max(12, Math.min(288, state.candles.length)),
+        Math.max(12, Math.min(288, state.decisions.length)),
       );
     } else if (drag.axis === 'y') {
       state.yZoom = clampPreviewChart(
@@ -717,7 +751,7 @@ function installPreviewScoreChartInteractions(canvas, state) {
     } else {
       const maximumOffset = Math.max(
         0,
-        state.candles.length - Math.min(state.visibleBars, state.candles.length),
+        state.decisions.length - Math.min(state.visibleBars, state.decisions.length),
       );
       state.rightOffset = clampPreviewChart(
         drag.initialRightOffset + (point.x - drag.startX) / drag.slot,
@@ -768,7 +802,7 @@ function installPreviewScoreChartInteractions(canvas, state) {
       state.manualY = true;
     } else {
       const oldBars = state.visibleBars;
-      const maximumBars = Math.max(12, Math.min(288, state.candles.length));
+      const maximumBars = Math.max(12, Math.min(288, state.decisions.length));
       const newBars = clampPreviewChart(
         oldBars * Math.exp(event.deltaY * .0015),
         12,
@@ -781,7 +815,7 @@ function installPreviewScoreChartInteractions(canvas, state) {
       state.rightOffset = clampPreviewChart(
         state.rightOffset + (oldBars - newBars) * fromRight,
         0,
-        Math.max(0, state.candles.length - newBars),
+        Math.max(0, state.decisions.length - newBars),
       );
       state.visibleBars = newBars;
     }
@@ -812,54 +846,83 @@ function previewChartRoundedPath(ctx, x, y, width, height, radius) {
   ctx.closePath();
 }
 
-function drawPreviewTradeMarker(ctx, x, anchorY, code, stack, plot) {
+function drawCommittedTradeMarker(ctx, x, anchorY, code, action, stack, plot) {
   const palette = {
-    CE: { fill: '#20d991', text: '#031d16', glow: '#45f7b7' },
-    PE: { fill: '#ff4f72', text: '#26020a', glow: '#ff7891' },
-    MV: { fill: '#e2e9f0', text: '#071929', glow: '#c8e7ff' },
+    CE: { fill: '#20d991', glow: '#45f7b7' },
+    PE: { fill: '#ff4f72', glow: '#ff7891' },
+    MV: { fill: '#a9b3bf', glow: '#e2e9f0' },
   };
   const tone = palette[code];
   if (!tone) return;
-  const width = code === 'MV' ? 32 : 30;
-  const height = 20;
-  let top = anchorY - 31 - stack * 24;
-  let below = false;
-  if (top < plot.top + 4) {
-    below = true;
-    top = anchorY + 11 + stack * 24;
-  }
-  top = clampPreviewChart(top, plot.top + 4, plot.bottom - height - 4);
-  const left = clampPreviewChart(
-    x - width / 2,
-    plot.left + 2,
-    plot.right - width - 2,
+  const radius = 12;
+  // Multiple lifecycle events can land in the same five-minute decision.
+  // Keep the first dot directly on the line and offset later dots just enough
+  // to leave every marker legible, with a short connector to the true point.
+  const direction = stack % 2 === 0 ? -1 : 1;
+  const ring = Math.ceil(stack / 2);
+  const markerX = clampPreviewChart(
+    x + direction * ring * 28,
+    plot.left + radius + 2,
+    plot.right - radius - 2,
+  );
+  const markerY = clampPreviewChart(
+    anchorY,
+    plot.top + radius + 2,
+    plot.bottom - radius - 2,
   );
   ctx.save();
-  ctx.strokeStyle = tone.glow;
-  ctx.fillStyle = tone.fill;
+  if (Math.abs(markerX - x) > 1 || Math.abs(markerY - anchorY) > 1) {
+    ctx.strokeStyle = tone.glow;
+    ctx.globalAlpha = .72;
+    ctx.lineWidth = 1.25;
+    ctx.beginPath();
+    ctx.moveTo(x, anchorY);
+    ctx.lineTo(markerX, markerY);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
   ctx.shadowColor = tone.glow;
-  ctx.shadowBlur = 14;
-  ctx.lineWidth = 1.2;
+  ctx.shadowBlur = 17;
+  ctx.fillStyle = tone.fill;
+  ctx.strokeStyle = 'rgba(255, 255, 255, .92)';
+  ctx.lineWidth = 1.8;
   ctx.beginPath();
-  ctx.moveTo(x, below ? anchorY + 2 : anchorY - 2);
-  ctx.lineTo(x, below ? top : top + height);
-  ctx.stroke();
-  previewChartRoundedPath(ctx, left, top, width, height, 7);
+  ctx.arc(markerX, markerY, radius, 0, Math.PI * 2);
   ctx.fill();
-  ctx.shadowBlur = 0;
-  ctx.strokeStyle = 'rgba(255, 255, 255, .72)';
   ctx.stroke();
-  ctx.fillStyle = tone.text;
-  ctx.font = '900 10px Inter, Segoe UI, sans-serif';
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = '#fff';
+  ctx.font = '900 17px Inter, Segoe UI, sans-serif';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  ctx.fillText(code, left + width / 2, top + height / 2 + .3);
+  ctx.fillText(action === 'EXIT' ? '×' : '+', markerX, markerY - .2);
+
+  const label = code;
+  ctx.font = '900 9px Inter, Segoe UI, sans-serif';
+  const labelWidth = Math.max(26, ctx.measureText(label).width + 12);
+  const labelHeight = 16;
+  const labelTop = action === 'EXIT'
+    ? Math.min(plot.bottom - labelHeight - 2, markerY + radius + 5 + stack * 2)
+    : Math.max(plot.top + 2, markerY - radius - labelHeight - 5 - stack * 2);
+  const labelLeft = clampPreviewChart(
+    markerX - labelWidth / 2,
+    plot.left + 2,
+    plot.right - labelWidth - 2,
+  );
+  previewChartRoundedPath(ctx, labelLeft, labelTop, labelWidth, labelHeight, 6);
+  ctx.fillStyle = 'rgba(4, 20, 39, .94)';
+  ctx.fill();
+  ctx.strokeStyle = tone.glow;
+  ctx.lineWidth = 1;
+  ctx.stroke();
+  ctx.fillStyle = tone.glow;
+  ctx.fillText(label, labelLeft + labelWidth / 2, labelTop + labelHeight / 2 + .3);
   ctx.restore();
 }
 
-function drawPreviewScoreChart(canvas, candles, trades = []) {
+function drawCommittedDecisionChart(canvas, decisions, trades = []) {
   const state = previewScoreChartState(canvas);
-  state.candles = candles;
+  state.decisions = decisions;
   state.trades = trades;
   installPreviewScoreChartInteractions(canvas, state);
   const rect = canvas.getBoundingClientRect();
@@ -876,23 +939,22 @@ function drawPreviewScoreChart(canvas, candles, trades = []) {
   ctx.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
   ctx.clearRect(0, 0, width, height);
 
-  // The right-side zone-label lane is intentionally outside of the candle
-  // plot.  This keeps the latest candles from being drawn behind zone labels.
+  // Keep a dedicated label lane so the latest decision is never obscured by
+  // the score-zone annotations.
   const zoneLabelLane = clampPreviewChart(width * .135, 92, 132);
   const plot = { left: 62, top: 22, right: width - zoneLabelLane - 12, bottom: height - 44 };
   const plotWidth = Math.max(1, plot.right - plot.left);
   const plotHeight = Math.max(1, plot.bottom - plot.top);
 
-  // A 24-hour buffer contains 288 bars. Keep the default viewport tight
-  // enough for substantial candles, then let horizontal zoom/pan expose the
-  // complete day without aggregating or discarding any bar.
-  const maximumVisibleBars = Math.max(12, Math.min(288, candles.length));
+  // A 24-hour buffer contains 288 five-minute decisions. Horizontal zoom and
+  // pan expose the full day without aggregating or discarding any point.
+  const maximumVisibleBars = Math.max(12, Math.min(288, decisions.length));
   state.visibleBars = clampPreviewChart(state.visibleBars, 12, maximumVisibleBars);
   const visibleCount = Math.max(
     1,
-    Math.min(candles.length, Math.round(state.visibleBars)),
+    Math.min(decisions.length, Math.round(state.visibleBars)),
   );
-  const maximumRightOffset = Math.max(0, candles.length - visibleCount);
+  const maximumRightOffset = Math.max(0, decisions.length - visibleCount);
   state.rightOffset = clampPreviewChart(
     state.rightOffset,
     0,
@@ -900,31 +962,24 @@ function drawPreviewScoreChart(canvas, candles, trades = []) {
   );
   const endIndex = Math.max(
     visibleCount,
-    candles.length - Math.round(state.rightOffset),
+    decisions.length - Math.round(state.rightOffset),
   );
   const startIndex = Math.max(0, endIndex - visibleCount);
-  const visibleCandles = candles.slice(startIndex, endIndex);
+  const visibleDecisions = decisions.slice(startIndex, endIndex);
   const slotCount = Math.max(
     1,
-    Math.min(Math.round(state.visibleBars), candles.length),
+    Math.min(Math.round(state.visibleBars), decisions.length),
   );
   const slot = plotWidth / slotCount;
-  const visiblePlotWidth = slot * visibleCandles.length;
-  const candleOffset = Math.max(0, plotWidth - visiblePlotWidth);
+  const visiblePlotWidth = slot * visibleDecisions.length;
+  const decisionOffset = Math.max(0, plotWidth - visiblePlotWidth);
 
-  // The vertical axis follows only the OHLC range actually on screen. A
-  // small "nice number" margin preserves wicks and markers while avoiding the
-  // old fixed −100…+100 scale that flattened meaningful score movement.
-  const visibleLow = Math.min(...visibleCandles.map(candle => candle.low));
-  const visibleHigh = Math.max(...visibleCandles.map(candle => candle.high));
+  // Fit the vertical axis to the committed scores currently on screen. A
+  // small nice-number margin keeps the line prominent without implying more
+  // precision than the engine reports.
+  const visibleLow = Math.min(...visibleDecisions.map(decision => decision.score));
+  const visibleHigh = Math.max(...visibleDecisions.map(decision => decision.score));
   const rawRange = Math.max(.5, visibleHigh - visibleLow);
-  // 8%, not 20%. At 20% each side the data occupied 1/1.4 = 71% of the plot
-  // height; at 8% it occupies 86%, so every body is ~20% taller for the same
-  // score move. That is a real gain but a modest one -- it is NOT the whole
-  // reason bodies look flat. A 1-2 point score move inside a five-minute
-  // candle is genuinely small next to a 15-point visible range, and a
-  // zoomed-out view (yZoom < 1) compresses it much further than any padding
-  // choice. Reset view restores the fitted scale.
   const padding = Math.max(1, rawRange * .08);
   const autoTick = nicePreviewScoreStep((rawRange + padding * 2) / 6);
   let autoMinimum = Math.floor((visibleLow - padding) / autoTick) * autoTick;
@@ -1013,7 +1068,7 @@ function drawPreviewScoreChart(canvas, candles, trades = []) {
     ctx.fillText(scoreLabel(level), plot.left - 10, y);
   }
 
-  for (const zone of PREVIEW_SCORE_ZONE_LEVELS) {
+  for (const zone of COMMITTED_SCORE_ZONE_LEVELS) {
     if (zone.value < scoreMinimum || zone.value > scoreMaximum) continue;
     const y = scoreY(zone.value);
     ctx.save();
@@ -1039,8 +1094,8 @@ function drawPreviewScoreChart(canvas, candles, trades = []) {
   }
   ctx.setLineDash([]);
 
-  // Strong, neutral-grey axes distinguish the chart frame from the thin
-  // zone and grid dots without competing with the score candles.
+  // Strong, neutral-grey axes distinguish the frame from the zone and grid
+  // guides without competing with the committed-score line.
   ctx.save();
   ctx.strokeStyle = 'rgba(168, 178, 190, .94)';
   ctx.lineWidth = 2;
@@ -1051,131 +1106,109 @@ function drawPreviewScoreChart(canvas, candles, trades = []) {
   ctx.stroke();
   ctx.restore();
 
-  // 26px bodies over a 4-8px height read as horizontal pills, not candles.
-  // Real terminals keep bodies narrow and let height carry the information:
-  // half the slot, capped at 13px, so a body is taller than it is wide for any
-  // move worth seeing.
-  const candleWidth = Math.max(3, Math.min(13, slot * .5));
   ctx.save();
   ctx.beginPath();
   ctx.rect(plot.left, plot.top, plotWidth, plotHeight);
   ctx.clip();
-  visibleCandles.forEach((candle, index) => {
-    const x = plot.left + candleOffset + slot * (index + .5);
-    const movement = candle.close - candle.open;
-    const isDoji = Math.abs(movement) < .01;
-    const isPartial = candle.partial === true && !candle.forming;
-    const rising = movement > 0;
-    // A flat score is a neutral doji, not a bullish candle.  Partial bars
-    // come from capture starting after the candle began (for example after a
-    // service restart) and are deliberately subdued rather than misleading.
-    const colour = isPartial ? '#8492a6' : isDoji ? '#c0cad5'
-      : rising ? '#36eab2' : '#ff5478';
-    const wickTop = scoreY(Math.max(candle.open, candle.high, candle.low, candle.close));
-    const wickBottom = scoreY(Math.min(candle.open, candle.high, candle.low, candle.close));
-    const rawBodyTop = scoreY(Math.max(candle.open, candle.close));
-    const rawBodyBottom = scoreY(Math.min(candle.open, candle.close));
-    // A doji is a single line at the open, the way every terminal draws it --
-    // a 3px rounded block reads as a real body and overstates a flat score.
-    const bodyHeight = isDoji ? 1 : Math.max(1, rawBodyBottom - rawBodyTop);
-    const bodyTop = isDoji ? Math.round(scoreY(candle.open)) : rawBodyTop;
-    // Snap the wick to a half-pixel so a 1px line lands on one device pixel
-    // instead of smearing across two.
-    const wickX = Math.round(x) + .5;
+  const decisionX = index =>
+    plot.left + decisionOffset + slot * (index + .5);
+
+  // Draw one segment per committed interval so the line itself carries the
+  // zone colour. The destination decision owns the segment colour because it
+  // is the value that became committed at that timestamp.
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  for (let index = 1; index < visibleDecisions.length; index += 1) {
+    const previous = visibleDecisions[index - 1];
+    const decision = visibleDecisions[index];
+    const colour = COMMITTED_ZONE_COLOURS[decision.zone]
+      || COMMITTED_ZONE_COLOURS.HOLD;
     ctx.save();
     ctx.strokeStyle = colour;
-    // Glow only on the bar still forming. Blurring all 21 bodies was the other
-    // half of the soft, un-charty look; crisp edges are what make a candle
-    // read as data rather than decoration.
-    if (candle.forming) {
-      ctx.shadowColor = colour;
-      ctx.shadowBlur = 10;
-    }
-    ctx.globalAlpha = isPartial ? .48 : candle.forming ? 1 : .94;
-    ctx.lineWidth = 1;
-    if (isPartial) ctx.setLineDash([3, 3]);
+    ctx.shadowColor = colour;
+    ctx.shadowBlur = 7;
+    ctx.globalAlpha = .98;
+    ctx.lineWidth = 2.8;
     ctx.beginPath();
-    ctx.moveTo(wickX, Math.round(wickTop));
-    ctx.lineTo(wickX, Math.round(wickBottom));
+    ctx.moveTo(decisionX(index - 1), scoreY(previous.score));
+    ctx.lineTo(decisionX(index), scoreY(decision.score));
     ctx.stroke();
-    ctx.setLineDash([]);
-    // Square, pixel-snapped body. The three-stop gradient across a 26px pill
-    // was the most "web dashboard" part of the old look; a flat fill with a
-    // one-pixel outline is what a chart reads as.
-    const bodyLeft = Math.round(x - candleWidth / 2);
-    const bodyRight = Math.round(x + candleWidth / 2);
-    const snappedWidth = Math.max(1, bodyRight - bodyLeft);
-    const snappedTop = Math.round(bodyTop);
-    const snappedHeight = Math.max(1, Math.round(bodyHeight));
+    ctx.restore();
+  }
 
-    if (isDoji) {
-      // Open == close: just the crossbar.
-      ctx.beginPath();
-      ctx.moveTo(bodyLeft, snappedTop + .5);
-      ctx.lineTo(bodyLeft + snappedWidth, snappedTop + .5);
-      ctx.stroke();
-    } else if (candle.forming) {
-      // Hollow while still forming, so the live bar is distinguishable at a
-      // glance from the settled ones without relying on the glow alone.
-      ctx.fillStyle = 'rgba(8, 35, 61, .96)';
-      ctx.fillRect(bodyLeft, snappedTop, snappedWidth, snappedHeight);
-      ctx.strokeRect(bodyLeft + .5, snappedTop + .5,
-                     snappedWidth - 1, snappedHeight - 1);
-    } else {
-      ctx.fillStyle = colour;
-      ctx.fillRect(bodyLeft, snappedTop, snappedWidth, snappedHeight);
-      // Outline in the same hue keeps a 1px body visible against the plot fill
-      // without the halo the old 0.78-alpha stroke produced.
-      if (snappedHeight > 2) {
-        ctx.strokeRect(bodyLeft + .5, snappedTop + .5,
-                       snappedWidth - 1, snappedHeight - 1);
-      }
+  // Small committed points keep exact samples visible; the latest point is
+  // larger and glowing so recency is obvious without a forming-candle state.
+  visibleDecisions.forEach((decision, index) => {
+    const colour = COMMITTED_ZONE_COLOURS[decision.zone]
+      || COMMITTED_ZONE_COLOURS.HOLD;
+    const latest = index === visibleDecisions.length - 1;
+    ctx.save();
+    ctx.fillStyle = colour;
+    ctx.strokeStyle = latest ? '#eef8ff' : 'rgba(5, 24, 43, .9)';
+    ctx.lineWidth = latest ? 1.4 : 1;
+    if (latest) {
+      ctx.shadowColor = colour;
+      ctx.shadowBlur = 13;
     }
+    ctx.beginPath();
+    ctx.arc(
+      decisionX(index),
+      scoreY(decision.score),
+      latest ? 4.8 : 2.4,
+      0,
+      Math.PI * 2,
+    );
+    ctx.fill();
+    ctx.stroke();
     ctx.restore();
   });
 
-  const visibleBuckets = new Map();
-  visibleCandles.forEach((candle, index) => {
-    if (Number.isFinite(candle._sortKey)) {
-      visibleBuckets.set(Math.floor(candle._sortKey / 300_000), {
-        candle,
-        index,
-      });
-    }
-  });
+  const nearestVisibleDecision = timeMillis => {
+    let best = null;
+    visibleDecisions.forEach((decision, index) => {
+      const distance = Math.abs(decision._sortKey - timeMillis);
+      if (!best || distance < best.distance) best = { decision, index, distance };
+    });
+    return best && best.distance <= 300_000 ? best : null;
+  };
   const markerStacks = new Map();
   trades.forEach(marker => {
-    const bucket = Math.floor(marker.timeMillis / 300_000);
-    const match = visibleBuckets.get(bucket);
+    const match = nearestVisibleDecision(marker.timeMillis);
     if (!match) return;
-    const stack = markerStacks.get(bucket) || 0;
-    markerStacks.set(bucket, stack + 1);
-    const x = plot.left + candleOffset + slot * (match.index + .5);
-    const anchorY = scoreY(match.candle.high);
-    drawPreviewTradeMarker(
+    const stack = markerStacks.get(match.index) || 0;
+    markerStacks.set(match.index, stack + 1);
+    const x = decisionX(match.index);
+    const anchorY = scoreY(match.decision.score);
+    drawCommittedTradeMarker(
       ctx,
       x,
       anchorY,
       marker.code,
+      marker.action,
       stack,
       plot,
     );
   });
   ctx.restore();
 
-  const labelCount = Math.min(6, visibleCandles.length);
-  const labelStep = Math.max(1, Math.floor((visibleCandles.length - 1) / Math.max(1, labelCount - 1)));
-  const labelIndexes = new Set([0, visibleCandles.length - 1]);
-  for (let index = labelStep; index < visibleCandles.length - 1; index += labelStep) {
-    labelIndexes.add(index);
+  const labelCount = Math.min(6, visibleDecisions.length);
+  const labelIndexes = new Set();
+  if (labelCount === 1) {
+    labelIndexes.add(0);
+  } else {
+    for (let position = 0; position < labelCount; position += 1) {
+      labelIndexes.add(Math.round(
+        position * (visibleDecisions.length - 1) / (labelCount - 1),
+      ));
+    }
   }
   ctx.font = '800 10px Inter, Segoe UI, sans-serif';
   ctx.fillStyle = '#d6dce3';
   ctx.textBaseline = 'top';
   ctx.textAlign = 'center';
-  const visibleStartMillis = Date.parse(visibleCandles[0].start_utc);
+  const visibleStartMillis = Date.parse(visibleDecisions[0].time_utc);
   const visibleEndMillis = Date.parse(
-    visibleCandles[visibleCandles.length - 1].start_utc,
+    visibleDecisions[visibleDecisions.length - 1].time_utc,
   );
   const includeDate = Number.isFinite(visibleStartMillis)
     && Number.isFinite(visibleEndMillis)
@@ -1186,11 +1219,11 @@ function drawPreviewScoreChart(canvas, candles, trades = []) {
       }) !== new Date(visibleEndMillis).toLocaleDateString('en-CA', {
         timeZone: IST_TIME_ZONE,
       })
-    );
+  );
   [...labelIndexes].sort((a, b) => a - b).forEach(index => {
-    const x = plot.left + candleOffset + slot * (index + .5);
+    const x = decisionX(index);
     ctx.fillText(
-      formatPreviewChartTime(visibleCandles[index].start_utc, includeDate),
+      formatPreviewChartTime(visibleDecisions[index].time_utc, includeDate),
       x,
       plot.bottom + 12,
     );
@@ -1198,20 +1231,15 @@ function drawPreviewScoreChart(canvas, candles, trades = []) {
   ctx.fillStyle = '#c2cbd5';
   ctx.textAlign = 'left';
   ctx.font = '800 9px Inter, Segoe UI, sans-serif';
-  ctx.fillText('PREVIEW DECISION SCORE', plot.left, 5);
-  if (visibleCandles[visibleCandles.length - 1].forming) {
-    ctx.textAlign = 'right';
-    ctx.fillStyle = '#dbeeff';
-    ctx.fillText('FORMING', plot.right, 5);
-  }
+  ctx.fillText('COMMITTED DECISION SCORE', plot.left, 5);
   const windowLabel = document.getElementById('te-preview-chart-window');
   if (windowLabel) {
     const rangeLabel =
       `${scoreLabel(scoreMinimum)} to ${scoreLabel(scoreMaximum)}`;
     const positionLabel = state.rightOffset < .5 ? 'latest'
-      : `${Math.round(state.rightOffset)} bars back`;
+      : `${Math.round(state.rightOffset)} decisions back`;
     windowLabel.textContent =
-      `${visibleCandles.length} of ${candles.length} candles · score ${rangeLabel} · ${positionLabel}`;
+      `${visibleDecisions.length} of ${decisions.length} decisions · score ${rangeLabel} · ${positionLabel}`;
   }
 }
 
@@ -1366,14 +1394,15 @@ async function renderEngineHealth() {
 async function load() {
   document.getElementById('trend-engine-page').setAttribute('aria-busy', 'true');
   try {
-    const [snapshot, liveView, liveHistory] = await Promise.all([
+    const [snapshot, liveView, decisionHistory] = await Promise.all([
       jget('/api/engine/snapshot'),
       jget('/api/engine/live').catch(() => ({ available: false })),
-      jget('/api/engine/live-history').catch(() => ({ available: false, candles: [] })),
+      jget('/api/engine/decision-history')
+        .catch(() => ({ available: false, decisions: [], trade_markers: [] })),
     ]);
     renderError(snapshot);
     renderHero(snapshot, liveView);
-    renderPreviewScoreChart(liveHistory);
+    renderCommittedDecisionChart(decisionHistory);
     renderComponents(snapshot.components);
     renderTimeframes(snapshot.timeframes);
     renderGates(snapshot.gates);
