@@ -17,6 +17,7 @@ import 'package:flutter/material.dart';
 import '../api/client.dart';
 import '../theme/design.dart';
 import '../widgets/kit.dart';
+import '../widgets/trade_controls.dart';
 
 class TodayScreen extends StatefulWidget {
   const TodayScreen({
@@ -34,11 +35,10 @@ class TodayScreen extends StatefulWidget {
 
 class _TodayScreenState extends State<TodayScreen> {
   Map<String, dynamic>? _status;
-  Map<String, dynamic>? _engine;
-  Map<String, dynamic>? _controller;
   List<dynamic> _todayTrades = const [];
   String? _error;
   bool _loading = true;
+  bool _closing = false;
   Timer? _poll;
 
   @override
@@ -48,7 +48,10 @@ class _TodayScreenState extends State<TodayScreen> {
     // 20s: fast enough that a fill shows up while you are looking at the
     // screen, slow enough not to hammer a dashboard that also runs the
     // trading loop in-process.
-    _poll = Timer.periodic(const Duration(seconds: 20), (_) => _refresh(quiet: true));
+    _poll = Timer.periodic(
+      const Duration(seconds: 20),
+      (_) => _refresh(quiet: true),
+    );
   }
 
   @override
@@ -62,8 +65,6 @@ class _TodayScreenState extends State<TodayScreen> {
 
     final results = await Future.wait([
       widget.api.status(),
-      widget.api.engineSnapshot(),
-      widget.api.scoreAutoStatus(),
       widget.api.todayTrades(),
     ]);
     if (!mounted) return;
@@ -78,13 +79,55 @@ class _TodayScreenState extends State<TodayScreen> {
     setState(() {
       _loading = false;
       _status = results[0].data as Map<String, dynamic>?;
-      _engine = results[1].data as Map<String, dynamic>?;
-      _controller = results[2].data as Map<String, dynamic>?;
-      _todayTrades = (results[3].data as List<dynamic>?) ?? const [];
+      _todayTrades = (results[1].data as List<dynamic>?) ?? const [];
       // Only the primary call's failure blanks the screen; the engine being
       // unreachable is itself information and gets its own card.
       _error = results[0].ok ? null : results[0].error;
     });
+  }
+
+  Map<String, dynamic>? get _currentTrade {
+    for (final row in _todayTrades.whereType<Map<String, dynamic>>()) {
+      if (row['_live'] == true || '${row['status']}'.toUpperCase() == 'OPEN') {
+        return row;
+      }
+    }
+    return null;
+  }
+
+  Future<void> _close(Map<String, dynamic> trade) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Close live position?'),
+        content: Text('${trade['symbol'] ?? 'Current position'} · market exit'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Close'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    setState(() => _closing = true);
+    final slot = '${trade['control_slot'] ?? trade['slot'] ?? 'trend'}';
+    final result = await widget.api.squareOff(slot: slot, targetMode: 'live');
+    if (!mounted) return;
+    setState(() => _closing = false);
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          result.ok ? 'Close submitted' : result.error ?? 'Close failed',
+        ),
+        backgroundColor: result.ok ? kPositive : kNegative,
+      ),
+    );
+    if (result.ok) await _refresh(quiet: true);
   }
 
   @override
@@ -102,15 +145,43 @@ class _TodayScreenState extends State<TodayScreen> {
       );
     }
 
+    final current = _currentTrade;
     return RefreshIndicator(
       onRefresh: _refresh,
       child: ListView(
         physics: const AlwaysScrollableScrollPhysics(),
         padding: const EdgeInsets.fromLTRB(Gap.lg, Gap.md, Gap.lg, Gap.xxl),
         children: [
-          _EngineCard(engine: _engine, controller: _controller),
-          const SizedBox(height: Gap.md),
-          _PositionsCard(status: _status),
+          if (current == null)
+            const AppCard(
+              kicker: 'Current trade',
+              title: 'Flat',
+              child: Text('No live position.', style: AppText.body),
+            )
+          else
+            _CurrentTradeCard(
+              trade: current,
+              busy: _closing,
+              onClose: () => _close(current),
+              onProtection: () async {
+                final saved = await showProtectionEditor(
+                  context: context,
+                  api: widget.api,
+                  trade: current,
+                );
+                if (!context.mounted) return;
+                if (saved) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text('Protection updated'),
+                      backgroundColor: kPositive,
+                    ),
+                  );
+                  await _refresh(quiet: true);
+                }
+              },
+              onPayoff: () => showPayoffSheet(context, current),
+            ),
           const SizedBox(height: Gap.md),
           _TodayTradesCard(trades: _todayTrades),
         ],
@@ -119,7 +190,71 @@ class _TodayScreenState extends State<TodayScreen> {
   }
 }
 
+class _CurrentTradeCard extends StatelessWidget {
+  const _CurrentTradeCard({
+    required this.trade,
+    required this.busy,
+    required this.onClose,
+    required this.onProtection,
+    required this.onPayoff,
+  });
+
+  final Map<String, dynamic> trade;
+  final bool busy;
+  final VoidCallback onClose;
+  final VoidCallback onProtection;
+  final VoidCallback onPayoff;
+
+  @override
+  Widget build(BuildContext context) {
+    final pnl = (trade['live_pnl'] as num?)?.toDouble();
+    return AppCard(
+      kicker: 'Current trade',
+      title: '${trade['symbol'] ?? '—'}',
+      accent: signedColour(pnl),
+      trailing: const StatusPill('LIVE', colour: kPositive),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          MetricTile(
+            label: 'Live P&L',
+            value: pnl == null ? '—' : '\$${_signed(pnl, 2)}',
+            colour: signedColour(pnl),
+            big: true,
+          ),
+          const SizedBox(height: Gap.md),
+          MetricWrap(
+            children: [
+              MetricTile(label: 'Lots', value: '${trade['lots'] ?? '—'}'),
+              MetricTile(
+                label: 'Side',
+                value: '${trade['side'] ?? '—'}'.toUpperCase(),
+              ),
+              MetricTile(
+                label: 'Entry',
+                value: _tradePrice(trade['entry_mark']),
+              ),
+              MetricTile(
+                label: 'Mark',
+                value: _tradePrice(trade['current_mark']),
+              ),
+            ],
+          ),
+          const SizedBox(height: Gap.lg),
+          TradeActionBar(
+            busy: busy,
+            onClose: onClose,
+            onProtection: onProtection,
+            onPayoff: onPayoff,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 /// Engine state: score, zone, and whether an entry is currently permitted.
+// ignore: unused_element
 class _EngineCard extends StatelessWidget {
   const _EngineCard({required this.engine, required this.controller});
 
@@ -198,15 +333,16 @@ class _EngineCard extends StatelessWidget {
   }
 
   static String _zoneLabel(String zone) => switch (zone) {
-        'CE_2_ITM' => 'Bullish · buy 2-step ITM call',
-        'PE_2_ITM' || 'PE_3_ITM' => 'Bearish · buy 2-step ITM put',
-        'SHORT_MOVE' => 'Sideways · sell ATM MOVE',
-        'HOLD' => 'Hold · no new action',
-        _ => zone,
-      };
+    'CE_2_ITM' => 'Bullish · buy 2-step ITM call',
+    'PE_2_ITM' || 'PE_3_ITM' => 'Bearish · buy 2-step ITM put',
+    'SHORT_MOVE' => 'Sideways · sell ATM MOVE',
+    'HOLD' => 'Hold · no new action',
+    _ => zone,
+  };
 }
 
 /// Open positions across every slot, flattened for a phone.
+// ignore: unused_element
 class _PositionsCard extends StatelessWidget {
   const _PositionsCard({required this.status});
 
@@ -243,7 +379,9 @@ class _PositionsCard extends StatelessWidget {
 
     return AppCard(
       kicker: 'Exposure',
-      title: slots.length == 1 ? 'Open position' : '${slots.length} open positions',
+      title: slots.length == 1
+          ? 'Open position'
+          : '${slots.length} open positions',
       accent: kPositive,
       child: Column(
         children: [
@@ -283,7 +421,9 @@ class _PositionRow extends StatelessWidget {
                 children: [
                   Text(
                     slot.toUpperCase(),
-                    style: AppText.kicker.copyWith(color: scheme.onSurfaceVariant),
+                    style: AppText.kicker.copyWith(
+                      color: scheme.onSurfaceVariant,
+                    ),
                   ),
                   const SizedBox(height: 2),
                   Text(symbol, style: AppText.title),
@@ -316,12 +456,18 @@ class _TodayTradesCard extends StatelessWidget {
     final rows = trades.whereType<Map<String, dynamic>>().toList();
     final total = rows.fold<double>(
       0,
-      (sum, row) => sum + ((row['pnl_usd'] as num?)?.toDouble() ?? 0),
+      (sum, row) =>
+          sum +
+          (((row['_live'] == true ? row['live_pnl'] : row['pnl_usd']) as num?)
+                  ?.toDouble() ??
+              0),
     );
 
     return AppCard(
       kicker: "Today",
-      title: rows.isEmpty ? 'No trades yet' : '${rows.length} closed',
+      title: rows.isEmpty
+          ? 'No trades yet'
+          : '${rows.length} trade${rows.length == 1 ? '' : 's'}',
       trailing: rows.isEmpty
           ? null
           : Text(
@@ -349,9 +495,22 @@ class _TodayTradesCard extends StatelessWidget {
                         ),
                         const SizedBox(width: Gap.sm),
                         Text(
-                          _signed((row['pnl_usd'] as num?)?.toDouble() ?? 0, 2),
+                          _signed(
+                            (((row['_live'] == true
+                                            ? row['live_pnl']
+                                            : row['pnl_usd'])
+                                        as num?)
+                                    ?.toDouble() ??
+                                0),
+                            2,
+                          ),
                           style: AppText.number.copyWith(
-                            color: signedColour((row['pnl_usd'] as num?)),
+                            color: signedColour(
+                              (row['_live'] == true
+                                      ? row['live_pnl']
+                                      : row['pnl_usd'])
+                                  as num?,
+                            ),
                           ),
                         ),
                       ],
@@ -362,8 +521,9 @@ class _TodayTradesCard extends StatelessWidget {
                     padding: const EdgeInsets.only(top: Gap.sm),
                     child: Text(
                       '+ ${rows.length - 8} more on Performance',
-                      style: AppText.caption
-                          .copyWith(color: scheme.onSurfaceVariant),
+                      style: AppText.caption.copyWith(
+                        color: scheme.onSurfaceVariant,
+                      ),
                     ),
                   ),
               ],
@@ -376,3 +536,8 @@ class _TodayTradesCard extends StatelessWidget {
 /// bare reads as though gains are the default state.
 String _signed(double value, int digits) =>
     '${value > 0 ? '+' : ''}${value.toStringAsFixed(digits)}';
+
+String _tradePrice(Object? value) {
+  final number = value is num ? value.toDouble() : double.tryParse('$value');
+  return number == null ? '—' : '\$${number.toStringAsFixed(2)}';
+}

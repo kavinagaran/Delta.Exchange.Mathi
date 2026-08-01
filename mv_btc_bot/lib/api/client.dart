@@ -18,9 +18,7 @@ import 'package:http/http.dart' as http;
 /// Outcome of one request. [data] is only meaningful when [ok].
 @immutable
 class ApiResult<T> {
-  const ApiResult.ok(this.data)
-      : error = null,
-        unauthorised = false;
+  const ApiResult.ok(this.data) : error = null, unauthorised = false;
   const ApiResult.failed(this.error, {this.unauthorised = false}) : data = null;
 
   final T? data;
@@ -45,31 +43,68 @@ class DashboardApi {
   /// fails in a more confusing way than being plainly anonymous.
   @visibleForTesting
   Map<String, String> get headers => {
-        'Accept': 'application/json',
-        if (sessionCookie != null && sessionCookie!.isNotEmpty)
-          'Cookie': 'session=$sessionCookie',
-      };
+    'Accept': 'application/json',
+    'Content-Type': 'application/json',
+    if (sessionCookie != null && sessionCookie!.isNotEmpty)
+      'Cookie': 'session=$sessionCookie',
+  };
 
-  Future<ApiResult<dynamic>> get(String path) async {
+  Future<ApiResult<dynamic>> _request(
+    String method,
+    String path, {
+    Map<String, dynamic>? body,
+  }) async {
     final uri = Uri.parse('$baseUrl$path');
     try {
-      final response = await http.get(uri, headers: headers).timeout(_timeout);
+      final response = switch (method) {
+        'POST' =>
+          await http
+              .post(uri, headers: headers, body: jsonEncode(body ?? const {}))
+              .timeout(_timeout),
+        'DELETE' =>
+          await http
+              .delete(uri, headers: headers, body: jsonEncode(body ?? const {}))
+              .timeout(_timeout),
+        _ => await http.get(uri, headers: headers).timeout(_timeout),
+      };
       if (response.statusCode == 401 || response.statusCode == 403) {
         return const ApiResult.failed('Session expired', unauthorised: true);
       }
-      if (response.statusCode >= 400) {
-        return ApiResult.failed('Server returned ${response.statusCode}');
+      dynamic decoded;
+      if (response.body.isNotEmpty) {
+        try {
+          decoded = jsonDecode(response.body);
+        } catch (_) {
+          decoded = null;
+        }
       }
-      if (response.body.isEmpty) return const ApiResult.ok(null);
-      return ApiResult.ok(jsonDecode(response.body));
+      if (response.statusCode >= 400) {
+        final message = decoded is Map ? decoded['error']?.toString() : null;
+        return ApiResult.failed(
+          message?.isNotEmpty == true
+              ? message
+              : 'Server returned ${response.statusCode}',
+        );
+      }
+      return ApiResult.ok(decoded);
     } on TimeoutException {
       return const ApiResult.failed('Timed out — the server did not respond');
     } catch (error) {
-      // Deliberately broad: a widget must not see a socket exception. The
-      // message is surfaced verbatim so a DNS or TLS problem stays diagnosable.
       return ApiResult.failed('Cannot reach the server: $error');
     }
   }
+
+  Future<ApiResult<dynamic>> get(String path) async {
+    return _request('GET', path);
+  }
+
+  Future<ApiResult<dynamic>> post(String path, [Map<String, dynamic>? body]) =>
+      _request('POST', path, body: body);
+
+  Future<ApiResult<dynamic>> delete(
+    String path, [
+    Map<String, dynamic>? body,
+  ]) => _request('DELETE', path, body: body);
 
   Future<ApiResult<Map<String, dynamic>>> getMap(String path) async {
     final result = await get(path);
@@ -104,9 +139,11 @@ class DashboardApi {
   Future<ApiResult<Map<String, dynamic>>> status() => getMap('/api/status');
   Future<ApiResult<Map<String, dynamic>>> summary() => getMap('/api/summary');
   Future<ApiResult<Map<String, dynamic>>> wallet() => getMap('/api/wallet');
-  Future<ApiResult<List<dynamic>>> todayTrades() => getList('/api/today-trades');
+  Future<ApiResult<List<dynamic>>> todayTrades() =>
+      getList('/api/today-trades');
   Future<ApiResult<List<dynamic>>> trades() => getList('/api/trades');
-  Future<ApiResult<List<dynamic>>> allPositions() => getList('/api/all-positions');
+  Future<ApiResult<List<dynamic>>> allPositions() =>
+      getList('/api/all-positions');
   Future<ApiResult<Map<String, dynamic>>> engineSnapshot() =>
       getMap('/api/engine/snapshot');
   Future<ApiResult<Map<String, dynamic>>> engineHealth() =>
@@ -115,4 +152,47 @@ class DashboardApi {
       getMap('/api/trend-engine/score-auto/status');
   Future<ApiResult<Map<String, dynamic>>> tradingMode() =>
       getMap('/api/trading-mode-availability');
+  Future<ApiResult<Map<String, dynamic>>> engineLive() =>
+      getMap('/api/engine/live');
+  Future<ApiResult<Map<String, dynamic>>> engineStatus() =>
+      getMap('/api/engine/status');
+  Future<ApiResult<Map<String, dynamic>>> decisionHistory() =>
+      getMap('/api/engine/decision-history');
+
+  Future<ApiResult<Map<String, dynamic>>> dryStatus() =>
+      getMap('/api/dry-run/status');
+  Future<ApiResult<List<dynamic>>> dryTrades() =>
+      getList('/api/dry-run/trades');
+  Future<ApiResult<List<dynamic>>> dryTodayTrades() =>
+      getList('/api/dry-run/today-trades');
+  Future<ApiResult<Map<String, dynamic>>> drySummary() =>
+      getMap('/api/dry-run/summary');
+
+  Future<ApiResult<Map<String, dynamic>>> config() => getMap('/api/config');
+  Future<ApiResult<dynamic>> saveConfig(Map<String, dynamic> values) =>
+      post('/api/config', values);
+  Future<ApiResult<dynamic>> resetZoneLock() =>
+      post('/api/trend-engine/score-auto/setup-lock/reset');
+  Future<ApiResult<dynamic>> testTelegram() => post('/api/test-telegram');
+
+  Future<ApiResult<Map<String, dynamic>>> logs({int limit = 100}) =>
+      getMap('/api/logs?n=${limit.clamp(1, 500)}');
+  Future<ApiResult<List<dynamic>>> accounts() => getList('/api/accounts');
+  Future<ApiResult<Map<String, dynamic>>> bots() => getMap('/api/bots');
+  Future<ApiResult<dynamic>> saveAccount(Map<String, dynamic> values) =>
+      post('/api/accounts', values);
+  Future<ApiResult<dynamic>> testAccount(Map<String, dynamic> values) =>
+      post('/api/accounts/test', values);
+  Future<ApiResult<dynamic>> deleteAccount(String username) =>
+      delete('/api/accounts/${Uri.encodeComponent(username)}');
+  Future<ApiResult<dynamic>> setBotActive(String username, bool active) => post(
+    '/api/bots/${Uri.encodeComponent(username)}/${active ? 'start' : 'stop'}',
+  );
+
+  Future<ApiResult<dynamic>> squareOff({
+    required String slot,
+    required String targetMode,
+  }) => post('/api/square-off?slot=${Uri.encodeQueryComponent(slot)}', {
+    'target_mode': targetMode,
+  });
 }

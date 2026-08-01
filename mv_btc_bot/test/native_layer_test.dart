@@ -10,7 +10,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:mv_btc_bot/api/client.dart';
-import 'package:mv_btc_bot/main.dart' show appPages;
+import 'package:mv_btc_bot/main.dart' show appPages, primaryPageIndexes;
 import 'package:mv_btc_bot/theme/design.dart';
 
 void main() {
@@ -35,8 +35,11 @@ void main() {
 
     test('every zone the engine can emit has a colour', () {
       for (final zone in ['CE_2_ITM', 'PE_2_ITM', 'PE_3_ITM', 'SHORT_MOVE']) {
-        expect(zoneColour(zone), isNot(kZoneHold),
-            reason: '$zone must be distinguishable from HOLD');
+        expect(
+          zoneColour(zone),
+          isNot(kZoneHold),
+          reason: '$zone must be distinguishable from HOLD',
+        );
       }
       expect(zoneColour('HOLD'), kZoneHold);
       expect(zoneColour(null), kZoneHold);
@@ -70,7 +73,10 @@ void main() {
     test('unauthorised is distinguishable from a generic failure', () {
       // The screen must be able to tell "sign in again" from "server down".
       // Rendering an expired session as empty data would look like being flat.
-      const expired = ApiResult<int>.failed('Session expired', unauthorised: true);
+      const expired = ApiResult<int>.failed(
+        'Session expired',
+        unauthorised: true,
+      );
       const offline = ApiResult<int>.failed('Cannot reach the server');
       expect(expired.unauthorised, isTrue);
       expect(offline.unauthorised, isFalse);
@@ -97,26 +103,35 @@ void main() {
     });
   });
 
-  group('native / embedded split', () {
-    test('the three native paths match the tabs they are meant to replace', () {
-      // _pageBody switches on AppPageSpec.path, so a path rename in appPages
-      // would silently fall through to the WebView and the native screen would
-      // simply never appear — no error, just the old page back.
+  group('native screen coverage', () {
+    test('every dashboard route has a native destination', () {
       final paths = appPages.map((page) => page.path).toSet();
-      for (final native in ['/', '/positions', '/trades']) {
+      for (final native in [
+        '/',
+        '/trades',
+        '/dry-run',
+        '/positions',
+        '/config',
+        '/accounts',
+        '/logs',
+        '/trend-engine',
+      ]) {
         expect(
           paths,
           contains(native),
-          reason: '$native is rendered natively but is no longer a tab path',
+          reason: '$native must remain reachable in the native app',
         );
       }
     });
 
-    test('control-heavy pages are still reachable as tabs', () {
-      // These stay embedded deliberately. If one disappears from appPages the
-      // app loses access to it entirely, since there is no native equivalent.
-      final paths = appPages.map((page) => page.path).toSet();
-      expect(paths, containsAll(['/config', '/accounts', '/trend-engine']));
+    test('phone primary navigation is intentionally compact', () {
+      expect(primaryPageIndexes, [0, 1, 2, 7]);
+      expect(primaryPageIndexes.map((index) => appPages[index].label), [
+        'Today',
+        'Performance',
+        'Paper',
+        'Trend Engine',
+      ]);
     });
   });
 }

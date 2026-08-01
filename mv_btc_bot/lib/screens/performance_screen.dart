@@ -141,7 +141,9 @@ class _SummaryCard extends StatelessWidget {
               Expanded(
                 child: MetricTile(
                   label: 'Win rate',
-                  value: winRate == null ? '—' : '${winRate.toStringAsFixed(1)}%',
+                  value: winRate == null
+                      ? '—'
+                      : '${winRate.toStringAsFixed(1)}%',
                   sub: '$wins W · $losses L',
                 ),
               ),
@@ -338,8 +340,9 @@ class _TradeListCard extends StatelessWidget {
                             trade['date'],
                             trade['side'],
                           ].where((v) => v != null).join(' · '),
-                          style: AppText.caption
-                              .copyWith(color: scheme.onSurfaceVariant),
+                          style: AppText.caption.copyWith(
+                            color: scheme.onSurfaceVariant,
+                          ),
                         ),
                       ],
                     ),

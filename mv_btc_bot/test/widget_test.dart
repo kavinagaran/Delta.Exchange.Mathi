@@ -2,11 +2,43 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:mv_btc_bot/main.dart';
+import 'package:mv_btc_bot/widgets/kit.dart';
 
 void main() {
   testWidgets('App builds', (WidgetTester tester) async {
     await tester.pumpWidget(const MathiBotApp());
     expect(find.byType(MathiBotApp), findsOneWidget);
+  });
+
+  testWidgets('cards render inside an unbounded scrolling page', (
+    WidgetTester tester,
+  ) async {
+    tester.view.physicalSize = const Size(360, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: buildAppTheme(blue: true),
+        home: Scaffold(
+          body: ListView(
+            children: const [
+              AppCard(
+                kicker: 'Trend engine',
+                title: 'Configuration',
+                accent: kPositive,
+                child: Text('Visible content'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+
+    expect(tester.takeException(), isNull);
+    expect(find.text('Configuration'), findsOneWidget);
+    expect(find.text('Visible content'), findsOneWidget);
   });
 
   testWidgets('all app tabs fit a narrow Android screen', (
@@ -23,11 +55,15 @@ void main() {
         home: Scaffold(
           bottomNavigationBar: NavigationBar(
             destinations: [
-              for (final page in appPages)
+              for (final index in primaryPageIndexes)
                 NavigationDestination(
-                  icon: Icon(page.icon),
-                  label: page.navLabel,
+                  icon: Icon(appPages[index].icon),
+                  label: appPages[index].navLabel,
                 ),
+              const NavigationDestination(
+                icon: Icon(Icons.grid_view_rounded),
+                label: 'More',
+              ),
             ],
           ),
         ),
@@ -37,6 +73,7 @@ void main() {
     expect(tester.takeException(), isNull);
     expect(find.text('Trend'), findsOneWidget);
     expect(find.text('Paper'), findsOneWidget);
+    expect(find.text('More'), findsOneWidget);
     // The /trades tab is labelled by its route, not by the page title — the
     // full 'Performance' does not fit a seven-tab bar at 360dp.
     expect(find.text('Trades'), findsOneWidget);
@@ -59,16 +96,17 @@ void main() {
     }
   });
 
-  test('all dashboard pages except Logs are exposed as tabs', () {
+  test('all dashboard pages are exposed as native destinations', () {
     expect(
       appPages.map((page) => page.label),
       equals([
-        'Nithi Bot',
+        'Today',
         'Performance',
         'Paper',
         'Exposure',
         'Bot Config',
         'API Accounts',
+        'Logs',
         'Trend Engine',
       ]),
     );
@@ -76,7 +114,7 @@ void main() {
       appPages.map((page) => page.path),
       containsAllInOrder(['/', '/trades', '/dry-run', '/trend-engine']),
     );
-    expect(appPages.any((page) => page.label == 'Logs'), isFalse);
+    expect(appPages.any((page) => page.label == 'Logs'), isTrue);
   });
 
   test('native Red and Blue themes mirror the dashboard palette', () {
@@ -126,11 +164,14 @@ void main() {
     expect(SessionService.sessionCookieFromHeader('other=value'), isNull);
   });
 
-  test('APK release ships a versioned web-asset revision for cache busting', () {
-    // Asserting the format rather than a literal so the test does not need
-    // editing on every bump — the invariant is that the cache-bust token
-    // exists and follows the "<major>.<minor>.<patch>+<build>-<slug>" shape.
-    expect(kWebAssetRevision, isNotEmpty);
-    expect(kWebAssetRevision, matches(RegExp(r'^\d+\.\d+\.\d+\+\d+-')));
-  });
+  test(
+    'APK release ships a versioned web-asset revision for cache busting',
+    () {
+      // Asserting the format rather than a literal so the test does not need
+      // editing on every bump — the invariant is that the cache-bust token
+      // exists and follows the "<major>.<minor>.<patch>+<build>-<slug>" shape.
+      expect(kWebAssetRevision, isNotEmpty);
+      expect(kWebAssetRevision, matches(RegExp(r'^\d+\.\d+\.\d+\+\d+-')));
+    },
+  );
 }

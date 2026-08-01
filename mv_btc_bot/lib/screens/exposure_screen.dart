@@ -115,7 +115,8 @@ class _ExposureScreenState extends State<ExposureScreen> {
           else ...[
             AppCard(
               kicker: 'Open exposure',
-              title: '${_positions.length} position'
+              title:
+                  '${_positions.length} position'
                   '${_positions.length == 1 ? '' : 's'}',
               accent: signedColour(totalPnl),
               trailing: Text(
@@ -182,7 +183,9 @@ class _WalletCard extends StatelessWidget {
           const SizedBox(height: Gap.md),
           StatRow(
             'Available',
-            available == null ? 'Not reported' : _money(available, signed: false),
+            available == null
+                ? 'Not reported'
+                : _money(available, signed: false),
           ),
         ],
       ),
@@ -229,7 +232,10 @@ class _PositionCard extends StatelessWidget {
           StatRow('Size', size == null ? '—' : size.toStringAsFixed(0)),
           StatRow('Entry', entry == null ? '—' : entry.toStringAsFixed(2)),
           StatRow('Mark', mark == null ? '—' : mark.toStringAsFixed(2)),
-          StatRow('Margin', margin == null ? 'Not reported' : _money(margin, signed: false)),
+          StatRow(
+            'Margin',
+            margin == null ? 'Not reported' : _money(margin, signed: false),
+          ),
           StatRow(
             'Liquidation',
             liquidation == null

@@ -167,14 +167,9 @@ def test_overview_has_no_manual_or_scheduled_move_controls():
     assert "/api/manual-entry" not in mobile
     assert "MORNING_SIDE" not in mobile
     assert "EVENING_SIDE" not in mobile
-    assert (
-        "AUTO forecast" in mobile
-        or (
-            "class DashboardWebPage" in mobile
-            and "label: 'Nithi Bot'" in mobile
-            and "path: '/'" in mobile
-        )
-    )
+    assert "'/' => TodayScreen" in mobile
+    assert "label: 'Today'" in mobile
+    assert "path: '/'" in mobile
 
 
 def _open_state(**updates):

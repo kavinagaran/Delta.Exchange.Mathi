@@ -10,7 +10,12 @@ import 'package:webview_flutter/webview_flutter.dart';
 import 'api/client.dart';
 import 'screens/exposure_screen.dart';
 import 'screens/performance_screen.dart';
+import 'screens/accounts_screen.dart';
+import 'screens/config_screen.dart';
+import 'screens/logs_screen.dart';
+import 'screens/paper_screen.dart';
 import 'screens/today_screen.dart';
+import 'screens/trend_engine_screen.dart';
 
 const kPositive = Color(0xFF38D99A);
 const kWarning = Color(0xFFFFC267);
@@ -70,8 +75,53 @@ const kWebAssetRevision = '5.1.0+21-native-exposure-performance';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  ErrorWidget.builder = (_) => const _AppErrorFallback();
   await appTheme.load();
   runApp(const MathiBotApp());
+}
+
+/// A release build must never turn a recoverable widget error into an empty
+/// page. Detailed diagnostics still go to Flutter's error pipeline; users get
+/// a concise, branded recovery message instead of a blank body.
+class _AppErrorFallback extends StatelessWidget {
+  const _AppErrorFallback();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Directionality(
+      textDirection: TextDirection.ltr,
+      child: ColoredBox(
+        color: kBlueBackground,
+        child: Center(
+          child: Padding(
+            padding: EdgeInsets.all(24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.sync_problem_rounded, color: kWarning, size: 36),
+                SizedBox(height: 12),
+                Text(
+                  'This screen could not be displayed',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color: kBlueText,
+                    fontSize: 18,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                SizedBox(height: 6),
+                Text(
+                  'Reopen the page to try again.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: kBlueMuted, fontSize: 13),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 class AppThemeController extends ChangeNotifier {
@@ -460,8 +510,8 @@ class AppPageSpec {
 // there too, just without the nav-gap spacer this flat list has no room for.
 const appPages = <AppPageSpec>[
   AppPageSpec(
-    label: 'Nithi Bot',
-    navLabel: 'Home',
+    label: 'Today',
+    navLabel: 'Today',
     path: '/',
     icon: Icons.home_outlined,
   ),
@@ -498,12 +548,22 @@ const appPages = <AppPageSpec>[
     icon: Icons.manage_accounts_outlined,
   ),
   AppPageSpec(
+    label: 'Logs',
+    navLabel: 'Logs',
+    path: '/logs',
+    icon: Icons.receipt_long_outlined,
+  ),
+  AppPageSpec(
     label: 'Trend Engine',
     navLabel: 'Trend',
     path: '/trend-engine',
     icon: Icons.insights_rounded,
   ),
 ];
+
+/// The high-frequency phone tabs. Other native pages live in the More sheet;
+/// tablets expose all destinations in a NavigationRail.
+const primaryPageIndexes = <int>[0, 1, 2, 7];
 
 class SessionService {
   static const _defaultUrl = 'https://mathibot.duckdns.org';
@@ -663,11 +723,6 @@ class HomeShell extends StatefulWidget {
 }
 
 class _HomeShellState extends State<HomeShell> {
-  final _webKeys = List.generate(
-    appPages.length,
-    (_) => GlobalKey<DashboardWebPageState>(),
-  );
-
   final Set<int> _visitedTabs = {0};
   int _tab = 0;
   bool _ready = false;
@@ -703,15 +758,8 @@ class _HomeShellState extends State<HomeShell> {
     });
   }
 
-  /// The widget for one tab: a native screen where we have one, else the
-  /// embedded dashboard page.
-  ///
-  /// One switch, so the native/embedded split is stated in a single place
-  /// rather than inferred from the build method. The native three are the
-  /// read-only, data-dense views where a phone layout genuinely beats a
-  /// desktop grid in a WebView. The rest are control-heavy, already tested
-  /// server-side, and a native copy would need keeping in step with every web
-  /// change — they stay embedded on purpose, not by omission.
+  /// Every page is native. The web dashboard remains the server/API surface,
+  /// not a visual dependency of the Android app.
   Widget _pageBody(int index, bool blue) {
     final page = appPages[index];
     final api = DashboardApi(
@@ -722,13 +770,18 @@ class _HomeShellState extends State<HomeShell> {
       '/' => TodayScreen(api: api, onUnauthorised: _signOut),
       '/positions' => ExposureScreen(api: api, onUnauthorised: _signOut),
       '/trades' => PerformanceScreen(api: api, onUnauthorised: _signOut),
-      _ => DashboardWebPage(
-          key: _webKeys[index],
-          page: page,
-          blue: blue,
-          onSessionExpired: _signOut,
-          onPageSelected: _selectTab,
-        ),
+      '/dry-run' => PaperScreen(api: api, onUnauthorised: _signOut),
+      '/config' => ConfigScreen(
+        api: api,
+        onUnauthorised: _signOut,
+        displayName: SessionService.displayName.isEmpty
+            ? SessionService.username
+            : SessionService.displayName,
+      ),
+      '/accounts' => AccountsScreen(api: api, onUnauthorised: _signOut),
+      '/logs' => LogsScreen(api: api, onUnauthorised: _signOut),
+      '/trend-engine' => TrendEngineScreen(api: api, onUnauthorised: _signOut),
+      _ => const SizedBox.shrink(),
     };
   }
 
@@ -738,6 +791,95 @@ class _HomeShellState extends State<HomeShell> {
       _tab = index;
       _visitedTabs.add(index);
     });
+  }
+
+  Future<void> _showMore() async {
+    const secondary = [3, 4, 5, 6];
+    final selected = await showModalBottomSheet<int>(
+      context: context,
+      useSafeArea: true,
+      backgroundColor: Theme.of(context).colorScheme.surface,
+      builder: (context) => Padding(
+        padding: const EdgeInsets.fromLTRB(18, 18, 18, 24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Expanded(
+                  child: Text(
+                    'Workspace',
+                    style: TextStyle(fontSize: 17, fontWeight: FontWeight.w800),
+                  ),
+                ),
+                IconButton(
+                  onPressed: () => Navigator.pop(context),
+                  icon: const Icon(Icons.close_rounded),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            GridView.count(
+              crossAxisCount: 2,
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              mainAxisSpacing: 10,
+              crossAxisSpacing: 10,
+              childAspectRatio: 2.25,
+              children: [
+                for (final index in secondary)
+                  InkWell(
+                    borderRadius: BorderRadius.circular(14),
+                    onTap: () => Navigator.pop(context, index),
+                    child: Ink(
+                      decoration: BoxDecoration(
+                        gradient: LinearGradient(
+                          colors: [
+                            Theme.of(
+                              context,
+                            ).colorScheme.primary.withValues(alpha: .18),
+                            Theme.of(context)
+                                .colorScheme
+                                .surfaceContainerHighest
+                                .withValues(alpha: .7),
+                          ],
+                        ),
+                        borderRadius: BorderRadius.circular(14),
+                        border: Border.all(
+                          color: Theme.of(context).colorScheme.outline,
+                        ),
+                      ),
+                      child: Row(
+                        children: [
+                          const SizedBox(width: 14),
+                          Icon(
+                            appPages[index].icon,
+                            color: kNeon,
+                            size: 21,
+                            shadows: kNeonIconGlow,
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Text(
+                              appPages[index].label,
+                              style: const TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+    if (selected != null) _selectTab(selected);
   }
 
   @override
@@ -757,6 +899,18 @@ class _HomeShellState extends State<HomeShell> {
 
     final blue = appTheme.isBlue;
     final muted = blue ? kBlueMuted : kRedMuted;
+    final wide = MediaQuery.sizeOf(context).width >= 840;
+    final primaryIndex = primaryPageIndexes.indexOf(_tab);
+    final pageStack = IndexedStack(
+      index: _tab,
+      children: [
+        for (var index = 0; index < appPages.length; index++)
+          if (_visitedTabs.contains(index))
+            _pageBody(index, blue)
+          else
+            const SizedBox.shrink(),
+      ],
+    );
     return Scaffold(
       appBar: AppBar(
         toolbarHeight: 62,
@@ -772,9 +926,7 @@ class _HomeShellState extends State<HomeShell> {
             Text('Nithi Bot', style: neonBrandTextStyle(fontSize: 16)),
             const SizedBox(height: 2),
             Text(
-              SessionService.displayName.isEmpty
-                  ? SessionService.username
-                  : SessionService.displayName,
+              '${appPages[_tab].label} · ${SessionService.displayName.isEmpty ? SessionService.username : SessionService.displayName}',
               style: const TextStyle(
                 color: kNeonSubtle,
                 fontSize: 10.5,
@@ -790,11 +942,6 @@ class _HomeShellState extends State<HomeShell> {
           ],
         ),
         actions: [
-          IconButton(
-            tooltip: 'Refresh this tab',
-            onPressed: () => _webKeys[_tab].currentState?.reload(),
-            icon: const Icon(Icons.refresh_rounded, size: 21),
-          ),
           const RedBlueThemeToggle(compact: true),
           PopupMenuButton<String>(
             tooltip: 'Account',
@@ -837,35 +984,78 @@ class _HomeShellState extends State<HomeShell> {
           const SizedBox(width: 4),
         ],
       ),
-      body: IndexedStack(
-        index: _tab,
-        children: [
-          for (var index = 0; index < appPages.length; index++)
-            if (_visitedTabs.contains(index))
-              _pageBody(index, blue)
-            else
-              const SizedBox.shrink(),
-        ],
-      ),
-      bottomNavigationBar: DecoratedBox(
-        decoration: BoxDecoration(
-          border: Border(
-            top: BorderSide(color: Theme.of(context).dividerColor),
-          ),
-        ),
-        child: NavigationBar(
-          selectedIndex: _tab,
-          onDestinationSelected: _selectTab,
-          destinations: [
-            for (final page in appPages)
-              NavigationDestination(
-                icon: Icon(page.icon),
-                selectedIcon: Icon(page.icon),
-                label: page.navLabel,
+      body: wide
+          ? Row(
+              children: [
+                NavigationRail(
+                  selectedIndex: _tab,
+                  extended: MediaQuery.sizeOf(context).width >= 1120,
+                  minExtendedWidth: 190,
+                  backgroundColor: Theme.of(
+                    context,
+                  ).colorScheme.surface.withValues(alpha: .88),
+                  indicatorColor: kNeon.withValues(alpha: .14),
+                  onDestinationSelected: _selectTab,
+                  leading: const Padding(
+                    padding: EdgeInsets.only(top: 10, bottom: 16),
+                    child: Icon(Icons.grid_view_rounded, color: kNeon),
+                  ),
+                  destinations: [
+                    for (final page in appPages)
+                      NavigationRailDestination(
+                        icon: Icon(
+                          page.icon,
+                          color: kNeon.withValues(alpha: .72),
+                        ),
+                        selectedIcon: Icon(
+                          page.icon,
+                          color: kNeon,
+                          shadows: kNeonIconGlowStrong,
+                        ),
+                        label: Text(page.navLabel),
+                      ),
+                  ],
+                ),
+                VerticalDivider(
+                  width: 1,
+                  color: Theme.of(context).dividerColor,
+                ),
+                Expanded(child: pageStack),
+              ],
+            )
+          : pageStack,
+      bottomNavigationBar: wide
+          ? null
+          : DecoratedBox(
+              decoration: BoxDecoration(
+                border: Border(
+                  top: BorderSide(color: Theme.of(context).dividerColor),
+                ),
               ),
-          ],
-        ),
-      ),
+              child: NavigationBar(
+                selectedIndex: primaryIndex >= 0 ? primaryIndex : 4,
+                onDestinationSelected: (index) {
+                  if (index == 4) {
+                    _showMore();
+                  } else {
+                    _selectTab(primaryPageIndexes[index]);
+                  }
+                },
+                destinations: [
+                  for (final index in primaryPageIndexes)
+                    NavigationDestination(
+                      icon: Icon(appPages[index].icon),
+                      selectedIcon: Icon(appPages[index].icon),
+                      label: appPages[index].navLabel,
+                    ),
+                  const NavigationDestination(
+                    icon: Icon(Icons.grid_view_rounded),
+                    selectedIcon: Icon(Icons.grid_view_rounded),
+                    label: 'More',
+                  ),
+                ],
+              ),
+            ),
     );
   }
 }
@@ -974,9 +1164,7 @@ class _LoginScreenState extends State<LoginScreen> {
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.stretch,
                           children: [
-                            const Align(
-                              child: NeonLogo(size: 76, radius: 16),
-                            ),
+                            const Align(child: NeonLogo(size: 76, radius: 16)),
                             const SizedBox(height: 18),
                             Text(
                               'Nithi Bot',

@@ -37,58 +37,172 @@ class AppCard extends StatelessWidget {
 
     return Container(
       decoration: BoxDecoration(
-        color: scheme.surface.withValues(alpha: .88),
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            Color.alphaBlend(
+              (accent ?? scheme.primary).withValues(alpha: .075),
+              scheme.surface.withValues(alpha: .96),
+            ),
+            scheme.surface.withValues(alpha: .86),
+          ],
+        ),
         borderRadius: BorderRadius.circular(Radii.lg),
         border: Border.all(color: scheme.outline),
-      ),
-      clipBehavior: Clip.antiAlias,
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          if (accent != null) Container(width: 3, color: accent),
-          Expanded(
-            child: Padding(
-              padding: padding,
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  if (hasHeader) ...[
-                    Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              if (kicker != null)
-                                Text(
-                                  kicker!.toUpperCase(),
-                                  style: AppText.kicker.copyWith(
-                                    color: scheme.onSurfaceVariant,
-                                  ),
-                                ),
-                              if (title != null)
-                                Padding(
-                                  padding: const EdgeInsets.only(top: 2),
-                                  child: Text(title!, style: AppText.title),
-                                ),
-                            ],
-                          ),
-                        ),
-                        ?trailing,
-                      ],
-                    ),
-                    const SizedBox(height: Gap.md),
-                  ],
-                  child,
-                ],
-              ),
-            ),
+        boxShadow: [
+          BoxShadow(
+            color: (accent ?? scheme.primary).withValues(alpha: .07),
+            blurRadius: 24,
+            offset: const Offset(0, 10),
           ),
         ],
       ),
+      clipBehavior: Clip.antiAlias,
+      child: Stack(
+        children: [
+          Padding(
+            padding: EdgeInsets.fromLTRB(
+              padding.left + (accent == null ? 0 : 3),
+              padding.top,
+              padding.right,
+              padding.bottom,
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (hasHeader) ...[
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            if (kicker != null)
+                              Text(
+                                kicker!.toUpperCase(),
+                                style: AppText.kicker.copyWith(
+                                  color: scheme.onSurfaceVariant,
+                                ),
+                              ),
+                            if (title != null)
+                              Padding(
+                                padding: const EdgeInsets.only(top: 2),
+                                child: Text(title!, style: AppText.title),
+                              ),
+                          ],
+                        ),
+                      ),
+                      ?trailing,
+                    ],
+                  ),
+                  const SizedBox(height: Gap.md),
+                ],
+                child,
+              ],
+            ),
+          ),
+          if (accent != null)
+            Positioned(
+              left: 0,
+              top: 0,
+              bottom: 0,
+              width: 3,
+              child: ColoredBox(color: accent!),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Compact, high-contrast action used inside trade and account cards.
+class CompactAction extends StatelessWidget {
+  const CompactAction({
+    super.key,
+    required this.label,
+    required this.icon,
+    this.onPressed,
+    this.tone,
+    this.filled = false,
+  });
+
+  final String label;
+  final IconData icon;
+  final VoidCallback? onPressed;
+  final Color? tone;
+  final bool filled;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final colour = tone ?? scheme.primary;
+    final style = ButtonStyle(
+      minimumSize: const WidgetStatePropertyAll(Size(0, 40)),
+      padding: const WidgetStatePropertyAll(
+        EdgeInsets.symmetric(horizontal: 13, vertical: 9),
+      ),
+      foregroundColor: WidgetStatePropertyAll(filled ? Colors.white : colour),
+      backgroundColor: WidgetStatePropertyAll(
+        filled ? colour : colour.withValues(alpha: .10),
+      ),
+      side: WidgetStatePropertyAll(
+        BorderSide(color: colour.withValues(alpha: .45)),
+      ),
+      shape: const WidgetStatePropertyAll(StadiumBorder()),
+      textStyle: const WidgetStatePropertyAll(
+        TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700),
+      ),
+    );
+    return TextButton.icon(
+      onPressed: onPressed,
+      style: style,
+      icon: Icon(icon, size: 17),
+      label: Text(label),
+    );
+  }
+}
+
+/// Wraps small metrics into equal-width tiles without horizontal scrolling.
+class MetricWrap extends StatelessWidget {
+  const MetricWrap({super.key, required this.children});
+
+  final List<Widget> children;
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final columns = constraints.maxWidth >= 680 ? 4 : 2;
+        final width = (constraints.maxWidth - Gap.sm * (columns - 1)) / columns;
+        return Wrap(
+          spacing: Gap.sm,
+          runSpacing: Gap.sm,
+          children: [
+            for (final child in children)
+              SizedBox(
+                width: width,
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: Theme.of(context).colorScheme.surfaceContainerHighest
+                        .withValues(alpha: .45),
+                    borderRadius: BorderRadius.circular(Radii.md),
+                    border: Border.all(
+                      color: Theme.of(context).colorScheme.outline,
+                    ),
+                  ),
+                  child: Padding(
+                    padding: const EdgeInsets.all(Gap.md),
+                    child: child,
+                  ),
+                ),
+              ),
+          ],
+        );
+      },
     );
   }
 }
@@ -96,7 +210,13 @@ class AppCard extends StatelessWidget {
 /// One label/value row. The value is right-aligned and tabular so a column of
 /// these lines up digit for digit.
 class StatRow extends StatelessWidget {
-  const StatRow(this.label, this.value, {super.key, this.valueColour, this.mono = true});
+  const StatRow(
+    this.label,
+    this.value, {
+    super.key,
+    this.valueColour,
+    this.mono = true,
+  });
 
   final String label;
   final String value;
@@ -122,8 +242,9 @@ class StatRow extends StatelessWidget {
             child: Text(
               value,
               textAlign: TextAlign.right,
-              style: (mono ? AppText.number : AppText.body)
-                  .copyWith(color: valueColour ?? scheme.onSurface),
+              style: (mono ? AppText.number : AppText.body).copyWith(
+                color: valueColour ?? scheme.onSurface,
+              ),
             ),
           ),
         ],
@@ -163,8 +284,9 @@ class MetricTile extends StatelessWidget {
         const SizedBox(height: Gap.xs),
         Text(
           value,
-          style: (big ? AppText.display : AppText.metric)
-              .copyWith(color: colour ?? scheme.onSurface),
+          style: (big ? AppText.display : AppText.metric).copyWith(
+            color: colour ?? scheme.onSurface,
+          ),
         ),
         if (sub != null) ...[
           const SizedBox(height: 2),
@@ -243,7 +365,10 @@ class StatePlaceholder extends StatelessWidget {
     final scheme = Theme.of(context).colorScheme;
     final colour = tone ?? scheme.onSurfaceVariant;
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: Gap.xxl, horizontal: Gap.lg),
+      padding: const EdgeInsets.symmetric(
+        vertical: Gap.xxl,
+        horizontal: Gap.lg,
+      ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -333,8 +458,9 @@ class ScoreMeter extends StatelessWidget {
                   child: Container(
                     width: 1,
                     height: 14,
-                    color: (edge > 0 ? kZoneCall : kZonePut)
-                        .withValues(alpha: .85),
+                    color: (edge > 0 ? kZoneCall : kZonePut).withValues(
+                      alpha: .85,
+                    ),
                   ),
                 ),
               // Marker.
