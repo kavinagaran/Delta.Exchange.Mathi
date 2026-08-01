@@ -2608,35 +2608,6 @@ body:has(.overview-page) .nav a.active {
 .today-ledger-empty span { color: var(--accent-dark); font-size: 16px; }
 .today-ledger-empty strong { color: var(--text); font-size: 12px; }
 .today-ledger-empty small { color: var(--muted); font-size: 10px; }
-.today-trade-actions {
-  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
-  min-width: 250px;
-}
-.trade-action-link {
-  appearance: none; padding: 4px 8px;
-  border: 1px solid var(--border); border-radius: 999px;
-  background: var(--surface-subtle); color: var(--muted);
-  font: inherit; font-size: 10.5px; font-weight: 750;
-  line-height: 1.2; white-space: nowrap; cursor: pointer;
-  transition: border-color .16s ease, color .16s ease,
-              background .16s ease, transform .16s ease;
-}
-.trade-action-link:hover { transform: translateY(-1px); }
-.trade-action-link.protection {
-  color: var(--accent-dark);
-  border-color: color-mix(in srgb, var(--accent) 48%, var(--border));
-  background: color-mix(in srgb, var(--accent-soft) 72%, var(--surface));
-}
-.trade-action-link.payoff {
-  color: var(--warn);
-  border-color: color-mix(in srgb, var(--warn) 42%, var(--border));
-  background: color-mix(in srgb, var(--warn-soft) 68%, var(--surface));
-}
-.trade-action-link.close {
-  color: var(--neg);
-  border-color: color-mix(in srgb, var(--neg) 48%, var(--border));
-  background: color-mix(in srgb, var(--neg-soft) 72%, var(--surface));
-}
 .today-payoff-modal { width: min(780px, 96vw); }
 .today-payoff-modal .chart-box { height: 380px; }
 @media (max-width: 920px) {

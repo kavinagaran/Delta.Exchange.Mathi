@@ -297,14 +297,17 @@ vm.runInThisContext(source.slice(start, end));
   const html = elements['today-body'].innerHTML;
   for (const detail of [
     'C-BTC-65000', 'P-BTC-64000', 'LIVE', 'LOSS',
-    'Close Position', 'Protection', 'Payoff',
   ]) {
     if (!html.includes(detail)) throw new Error(`missing today detail: ${detail}`);
   }
-  const closedRow = html.slice(html.indexOf('P-BTC-64000'));
-  if (closedRow.includes('Close Position') || closedRow.includes('Protection') ||
-      closedRow.includes('Payoff</button>')) {
-    throw new Error(`closed trade exposed LIVE actions: ${closedRow}`);
+  for (const removed of ['Actions', 'Close Position', 'Protection', 'Payoff']) {
+    if (html.includes(removed)) throw new Error(`table exposed removed action: ${removed}`);
+  }
+  const currentCard = elements['today-current-position'].innerHTML;
+  for (const control of ['Close Position', 'Protection', 'Payoff']) {
+    if (!currentCard.includes(control)) {
+      throw new Error(`current trade card is missing control: ${control}`);
+    }
   }
   await closeTodayLiveTrade(0);
   if (!posted || posted.url !== '/api/square-off?slot=trend' ||

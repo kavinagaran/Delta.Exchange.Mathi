@@ -17,10 +17,9 @@ def test_overview_uses_performance_style_cards_and_table_header():
     assert "overview-today-card" in overview
     assert ".today-summary" in styles
     assert ".today-trades-table td.numeric" in styles
-    assert ".today-trade-actions" in styles
-    assert ".trade-action-link.protection" in styles
-    assert ".trade-action-link.payoff" in styles
-    assert ".trade-action-link.close" in styles
+    assert "<th>Actions</th>" not in overview
+    assert ".today-trade-actions" not in styles
+    assert ".trade-action-link" not in styles
 
 
 def test_overview_inherits_the_selected_theme_table_header():

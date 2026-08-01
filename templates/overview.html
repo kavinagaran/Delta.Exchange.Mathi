@@ -92,10 +92,9 @@
           <th>Exit / Mark</th>
           <th>P&amp;L</th>
           <th>Status</th>
-          <th>Actions</th>
         </tr></thead>
         <tbody id="today-body">
-          <tr class="empty-row"><td colspan="9">Loading…</td></tr>
+          <tr class="empty-row"><td colspan="8">Loading…</td></tr>
         </tbody>
       </table>
     </div>
@@ -323,7 +322,7 @@ async function loadToday() {
   renderTodayCurrentTrade(currentTrade, currentIndex);
   renderTodayEngineDecision(engineStatus);
   if (!rows.length) {
-    body.innerHTML = `<tr class="empty-row today-ledger-empty"><td colspan="9">
+    body.innerHTML = `<tr class="empty-row today-ledger-empty"><td colspan="8">
       <div><span aria-hidden="true">◇</span><strong>No trades today</strong>
       <small>Completed and active trades will appear here automatically.</small></div>
     </td></tr>`;
@@ -347,16 +346,6 @@ async function loadToday() {
     if (live && controlSlot) {
       window._todayLiveTrades[index] = { ...trade, controlSlot };
     }
-    const actions = live && controlSlot
-      ? `<div class="today-trade-actions">
-          <button class="trade-action-link close" type="button"
-                  onclick="closeTodayLiveTrade(${index})">Close Position</button>
-          <button class="trade-action-link protection" type="button"
-                  onclick="openTodayProtection(${index})">Protection</button>
-          <button class="trade-action-link payoff" type="button"
-                  onclick="showTodayPayoff(${index})">Payoff</button>
-        </div>`
-      : '<span class="c-muted">—</span>';
     return `<tr>
       <td>${esc(trade.symbol)}</td>
       <td><span class="badge ${directionClass}">${esc(direction)}</span></td>
@@ -366,7 +355,6 @@ async function loadToday() {
       <td class="numeric">$${fN(exit, 2)}</td>
       <td class="numeric ${pnlCls(pnl)}">${f$(pnl)}</td>
       <td>${status}</td>
-      <td>${actions}</td>
     </tr>`;
   }).join('');
   return rows;
