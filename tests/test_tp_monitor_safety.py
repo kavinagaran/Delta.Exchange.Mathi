@@ -26,6 +26,10 @@ class TpMonitorSafetyTests(unittest.TestCase):
             patch.object(tp_monitor, "HISTORY_FILE", self.history_file),
             patch.object(tp_monitor, "HEALTH_FILE", self.health_file),
             patch.object(tp_monitor, "USER_DIR", root),
+            # Most tests exercise the legacy reconciliation branches in
+            # isolation. Exchange-only behavior has a dedicated contract
+            # test below.
+            patch.object(tp_monitor, "EXCHANGE_ONLY_PROTECTION", False),
         ]
         for item in self.path_patches:
             item.start()
@@ -837,13 +841,14 @@ class TpMonitorSafetyTests(unittest.TestCase):
         health = json.loads(self.health_file.read_text(encoding="utf-8"))
         self.assertEqual(health["status"], "healthy")
 
-    def test_unsupported_exchange_protection_uses_quiet_healthy_local_fallback(self):
+    def test_unsupported_exchange_protection_triggers_safety_close(self):
         self.write_state(protection_config={
             "tp_target_pnl": 100, "sl_target_pnl": 50,
             "tsl_arm_pnl": 0, "tsl_trail_pnl": 0, "poll_secs": 30,
         })
         unsupported = {"success": False, "error": {"code": "unsupported"}}
-        with patch.object(tp_monitor, "REMOVE_PROTECTION", False), \
+        with patch.object(tp_monitor, "EXCHANGE_ONLY_PROTECTION", True), \
+             patch.object(tp_monitor, "REMOVE_PROTECTION", False), \
              patch.object(tp_monitor, "install_signal_handlers"), \
              patch.object(tp_monitor, "get_exchange_size", return_value=10), \
              patch.object(tp_monitor, "get_exchange_position", return_value={
@@ -853,18 +858,21 @@ class TpMonitorSafetyTests(unittest.TestCase):
              patch.object(tp_monitor, "place_stop_order", return_value=unsupported), \
              patch.object(tp_monitor, "get_order_by_client_id",
                           return_value=({}, True)), \
+             patch.object(tp_monitor, "close_position", return_value=True) as close, \
+             patch.object(tp_monitor, "remove_exchange_protection",
+                          return_value=True), \
              patch.object(tp_monitor, "send_telegram") as telegram, \
              patch.object(tp_monitor.time, "sleep", side_effect=_StopLoop):
-            with self.assertRaises(_StopLoop):
-                tp_monitor.main()
-        telegram.assert_not_called()
+            self.assertEqual(tp_monitor.main(), 0)
+        close.assert_called_once()
+        self.assertEqual(
+            close.call_args.args[3], "exchange_protection_unavailable",
+        )
+        telegram.assert_called_once()
         health = json.loads(self.health_file.read_text(encoding="utf-8"))
-        self.assertEqual(health["status"], "healthy")
-        self.assertEqual(health["last_error"], "")
-        self.assertEqual(health["protection_runtime_mode"], "local_monitor")
-        self.assertTrue(health["protection_established"])
-        self.assertTrue(health["local_fallback_active"])
-        self.assertFalse(health["exchange_protection_complete"])
+        self.assertEqual(health["status"], "closed")
+        self.assertEqual(health["protection_runtime_mode"], "exchange_required")
+        self.assertFalse(health["protection_established"])
 
     def test_local_fallback_alerts_only_after_three_consecutive_poll_failures(self):
         self.write_state(

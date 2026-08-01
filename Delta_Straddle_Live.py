@@ -3024,8 +3024,7 @@ def start_tp_monitor(slot: str):
             if age < -30 or age > heartbeat_max_age:
                 return False
             proven_mode = bool(
-                health.get("exchange_protection_complete")
-                or health.get("local_fallback_active")
+                health.get("exchange_protection_complete") is True
             )
             return (bool(health.get("protection_established")) and proven_mode
                     and health.get("status") in {"healthy", "degraded"})

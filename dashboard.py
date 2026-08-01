@@ -364,8 +364,7 @@ def _wait_for_protection(user: str, slot: str, started_at: datetime,
             current_run = False
         active = bool(
             latest.get("protection_established")
-            and (latest.get("exchange_protection_complete")
-                 or latest.get("local_fallback_active"))
+            and latest.get("exchange_protection_complete") is True
         )
         if (current_run and active and _tp_health_matches(latest, expected_state, user, slot)
                 and latest.get("status") in {"healthy", "degraded", "running"}):
@@ -8466,6 +8465,7 @@ def _trend_score_auto_ledger(data_dir: Path) -> dict:
             "legacy_setup_lock_migration_v1": False,
             "setup_lock_semantics_v2_migrated": False,
             "setup_lock_last_manual_reset_at_utc": None,
+            "setup_lock_last_daily_reset_ist_date": None,
         }
     if ledger.get("schema_version") != 1:
         raise RuntimeError("Trend score-auto ledger schema is unsupported")
@@ -8491,6 +8491,9 @@ def _trend_score_auto_ledger(data_dir: Path) -> dict:
     manual_reset_at = ledger.get("setup_lock_last_manual_reset_at_utc")
     if manual_reset_at is not None and not isinstance(manual_reset_at, str):
         raise RuntimeError("Trend score-auto setup-lock reset marker is invalid")
+    daily_reset_date = ledger.get("setup_lock_last_daily_reset_ist_date")
+    if daily_reset_date is not None and not isinstance(daily_reset_date, str):
+        raise RuntimeError("Trend score-auto daily setup-lock reset marker is invalid")
     ledger.setdefault("notifications", {})
     ledger.setdefault("current_transition", None)
     ledger.setdefault("no_fill_setup", None)
@@ -8498,6 +8501,7 @@ def _trend_score_auto_ledger(data_dir: Path) -> dict:
     ledger.setdefault("legacy_setup_lock_migration_v1", False)
     ledger.setdefault("setup_lock_semantics_v2_migrated", False)
     ledger.setdefault("setup_lock_last_manual_reset_at_utc", None)
+    ledger.setdefault("setup_lock_last_daily_reset_ist_date", None)
     return ledger
 
 
@@ -9416,6 +9420,67 @@ def _trend_score_auto_lock_setup(
         "source_transition_id": transition_id,
         "source_action": action,
     }
+
+
+def _maybe_daily_reset_trend_score_setup_lock(
+    *,
+    now: datetime | None = None,
+) -> bool:
+    """Clear an existing score-zone lock once daily after 5:30 PM IST.
+
+    The date marker is written even when no lock exists.  This is important:
+    a setup first traded later that evening must remain locked until the next
+    day's reset instead of being cleared by a subsequent supervisor tick.
+    """
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    current_ist = current.astimezone(_IST_TIMEZONE)
+    reset_date = current_ist.strftime("%Y-%m-%d")
+    if (current_ist.hour, current_ist.minute) < (17, 30):
+        return False
+
+    mode = _trend_score_auto_mode()
+    if mode not in {"dry_run", "live"}:
+        return False
+    dry_run = mode == "dry_run"
+    user = _active_user()
+    data_dir = _mode_data_dir(dry_run)
+    owner = f"trend-score-daily-reset:{user}:{os.getpid()}:{time.time_ns()}"
+    previous = None
+    with account_entry_lock(_user_dir(), owner) as acquired:
+        if not acquired:
+            return False
+        # A mode save may race the supervisor. Never clear the other
+        # namespace after the account lock was acquired.
+        if _trend_score_auto_mode() != mode:
+            return False
+        with account_file_lock(
+            data_dir, "score-setup-lock", owner,
+            stale_after_sec=30, wait_sec=0,
+        ) as file_acquired:
+            if not file_acquired:
+                return False
+            ledger = _trend_score_auto_ledger(data_dir)
+            if ledger.get("setup_lock_last_daily_reset_ist_date") == reset_date:
+                return False
+            previous = _trend_score_auto_setup_lock(ledger)
+            ledger["setup_lock"] = None
+            ledger["setup_lock_last_daily_reset_ist_date"] = reset_date
+            _trend_score_auto_write_ledger(data_dir, ledger)
+
+    if previous is not None:
+        _trend_audit("trend_score_auto_setup_lock_daily_reset", {
+            "execution_mode": mode,
+            "zone": previous["target_zone"],
+            "source_signal_key": previous.get("source_signal_key"),
+            "reset_ist_date": reset_date,
+            "scheduled_for_ist": "17:30",
+            "order_submitted": False,
+            "exchange_api_called": False,
+        })
+        return True
+    return False
 
 
 def _trend_score_auto_backfill_legacy_setup_lock(
@@ -13084,6 +13149,8 @@ def _trend_auto_loop() -> None:
                         if recovery_claimed:
                             continue
                         score_mode = _trend_score_auto_mode()
+                        if score_mode in {"dry_run", "live"}:
+                            _maybe_daily_reset_trend_score_setup_lock()
                         # Publish the displayed 5M/15M/live-1H state for the
                         # Morning MOVE rule even when Trend auto-entry itself
                         # is disabled. The 15-second cache limits API traffic.

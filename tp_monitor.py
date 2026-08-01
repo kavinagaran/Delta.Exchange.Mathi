@@ -144,6 +144,10 @@ RECONCILE_SECS = max(int(_f("TP_ORDER_RECONCILE_SECS", 60)), 30)
 LOCAL_FALLBACK_POLL_SECS = max(
     10, min(POLL_SECS, int(_f("TP_LOCAL_FALLBACK_POLL_SECS", 10)))
 )
+# LIVE protection is exchange-only. The local loop remains responsible for
+# reconciliation and emergency flattening, but it is never accepted as the
+# TP/SL/TSL protection layer for an open position.
+EXCHANGE_ONLY_PROTECTION = True
 OPTION_FEE_RATE = max(_f("OPTION_FEE_RATE", 0.00010), 0)
 OPTION_FEE_CAP_PCT = max(_f("OPTION_FEE_CAP_PCT", 0.035), 0)
 
@@ -2699,12 +2703,16 @@ def _finalize_confirmed_market_close_locked(state, order, mark, lots, reason):
     _atomic_write_json(STATE_FILE, state)
     append_history(state)
 
-    tag = {"take_profit": "TP", "stop_loss": "SL", "trailing_stop": "TSL"}.get(reason, "TP")
+    tag = {"take_profit": "TP", "stop_loss": "SL", "trailing_stop": "TSL",
+           "exchange_protection_unavailable": "SAFETY CLOSE"}.get(reason, "CLOSE")
     label = _slot_label()
     head = {
         "take_profit": f"✅ <b>TAKE PROFIT HIT — {label} ({USER.upper()})</b>",
         "stop_loss": f"🛑 <b>STOP LOSS HIT — {label} ({USER.upper()})</b>",
         "trailing_stop": f"🔻 <b>TRAILING STOP HIT — {label} ({USER.upper()})</b>",
+        "exchange_protection_unavailable": (
+            f"🚨 <b>EXCHANGE PROTECTION UNAVAILABLE — {label} ({USER.upper()})</b>"
+        ),
     }.get(reason, f"✅ <b>{tag} — {label} ({USER.upper()})</b>")
     psign = "+" if real >= 0 else "-"
     send_telegram(
@@ -3138,8 +3146,9 @@ def _close_position_locked(state, mark, pnl, reason="take_profit"):
         log.error("Trend close POST blocked by final cycle proof: %s", cycle_error)
         return False
 
-    tag = {"take_profit": "TP", "stop_loss": "SL", "trailing_stop": "TSL"}.get(
-        pending_reason, "TP"
+    tag = {"take_profit": "TP", "stop_loss": "SL", "trailing_stop": "TSL",
+           "exchange_protection_unavailable": "SAFETY CLOSE"}.get(
+        pending_reason, "CLOSE"
     )
     log.info("%s HIT — P&L $%.2f  mark $%.4f  %sing %d lots to close (client %s)...",
              tag, pnl, mark, close_side, lots, client_order_id)
@@ -4787,9 +4796,13 @@ def main():
                 continuity_verified = bool(
                     not continuity_required or continuity.get("verified")
                 )
-                tp_local_fallback = continuity_verified and not tp_complete
+                tp_local_fallback = (
+                    not EXCHANGE_ONLY_PROTECTION
+                    and continuity_verified and not tp_complete
+                )
                 stop_local_fallback = (
-                    continuity_verified and stop_required and not stop_complete
+                    not EXCHANGE_ONLY_PROTECTION
+                    and continuity_verified and stop_required and not stop_complete
                 )
                 local_fallback_active = tp_local_fallback or stop_local_fallback
                 protection_established = continuity_verified and (
@@ -4847,6 +4860,35 @@ def main():
                     continuity_verified_at_utc=continuity.get("verified_at_utc") or _utc_now(),
                     consecutive_errors=0, next_poll_secs=sleep_secs,
                 )
+                if (EXCHANGE_ONLY_PROTECTION and continuity_verified
+                        and not exchange_complete):
+                    reason = str(
+                        load_state().get("exchange_protection_error")
+                        or "complete reduce-only TP and SL/TSL orders are not verified"
+                    )
+                    alert_once(
+                        "exchange_only_protection_unavailable",
+                        f"{symbol}: Delta exchange protection is required; "
+                        f"the position is being flattened ({reason[:180]})",
+                    )
+                    closed = close_position(
+                        state, mark, pnl, "exchange_protection_unavailable",
+                    )
+                    if closed:
+                        cleaned = remove_exchange_protection(
+                            load_state(), confirmed_closed=True,
+                            reason="exchange-only safety close confirmed",
+                        )
+                        if cleaned:
+                            write_monitor_health(
+                                "closed", state_status="CLOSED",
+                                exchange_position_size=0,
+                                protection_established=False,
+                                protection_runtime_mode="exchange_required",
+                            )
+                            return 0
+                    sleep_secs = local_fallback_poll
+                    raise _RetryMonitorCycle()
                 if consecutive_errors:
                     # A recovered fallback must be allowed to report a future
                     # independent outage once, instead of suppressing it for

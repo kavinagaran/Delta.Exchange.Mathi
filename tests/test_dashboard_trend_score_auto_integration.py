@@ -1165,6 +1165,64 @@ def test_setup_lock_reset_endpoint_clears_only_the_lock(score_cycle):
         mock.assert_not_called()
 
 
+def test_setup_lock_resets_once_daily_at_530_pm_ist(score_cycle):
+    assert dashboard._maybe_auto_trend_score_cycle() is True
+    before_cutoff = datetime(2026, 8, 1, 11, 59, tzinfo=timezone.utc)
+    at_cutoff = datetime(2026, 8, 1, 12, 0, tzinfo=timezone.utc)
+
+    assert dashboard._maybe_daily_reset_trend_score_setup_lock(
+        now=before_cutoff,
+    ) is False
+    assert dashboard._trend_score_auto_ledger(
+        score_cycle["dry"],
+    )["setup_lock"] is not None
+
+    assert dashboard._maybe_daily_reset_trend_score_setup_lock(
+        now=at_cutoff,
+    ) is True
+    ledger = dashboard._trend_score_auto_ledger(score_cycle["dry"])
+    assert ledger["setup_lock"] is None
+    assert ledger["setup_lock_last_daily_reset_ist_date"] == "2026-08-01"
+
+    # A trade entered later that evening stays locked until tomorrow.
+    dashboard._trend_score_auto_lock_setup(
+        ledger,
+        score_cycle["holder"]["signal"],
+        transition_id="later-evening-trade",
+        action="OPEN_CE",
+    )
+    dashboard._trend_score_auto_write_ledger(score_cycle["dry"], ledger)
+    assert dashboard._maybe_daily_reset_trend_score_setup_lock(
+        now=at_cutoff + timedelta(hours=2),
+    ) is False
+    assert dashboard._trend_score_auto_ledger(
+        score_cycle["dry"],
+    )["setup_lock"] is not None
+
+    assert dashboard._maybe_daily_reset_trend_score_setup_lock(
+        now=at_cutoff + timedelta(days=1),
+    ) is True
+    assert dashboard._trend_score_auto_ledger(
+        score_cycle["dry"],
+    )["setup_lock"] is None
+
+    reset_events = [
+        call for call in score_cycle["audit"].call_args_list
+        if call.args and call.args[0] == "trend_score_auto_setup_lock_daily_reset"
+    ]
+    assert len(reset_events) == 2
+
+
+def test_daily_setup_lock_check_marks_date_when_nothing_is_locked(score_cycle):
+    at_cutoff = datetime(2026, 8, 1, 12, 0, tzinfo=timezone.utc)
+    assert dashboard._maybe_daily_reset_trend_score_setup_lock(
+        now=at_cutoff,
+    ) is False
+    ledger = dashboard._trend_score_auto_ledger(score_cycle["dry"])
+    assert ledger["setup_lock"] is None
+    assert ledger["setup_lock_last_daily_reset_ist_date"] == "2026-08-01"
+
+
 def test_actionable_zone_change_releases_old_lock_even_if_entry_is_unavailable(
         score_cycle, monkeypatch):
     state_path = score_cycle["dry"] / "trend_state.json"
