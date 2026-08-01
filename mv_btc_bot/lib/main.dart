@@ -7,6 +7,9 @@ import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
+import 'api/client.dart';
+import 'screens/today_screen.dart';
+
 const kPositive = Color(0xFF38D99A);
 const kWarning = Color(0xFFFFC267);
 
@@ -61,7 +64,7 @@ const kBlueBackgroundAsset = 'assets/sparkling-blue-dashboard-bg.png';
 
 final appTheme = AppThemeController();
 
-const kWebAssetRevision = '4.8.0+19-crisp-score-candles';
+const kWebAssetRevision = '5.0.0+20-native-today';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -507,6 +510,16 @@ class SessionService {
   static String username = 'mathi';
   static String password = '';
   static String displayName = '';
+
+  /// The Flask session cookie from the last successful sign-in.
+  ///
+  /// Retained so the native screens' JSON calls can authenticate as the same
+  /// session the WebView uses. Previously it was handed to the cookie manager
+  /// and dropped, which left `http` requests anonymous — they came back 401
+  /// and a native screen would have read that as "no data" rather than "not
+  /// signed in". Cleared on sign-out with everything else.
+  static String? sessionCookie;
+
   static final cookieManager = WebViewCookieManager();
 
   static Future<void> load() async {
@@ -577,17 +590,18 @@ class SessionService {
     }
 
     final setCookie = response.headers['set-cookie'] ?? '';
-    final sessionCookie = sessionCookieFromHeader(setCookie);
-    if (sessionCookie == null || sessionCookie.isEmpty) {
+    final cookie = sessionCookieFromHeader(setCookie);
+    if (cookie == null || cookie.isEmpty) {
       throw Exception('The server did not return an authenticated session.');
     }
+    sessionCookie = cookie;
 
     await cookieManager.clearCookies();
     final server = Uri.parse(nextUrl);
     await cookieManager.setCookie(
       WebViewCookie(
         name: 'session',
-        value: sessionCookie,
+        value: cookie,
         domain: server.host,
         path: '/',
       ),
@@ -604,6 +618,9 @@ class SessionService {
 
   static Future<void> signOut() async {
     await cookieManager.clearCookies();
+    // Must be cleared with the rest: a retained cookie would let the native
+    // screens keep fetching and rendering account data after sign-out.
+    sessionCookie = null;
     displayName = '';
     password = '';
     final prefs = await SharedPreferences.getInstance();
@@ -793,16 +810,30 @@ class _HomeShellState extends State<HomeShell> {
         index: _tab,
         children: [
           for (var index = 0; index < appPages.length; index++)
-            if (_visitedTabs.contains(index))
+            if (!_visitedTabs.contains(index))
+              const SizedBox.shrink()
+            // Today is drawn natively. It is the view opened in a hurry, so it
+            // has to answer "is the bot alive, am I in a position, what is it
+            // doing" without waiting for a WebView to lay out a desktop grid.
+            // The remaining tabs stay embedded: they are control-heavy and
+            // already tested server-side, and a native copy would drift from
+            // the web app on every change.
+            else if (appPages[index].path == '/')
+              TodayScreen(
+                api: DashboardApi(
+                  baseUrl: SessionService.baseUrl,
+                  sessionCookie: SessionService.sessionCookie,
+                ),
+                onUnauthorised: _signOut,
+              )
+            else
               DashboardWebPage(
                 key: _webKeys[index],
                 page: appPages[index],
                 blue: blue,
                 onSessionExpired: _signOut,
                 onPageSelected: _selectTab,
-              )
-            else
-              const SizedBox.shrink(),
+              ),
         ],
       ),
       bottomNavigationBar: DecoratedBox(
