@@ -23,20 +23,28 @@ def test_overview_uses_performance_style_cards_and_table_header():
     assert ".trade-action-link.close" in styles
 
 
-def test_overview_inherits_the_shared_table_header_instead_of_restating_it():
-    """Same hierarchy as Performance, now by sharing rather than duplication.
+def test_overview_inherits_the_selected_theme_table_header():
+    """The shared header follows Red/Blue without a per-page override.
 
     Overview used to carry its own `.overview-page .overview-today-card thead
     th` block copying the Performance header. That per-page override is gone:
-    a single `:root table thead th` rule gives every table on every page the
-    same graded header, so Overview inherits the treatment. Pinning the shared
-    rule keeps the original intent; pinning the deleted duplicate only
-    asserted how it used to be achieved.
+    the shared structural rule and two theme-specific palettes give every
+    table the selected treatment.
     """
     overview = (ROOT / "templates" / "overview.html").read_text(encoding="utf-8")
     styles = (ROOT / "static" / "css" / "app.css").read_text(encoding="utf-8")
 
     assert ":root table thead th" in styles
+    assert ':root:not([data-theme="dark"]) table thead th' in styles
+    assert ':root[data-theme="dark"] table thead th' in styles
+    assert ":root table thead th:nth-child" not in styles
+    red_header = styles.split(
+        ':root:not([data-theme="dark"]) table thead th', 1)[1].split("}", 1)[0]
+    blue_header = styles.split(
+        ':root[data-theme="dark"] table thead th', 1)[1].split("}", 1)[0]
+    assert "#7c2032" in red_header
+    assert "#0f5688" in blue_header
+    assert red_header != blue_header
     # The rule only reaches Overview if the card holds a real <table><thead>.
     card = overview.split('class="card overview-today-card"', 1)[1]
     assert "<table" in card and "<thead>" in card

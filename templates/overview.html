@@ -31,21 +31,44 @@
 
   <div class="stats today-summary" id="today-summary" aria-label="Today's trading summary">
     <div class="stat performance-stat accent" data-metric="trades">
+      <span class="today-stat-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" focusable="false">
+          <path d="M4 7h15m0 0-3-3m3 3-3 3M20 17H5m0 0 3-3m-3 3 3 3"/>
+        </svg>
+      </span>
       <div class="lbl">Trades today</div>
       <div class="val" id="today-trade-total">—</div>
       <div class="sub">All entries opened today</div>
     </div>
     <div class="stat performance-stat neutral" data-metric="open">
+      <span class="today-stat-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" focusable="false">
+          <circle cx="12" cy="12" r="8"/>
+          <path d="M12 7.5V12l3.5 2"/>
+        </svg>
+      </span>
       <div class="lbl">Open trades</div>
       <div class="val" id="today-open-total">—</div>
       <div class="sub">Currently running</div>
     </div>
     <div class="stat performance-stat neutral" data-metric="closed">
+      <span class="today-stat-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" focusable="false">
+          <circle cx="12" cy="12" r="8"/>
+          <path d="m8.5 12.2 2.3 2.3 4.9-5"/>
+        </svg>
+      </span>
       <div class="lbl">Closed trades</div>
       <div class="val" id="today-closed-total">—</div>
       <div class="sub" id="today-result-note">—</div>
     </div>
     <div class="stat performance-stat neutral today-pnl-stat" data-metric="pnl">
+      <span class="today-stat-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" focusable="false">
+          <path d="M4 17.5 9 12l3.2 3.2L20 7"/>
+          <path d="M15.5 7H20v4.5"/>
+        </svg>
+      </span>
       <div class="lbl">Day P&amp;L</div>
       <div class="val" id="today-pnl">—</div>
       <div class="sub">Open mark plus realised P&amp;L</div>

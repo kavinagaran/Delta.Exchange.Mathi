@@ -65,6 +65,8 @@ def test_today_page_uses_compact_responsive_terminal_layout():
         ".today-current-trade-body",
         ".today-decision-panel .decision-primary",
         ".overview-page .today-summary .performance-stat",
+        ".overview-page .today-summary .today-stat-icon",
+        ".overview-page .today-summary .today-stat-icon svg",
         ".today-ledger-empty td > div",
         "#today-current-position > .score-zone-empty",
         "@media (max-width: 920px)",
@@ -72,6 +74,20 @@ def test_today_page_uses_compact_responsive_terminal_layout():
         "prefers-reduced-motion",
     ):
         assert required in styles
+
+
+def test_today_summary_cards_use_meaningful_svg_icons_not_empty_boxes():
+    source = (ROOT / "templates" / "overview.html").read_text(encoding="utf-8")
+    styles = (ROOT / "static" / "css" / "app.css").read_text(encoding="utf-8")
+    summary = source.split('id="today-summary"', 1)[1].split(
+        'class="card overview-today-card"', 1)[0]
+
+    assert summary.count('class="today-stat-icon"') == 4
+    assert summary.count('<svg viewBox="0 0 24 24"') == 4
+    assert summary.count('aria-hidden="true"') == 4
+    assert 'stroke: currentColor' in styles
+    assert '.today-summary .performance-stat::before' not in styles
+    assert '.performance-stat[data-metric="open"]::after' not in styles
 
 
 def test_topbar_btc_pill_uses_theme_gradient_and_live_pnl_tones():

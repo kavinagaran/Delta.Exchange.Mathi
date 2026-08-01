@@ -18,4 +18,6 @@ def test_global_card_stat_and_table_treatments_cover_every_dashboard_page():
     assert ':root[data-theme="dark"] .card-hd' in styles
     assert ':root .stats .stat:not(.performance-stat)::before' in styles
     assert ':root table thead th' in styles
+    assert ':root:not([data-theme="dark"]) table thead th' in styles
+    assert ':root[data-theme="dark"] table thead th' in styles
     assert ':root .section-title' in styles
