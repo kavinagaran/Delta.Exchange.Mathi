@@ -10,6 +10,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:mv_btc_bot/api/client.dart';
+import 'package:mv_btc_bot/main.dart' show appPages;
 import 'package:mv_btc_bot/theme/design.dart';
 
 void main() {
@@ -93,6 +94,29 @@ void main() {
     test('an empty cookie is treated as no session', () {
       final api = DashboardApi(baseUrl: 'https://x', sessionCookie: '');
       expect(api.headers.containsKey('Cookie'), isFalse);
+    });
+  });
+
+  group('native / embedded split', () {
+    test('the three native paths match the tabs they are meant to replace', () {
+      // _pageBody switches on AppPageSpec.path, so a path rename in appPages
+      // would silently fall through to the WebView and the native screen would
+      // simply never appear — no error, just the old page back.
+      final paths = appPages.map((page) => page.path).toSet();
+      for (final native in ['/', '/positions', '/trades']) {
+        expect(
+          paths,
+          contains(native),
+          reason: '$native is rendered natively but is no longer a tab path',
+        );
+      }
+    });
+
+    test('control-heavy pages are still reachable as tabs', () {
+      // These stay embedded deliberately. If one disappears from appPages the
+      // app loses access to it entirely, since there is no native equivalent.
+      final paths = appPages.map((page) => page.path).toSet();
+      expect(paths, containsAll(['/config', '/accounts', '/trend-engine']));
     });
   });
 }

@@ -105,6 +105,7 @@ class DashboardApi {
   Future<ApiResult<Map<String, dynamic>>> summary() => getMap('/api/summary');
   Future<ApiResult<Map<String, dynamic>>> wallet() => getMap('/api/wallet');
   Future<ApiResult<List<dynamic>>> todayTrades() => getList('/api/today-trades');
+  Future<ApiResult<List<dynamic>>> trades() => getList('/api/trades');
   Future<ApiResult<List<dynamic>>> allPositions() => getList('/api/all-positions');
   Future<ApiResult<Map<String, dynamic>>> engineSnapshot() =>
       getMap('/api/engine/snapshot');

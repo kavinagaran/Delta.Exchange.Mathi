@@ -8,6 +8,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
 import 'api/client.dart';
+import 'screens/exposure_screen.dart';
+import 'screens/performance_screen.dart';
 import 'screens/today_screen.dart';
 
 const kPositive = Color(0xFF38D99A);
@@ -64,7 +66,7 @@ const kBlueBackgroundAsset = 'assets/sparkling-blue-dashboard-bg.png';
 
 final appTheme = AppThemeController();
 
-const kWebAssetRevision = '5.0.0+20-native-today';
+const kWebAssetRevision = '5.1.0+21-native-exposure-performance';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -701,6 +703,35 @@ class _HomeShellState extends State<HomeShell> {
     });
   }
 
+  /// The widget for one tab: a native screen where we have one, else the
+  /// embedded dashboard page.
+  ///
+  /// One switch, so the native/embedded split is stated in a single place
+  /// rather than inferred from the build method. The native three are the
+  /// read-only, data-dense views where a phone layout genuinely beats a
+  /// desktop grid in a WebView. The rest are control-heavy, already tested
+  /// server-side, and a native copy would need keeping in step with every web
+  /// change — they stay embedded on purpose, not by omission.
+  Widget _pageBody(int index, bool blue) {
+    final page = appPages[index];
+    final api = DashboardApi(
+      baseUrl: SessionService.baseUrl,
+      sessionCookie: SessionService.sessionCookie,
+    );
+    return switch (page.path) {
+      '/' => TodayScreen(api: api, onUnauthorised: _signOut),
+      '/positions' => ExposureScreen(api: api, onUnauthorised: _signOut),
+      '/trades' => PerformanceScreen(api: api, onUnauthorised: _signOut),
+      _ => DashboardWebPage(
+          key: _webKeys[index],
+          page: page,
+          blue: blue,
+          onSessionExpired: _signOut,
+          onPageSelected: _selectTab,
+        ),
+    };
+  }
+
   void _selectTab(int index) {
     if (index < 0 || index >= appPages.length) return;
     setState(() {
@@ -810,30 +841,10 @@ class _HomeShellState extends State<HomeShell> {
         index: _tab,
         children: [
           for (var index = 0; index < appPages.length; index++)
-            if (!_visitedTabs.contains(index))
-              const SizedBox.shrink()
-            // Today is drawn natively. It is the view opened in a hurry, so it
-            // has to answer "is the bot alive, am I in a position, what is it
-            // doing" without waiting for a WebView to lay out a desktop grid.
-            // The remaining tabs stay embedded: they are control-heavy and
-            // already tested server-side, and a native copy would drift from
-            // the web app on every change.
-            else if (appPages[index].path == '/')
-              TodayScreen(
-                api: DashboardApi(
-                  baseUrl: SessionService.baseUrl,
-                  sessionCookie: SessionService.sessionCookie,
-                ),
-                onUnauthorised: _signOut,
-              )
+            if (_visitedTabs.contains(index))
+              _pageBody(index, blue)
             else
-              DashboardWebPage(
-                key: _webKeys[index],
-                page: appPages[index],
-                blue: blue,
-                onSessionExpired: _signOut,
-                onPageSelected: _selectTab,
-              ),
+              const SizedBox.shrink(),
         ],
       ),
       bottomNavigationBar: DecoratedBox(
