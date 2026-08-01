@@ -5,7 +5,7 @@
 {% endblock %}
 
 {% block content %}
-<div class="overview-page">
+<div class="overview-page" aria-label="Today trading dashboard">
   <article class="card today-current-trade-card" aria-labelledby="today-current-trade-title">
     <div class="card-hd slot-hd">
       <span aria-hidden="true">◉</span>
@@ -29,23 +29,23 @@
     </div>
   </article>
 
-  <div class="stats today-summary" id="today-summary">
-    <div class="stat performance-stat accent">
+  <div class="stats today-summary" id="today-summary" aria-label="Today's trading summary">
+    <div class="stat performance-stat accent" data-metric="trades">
       <div class="lbl">Trades today</div>
       <div class="val" id="today-trade-total">—</div>
       <div class="sub">All entries opened today</div>
     </div>
-    <div class="stat performance-stat neutral">
+    <div class="stat performance-stat neutral" data-metric="open">
       <div class="lbl">Open trades</div>
       <div class="val" id="today-open-total">—</div>
       <div class="sub">Currently running</div>
     </div>
-    <div class="stat performance-stat neutral">
+    <div class="stat performance-stat neutral" data-metric="closed">
       <div class="lbl">Closed trades</div>
       <div class="val" id="today-closed-total">—</div>
       <div class="sub" id="today-result-note">—</div>
     </div>
-    <div class="stat performance-stat neutral">
+    <div class="stat performance-stat neutral today-pnl-stat" data-metric="pnl">
       <div class="lbl">Day P&amp;L</div>
       <div class="val" id="today-pnl">—</div>
       <div class="sub">Open mark plus realised P&amp;L</div>
@@ -176,6 +176,10 @@ function renderTodayCurrentTrade(trade, index) {
   const direction = String(trade.side || '—').toUpperCase();
   const directionClass = direction === 'SHORT' ? 'short' : 'long';
   const slot = todayControlSlot(trade);
+  const exchangeProtected = trade.exchange_protection_complete === true;
+  const protection = exchangeProtected
+    ? '<span class="today-protection-state protected"><span class="dot"></span>Exchange protected</span>'
+    : '<span class="today-protection-state verifying"><span class="dot"></span>Verifying on exchange</span>';
   root.innerHTML = `<div class="dry-state-line">
       <span class="badge live">LIVE OPEN</span><span>Exchange position</span>
     </div>
@@ -188,6 +192,7 @@ function renderTodayCurrentTrade(trade, index) {
       <dt>Lots</dt><dd>${fN(trade.lots)}</dd>
       <dt>Entry</dt><dd>$${fN(trade.entry_mark, 4)}</dd>
       <dt>Current mark</dt><dd>$${fN(trade.current_mark, 4)}</dd>
+      <dt>Protection</dt><dd>${protection}</dd>
     </dl>
     ${slot ? `<div class="today-current-actions">
       <button class="btn danger sm" type="button" onclick="closeTodayLiveTrade(${index})">Close Position</button>
@@ -226,20 +231,20 @@ function renderTodayEngineDecision(status) {
     : zone === 'HOLD' ? 'is-hold' : 'is-waiting';
   const score = Number.isFinite(Number(status.direction_score)) ? fN(status.direction_score, 1) : 'Waiting';
   const lots = Number.isFinite(Number(status.lots)) ? fN(status.lots) : '—';
-  root.innerHTML = `<section class="dry-engine-panel ${tone}" aria-label="Latest live engine decision">
+  root.innerHTML = `<section class="dry-engine-panel today-decision-panel ${tone}" data-zone="${esc(zone || 'WAITING')}" aria-label="Latest live engine decision">
     <div class="dry-engine-hd"><div><span>TREND SCORE AUTOMATION · LIVE</span>
       <strong>Entries, exits and trade transitions happen automatically</strong></div>
       <span class="dry-engine-decision">${esc(todayDecisionLabel(status.status || zone).toUpperCase())}</span></div>
     <dl class="dry-engine-metrics">
-      <div class="wide"><dt>Current automatic action</dt><dd>${esc(action)}</dd></div>
-      <div><dt>Direction score</dt><dd>${esc(score)}</dd></div>
-      <div><dt>Market regime</dt><dd>${esc(todayDecisionLabel(status.market_regime || 'Waiting'))}</dd></div>
-      <div><dt>Trade type</dt><dd>${esc(todayDecisionLabel(zone || 'Waiting'))}</dd></div>
-      <div><dt>Lots</dt><dd>${esc(lots)}</dd></div>
-      <div class="wide"><dt>Selected / open contract</dt><dd>${esc(status.symbol || 'Waiting for an eligible contract')}</dd></div>
-      <div class="wide"><dt>Last automatic action</dt><dd>${esc(todayDecisionLabel(status.last_action || 'No automatic transition yet'))}</dd></div>
-      <div><dt>Signal bar closed</dt><dd>${esc(todayDecisionTime(status.signal_bar_close_utc))}</dd></div>
-      <div><dt>Last controller cycle</dt><dd>${esc(todayDecisionTime(status.last_cycle_utc))}</dd></div>
+      <div class="wide decision-primary"><dt>Current automatic action</dt><dd>${esc(action)}</dd></div>
+      <div class="decision-key score"><dt>Direction score</dt><dd>${esc(score)}</dd></div>
+      <div class="decision-key regime"><dt>Market regime</dt><dd>${esc(todayDecisionLabel(status.market_regime || 'Waiting'))}</dd></div>
+      <div class="decision-detail"><dt>Trade type</dt><dd>${esc(todayDecisionLabel(zone || 'Waiting'))}</dd></div>
+      <div class="decision-detail"><dt>Lots</dt><dd>${esc(lots)}</dd></div>
+      <div class="wide decision-detail"><dt>Selected / open contract</dt><dd>${esc(status.symbol || 'Waiting for an eligible contract')}</dd></div>
+      <div class="wide decision-detail last-action"><dt>Last automatic action</dt><dd>${esc(todayDecisionLabel(status.last_action || 'No automatic transition yet'))}</dd></div>
+      <div class="decision-detail"><dt>Signal bar closed</dt><dd>${esc(todayDecisionTime(status.signal_bar_close_utc))}</dd></div>
+      <div class="decision-detail"><dt>Last controller cycle</dt><dd>${esc(todayDecisionTime(status.last_cycle_utc))}</dd></div>
     </dl>
     ${status.last_error ? `<p class="dry-engine-action-copy c-neg">Latest controller error: ${esc(status.last_error)}</p>` : ''}
     <div class="dry-engine-actions"><a href="/trend-engine" class="btn secondary sm">View Trend Engine</a></div>
@@ -249,7 +254,7 @@ function renderTodayEngineDecision(status) {
 function setTodaySummaryTone(elementId, tone) {
   const value = document.getElementById(elementId);
   const card = value?.closest('.stat');
-  if (card) card.className = `stat performance-stat ${tone}`;
+  if (card) card.className = `stat performance-stat ${tone}${elementId === 'today-pnl' ? ' today-pnl-stat' : ''}`;
 }
 
 function updateTodaySummary(rows) {
@@ -295,7 +300,10 @@ async function loadToday() {
   renderTodayCurrentTrade(currentTrade, currentIndex);
   renderTodayEngineDecision(engineStatus);
   if (!rows.length) {
-    body.innerHTML = '<tr class="empty-row"><td colspan="9">No trades today</td></tr>';
+    body.innerHTML = `<tr class="empty-row today-ledger-empty"><td colspan="9">
+      <div><span aria-hidden="true">◇</span><strong>No trades today</strong>
+      <small>Completed and active trades will appear here automatically.</small></div>
+    </td></tr>`;
     return rows;
   }
   body.innerHTML = rows.map((trade, index) => {

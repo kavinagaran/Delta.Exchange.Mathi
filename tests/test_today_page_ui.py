@@ -28,6 +28,12 @@ def test_today_page_contains_only_same_day_trade_content():
         "jget('/api/tp-monitor')",
         "saveProtectionConfig(",
         'id="today-payoff-chart"',
+        'aria-label="Today trading dashboard"',
+        'data-metric="pnl"',
+        'class="wide decision-primary"',
+        'class="decision-key score"',
+        'Exchange protected',
+        'class="empty-row today-ledger-empty"',
     ):
         assert required in source
 
@@ -49,6 +55,23 @@ def test_today_page_contains_only_same_day_trade_content():
         "/api/engine/health",
     ):
         assert removed not in source
+
+
+def test_today_page_uses_compact_responsive_terminal_layout():
+    styles = (ROOT / "static" / "css" / "app.css").read_text(encoding="utf-8")
+
+    for required in (
+        "body:has(.overview-page) .main",
+        ".today-current-trade-body",
+        ".today-decision-panel .decision-primary",
+        ".overview-page .today-summary .performance-stat",
+        ".today-ledger-empty td > div",
+        "#today-current-position > .score-zone-empty",
+        "@media (max-width: 920px)",
+        "@media (max-width: 560px)",
+        "prefers-reduced-motion",
+    ):
+        assert required in styles
 
 
 def test_topbar_btc_pill_uses_theme_gradient_and_live_pnl_tones():
