@@ -81,8 +81,8 @@
     <div class="tbl-wrap">
       <table class="today-trades-table" aria-label="All trades opened today">
         <thead><tr>
-          <th>Opened</th><th>Contract</th><th>Direction</th><th class="numeric">Lots</th>
-          <th class="numeric">Entry</th><th>Closed</th><th class="numeric">Exit / Mark</th>
+          <th>Opened</th><th>Closed</th><th>Contract</th><th>Direction</th><th class="numeric">Lots</th>
+          <th class="numeric">Entry</th><th class="numeric">Exit / Mark</th>
           <th class="numeric">Gross P/L</th><th class="numeric">Net P/L</th>
           <th class="numeric">Fees</th><th>Status</th>
         </tr></thead>
@@ -299,11 +299,11 @@ function renderTodayTrades(rows) {
     const exit = open ? trade.current_mark : trade.exit_mark;
     return `<tr>
       <td>${esc(todayTableTimestamp(trade))}</td>
+      <td>${open ? '—' : esc(todayTableTimestamp(trade, 'exit'))}</td>
       <td><strong>${esc(trade.symbol || '—')}</strong></td>
       <td><span class="badge ${directionClass}">${esc(direction)}</span></td>
       <td class="numeric">${fN(trade.lots, 6)}</td>
       <td class="numeric">${fN(trade.entry_mark, 8)}</td>
-      <td>${open ? '—' : esc(todayTableTimestamp(trade, 'exit'))}</td>
       <td class="numeric">${todayKnownNumber(exit) ? fN(exit, 8) : '—'}</td>
       <td class="numeric ${pnlCls(gross)}">${todayKnownNumber(gross) ? f$(gross) : '—'}</td>
       <td class="numeric ${pnlCls(net)}">${todayKnownNumber(net) ? f$(net) : '—'}</td>

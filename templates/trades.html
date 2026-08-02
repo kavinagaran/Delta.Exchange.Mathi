@@ -30,8 +30,8 @@
   <div class="tbl-wrap">
     <table class="exchange-history-table">
       <thead><tr>
-        <th>Opened</th><th>Contract</th><th>Direction</th><th class="numeric">Lots</th>
-        <th class="numeric">Entry</th><th>Closed</th><th class="numeric">Exit</th><th class="numeric">Gross P/L</th><th class="numeric">Net P/L</th><th class="numeric">Fees</th><th>Status</th>
+        <th>Opened</th><th>Closed</th><th>Contract</th><th>Direction</th><th class="numeric">Lots</th>
+        <th class="numeric">Entry</th><th class="numeric">Exit</th><th class="numeric">Gross P/L</th><th class="numeric">Net P/L</th><th class="numeric">Fees</th><th>Status</th>
       </tr></thead>
       <tbody id="tbl-body"><tr class="empty-row"><td colspan="11">Loading complete Delta Exchange trade history…</td></tr></tbody>
     </table>
@@ -229,11 +229,11 @@ function renderTable(trades) {
     const isOpen = trade.status === 'OPEN';
     return `<tr>
       <td>${esc(tableTime(trade.entry_time_ist))}</td>
+      <td>${isOpen ? '—' : esc(tableTime(trade.exit_time_ist))}</td>
       <td><strong>${esc(trade.symbol || 'Not reported')}</strong></td>
       <td>${side ? `<span class="badge ${side === 'short' ? 'short' : 'long'}">${esc(side.toUpperCase())}</span>` : '—'}</td>
       <td class="numeric">${fN(isOpen ? trade.open_lots : trade.lots, 6)}</td>
       <td class="numeric">${fN(trade.entry_price, 8)}</td>
-      <td>${isOpen ? '—' : esc(tableTime(trade.exit_time_ist))}</td>
       <td class="numeric">${isOpen ? '—' : fN(trade.exit_price, 8)}</td>
       <td class="numeric ${pnlCls(trade.gross_pnl_usd)}">${f$(trade.gross_pnl_usd)}</td>
       <td class="numeric ${pnlCls(trade.net_pnl_usd)}">${f$(trade.net_pnl_usd)}</td>

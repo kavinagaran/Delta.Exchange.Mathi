@@ -1037,11 +1037,11 @@ body.login-body {
 }
 .performance-history-card .exchange-history-table td.numeric { text-align: right; }
 .performance-history-card .exchange-history-table th:nth-child(1),
-.performance-history-card .exchange-history-table th:nth-child(6) { width: 13%; }
-.performance-history-card .exchange-history-table th:nth-child(2) { width: 11%; }
-.performance-history-card .exchange-history-table th:nth-child(3),
+.performance-history-card .exchange-history-table th:nth-child(2) { width: 13%; }
+.performance-history-card .exchange-history-table th:nth-child(3) { width: 11%; }
 .performance-history-card .exchange-history-table th:nth-child(4),
 .performance-history-card .exchange-history-table th:nth-child(5),
+.performance-history-card .exchange-history-table th:nth-child(6),
 .performance-history-card .exchange-history-table th:nth-child(7),
 .performance-history-card .exchange-history-table th:nth-child(8),
 .performance-history-card .exchange-history-table th:nth-child(9),

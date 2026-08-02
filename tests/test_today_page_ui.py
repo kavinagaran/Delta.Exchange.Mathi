@@ -7,6 +7,8 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_today_page_contains_only_same_day_trade_content():
     source = (ROOT / "templates" / "overview.html").read_text(encoding="utf-8")
 
+    assert '<th>Opened</th><th>Closed</th><th>Contract</th>' in source
+
     for required in (
         'id="today-summary"',
         'id="today-trade-total"',

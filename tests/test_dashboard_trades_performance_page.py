@@ -19,6 +19,7 @@ def test_page_is_registered_as_performance():
 
 
 def test_page_has_complete_exchange_history_disclosure_without_filters():
+    assert '<th>Opened</th><th>Closed</th><th>Contract</th>' in TEMPLATE
     assert "Delta Exchange · trade history" in TEMPLATE
     assert "/api/performance/delta-trades" in TEMPLATE
     assert "closed trades valued" in TEMPLATE
