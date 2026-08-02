@@ -2538,6 +2538,35 @@ body:has(.overview-page) .nav a.active {
   min-width: 86px; padding-inline: 22px; border-radius: 999px;
   box-shadow: 0 8px 20px color-mix(in srgb, var(--neg) 24%, transparent), inset 0 1px rgba(255,255,255,.2);
 }
+.today-inline-protection {
+  margin-top: 18px; border-color: color-mix(in srgb, var(--accent) 30%, var(--border));
+  background: linear-gradient(145deg,
+    color-mix(in srgb, var(--accent) 7%, var(--surface-subtle)),
+    color-mix(in srgb, var(--surface) 92%, transparent));
+}
+.today-inline-protection.unavailable { border-color: color-mix(in srgb, var(--neg) 34%, var(--border)); }
+.today-protection-grid {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px 11px;
+}
+.today-protection-metric {
+  min-width: 0; padding: 8px 10px; border: 1px solid color-mix(in srgb, currentColor 30%, var(--border));
+  border-radius: 8px; background: color-mix(in srgb, currentColor 7%, var(--surface));
+  box-shadow: inset 0 1px color-mix(in srgb, currentColor 12%, transparent);
+}
+.today-protection-metric span {
+  display: block; margin-bottom: 4px; color: var(--muted);
+  font-size: 9.5px; font-weight: 650;
+}
+.today-protection-metric strong {
+  display: block; color: currentColor; font: 750 13px/1.2 ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-variant-numeric: tabular-nums;
+}
+.today-protection-metric.tone-tp { color: var(--pos); }
+.today-protection-metric.tone-sl { color: #ff6172; }
+.today-protection-metric.tone-tsl-arm { color: #ffc267; }
+.today-protection-metric.tone-tsl-trail { color: #70b8ff; }
+.today-protection-metric.tone-lock { color: #c58cff; }
+.today-protection-metric.tone-poll { color: var(--accent-dark); }
 .today-protection-state { display: inline-flex; align-items: center; justify-content: flex-end; gap: 6px; font-size: 10.5px; }
 .today-protection-state .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
 .today-protection-state.protected { color: var(--pos); }
@@ -2657,6 +2686,7 @@ body:has(.overview-page) .nav a.active {
   .overview-page .today-summary .performance-stat { min-height: 82px; }
   .today-current-actions .btn { flex: 1 1 auto; min-height: 38px; }
   .today-current-actions .today-exit-btn { flex: 0 1 132px; }
+  .today-protection-grid { grid-template-columns: 1fr; }
   .today-latest-trade-body { min-height: 340px; padding: 12px; }
   .today-latest-detail { padding: 18px 16px; }
   .today-latest-detail .big-pnl { font-size: 28px; }

@@ -191,6 +191,8 @@ def test_real_overview_is_a_same_day_trade_ledger_only():
         "Latest Trade",
         '>Exit</button>',
         "renderTodayLatestTrade(",
+        "todayInlineProtectionHtml(",
+        "jget('/api/tp-monitor')",
     ):
         assert required in source
     for non_daily in (
@@ -286,9 +288,10 @@ global.jget = async url => {
   if (url === '/api/tp-monitor') {
     return {trend: {
       running: true, target_pnl: 500, sl_pnl: 250, tsl_arm_pnl: 125,
-      tsl_trail_pnl: 125, tsl_lock_min_pnl: 0, poll_secs: 10,
+      tsl_trail_pnl: 100, tsl_lock_min_pnl: 25, poll_secs: 10,
       protection_source: 'automatic_filled_premium',
       coverage_status: 'exchange_protected',
+      health: {peak_pnl: 180, heartbeat_utc: new Date().toISOString()},
     }};
   }
   throw new Error(`unexpected endpoint: ${url}`);
@@ -304,6 +307,14 @@ vm.runInThisContext(source.slice(start, end));
   const currentCard = elements['today-current-position'].innerHTML;
   if (!currentCard.includes('C-BTC-65000') || !currentCard.includes('>Exit</button>')) {
     throw new Error(`current trade card is incomplete: ${currentCard}`);
+  }
+  for (const detail of [
+    'Live protection', 'TP / SL / TSL Monitor', 'RUNNING',
+    'Take profit $', '500', 'Stop loss $', '250',
+    'TSL arm P&amp;L $', '125', 'TSL trail $', '100',
+    'Minimum locked $', '25', 'EXCHANGE PROTECTED',
+  ]) {
+    if (!currentCard.includes(detail)) throw new Error(`missing protection detail: ${detail}`);
   }
   for (const removed of ['Close Position', '>Protection</button>', '>Payoff</button>']) {
     if (currentCard.includes(removed)) {

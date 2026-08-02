@@ -153,7 +153,71 @@ function todayTradeType(trade) {
   return String(trade?.trade_type || trade?.trend_score_zone || '—').toUpperCase();
 }
 
-function renderTodayCurrentTrade(trade, index) {
+function todayKnownNumber(value) {
+  return value !== null && value !== undefined && value !== '' &&
+    Number.isFinite(Number(value));
+}
+
+function todayProtectionAge(value) {
+  const checked = Date.parse(value || '');
+  if (!Number.isFinite(checked)) return 'First check pending';
+  const age = Math.max(Math.floor((Date.now() - checked) / 1000), 0);
+  return `Checked ${age < 60 ? age + 's' : Math.floor(age / 60) + 'm'} ago`;
+}
+
+function todayInlineProtectionHtml(protection) {
+  if (!protection) {
+    return `<section class="dry-protection-box today-inline-protection unavailable">
+      <div class="dry-protection-hd"><div><span>Live protection</span>
+      <strong>TP / SL / TSL Monitor</strong></div>
+      <span class="pill closed-loss mini">UNAVAILABLE</span></div>
+      <p>Protection details could not be loaded. The dashboard will retry automatically.</p>
+    </section>`;
+  }
+  const health = protection.health || {};
+  const running = protection.running === true;
+  const armed = protection.tsl_armed === true;
+  const status = armed ? 'TSL ARMED' : running ? 'RUNNING' : 'NOT RUNNING';
+  const statusClass = armed || running ? 'live' : 'closed-loss';
+  const value = (raw, fallback = 0) =>
+    todayKnownNumber(raw) ? fN(Number(raw), 4) : fN(fallback, 4);
+  const peak = todayKnownNumber(health.peak_pnl)
+    ? `Peak ${f$(Number(health.peak_pnl))}` : 'Peak pending';
+  const floorValue = protection.tsl_floor ?? health.stop_floor;
+  const floor = armed && todayKnownNumber(floorValue)
+    ? `TSL floor ${f$(Number(floorValue))}` : 'TSL not armed';
+  const every = Number(protection.poll_secs || health.next_poll_secs || 0);
+  const timing = `${todayProtectionAge(health.heartbeat_utc)}` +
+    (every > 0 ? ` · every ${fN(every)}s` : '');
+  const coverage = String(protection.coverage_status || 'verifying')
+    .replaceAll('_', ' ').toUpperCase();
+  return `<section class="dry-protection-box today-inline-protection" aria-label="Live TP, SL and TSL monitor">
+    <div class="dry-protection-hd">
+      <div><span>Live protection</span><strong>TP / SL / TSL Monitor</strong></div>
+      <span class="pill ${statusClass} mini"><span class="dot"></span>${status}</span>
+    </div>
+    <div class="today-protection-grid">
+      <div class="today-protection-metric tone-tp"><span>Take profit $</span>
+        <strong>${value(protection.target_pnl)}</strong></div>
+      <div class="today-protection-metric tone-sl"><span>Stop loss $</span>
+        <strong>${value(protection.sl_pnl)}</strong></div>
+      <div class="today-protection-metric tone-tsl-arm"><span>TSL arm P&amp;L $</span>
+        <strong>${value(protection.tsl_arm_pnl)}</strong></div>
+      <div class="today-protection-metric tone-tsl-trail"><span>TSL trail $</span>
+        <strong>${value(protection.tsl_trail_pnl)}</strong></div>
+      <div class="today-protection-metric tone-lock"><span>Minimum locked $</span>
+        <strong>${value(protection.tsl_lock_min_pnl)}</strong></div>
+      <div class="today-protection-metric tone-poll"><span>Poll secs</span>
+        <strong>${fN(every || 0)}</strong></div>
+    </div>
+    <div class="dry-protection-telemetry">
+      <span>${esc(timing)}</span><span>${esc(peak)} · ${esc(floor)} · ${esc(coverage)}</span>
+    </div>
+    <p>Automatic protection from the filled premium. Values are read-only on Today.</p>
+  </section>`;
+}
+
+function renderTodayCurrentTrade(trade, index, protection = null) {
   const root = document.getElementById('today-current-position');
   if (!trade) {
     root.innerHTML = `<div class="no-pos score-zone-empty">
@@ -181,7 +245,8 @@ function renderTodayCurrentTrade(trade, index) {
     </dl>
     ${slot ? `<div class="today-current-actions">
       <button class="btn danger sm today-exit-btn" type="button" onclick="closeTodayLiveTrade(${index})">Exit</button>
-    </div>` : ''}`;
+    </div>` : ''}
+    ${slot ? todayInlineProtectionHtml(protection) : ''}`;
 }
 
 function latestCompletedTodayTrade(rows) {
@@ -313,9 +378,10 @@ function updateTodaySummary(rows) {
 }
 
 async function loadToday() {
-  const [rows, engineStatus] = await Promise.all([
+  const [rows, engineStatus, protectionStatus] = await Promise.all([
     jget('/api/today-trades'),
     jget('/api/trend-engine/score-auto/status').catch(() => null),
+    jget('/api/tp-monitor').catch(() => null),
   ]);
   updateTodaySummary(rows);
   window._todayLiveTrades = {};
@@ -325,7 +391,9 @@ async function loadToday() {
     const controlSlot = todayControlSlot(currentTrade);
     if (controlSlot) window._todayLiveTrades[currentIndex] = { ...currentTrade, controlSlot };
   }
-  renderTodayCurrentTrade(currentTrade, currentIndex);
+  const currentSlot = currentTrade ? todayControlSlot(currentTrade) : '';
+  const currentProtection = currentSlot ? protectionStatus?.[currentSlot] : null;
+  renderTodayCurrentTrade(currentTrade, currentIndex, currentProtection);
   renderTodayLatestTrade(latestCompletedTodayTrade(rows));
   renderTodayEngineDecision(engineStatus);
   return rows;

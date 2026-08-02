@@ -19,6 +19,9 @@ def test_overview_uses_performance_style_cards_and_latest_trade_detail():
     assert "today-latest-trade-card" in overview
     assert ".today-latest-trade-body" in styles
     assert ".today-latest-detail" in styles
+    assert ".today-protection-metric.tone-sl { color: #ff6172; }" in styles
+    assert ".today-protection-metric.tone-tsl-arm { color: #ffc267; }" in styles
+    assert ".today-protection-metric.tone-tsl-trail { color: #70b8ff; }" in styles
     assert "<th>Actions</th>" not in overview
     assert ".today-trade-actions" not in styles
     assert ".trade-action-link" not in styles
