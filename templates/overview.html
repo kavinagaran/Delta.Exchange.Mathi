@@ -71,15 +71,25 @@
     </div>
   </div>
 
-  <div class="card overview-today-card today-latest-trade-card">
+  <div class="card overview-today-card today-trades-card">
     <div class="card-hd">
       <span aria-hidden="true">◉</span>
-      Latest Trade
+      Today's Trades
       <span class="spacer"></span>
-      <span class="hint" id="today-latest-note">Last completed position today</span>
+      <span class="hint" id="today-table-count">Loading…</span>
     </div>
-    <div class="card-bd today-latest-trade-body" id="today-latest-trade" aria-live="polite">
-      <div class="no-pos">Loading latest trade…</div>
+    <div class="tbl-wrap">
+      <table class="today-trades-table" aria-label="All trades opened today">
+        <thead><tr>
+          <th>Opened</th><th>Contract</th><th>Direction</th><th class="numeric">Lots</th>
+          <th class="numeric">Entry</th><th>Closed</th><th class="numeric">Exit / Mark</th>
+          <th class="numeric">Gross P/L</th><th class="numeric">Net P/L</th>
+          <th class="numeric">Fees</th><th>Status</th>
+        </tr></thead>
+        <tbody id="today-trades-body" aria-live="polite">
+          <tr class="empty-row"><td colspan="11">Loading today's trades…</td></tr>
+        </tbody>
+      </table>
     </div>
   </div>
 </div>
@@ -140,9 +150,15 @@ function todayTradeTimeIst(trade, phase = 'entry') {
   return `${(hour + 11) % 12 + 1}:${String(minute).padStart(2, '0')} ${hour >= 12 ? 'PM' : 'AM'} IST`;
 }
 
-function todayTradeDateIst(trade) {
-  const moment = todayTradeMoment(trade, 'entry');
-  return moment ? moment.toLocaleDateString('en-CA', {timeZone: 'Asia/Kolkata'}) : '—';
+function todayTableTimestamp(trade, phase = 'entry') {
+  const moment = todayTradeMoment(trade, phase);
+  if (!moment) return '—';
+  const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true,
+  }).formatToParts(moment).filter(part => part.type !== 'literal')
+    .map(part => [part.type, part.value]));
+  return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second} ${parts.dayPeriod}`;
 }
 
 function todayTradeType(trade) {
@@ -174,7 +190,10 @@ function todayInlineProtectionHtml(protection) {
       <p>Protection details could not be loaded. The dashboard will retry automatically.</p>
     </section>`;
   }
-  const health = protection.health || {};
+  const health = protection.health || {
+    heartbeat_utc: protection.last_check_utc,
+    peak_pnl: protection.peak_pnl_usd,
+  };
   const running = protection.running === true;
   const armed = protection.tsl_armed === true;
   const status = armed ? 'TSL ARMED' : running ? 'RUNNING' : 'NOT RUNNING';
@@ -183,13 +202,13 @@ function todayInlineProtectionHtml(protection) {
     todayKnownNumber(raw) ? fN(Number(raw), 4) : fN(fallback, 4);
   const peak = todayKnownNumber(health.peak_pnl)
     ? `Peak ${f$(Number(health.peak_pnl))}` : 'Peak pending';
-  const floorValue = protection.tsl_floor ?? health.stop_floor;
+  const floorValue = protection.tsl_floor ?? protection.tsl_floor_usd ?? health.stop_floor;
   const floor = armed && todayKnownNumber(floorValue)
     ? `TSL floor ${f$(Number(floorValue))}` : 'TSL not armed';
   const every = Number(protection.poll_secs || health.next_poll_secs || 0);
   const timing = `${todayProtectionAge(health.heartbeat_utc)}` +
     (every > 0 ? ` · every ${fN(every)}s` : '');
-  const coverage = String(protection.coverage_status || 'verifying')
+  const coverage = String(protection.coverage_status || (protection.running ? 'simulated protection' : 'verifying'))
     .replaceAll('_', ' ').toUpperCase();
   return `<section class="dry-protection-box today-inline-protection" aria-label="Live TP, SL and TSL monitor">
     <div class="dry-protection-hd">
@@ -198,9 +217,9 @@ function todayInlineProtectionHtml(protection) {
     </div>
     <div class="today-protection-grid">
       <div class="today-protection-metric tone-tp"><span>Take profit $</span>
-        <strong>${value(protection.target_pnl)}</strong></div>
+        <strong>${value(protection.target_pnl ?? protection.tp_target_pnl)}</strong></div>
       <div class="today-protection-metric tone-sl"><span>Stop loss $</span>
-        <strong>${value(protection.sl_pnl)}</strong></div>
+        <strong>${value(protection.sl_pnl ?? protection.sl_target_pnl)}</strong></div>
       <div class="today-protection-metric tone-tsl-arm"><span>TSL arm P&amp;L $</span>
         <strong>${value(protection.tsl_arm_pnl)}</strong></div>
       <div class="today-protection-metric tone-tsl-trail"><span>TSL trail $</span>
@@ -221,7 +240,7 @@ function renderTodayCurrentTrade(trade, index, protection = null) {
   const root = document.getElementById('today-current-position');
   if (!trade) {
     root.innerHTML = `<div class="no-pos score-zone-empty">
-      <span class="icon">◇</span><strong>No live trade is open</strong>
+      <span class="icon">◇</span><strong>No trade is open</strong>
       <small>The next approved engine entry will appear here.</small>
     </div>`;
     return;
@@ -230,8 +249,11 @@ function renderTodayCurrentTrade(trade, index, protection = null) {
   const direction = String(trade.side || '—').toUpperCase();
   const directionClass = direction === 'SHORT' ? 'short' : 'long';
   const slot = todayControlSlot(trade);
+  const simulated = trade.dry_run === true ||
+    String(trade.execution_mode || '').toLowerCase() === 'dry_run';
   root.innerHTML = `<div class="dry-state-line">
-      <span class="badge live">LIVE OPEN</span><span>Exchange position</span>
+      <span class="badge ${simulated ? 'sim' : 'live'}">${simulated ? 'SIMULATED OPEN' : 'LIVE OPEN'}</span>
+      <span>${simulated ? 'Paper position · no exchange exposure' : 'Exchange position'}</span>
     </div>
     <div class="big-pnl ${pnlCls(pnl)}">${f$(pnl)}<small>Live P&amp;L</small></div>
     <dl class="kv">
@@ -249,56 +271,55 @@ function renderTodayCurrentTrade(trade, index, protection = null) {
     ${slot ? todayInlineProtectionHtml(protection) : ''}`;
 }
 
-function latestCompletedTodayTrade(rows) {
-  return (Array.isArray(rows) ? rows : [])
-    .filter(trade => trade && !trade._live && String(trade.status || 'CLOSED').toUpperCase() !== 'OPEN')
-    .sort((left, right) =>
-      (todayTradeMoment(left, 'exit')?.getTime() || 0) -
-      (todayTradeMoment(right, 'exit')?.getTime() || 0))
-    .at(-1) || null;
-}
-
-function renderTodayLatestTrade(trade) {
-  const root = document.getElementById('today-latest-trade');
-  const note = document.getElementById('today-latest-note');
-  if (!trade) {
-    note.textContent = 'No completed trade today';
-    root.innerHTML = `<div class="no-pos score-zone-empty">
-      <span class="icon">◇</span><strong>No completed trade today</strong>
-      <small>The latest completed position will appear here.</small>
-    </div>`;
+function renderTodayTrades(rows) {
+  const trades = [...(Array.isArray(rows) ? rows : [])].sort((left, right) =>
+    (todayTradeMoment(right, 'entry')?.getTime() || 0) -
+    (todayTradeMoment(left, 'entry')?.getTime() || 0));
+  const body = document.getElementById('today-trades-body');
+  const count = document.getElementById('today-table-count');
+  count.textContent = `${trades.length.toLocaleString()} trade${trades.length === 1 ? '' : 's'} today`;
+  if (!trades.length) {
+    body.innerHTML = `<tr class="today-ledger-empty"><td colspan="11"><div>
+      <span>◇</span><strong>No trades today</strong>
+      <small>The next completed or open trade will appear here.</small>
+    </div></td></tr>`;
     return;
   }
-  const pnl = todayTradePnl(trade);
-  const direction = String(trade.side || '—').toUpperCase();
-  const directionClass = direction === 'SHORT' ? 'short' : 'long';
-  const result = pnl > 0 ? 'WIN' : pnl < 0 ? 'LOSS' : 'CLOSED';
-  const resultClass = pnl > 0 ? 'win' : pnl < 0 ? 'loss' : 'closed';
-  const reason = String(trade.exit_trigger || '').replaceAll('_', ' ').toUpperCase();
-  note.textContent = `${todayTradeType(trade)} · ${trade.symbol || 'Completed trade'}`;
-  root.innerHTML = `<div class="today-latest-detail">
-    <div class="dry-state-line">
-      <span class="badge ${resultClass}">${result}</span>
-      <span>Completed position · no exchange exposure</span>
-    </div>
-    <div class="big-pnl ${pnlCls(pnl)}">${f$(pnl)}<small>Realized P&amp;L</small></div>
-    <dl class="kv">
-      <dt>Trade date</dt><dd>${esc(todayTradeDateIst(trade))}</dd>
-      <dt>Entry time</dt><dd>${esc(todayTradeTimeIst(trade))}</dd>
-      <dt>Exit time</dt><dd>${esc(todayTradeTimeIst(trade, 'exit'))}</dd>
-      <dt>Trade type</dt><dd>${esc(todayTradeType(trade))}</dd>
-      <dt>Contract</dt><dd>${esc(trade.symbol || '—')}</dd>
-      <dt>Side</dt><dd><span class="badge ${directionClass}">${esc(direction)}</span></dd>
-      <dt>Lots</dt><dd>${fN(trade.lots)}</dd>
-      <dt>Entry</dt><dd>$${fN(trade.entry_mark, 4)}</dd>
-      <dt>Exit price</dt><dd>$${fN(trade.exit_mark, 4)}</dd>
-      ${reason ? `<dt>Exit reason</dt><dd>${esc(reason)}</dd>` : ''}
-    </dl>
-  </div>`;
+  body.innerHTML = trades.map(trade => {
+    const open = trade._live || String(trade.status || '').toUpperCase() === 'OPEN';
+    const direction = String(trade.side || '—').toUpperCase();
+    const directionClass = direction === 'SHORT' ? 'short' : 'long';
+    const gross = todayKnownNumber(trade.gross_pnl_usd)
+      ? Number(trade.gross_pnl_usd) : open ? todayTradePnl(trade) : Number(trade.pnl_usd || 0);
+    const net = open ? todayTradePnl(trade) : todayKnownNumber(trade.pnl_usd)
+      ? Number(trade.pnl_usd) : gross;
+    const fees = todayKnownNumber(trade.fees_usd)
+      ? Number(trade.fees_usd) : (!open && todayKnownNumber(gross) && todayKnownNumber(net)
+        ? Math.max(gross - net, 0) : null);
+    const exit = open ? trade.current_mark : trade.exit_mark;
+    return `<tr>
+      <td>${esc(todayTableTimestamp(trade))}</td>
+      <td><strong>${esc(trade.symbol || '—')}</strong></td>
+      <td><span class="badge ${directionClass}">${esc(direction)}</span></td>
+      <td class="numeric">${fN(trade.lots, 6)}</td>
+      <td class="numeric">${fN(trade.entry_mark, 8)}</td>
+      <td>${open ? '—' : esc(todayTableTimestamp(trade, 'exit'))}</td>
+      <td class="numeric">${todayKnownNumber(exit) ? fN(exit, 8) : '—'}</td>
+      <td class="numeric ${pnlCls(gross)}">${todayKnownNumber(gross) ? f$(gross) : '—'}</td>
+      <td class="numeric ${pnlCls(net)}">${todayKnownNumber(net) ? f$(net) : '—'}</td>
+      <td class="numeric">${fees == null ? '—' : `${fN(fees, 8)} USD`}</td>
+      <td><span class="badge ${open ? 'live' : 'closed'}">${open ? 'OPEN' : 'CLOSED'}</span></td>
+    </tr>`;
+  }).join('');
 }
 
 function todayDecisionLabel(value) {
   return String(value || 'Unavailable').replace(/_/g, ' ');
+}
+
+function todaySentenceLabel(value) {
+  const text = todayDecisionLabel(value);
+  return text ? text.charAt(0).toUpperCase() + text.slice(1) : text;
 }
 
 function todayDecisionTime(value) {
@@ -393,7 +414,7 @@ function renderTodayEngineDecision(status, snapshot, liveView) {
       <div class="decision-detail"><dt>Trade type</dt><dd>${esc(todayDecisionLabel(zone || 'Waiting'))}</dd></div>
       <div class="decision-detail"><dt>Lots</dt><dd>${esc(lots)}</dd></div>
       <div class="wide decision-detail"><dt>Selected / open contract</dt><dd>${esc(status.symbol || 'Waiting for an eligible contract')}</dd></div>
-      <div class="wide decision-detail last-action"><dt>Last automatic action</dt><dd>${esc(todayDecisionLabel(status.last_action || 'No automatic transition yet'))}</dd></div>
+      <div class="wide decision-detail last-action"><dt>Last automatic action</dt><dd>${esc(todaySentenceLabel(status.last_action || 'No automatic transition yet'))}</dd></div>
       <div class="decision-detail"><dt>Signal bar closed</dt><dd>${esc(todayDecisionTime(status.signal_bar_close_utc))}</dd></div>
       <div class="decision-detail"><dt>Last controller cycle</dt><dd>${esc(todayDecisionTime(status.last_cycle_utc))}</dd></div>
     </dl>
@@ -448,9 +469,10 @@ async function loadToday() {
     if (controlSlot) window._todayLiveTrades[currentIndex] = { ...currentTrade, controlSlot };
   }
   const currentSlot = currentTrade ? todayControlSlot(currentTrade) : '';
-  const currentProtection = currentSlot ? protectionStatus?.[currentSlot] : null;
+  const currentProtection = currentTrade?.dry_run
+    ? currentTrade.dry_protection : currentSlot ? protectionStatus?.[currentSlot] : null;
   renderTodayCurrentTrade(currentTrade, currentIndex, currentProtection);
-  renderTodayLatestTrade(latestCompletedTodayTrade(rows));
+  renderTodayTrades(rows);
   renderTodayEngineDecision(engineStatus, engineSnapshot, engineLive);
   return rows;
 }
@@ -466,23 +488,26 @@ async function closeTodayLiveTrade(index) {
     return;
   }
   const adopted = +trade.externally_added_lots_adopted || 0;
+  const simulated = trade.dry_run === true ||
+    String(trade.execution_mode || '').toLowerCase() === 'dry_run';
   const scope = adopted > 0
     ? `\n\nThis closes all ${fN(trade.lots)} matching lots, including ${fN(adopted)} externally added lots.`
     : '';
-  if (!confirm(
-      `Close ${trade.symbol} manually at market price?` +
-      `\n\nThis submits a reduce-only LIVE exit order.${scope}`)) return;
+  if (!confirm(simulated
+      ? `Exit the ${trade.symbol} paper trade at its current mark?\n\nNo exchange order will be placed.`
+      : `Close ${trade.symbol} manually at market price?` +
+        `\n\nThis submits a reduce-only LIVE exit order.${scope}`)) return;
   todayClosing.add(index);
   try {
     const result = await jpost(
       '/api/square-off?slot=' + encodeURIComponent(trade.controlSlot),
-      { target_mode: 'live' },
+      { target_mode: simulated ? 'dry_run' : 'live' },
     );
     if (result.ok) {
-      toast(`LIVE position closed — P&L ${f$(result.pnl)}`, 'ok');
+      toast(`${simulated ? 'Paper' : 'LIVE'} position closed — P&L ${f$(result.pnl)}`, 'ok');
       await loadAll();
     } else {
-      toast(result.error || 'Manual LIVE close failed', 'err');
+      toast(result.error || `Manual ${simulated ? 'paper' : 'LIVE'} close failed`, 'err');
     }
   } finally {
     todayClosing.delete(index);

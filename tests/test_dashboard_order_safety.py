@@ -158,12 +158,12 @@ def test_overview_has_no_manual_or_scheduled_move_controls():
     assert "Automatic MOVE Forecast" not in source
     assert "SIDEWAYS SELL immediate" not in source
     # Today contains only same-day trade data. The one mutating action is an
-    # explicit LIVE reduce-only close routed through the guarded square-off API.
+    # explicit, mode-bound close routed through the guarded square-off API.
     assert "jget('/api/today-trades')" in source
     assert "squareOff(" not in source
     assert "openProtectionDrawer" not in source
     assert "'/api/square-off?slot='" in source
-    assert "{ target_mode: 'live' }" in source
+    assert "target_mode: simulated ? 'dry_run' : 'live'" in source
     assert "/api/manual-entry" not in mobile
     assert "MORNING_SIDE" not in mobile
     assert "EVENING_SIDE" not in mobile

@@ -2829,10 +2829,16 @@ def _ist_calendar_date(date_str: str, time_str: str) -> str:
 @app.route("/api/today-trades")
 def api_today_trades():
     today_ist = (datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)).strftime("%Y-%m-%d")
-    trades  = _load_json(_hist_file(), [])
+    dry_run_mode = _trading_mode_payload()["dry_run_mode"]
+    trades = (
+        _dry_run_trades()
+        if dry_run_mode
+        else _load_json(_hist_file(), [])
+    )
     today_t = [
         t for t in trades
-        if isinstance(t, dict) and not _is_dry_record(t)
+        if isinstance(t, dict)
+        and (_is_dry_record(t) if dry_run_mode else not _is_dry_record(t))
         and _ist_calendar_date(
             t.get("entry_date") or t.get("date", ""),
             t.get("entry_time") or t.get("entry_time_utc", ""),
@@ -2840,14 +2846,15 @@ def api_today_trades():
     ]
     # Include any open slot position as a live row with real-time mark & P&L
     for slot in SLOTS:
-        s = _load_json(_slot_file(slot), {})
-        if (s.get("status") == "OPEN" and not _is_dry_record(s)
+        s = _load_json(_slot_file(slot, dry_run=dry_run_mode), {})
+        if (s.get("status") == "OPEN"
+                and (_is_dry_record(s) if dry_run_mode else not _is_dry_record(s))
                 and _ist_calendar_date(
                     s.get("entry_date", ""), s.get("entry_time_utc", ""),
                 ) == today_ist):
             s["_live"] = True
             s["slot"]  = slot
-            s = _enrich_live(s)
+            s = _enrich_dry_state(s) if dry_run_mode else _enrich_live(s)
             today_t = [s] + today_t
     return jsonify(today_t)
 

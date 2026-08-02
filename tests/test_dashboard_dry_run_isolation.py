@@ -903,9 +903,9 @@ def test_dry_run_has_one_score_zone_position_and_manual_exit():
     for legacy_slot in ("dry-slot-morning", "dry-slot-evening", "dry-slot-trend"):
         assert legacy_slot not in template
 
-    # Today is a daily ledger only. Position exit/protection actions remain on
-    # each LIVE trade record and can never target the DRY RUN namespace.
+    # Today is a daily ledger for the active account mode. Its only mutation is
+    # an explicitly mode-bound exit through the guarded square-off endpoint.
     assert "squareOff(" not in overview
     assert "target_mode: targetMode" not in overview
     assert "closeTodayLiveTrade(" in overview
-    assert "target_mode: 'live'" in overview
+    assert "target_mode: simulated ? 'dry_run' : 'live'" in overview

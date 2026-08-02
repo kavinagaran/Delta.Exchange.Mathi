@@ -2,6 +2,7 @@ import json
 import shutil
 import subprocess
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -186,11 +187,11 @@ def test_real_overview_is_a_same_day_trade_ledger_only():
 
     for required in (
         'id="today-summary"',
-        'id="today-latest-trade"',
+        'id="today-trades-body"',
         "jget('/api/today-trades')",
-        "Latest Trade",
+        "Today's Trades",
         '>Exit</button>',
-        "renderTodayLatestTrade(",
+        "renderTodayTrades(",
         "todayInlineProtectionHtml(",
         "jget('/api/tp-monitor')",
     ):
@@ -221,6 +222,31 @@ def test_real_overview_is_a_same_day_trade_ledger_only():
         ">Payoff</button>",
     ):
         assert non_daily not in source
+
+
+def test_today_trades_uses_the_active_accounts_dry_run_history(
+        isolated_live_dashboard, monkeypatch):
+    now = datetime.now(timezone.utc)
+    dry_history = isolated_live_dashboard / "dry_run" / "trade_history.json"
+    _write(dry_history, [{
+        "slot": "trend", "status": "CLOSED", "dry_run": True,
+        "symbol": "MV-BTC-62600-020826", "side": "short", "lots": 1000,
+        "entry_date": now.strftime("%Y-%m-%d"),
+        "entry_time_utc": now.strftime("%H:%M:%S"),
+        "exit_date": now.strftime("%Y-%m-%d"),
+        "exit_time_utc": now.strftime("%H:%M:%S"),
+        "entry_mark": 358, "exit_mark": 500, "pnl_usd": -142,
+    }])
+    monkeypatch.setattr(dashboard, "_user_cfg", lambda: {
+        "DRY_RUN": "true", "TREND_ENGINE_SCORE_AUTO_MODE": "dry_run",
+    })
+
+    with dashboard.app.test_request_context("/api/today-trades"):
+        rows = dashboard.api_today_trades().get_json()
+
+    assert len(rows) == 1
+    assert rows[0]["symbol"] == "MV-BTC-62600-020826"
+    assert rows[0]["dry_run"] is True
 
 
 @pytest.mark.skipif(NODE is None, reason="Node.js is required for frontend JavaScript tests")
@@ -297,7 +323,8 @@ global.jget = async url => {
   if (url === '/api/trend-engine/score-auto/status') {
     return {status: 'signal_consumed', engine_zone: 'CE_2_ITM',
       direction_score: 43.2, market_regime: 'trend_up', lots: 1000,
-      symbol: 'C-BTC-65000'};
+      symbol: 'C-BTC-65000',
+      last_action: 'this completed LIVE signal was already handled; waiting for the next one'};
   }
   if (url === '/api/engine/snapshot') {
     return {trend_score: 43.2, data_quality: 'OK'};
@@ -332,13 +359,13 @@ vm.runInThisContext(source.slice(start, end));
       throw new Error(`current trade card exposed removed control: ${removed}`);
     }
   }
-  const latestCard = elements['today-latest-trade'].innerHTML;
+  const todayTable = elements['today-trades-body'].innerHTML;
   for (const detail of [
-    'P-BTC-64000', 'LOSS', '-$50.00', 'Realized P&amp;L',
-    'Entry time', 'Exit time', 'TRAILING STOP',
+    'C-BTC-65000', 'P-BTC-64000', 'OPEN', 'CLOSED', '-$50.00',
   ]) {
-    if (!latestCard.includes(detail)) throw new Error(`missing latest detail: ${detail}`);
+    if (!todayTable.includes(detail)) throw new Error(`missing Today table detail: ${detail}`);
   }
+  if (todayTable.includes(' IST')) throw new Error('Today table still prints IST');
   const decisionCard = elements['today-engine-decision'].innerHTML;
   for (const detail of ['Live preview', 'Committed decision', 'today-odometer-window']) {
     if (!decisionCard.includes(detail)) throw new Error(`missing engine dial detail: ${detail}`);
@@ -346,13 +373,16 @@ vm.runInThisContext(source.slice(start, end));
   if (decisionCard.includes('View Trend Engine')) {
     throw new Error('obsolete Trend Engine link is still present');
   }
+  if (!decisionCard.includes('This completed LIVE signal was already handled; waiting for the next one')) {
+    throw new Error('last automatic action is not sentence-cased');
+  }
   await closeTodayLiveTrade(0);
   if (!posted || posted.url !== '/api/square-off?slot=trend' ||
       posted.body?.target_mode !== 'live') {
     throw new Error(`LIVE close was not explicitly routed: ${JSON.stringify(posted)}`);
   }
   for (const removed of ['Open Positions', 'Engine health']) {
-    if (latestCard.includes(removed)) throw new Error(`non-daily section leaked: ${removed}`);
+    if (todayTable.includes(removed)) throw new Error(`non-daily section leaked: ${removed}`);
   }
 })().catch(error => {
   console.error(error);

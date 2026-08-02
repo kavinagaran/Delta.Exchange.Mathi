@@ -5,7 +5,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_overview_uses_performance_style_cards_and_latest_trade_detail():
+def test_overview_uses_performance_style_cards_and_today_trade_table():
     overview = (ROOT / "templates" / "overview.html").read_text(encoding="utf-8")
     styles = (ROOT / "static" / "css" / "app.css").read_text(encoding="utf-8")
 
@@ -16,9 +16,9 @@ def test_overview_uses_performance_style_cards_and_latest_trade_detail():
     assert "setTodaySummaryTone('today-pnl'" in overview
     assert "overview-today-card" in overview
     assert ".today-summary" in styles
-    assert "today-latest-trade-card" in overview
-    assert ".today-latest-trade-body" in styles
-    assert ".today-latest-detail" in styles
+    assert "today-trades-card" in overview
+    assert ".today-trades-table" in styles
+    assert 'id="today-trades-body"' in overview
     assert ".today-protection-metric.tone-sl { color: #ff6172; }" in styles
     assert ".today-protection-metric.tone-tsl-arm { color: #ffc267; }" in styles
     assert ".today-protection-metric.tone-tsl-trail { color: #70b8ff; }" in styles
@@ -27,15 +27,13 @@ def test_overview_uses_performance_style_cards_and_latest_trade_detail():
     assert ".trade-action-link" not in styles
 
 
-def test_latest_trade_card_inherits_the_selected_theme_palette():
-    """The latest-trade treatment is expressed entirely in theme variables."""
+def test_today_trade_table_inherits_the_selected_theme_palette():
+    """Every Today table header follows the shared selected-theme gradient."""
     overview = (ROOT / "templates" / "overview.html").read_text(encoding="utf-8")
     styles = (ROOT / "static" / "css" / "app.css").read_text(encoding="utf-8")
 
-    detail_rule = styles.split(".today-latest-detail {", 1)[1].split("}", 1)[0]
-    assert "var(--accent-dark)" in detail_rule
-    assert "var(--surface)" in detail_rule
-    assert "var(--border)" in detail_rule
-    card = overview.split("today-latest-trade-card", 1)[1]
-    assert 'id="today-latest-trade"' in card
-    assert "<table" not in card
+    assert ':root:not([data-theme="dark"]) table thead th' in styles
+    assert ':root[data-theme="dark"] table thead th' in styles
+    card = overview.split("today-trades-card", 1)[1]
+    assert 'id="today-trades-body"' in card
+    assert '<table class="today-trades-table"' in card

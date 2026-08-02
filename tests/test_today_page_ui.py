@@ -13,13 +13,14 @@ def test_today_page_contains_only_same_day_trade_content():
         'id="today-open-total"',
         'id="today-closed-total"',
         'id="today-pnl"',
-        "Latest Trade",
-        'id="today-latest-trade"',
-        'id="today-latest-note"',
+        "Today's Trades",
+        'id="today-trades-body"',
+        'id="today-table-count"',
+        'class="today-trades-table"',
         "jget('/api/today-trades')",
         "function updateTodaySummary(rows)",
-        "function latestCompletedTodayTrade(rows)",
-        "function renderTodayLatestTrade(trade)",
+        "function todayTableTimestamp(trade, phase = 'entry')",
+        "function renderTodayTrades(rows)",
         "function todayInlineProtectionHtml(protection)",
         "jget('/api/tp-monitor')",
         "jget('/api/engine/snapshot')",
@@ -32,13 +33,13 @@ def test_today_page_contains_only_same_day_trade_content():
         '>Exit</button>',
         "function closeTodayLiveTrade(index)",
         "'/api/square-off?slot='",
-        "target_mode: 'live'",
+        "target_mode: simulated ? 'dry_run' : 'live'",
         'aria-label="Today trading dashboard"',
         'data-metric="pnl"',
         'class="wide decision-primary"',
         'class="today-score-dial"',
-        'class="today-latest-detail"',
-        'Realized P&amp;L',
+        'Gross P/L',
+        'Net P/L',
     ):
         assert required in source
 
@@ -55,7 +56,8 @@ def test_today_page_contains_only_same_day_trade_content():
         "loadStatsInto",
         "loadSlots",
         'id="today-body"',
-        "Today's Trades",
+        "Latest Trade",
+        'id="today-latest-trade"',
         ">Close Position</button>",
         ">Protection</button>",
         ">Payoff</button>",
@@ -87,6 +89,7 @@ def test_today_page_uses_compact_responsive_terminal_layout():
         ".today-protection-metric.tone-tsl-trail",
         ".today-engine-score-dials",
         ".today-score-dial",
+        "text-align: center",
         ".today-odometer-window",
         "@keyframes today-odometer-roll",
         "@media (max-width: 920px)",
@@ -100,7 +103,7 @@ def test_today_summary_cards_use_meaningful_svg_icons_not_empty_boxes():
     source = (ROOT / "templates" / "overview.html").read_text(encoding="utf-8")
     styles = (ROOT / "static" / "css" / "app.css").read_text(encoding="utf-8")
     summary = source.split('id="today-summary"', 1)[1].split(
-        'class="card overview-today-card today-latest-trade-card"', 1)[0]
+        'class="card overview-today-card today-trades-card"', 1)[0]
 
     assert summary.count('class="today-stat-icon"') == 4
     assert summary.count('<svg viewBox="0 0 24 24"') == 4

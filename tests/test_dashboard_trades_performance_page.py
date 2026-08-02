@@ -39,6 +39,9 @@ def test_page_has_complete_exchange_history_disclosure_without_filters():
     assert "performance-history-card" in TEMPLATE
     assert 'class="numeric">Lots</th>' in TEMPLATE
     assert 'class="numeric ${pnlCls(trade.net_pnl_usd)}"' in TEMPLATE
+    assert "function tableTime(value)" in TEMPLATE
+    assert "Opened (IST)" not in TEMPLATE
+    assert "Closed (IST)" not in TEMPLATE
     assert "Trade activity" not in TEMPLATE
     assert "Refresh history" in TEMPLATE
     assert "slot-filter-chips" not in TEMPLATE
