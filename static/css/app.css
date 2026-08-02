@@ -2578,6 +2578,51 @@ body:has(.overview-page) .nav a.active {
 .today-decision-panel .dry-engine-hd > div > span { font-size: 8.5px; }
 .today-decision-panel .dry-engine-hd strong { font-size: 11px; font-weight: 650; }
 .today-decision-panel .dry-engine-decision { padding: 4px 8px; font-size: 8px; }
+.today-engine-score-dials {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+  justify-items: center; gap: 12px; padding: 8px 4px 4px;
+}
+.today-score-dial-item { display: grid; place-items: center; min-width: 0; }
+.today-score-dial {
+  --today-score-angle: 0deg; --today-score-tone: var(--muted);
+  display: grid; place-items: center; width: 142px; height: 142px; padding: 10px;
+  border-radius: 50%;
+  background: conic-gradient(from -90deg, var(--today-score-tone) 0deg var(--today-score-angle), color-mix(in srgb, var(--border) 80%, transparent) var(--today-score-angle) 360deg);
+  box-shadow: 0 0 24px color-mix(in srgb, var(--today-score-tone) 20%, transparent), inset 0 0 0 1px rgba(255,255,255,.06);
+}
+.today-score-dial-core {
+  display: grid; place-items: center; align-content: center; gap: 8px;
+  width: 100%; height: 100%; padding: 10px;
+  border: 1px solid color-mix(in srgb, var(--today-score-tone) 32%, var(--border));
+  border-radius: 50%; background: color-mix(in srgb, var(--surface) 94%, transparent);
+  box-shadow: inset 0 5px 18px rgba(0,0,0,.28), inset 0 1px rgba(255,255,255,.045);
+}
+.today-score-dial-core > span {
+  color: color-mix(in srgb, var(--text) 82%, var(--muted)); font-size: 8px;
+  font-weight: 850; letter-spacing: .075em; line-height: 1.2; text-transform: uppercase;
+}
+.today-odometer {
+  display: inline-flex; align-items: center; justify-content: center; height: 31px;
+  color: var(--today-score-tone); font: 850 27px/1 ui-monospace, SFMono-Regular, Consolas, monospace;
+  letter-spacing: -.08em; filter: drop-shadow(0 0 7px color-mix(in srgb, var(--today-score-tone) 36%, transparent));
+}
+.today-odometer-window {
+  display: inline-block; width: .61em; height: 1em; overflow: hidden; border-radius: 3px;
+  background: linear-gradient(180deg, rgba(255,255,255,.06), transparent 42%, rgba(0,0,0,.2));
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.045);
+}
+.today-odometer-strip {
+  display: flex; flex-direction: column; width: 100%;
+  transform: translateY(calc(var(--odometer-digit) * -1em));
+  animation: today-odometer-roll .72s cubic-bezier(.2,.75,.2,1) both;
+}
+.today-odometer-strip i { display: block; height: 1em; font: inherit; font-style: normal; line-height: 1; text-align: center; }
+.today-odometer-symbol { display: inline-grid; place-items: center; min-width: .42em; }
+.today-odometer-empty { letter-spacing: 0; }
+@keyframes today-odometer-roll {
+  from { transform: translateY(0); }
+  to { transform: translateY(calc(var(--odometer-digit) * -1em)); }
+}
 .today-decision-panel .dry-engine-metrics { gap: 6px; }
 .today-decision-panel .dry-engine-metrics > div {
   padding: 6px 8px; border-color: color-mix(in srgb, var(--dry-engine-tone) 10%, var(--border));
@@ -2682,6 +2727,9 @@ body:has(.overview-page) .nav a.active {
   .today-current-trade-card > .card-hd .hint { display: none; }
   .today-decision-panel .dry-engine-metrics { grid-template-columns: 1fr; }
   .today-decision-panel .dry-engine-metrics > .wide { grid-column: auto; }
+  .today-engine-score-dials { gap: 8px; padding-inline: 0; }
+  .today-score-dial { width: 120px; height: 120px; padding: 8px; }
+  .today-odometer { height: 26px; font-size: 22px; }
   .today-summary { grid-template-columns: 1fr; }
   .overview-page .today-summary .performance-stat { min-height: 82px; }
   .today-current-actions .btn { flex: 1 1 auto; min-height: 38px; }

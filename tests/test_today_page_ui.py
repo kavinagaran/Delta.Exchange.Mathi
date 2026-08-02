@@ -22,6 +22,12 @@ def test_today_page_contains_only_same_day_trade_content():
         "function renderTodayLatestTrade(trade)",
         "function todayInlineProtectionHtml(protection)",
         "jget('/api/tp-monitor')",
+        "jget('/api/engine/snapshot')",
+        "jget('/api/engine/live')",
+        "function todayOdometerScore(value)",
+        "function todayEngineScoreDials(snapshot, liveView, status)",
+        "Live preview",
+        "Committed decision",
         'aria-label="Live TP, SL and TSL monitor"',
         '>Exit</button>',
         "function closeTodayLiveTrade(index)",
@@ -30,7 +36,7 @@ def test_today_page_contains_only_same_day_trade_content():
         'aria-label="Today trading dashboard"',
         'data-metric="pnl"',
         'class="wide decision-primary"',
-        'class="decision-key score"',
+        'class="today-score-dial"',
         'class="today-latest-detail"',
         'Realized P&amp;L',
     ):
@@ -57,6 +63,7 @@ def test_today_page_contains_only_same_day_trade_content():
         "showPayoff",
         "squareOff",
         "/api/engine/health",
+        "View Trend Engine",
     ):
         assert removed not in source
 
@@ -78,6 +85,10 @@ def test_today_page_uses_compact_responsive_terminal_layout():
         ".today-protection-metric.tone-sl",
         ".today-protection-metric.tone-tsl-arm",
         ".today-protection-metric.tone-tsl-trail",
+        ".today-engine-score-dials",
+        ".today-score-dial",
+        ".today-odometer-window",
+        "@keyframes today-odometer-roll",
         "@media (max-width: 920px)",
         "@media (max-width: 560px)",
         "prefers-reduced-motion",

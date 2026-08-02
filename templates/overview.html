@@ -309,12 +309,68 @@ function todayDecisionTime(value) {
   });
 }
 
-function renderTodayEngineDecision(status) {
+function todayScoreColor(value, quality) {
+  if (quality && String(quality).toUpperCase() !== 'OK') return 'var(--neg)';
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return 'var(--muted)';
+  const score = Math.max(-100, Math.min(100, numeric));
+  const mix = (score + 100) / 200;
+  const red = Math.round(255 * (1 - mix));
+  const green = Math.round(97 * (1 - mix) + 194 * mix);
+  const blue = Math.round(114 * (1 - mix) + 110 * mix);
+  return `rgb(${red}, ${green}, ${blue})`;
+}
+
+function todayOdometerScore(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return '<span class="today-odometer-empty">—</span>';
+  }
+  const formatted = `${numeric > 0 ? '+' : numeric < 0 ? '−' : ''}${Math.abs(numeric).toFixed(1)}`;
+  return [...formatted].map(character => {
+    if (!/\d/.test(character)) {
+      return `<span class="today-odometer-symbol">${character}</span>`;
+    }
+    const digits = Array.from({length: 10}, (_, digit) => `<i>${digit}</i>`).join('');
+    return `<span class="today-odometer-window"><span class="today-odometer-strip" style="--odometer-digit:${character}">${digits}</span></span>`;
+  }).join('');
+}
+
+function todayScoreDial(label, value, quality) {
+  const numeric = Number(value);
+  const available = Number.isFinite(numeric);
+  const score = available ? Math.max(-100, Math.min(100, numeric)) : 0;
+  const color = todayScoreColor(available ? score : null, quality);
+  const accessible = available ? score.toFixed(1) : 'unavailable';
+  const meterValue = available ? ` aria-valuenow="${esc(accessible)}"` : '';
+  return `<div class="today-score-dial-item">
+    <div class="today-score-dial" role="meter" aria-label="${esc(label)} score" aria-valuemin="-100" aria-valuemax="100"${meterValue}
+      style="--today-score-angle:${Math.abs(score) * 3.6}deg;--today-score-tone:${color}">
+      <div class="today-score-dial-core">
+        <span>${esc(label)}</span>
+        <strong class="today-odometer" aria-label="${esc(accessible)}">${todayOdometerScore(available ? score : null)}</strong>
+      </div>
+    </div>
+  </div>`;
+}
+
+function todayEngineScoreDials(snapshot, liveView, status) {
+  const liveScore = liveView?.available !== false ? liveView?.live_score : null;
+  const committedScore = Number.isFinite(Number(snapshot?.trend_score))
+    ? snapshot.trend_score : status?.direction_score;
+  return `<div class="today-engine-score-dials" aria-label="Trend Engine scores">
+    ${todayScoreDial('Live preview', liveScore, liveView?.data_quality || snapshot?.data_quality)}
+    ${todayScoreDial('Committed decision', committedScore, snapshot?.data_quality)}
+  </div>`;
+}
+
+function renderTodayEngineDecision(status, snapshot, liveView) {
   const root = document.getElementById('today-engine-decision');
   if (!status) {
     root.innerHTML = `<section class="dry-engine-panel is-unavailable">
       <div class="dry-engine-hd"><div><span>TREND SCORE AUTOMATION</span>
       <strong>Decision status is unavailable</strong></div><span class="dry-engine-decision">WAITING</span></div>
+      ${todayEngineScoreDials(snapshot, liveView, status)}
       <p>The latest controller state could not be loaded. It will refresh automatically.</p>
     </section>`;
     return;
@@ -325,16 +381,15 @@ function renderTodayEngineDecision(status) {
   const action = targets[zone] || 'Waiting for a valid closed-bar score';
   const tone = zone === 'CE_2_ITM' ? 'is-buy-ce' : zone === 'PE_2_ITM' ? 'is-buy-pe'
     : zone === 'HOLD' ? 'is-hold' : 'is-waiting';
-  const score = Number.isFinite(Number(status.direction_score)) ? fN(status.direction_score, 1) : 'Waiting';
   const lots = Number.isFinite(Number(status.lots)) ? fN(status.lots) : '—';
   root.innerHTML = `<section class="dry-engine-panel today-decision-panel ${tone}" data-zone="${esc(zone || 'WAITING')}" aria-label="Latest live engine decision">
     <div class="dry-engine-hd"><div><span>TREND SCORE AUTOMATION · LIVE</span>
       <strong>Entries, exits and trade transitions happen automatically</strong></div>
       <span class="dry-engine-decision">${esc(todayDecisionLabel(status.status || zone).toUpperCase())}</span></div>
+    ${todayEngineScoreDials(snapshot, liveView, status)}
     <dl class="dry-engine-metrics">
       <div class="wide decision-primary"><dt>Current automatic action</dt><dd>${esc(action)}</dd></div>
-      <div class="decision-key score"><dt>Direction score</dt><dd>${esc(score)}</dd></div>
-      <div class="decision-key regime"><dt>Market regime</dt><dd>${esc(todayDecisionLabel(status.market_regime || 'Waiting'))}</dd></div>
+      <div class="wide decision-key regime"><dt>Market regime</dt><dd>${esc(todayDecisionLabel(status.market_regime || 'Waiting'))}</dd></div>
       <div class="decision-detail"><dt>Trade type</dt><dd>${esc(todayDecisionLabel(zone || 'Waiting'))}</dd></div>
       <div class="decision-detail"><dt>Lots</dt><dd>${esc(lots)}</dd></div>
       <div class="wide decision-detail"><dt>Selected / open contract</dt><dd>${esc(status.symbol || 'Waiting for an eligible contract')}</dd></div>
@@ -343,7 +398,6 @@ function renderTodayEngineDecision(status) {
       <div class="decision-detail"><dt>Last controller cycle</dt><dd>${esc(todayDecisionTime(status.last_cycle_utc))}</dd></div>
     </dl>
     ${status.last_error ? `<p class="dry-engine-action-copy c-neg">Latest controller error: ${esc(status.last_error)}</p>` : ''}
-    <div class="dry-engine-actions"><a href="/trend-engine" class="btn secondary sm">View Trend Engine</a></div>
   </section>`;
 }
 
@@ -378,10 +432,12 @@ function updateTodaySummary(rows) {
 }
 
 async function loadToday() {
-  const [rows, engineStatus, protectionStatus] = await Promise.all([
+  const [rows, engineStatus, protectionStatus, engineSnapshot, engineLive] = await Promise.all([
     jget('/api/today-trades'),
     jget('/api/trend-engine/score-auto/status').catch(() => null),
     jget('/api/tp-monitor').catch(() => null),
+    jget('/api/engine/snapshot').catch(() => null),
+    jget('/api/engine/live').catch(() => ({available: false})),
   ]);
   updateTodaySummary(rows);
   window._todayLiveTrades = {};
@@ -395,7 +451,7 @@ async function loadToday() {
   const currentProtection = currentSlot ? protectionStatus?.[currentSlot] : null;
   renderTodayCurrentTrade(currentTrade, currentIndex, currentProtection);
   renderTodayLatestTrade(latestCompletedTodayTrade(rows));
-  renderTodayEngineDecision(engineStatus);
+  renderTodayEngineDecision(engineStatus, engineSnapshot, engineLive);
   return rows;
 }
 

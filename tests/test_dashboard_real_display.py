@@ -294,6 +294,17 @@ global.jget = async url => {
       health: {peak_pnl: 180, heartbeat_utc: new Date().toISOString()},
     }};
   }
+  if (url === '/api/trend-engine/score-auto/status') {
+    return {status: 'signal_consumed', engine_zone: 'CE_2_ITM',
+      direction_score: 43.2, market_regime: 'trend_up', lots: 1000,
+      symbol: 'C-BTC-65000'};
+  }
+  if (url === '/api/engine/snapshot') {
+    return {trend_score: 43.2, data_quality: 'OK'};
+  }
+  if (url === '/api/engine/live') {
+    return {available: true, live_score: 47.8, data_quality: 'OK'};
+  }
   throw new Error(`unexpected endpoint: ${url}`);
 };
 vm.runInThisContext(source.slice(start, end));
@@ -327,6 +338,13 @@ vm.runInThisContext(source.slice(start, end));
     'Entry time', 'Exit time', 'TRAILING STOP',
   ]) {
     if (!latestCard.includes(detail)) throw new Error(`missing latest detail: ${detail}`);
+  }
+  const decisionCard = elements['today-engine-decision'].innerHTML;
+  for (const detail of ['Live preview', 'Committed decision', 'today-odometer-window']) {
+    if (!decisionCard.includes(detail)) throw new Error(`missing engine dial detail: ${detail}`);
+  }
+  if (decisionCard.includes('View Trend Engine')) {
+    throw new Error('obsolete Trend Engine link is still present');
   }
   await closeTodayLiveTrade(0);
   if (!posted || posted.url !== '/api/square-off?slot=trend' ||
