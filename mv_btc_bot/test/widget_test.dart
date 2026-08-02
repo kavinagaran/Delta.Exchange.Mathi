@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:mv_btc_bot/main.dart';
+import 'package:mv_btc_bot/api/client.dart';
+import 'package:mv_btc_bot/screens/today_screen.dart';
 import 'package:mv_btc_bot/widgets/kit.dart';
 
 void main() {
@@ -39,6 +41,36 @@ void main() {
     expect(tester.takeException(), isNull);
     expect(find.text('Configuration'), findsOneWidget);
     expect(find.text('Visible content'), findsOneWidget);
+  });
+
+  testWidgets('Today shows one Exit action and a detailed latest trade', (
+    WidgetTester tester,
+  ) async {
+    tester.view.physicalSize = const Size(390, 1000);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: buildAppTheme(blue: true),
+        home: TodayScreen(api: _TodayApi(), onUnauthorised: () {}),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Latest Trade'), findsOneWidget);
+    expect(find.text('P-BTC-63000-020826'), findsOneWidget);
+    expect(find.text(r'-$65.90'), findsOneWidget);
+    expect(find.text('7:41 AM IST'), findsOneWidget);
+    expect(find.text('8:01 AM IST'), findsOneWidget);
+    expect(find.text('Exit'), findsOneWidget);
+    expect(find.text('Close'), findsNothing);
+    expect(find.text('Protection'), findsNothing);
+    expect(find.text('Payoff'), findsNothing);
+
+    // Dispose the screen's polling timer before the test ends.
+    await tester.pumpWidget(const SizedBox.shrink());
   });
 
   testWidgets('all app tabs fit a narrow Android screen', (
@@ -174,4 +206,40 @@ void main() {
       expect(kWebAssetRevision, matches(RegExp(r'^\d+\.\d+\.\d+\+\d+-')));
     },
   );
+}
+
+class _TodayApi extends DashboardApi {
+  _TodayApi() : super(baseUrl: 'https://example.invalid', sessionCookie: null);
+
+  @override
+  Future<ApiResult<Map<String, dynamic>>> status() async =>
+      const ApiResult.ok(<String, dynamic>{});
+
+  @override
+  Future<ApiResult<List<dynamic>>> todayTrades() async => ApiResult.ok([
+    <String, dynamic>{
+      '_live': true,
+      'status': 'OPEN',
+      'symbol': 'C-BTC-64000-020826',
+      'side': 'long',
+      'lots': 1000,
+      'entry_mark': 475.0,
+      'current_mark': 421.7,
+      'live_pnl': -53.3,
+    },
+    <String, dynamic>{
+      'status': 'CLOSED',
+      'symbol': 'P-BTC-63000-020826',
+      'side': 'long',
+      'lots': 1000,
+      'entry_mark': 475.0,
+      'exit_mark': 409.1,
+      'pnl_usd': -65.9,
+      'entry_date': '2026-08-02',
+      'entry_time_utc': '02:11:00',
+      'exit_date': '2026-08-02',
+      'exit_time_utc': '02:31:00',
+      'exit_trigger': 'trailing_stop',
+    },
+  ]);
 }

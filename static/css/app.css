@@ -2534,6 +2534,10 @@ body:has(.overview-page) .nav a.active {
 #today-engine-decision > .dry-engine-panel { height: 100%; box-sizing: border-box; margin-top: 0; }
 .today-current-actions { display: flex; justify-content: center; gap: 7px; flex-wrap: wrap; margin-top: 14px; }
 .today-current-actions .btn { min-height: 30px; }
+.today-current-actions .today-exit-btn {
+  min-width: 86px; padding-inline: 22px; border-radius: 999px;
+  box-shadow: 0 8px 20px color-mix(in srgb, var(--neg) 24%, transparent), inset 0 1px rgba(255,255,255,.2);
+}
 .today-protection-state { display: inline-flex; align-items: center; justify-content: flex-end; gap: 6px; font-size: 10.5px; }
 .today-protection-state .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
 .today-protection-state.protected { color: var(--pos); }
@@ -2590,6 +2594,29 @@ body:has(.overview-page) .nav a.active {
 
 .overview-today-card { margin: 0; overflow: hidden; }
 .overview-today-card > .card-hd { min-height: 44px; padding: 11px 16px; }
+.today-latest-trade-card > .card-hd {
+  background: color-mix(in srgb, var(--surface-subtle) 78%, transparent);
+}
+.today-latest-trade-body {
+  min-height: 390px; display: grid; place-items: center; padding: 22px;
+  background:
+    radial-gradient(circle at 50% 8%, color-mix(in srgb, var(--accent) 10%, transparent), transparent 42%),
+    linear-gradient(155deg, color-mix(in srgb, var(--surface-subtle) 38%, transparent), transparent 62%);
+}
+.today-latest-trade-body > .score-zone-empty { min-height: 250px; }
+.today-latest-detail {
+  width: min(680px, 100%); box-sizing: border-box; padding: 22px 28px;
+  border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+  border-left: 3px solid var(--accent-dark); border-radius: 12px;
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  box-shadow: 0 18px 42px rgba(0,0,0,.22), inset 0 1px rgba(255,255,255,.035);
+}
+.today-latest-detail .dry-state-line { justify-content: center; }
+.today-latest-detail .big-pnl { margin: 18px 0 14px; font-size: 32px; }
+.today-latest-detail .big-pnl small { margin-top: 4px; letter-spacing: .08em; }
+.today-latest-detail .kv { max-width: 600px; margin: 0 auto; gap: 8px 24px; }
+.today-latest-detail .kv dt,
+.today-latest-detail .kv dd { padding-bottom: 4px; }
 .overview-today-card .tbl-wrap { max-height: 430px; }
 .today-trades-table { min-width: 940px; }
 .today-trades-table thead { position: sticky; top: 0; z-index: 2; }
@@ -2629,6 +2656,10 @@ body:has(.overview-page) .nav a.active {
   .today-summary { grid-template-columns: 1fr; }
   .overview-page .today-summary .performance-stat { min-height: 82px; }
   .today-current-actions .btn { flex: 1 1 auto; min-height: 38px; }
+  .today-current-actions .today-exit-btn { flex: 0 1 132px; }
+  .today-latest-trade-body { min-height: 340px; padding: 12px; }
+  .today-latest-detail { padding: 18px 16px; }
+  .today-latest-detail .big-pnl { font-size: 28px; }
   .drawer-fields { grid-template-columns: 1fr; }
   .today-payoff-modal .chart-box { height: 300px; }
 }

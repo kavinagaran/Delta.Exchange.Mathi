@@ -1,9 +1,5 @@
 {% extends "base.html" %}
 
-{% block head %}
-<script src="/static/js/vendor/chart.umd.min.js?v={{ asset_v('js/vendor/chart.umd.min.js') }}"></script>
-{% endblock %}
-
 {% block content %}
 <div class="overview-page" aria-label="Today trading dashboard">
   <article class="card today-current-trade-card" aria-labelledby="today-current-trade-title">
@@ -75,72 +71,15 @@
     </div>
   </div>
 
-  <div class="card overview-today-card">
+  <div class="card overview-today-card today-latest-trade-card">
     <div class="card-hd">
-      Today's Trades
+      <span aria-hidden="true">◉</span>
+      Latest Trade
       <span class="spacer"></span>
-      <span class="hint" id="today-table-note">Loading…</span>
+      <span class="hint" id="today-latest-note">Last completed position today</span>
     </div>
-    <div class="tbl-wrap">
-      <table class="today-trades-table">
-        <thead><tr>
-          <th>Contract</th>
-          <th>Direction</th>
-          <th>Strike</th>
-          <th>Lots</th>
-          <th>Entry</th>
-          <th>Exit / Mark</th>
-          <th>P&amp;L</th>
-          <th>Status</th>
-        </tr></thead>
-        <tbody id="today-body">
-          <tr class="empty-row"><td colspan="8">Loading…</td></tr>
-        </tbody>
-      </table>
-    </div>
-  </div>
-
-  <div class="drawer-back" id="today-protection-back"
-       onclick="if(event.target===this)closeTodayProtection()">
-    <div class="drawer" role="dialog" aria-modal="true"
-         aria-labelledby="today-protection-title">
-      <div class="drawer-hd">
-        <h3 id="today-protection-title">LIVE trade protection</h3>
-        <button class="x" type="button" onclick="closeTodayProtection()"
-                aria-label="Close protection settings">×</button>
-      </div>
-      <div class="today-protection-context" id="today-protection-context">
-        Loading active protection…
-      </div>
-      <div class="drawer-fields" id="today-protection-fields"></div>
-      <div class="btn-row">
-        <button class="btn sm" id="today-protection-save" type="button"
-                onclick="saveTodayProtection()">Save Changes</button>
-        <button class="btn success sm" id="today-protection-start" type="button"
-                onclick="startTodayProtection()" hidden>Start Monitor</button>
-      </div>
-      <div class="drawer-note">
-        Changes override the automatic premium-based values for this open LIVE
-        trade. They do not close the position.
-      </div>
-    </div>
-  </div>
-
-  <div class="modal-back" id="today-payoff-back"
-       onclick="if(event.target===this)closeTodayPayoff()">
-    <div class="modal today-payoff-modal" role="dialog" aria-modal="true"
-         aria-labelledby="today-payoff-title">
-      <div class="modal-hd">
-        <h3 id="today-payoff-title">Payoff at settlement</h3>
-        <button class="x" type="button" onclick="closeTodayPayoff()"
-                aria-label="Close payoff chart">×</button>
-      </div>
-      <div class="chart-box"><canvas id="today-payoff-chart"></canvas></div>
-      <div class="payoff-facts" id="today-payoff-facts"></div>
-      <p class="payoff-note">
-        Settlement payoff estimate before exit fees. The current mark and
-        protection monitor remain authoritative for the running trade.
-      </p>
+    <div class="card-bd today-latest-trade-body" id="today-latest-trade" aria-live="polite">
+      <div class="no-pos">Loading latest trade…</div>
     </div>
   </div>
 </div>
@@ -149,8 +88,6 @@
 {% block scripts %}
 <script>
 const TODAY_CONTROL_SLOTS = new Set(['morning', 'evening', 'trend']);
-let todayProtection = null;
-let todayPayoffChart = null;
 const todayClosing = new Set();
 
 function todayTradePnl(trade) {
@@ -165,8 +102,34 @@ function todayControlSlot(trade) {
   return '';
 }
 
-function todayTradeTimeIst(trade) {
-  const clock = String(trade?.entry_time_utc || trade?.entry_time || '').trim();
+function todayTradeMoment(trade, phase = 'entry') {
+  const exiting = phase === 'exit';
+  const stamp = String(exiting
+    ? trade?.exit_at_utc || trade?.closed_at_utc || ''
+    : trade?.entry_at_utc || trade?.opened_at_utc || '').trim();
+  if (stamp) {
+    const parsed = new Date(stamp);
+    if (!Number.isNaN(parsed.getTime())) return parsed;
+  }
+  const date = String(exiting
+    ? trade?.exit_date || trade?.entry_date || trade?.date || ''
+    : trade?.entry_date || trade?.date || '').trim();
+  const clock = String(exiting
+    ? trade?.exit_time_utc || trade?.exit_time || ''
+    : trade?.entry_time_utc || trade?.entry_time || '').trim();
+  if (!date || !clock) return null;
+  const parsed = new Date(`${date}T${clock.replace(/Z$/, '')}Z`);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function todayTradeTimeIst(trade, phase = 'entry') {
+  const moment = todayTradeMoment(trade, phase);
+  if (moment) return moment.toLocaleTimeString('en-IN', {
+    timeZone: 'Asia/Kolkata', hour: 'numeric', minute: '2-digit', hour12: true,
+  }) + ' IST';
+  const clock = String(phase === 'exit'
+    ? trade?.exit_time_utc || trade?.exit_time || ''
+    : trade?.entry_time_utc || trade?.entry_time || '').trim();
   if (!clock) return '—';
   if (typeof utcToIst === 'function') return utcToIst(clock) || '—';
   const parts = clock.split(':').map(Number);
@@ -175,6 +138,11 @@ function todayTradeTimeIst(trade) {
   const hour = Math.floor(total / 60);
   const minute = total % 60;
   return `${(hour + 11) % 12 + 1}:${String(minute).padStart(2, '0')} ${hour >= 12 ? 'PM' : 'AM'} IST`;
+}
+
+function todayTradeDateIst(trade) {
+  const moment = todayTradeMoment(trade, 'entry');
+  return moment ? moment.toLocaleDateString('en-CA', {timeZone: 'Asia/Kolkata'}) : '—';
 }
 
 function todayTradeType(trade) {
@@ -198,10 +166,6 @@ function renderTodayCurrentTrade(trade, index) {
   const direction = String(trade.side || '—').toUpperCase();
   const directionClass = direction === 'SHORT' ? 'short' : 'long';
   const slot = todayControlSlot(trade);
-  const exchangeProtected = trade.exchange_protection_complete === true;
-  const protection = exchangeProtected
-    ? '<span class="today-protection-state protected"><span class="dot"></span>Exchange protected</span>'
-    : '<span class="today-protection-state verifying"><span class="dot"></span>Verifying on exchange</span>';
   root.innerHTML = `<div class="dry-state-line">
       <span class="badge live">LIVE OPEN</span><span>Exchange position</span>
     </div>
@@ -214,13 +178,58 @@ function renderTodayCurrentTrade(trade, index) {
       <dt>Lots</dt><dd>${fN(trade.lots)}</dd>
       <dt>Entry</dt><dd>$${fN(trade.entry_mark, 4)}</dd>
       <dt>Current mark</dt><dd>$${fN(trade.current_mark, 4)}</dd>
-      <dt>Protection</dt><dd>${protection}</dd>
     </dl>
     ${slot ? `<div class="today-current-actions">
-      <button class="btn danger sm" type="button" onclick="closeTodayLiveTrade(${index})">Close Position</button>
-      <button class="btn secondary sm" type="button" onclick="openTodayProtection(${index})">Protection</button>
-      <button class="btn secondary sm" type="button" onclick="showTodayPayoff(${index})">Payoff</button>
+      <button class="btn danger sm today-exit-btn" type="button" onclick="closeTodayLiveTrade(${index})">Exit</button>
     </div>` : ''}`;
+}
+
+function latestCompletedTodayTrade(rows) {
+  return (Array.isArray(rows) ? rows : [])
+    .filter(trade => trade && !trade._live && String(trade.status || 'CLOSED').toUpperCase() !== 'OPEN')
+    .sort((left, right) =>
+      (todayTradeMoment(left, 'exit')?.getTime() || 0) -
+      (todayTradeMoment(right, 'exit')?.getTime() || 0))
+    .at(-1) || null;
+}
+
+function renderTodayLatestTrade(trade) {
+  const root = document.getElementById('today-latest-trade');
+  const note = document.getElementById('today-latest-note');
+  if (!trade) {
+    note.textContent = 'No completed trade today';
+    root.innerHTML = `<div class="no-pos score-zone-empty">
+      <span class="icon">◇</span><strong>No completed trade today</strong>
+      <small>The latest completed position will appear here.</small>
+    </div>`;
+    return;
+  }
+  const pnl = todayTradePnl(trade);
+  const direction = String(trade.side || '—').toUpperCase();
+  const directionClass = direction === 'SHORT' ? 'short' : 'long';
+  const result = pnl > 0 ? 'WIN' : pnl < 0 ? 'LOSS' : 'CLOSED';
+  const resultClass = pnl > 0 ? 'win' : pnl < 0 ? 'loss' : 'closed';
+  const reason = String(trade.exit_trigger || '').replaceAll('_', ' ').toUpperCase();
+  note.textContent = `${todayTradeType(trade)} · ${trade.symbol || 'Completed trade'}`;
+  root.innerHTML = `<div class="today-latest-detail">
+    <div class="dry-state-line">
+      <span class="badge ${resultClass}">${result}</span>
+      <span>Completed position · no exchange exposure</span>
+    </div>
+    <div class="big-pnl ${pnlCls(pnl)}">${f$(pnl)}<small>Realized P&amp;L</small></div>
+    <dl class="kv">
+      <dt>Trade date</dt><dd>${esc(todayTradeDateIst(trade))}</dd>
+      <dt>Entry time</dt><dd>${esc(todayTradeTimeIst(trade))}</dd>
+      <dt>Exit time</dt><dd>${esc(todayTradeTimeIst(trade, 'exit'))}</dd>
+      <dt>Trade type</dt><dd>${esc(todayTradeType(trade))}</dd>
+      <dt>Contract</dt><dd>${esc(trade.symbol || '—')}</dd>
+      <dt>Side</dt><dd><span class="badge ${directionClass}">${esc(direction)}</span></dd>
+      <dt>Lots</dt><dd>${fN(trade.lots)}</dd>
+      <dt>Entry</dt><dd>$${fN(trade.entry_mark, 4)}</dd>
+      <dt>Exit price</dt><dd>$${fN(trade.exit_mark, 4)}</dd>
+      ${reason ? `<dt>Exit reason</dt><dd>${esc(reason)}</dd>` : ''}
+    </dl>
+  </div>`;
 }
 
 function todayDecisionLabel(value) {
@@ -301,8 +310,6 @@ function updateTodaySummary(rows) {
   setTodaySummaryTone('today-open-total', open.length ? 'warning' : 'neutral');
   setTodaySummaryTone('today-closed-total', closed.length ? 'accent' : 'neutral');
   setTodaySummaryTone('today-pnl', pnl > 0 ? 'positive' : pnl < 0 ? 'negative' : 'neutral');
-  document.getElementById('today-table-note').textContent =
-    `${trades.length} trade${trades.length === 1 ? '' : 's'} today`;
 }
 
 async function loadToday() {
@@ -310,7 +317,6 @@ async function loadToday() {
     jget('/api/today-trades'),
     jget('/api/trend-engine/score-auto/status').catch(() => null),
   ]);
-  const body = document.getElementById('today-body');
   updateTodaySummary(rows);
   window._todayLiveTrades = {};
   const currentIndex = rows.findIndex(trade => trade?._live);
@@ -320,43 +326,8 @@ async function loadToday() {
     if (controlSlot) window._todayLiveTrades[currentIndex] = { ...currentTrade, controlSlot };
   }
   renderTodayCurrentTrade(currentTrade, currentIndex);
+  renderTodayLatestTrade(latestCompletedTodayTrade(rows));
   renderTodayEngineDecision(engineStatus);
-  if (!rows.length) {
-    body.innerHTML = `<tr class="empty-row today-ledger-empty"><td colspan="8">
-      <div><span aria-hidden="true">◇</span><strong>No trades today</strong>
-      <small>Completed and active trades will appear here automatically.</small></div>
-    </td></tr>`;
-    return rows;
-  }
-  body.innerHTML = rows.map((trade, index) => {
-    const live = !!trade._live;
-    const pnl = todayTradePnl(trade);
-    const exit = live ? trade.current_mark : trade.exit_mark;
-    const direction = String(trade.side || '—').toUpperCase();
-    const directionClass = direction === 'LONG' ? 'long'
-      : direction === 'SHORT' ? 'short' : 'closed';
-    const status = live
-      ? '<span class="badge live">LIVE</span>'
-      : pnl > 0
-        ? '<span class="badge win">WIN</span>'
-        : pnl < 0
-          ? '<span class="badge loss">LOSS</span>'
-          : '<span class="badge closed">CLOSED</span>';
-    const controlSlot = live ? todayControlSlot(trade) : '';
-    if (live && controlSlot) {
-      window._todayLiveTrades[index] = { ...trade, controlSlot };
-    }
-    return `<tr>
-      <td>${esc(trade.symbol)}</td>
-      <td><span class="badge ${directionClass}">${esc(direction)}</span></td>
-      <td class="numeric">$${fN(trade.strike)}</td>
-      <td class="numeric">${fN(trade.lots)}</td>
-      <td class="numeric">$${fN(trade.entry_mark, 2)}</td>
-      <td class="numeric">$${fN(exit, 2)}</td>
-      <td class="numeric ${pnlCls(pnl)}">${f$(pnl)}</td>
-      <td>${status}</td>
-    </tr>`;
-  }).join('');
   return rows;
 }
 
@@ -655,12 +626,6 @@ async function loadAll() {
   await loadToday();
   refreshTopbar();
 }
-
-document.addEventListener('keydown', event => {
-  if (event.key !== 'Escape') return;
-  closeTodayProtection();
-  closeTodayPayoff();
-});
 
 loadAll();
 setInterval(loadAll, 12_000);

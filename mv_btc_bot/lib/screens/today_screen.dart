@@ -17,7 +17,6 @@ import 'package:flutter/material.dart';
 import '../api/client.dart';
 import '../theme/design.dart';
 import '../widgets/kit.dart';
-import '../widgets/trade_controls.dart';
 
 class TodayScreen extends StatefulWidget {
   const TodayScreen({
@@ -95,6 +94,25 @@ class _TodayScreenState extends State<TodayScreen> {
     return null;
   }
 
+  Map<String, dynamic>? get _latestTrade {
+    final closed = _todayTrades
+        .whereType<Map<String, dynamic>>()
+        .where(
+          (row) =>
+              row['_live'] != true &&
+              '${row['status'] ?? 'CLOSED'}'.toUpperCase() != 'OPEN',
+        )
+        .toList();
+    if (closed.isEmpty) return null;
+    closed.sort(
+      (left, right) => _tradeMoment(
+        left,
+        exit: true,
+      ).compareTo(_tradeMoment(right, exit: true)),
+    );
+    return closed.last;
+  }
+
   Future<void> _close(Map<String, dynamic> trade) async {
     final confirmed = await showDialog<bool>(
       context: context,
@@ -146,6 +164,7 @@ class _TodayScreenState extends State<TodayScreen> {
     }
 
     final current = _currentTrade;
+    final latest = _latestTrade;
     return RefreshIndicator(
       onRefresh: _refresh,
       child: ListView(
@@ -163,27 +182,9 @@ class _TodayScreenState extends State<TodayScreen> {
               trade: current,
               busy: _closing,
               onClose: () => _close(current),
-              onProtection: () async {
-                final saved = await showProtectionEditor(
-                  context: context,
-                  api: widget.api,
-                  trade: current,
-                );
-                if (!context.mounted) return;
-                if (saved) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                      content: Text('Protection updated'),
-                      backgroundColor: kPositive,
-                    ),
-                  );
-                  await _refresh(quiet: true);
-                }
-              },
-              onPayoff: () => showPayoffSheet(context, current),
             ),
           const SizedBox(height: Gap.md),
-          _TodayTradesCard(trades: _todayTrades),
+          _LatestTradeCard(trade: latest),
         ],
       ),
     );
@@ -195,15 +196,11 @@ class _CurrentTradeCard extends StatelessWidget {
     required this.trade,
     required this.busy,
     required this.onClose,
-    required this.onProtection,
-    required this.onPayoff,
   });
 
   final Map<String, dynamic> trade;
   final bool busy;
   final VoidCallback onClose;
-  final VoidCallback onProtection;
-  final VoidCallback onPayoff;
 
   @override
   Widget build(BuildContext context) {
@@ -241,11 +238,14 @@ class _CurrentTradeCard extends StatelessWidget {
             ],
           ),
           const SizedBox(height: Gap.lg),
-          TradeActionBar(
-            busy: busy,
-            onClose: onClose,
-            onProtection: onProtection,
-            onPayoff: onPayoff,
+          Center(
+            child: CompactAction(
+              label: busy ? 'Exiting…' : 'Exit',
+              icon: Icons.exit_to_app_rounded,
+              tone: kNegative,
+              filled: true,
+              onPressed: busy ? null : onClose,
+            ),
           ),
         ],
       ),
@@ -444,90 +444,96 @@ class _PositionRow extends StatelessWidget {
   }
 }
 
-/// Trades closed today.
-class _TodayTradesCard extends StatelessWidget {
-  const _TodayTradesCard({required this.trades});
+/// The most recent completed trade today, presented with the same strong
+/// hierarchy as the open-position card instead of being buried in a list.
+class _LatestTradeCard extends StatelessWidget {
+  const _LatestTradeCard({required this.trade});
 
-  final List<dynamic> trades;
+  final Map<String, dynamic>? trade;
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final rows = trades.whereType<Map<String, dynamic>>().toList();
-    final total = rows.fold<double>(
-      0,
-      (sum, row) =>
-          sum +
-          (((row['_live'] == true ? row['live_pnl'] : row['pnl_usd']) as num?)
-                  ?.toDouble() ??
-              0),
-    );
+    final row = trade;
+    if (row == null) {
+      return AppCard(
+        title: 'Latest Trade',
+        child: Text(
+          'No completed trade today.',
+          style: AppText.body.copyWith(color: scheme.onSurfaceVariant),
+        ),
+      );
+    }
+
+    final pnl = _number(row['pnl_usd']);
+    final result = pnl == null
+        ? 'CLOSED'
+        : pnl > 0
+        ? 'WIN'
+        : pnl < 0
+        ? 'LOSS'
+        : 'FLAT';
+    final resultColour = pnl == null ? kNeutral : signedColour(pnl);
 
     return AppCard(
-      kicker: "Today",
-      title: rows.isEmpty
-          ? 'No trades yet'
-          : '${rows.length} trade${rows.length == 1 ? '' : 's'}',
-      trailing: rows.isEmpty
-          ? null
-          : Text(
-              _signed(total, 2),
-              style: AppText.metric.copyWith(color: signedColour(total)),
-            ),
-      child: rows.isEmpty
-          ? Text(
-              'Nothing closed today.',
-              style: AppText.body.copyWith(color: scheme.onSurfaceVariant),
-            )
-          : Column(
+      title: 'Latest Trade',
+      accent: resultColour,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  'LAST COMPLETED POSITION',
+                  style: AppText.kicker.copyWith(
+                    color: scheme.onSurfaceVariant,
+                  ),
+                ),
+              ),
+              StatusPill(result, colour: resultColour, dot: false),
+            ],
+          ),
+          const SizedBox(height: Gap.lg),
+          Center(
+            child: Column(
               children: [
-                for (final row in rows.take(8))
-                  Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 5),
-                    child: Row(
-                      children: [
-                        Expanded(
-                          child: Text(
-                            '${row['symbol'] ?? '—'}',
-                            style: AppText.body,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ),
-                        const SizedBox(width: Gap.sm),
-                        Text(
-                          _signed(
-                            (((row['_live'] == true
-                                            ? row['live_pnl']
-                                            : row['pnl_usd'])
-                                        as num?)
-                                    ?.toDouble() ??
-                                0),
-                            2,
-                          ),
-                          style: AppText.number.copyWith(
-                            color: signedColour(
-                              (row['_live'] == true
-                                      ? row['live_pnl']
-                                      : row['pnl_usd'])
-                                  as num?,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
+                Text(
+                  pnl == null ? '—' : _money(pnl),
+                  style: AppText.display.copyWith(color: resultColour),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  'REALIZED P&L',
+                  style: AppText.kicker.copyWith(
+                    color: scheme.onSurfaceVariant,
                   ),
-                if (rows.length > 8)
-                  Padding(
-                    padding: const EdgeInsets.only(top: Gap.sm),
-                    child: Text(
-                      '+ ${rows.length - 8} more on Performance',
-                      style: AppText.caption.copyWith(
-                        color: scheme.onSurfaceVariant,
-                      ),
-                    ),
-                  ),
+                ),
               ],
             ),
+          ),
+          const SizedBox(height: Gap.lg),
+          StatRow('Trade date', _tradeDate(row)),
+          StatRow('Entry time', _tradeTime(row)),
+          StatRow('Exit time', _tradeTime(row, exit: true)),
+          StatRow('Trade type', _tradeType(row), valueColour: resultColour),
+          StatRow('Contract', '${row['symbol'] ?? '—'}'),
+          StatRow(
+            'Side',
+            '${row['side'] ?? '—'}'.toUpperCase(),
+            valueColour: _sideColour(row['side']),
+          ),
+          StatRow('Lots', _lots(row['lots'])),
+          StatRow('Entry', _tradePrice(row['entry_mark'])),
+          StatRow('Exit price', _tradePrice(row['exit_mark'])),
+          if ('${row['exit_trigger'] ?? ''}'.trim().isNotEmpty)
+            StatRow(
+              'Exit reason',
+              '${row['exit_trigger']}'.replaceAll('_', ' ').toUpperCase(),
+              mono: false,
+            ),
+        ],
+      ),
     );
   }
 }
@@ -537,7 +543,75 @@ class _TodayTradesCard extends StatelessWidget {
 String _signed(double value, int digits) =>
     '${value > 0 ? '+' : ''}${value.toStringAsFixed(digits)}';
 
+String _money(double value) =>
+    '${value > 0
+        ? '+'
+        : value < 0
+        ? '-'
+        : ''}'
+    '\$${value.abs().toStringAsFixed(2)}';
+
 String _tradePrice(Object? value) {
-  final number = value is num ? value.toDouble() : double.tryParse('$value');
+  final number = _number(value);
   return number == null ? '—' : '\$${number.toStringAsFixed(2)}';
+}
+
+double? _number(Object? value) =>
+    value is num ? value.toDouble() : double.tryParse('$value');
+
+String _tradeType(Map<String, dynamic> trade) {
+  final zone = '${trade['trend_score_zone'] ?? trade['engine_zone'] ?? ''}'
+      .toUpperCase();
+  final symbol = '${trade['symbol'] ?? ''}'.toUpperCase();
+  if (zone.startsWith('CE') || symbol.startsWith('C-')) return 'CE';
+  if (zone.startsWith('PE') || symbol.startsWith('P-')) return 'PE';
+  if (zone == 'SHORT_MOVE' || symbol.startsWith('MV-')) return 'MV';
+  return 'TRADE';
+}
+
+Color _sideColour(Object? side) =>
+    '$side'.toLowerCase() == 'short' ? kNegative : kPositive;
+
+String _lots(Object? value) {
+  final number = _number(value);
+  if (number == null) return '—';
+  final raw = number == number.roundToDouble()
+      ? number.toInt().toString()
+      : number.toString();
+  return raw.replaceAllMapped(RegExp(r'\B(?=(\d{3})+(?!\d))'), (_) => ',');
+}
+
+DateTime _tradeMoment(Map<String, dynamic> trade, {required bool exit}) {
+  final iso =
+      '${exit ? trade['exit_at_utc'] ?? trade['closed_at_utc'] ?? '' : trade['entry_at_utc'] ?? trade['opened_at_utc'] ?? ''}'
+          .trim();
+  final parsedIso = DateTime.tryParse(iso);
+  if (parsedIso != null) return parsedIso.toUtc();
+
+  final date =
+      '${exit ? trade['exit_date'] ?? trade['entry_date'] ?? trade['date'] ?? '' : trade['entry_date'] ?? trade['date'] ?? ''}'
+          .trim();
+  final time =
+      '${exit ? trade['exit_time_utc'] ?? trade['exit_time'] ?? '' : trade['entry_time_utc'] ?? trade['entry_time'] ?? ''}'
+          .trim();
+  return DateTime.tryParse('${date}T${time}Z')?.toUtc() ??
+      DateTime.fromMillisecondsSinceEpoch(0, isUtc: true);
+}
+
+String _tradeDate(Map<String, dynamic> trade) {
+  final moment = _tradeMoment(trade, exit: false);
+  if (moment.millisecondsSinceEpoch == 0) return '—';
+  final ist = moment.add(const Duration(hours: 5, minutes: 30));
+  return '${ist.year.toString().padLeft(4, '0')}-'
+      '${ist.month.toString().padLeft(2, '0')}-'
+      '${ist.day.toString().padLeft(2, '0')}';
+}
+
+String _tradeTime(Map<String, dynamic> trade, {bool exit = false}) {
+  final moment = _tradeMoment(trade, exit: exit);
+  if (moment.millisecondsSinceEpoch == 0) return '—';
+  final ist = moment.add(const Duration(hours: 5, minutes: 30));
+  final hour = ist.hour % 12 == 0 ? 12 : ist.hour % 12;
+  final minute = ist.minute.toString().padLeft(2, '0');
+  return '$hour:$minute ${ist.hour < 12 ? 'AM' : 'PM'} IST';
 }

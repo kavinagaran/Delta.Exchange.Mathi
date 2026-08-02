@@ -162,15 +162,20 @@ if (attributes['aria-pressed'] !== 'false' || !attributes['aria-label'].includes
 def test_today_page_has_contextual_live_actions_without_a_position_section():
     source = (ROOT / "templates" / "overview.html").read_text(encoding="utf-8")
 
-    assert 'id="today-body"' in source
+    assert 'id="today-latest-trade"' in source
     assert "jget('/api/today-trades')" in source
     assert "closeTodayLiveTrade(" in source
-    assert "openTodayProtection(" in source
-    assert "showTodayPayoff(" in source
+    current_renderer = source.split(
+        "function renderTodayCurrentTrade", 1
+    )[1].split("function todayDecisionLabel", 1)[0]
+    assert '>Exit</button>' in current_renderer
     for removed in (
         'id="positions-body"',
         "renderPositions",
         "botPosRowHtml",
+        ">Close Position</button>",
+        ">Protection</button>",
+        ">Payoff</button>",
         "openProtectionDrawer",
         "saveDrawerProtection",
         "showPayoff",

@@ -186,11 +186,11 @@ def test_real_overview_is_a_same_day_trade_ledger_only():
 
     for required in (
         'id="today-summary"',
-        'id="today-body"',
+        'id="today-latest-trade"',
         "jget('/api/today-trades')",
-        "Close Position",
-        "Protection",
-        "Payoff",
+        "Latest Trade",
+        '>Exit</button>',
+        "renderTodayLatestTrade(",
     ):
         assert required in source
     for non_daily in (
@@ -213,6 +213,10 @@ def test_real_overview_is_a_same_day_trade_ledger_only():
         "function trendEntry",
         "/api/trend-entry/preview",
         "jpost('/api/trend-entry'",
+        'id="today-body"',
+        ">Close Position</button>",
+        ">Protection</button>",
+        ">Payoff</button>",
     ):
         assert non_daily not in source
 
@@ -273,7 +277,10 @@ global.jget = async url => {
        entry_mark: 500, _live: true, current_mark: 525, live_pnl: 25,
        slot: 'trend'},
       {symbol: 'P-BTC-64000', side: 'long', strike: 64000, lots: 1000,
-       entry_mark: 450, exit_mark: 400, pnl_usd: -50, slot: 'trend'},
+       entry_mark: 450, exit_mark: 400, pnl_usd: -50, slot: 'trend',
+       entry_date: '2026-08-02', entry_time_utc: '02:11:00',
+       exit_date: '2026-08-02', exit_time_utc: '02:31:00',
+       exit_trigger: 'trailing_stop'},
     ];
   }
   if (url === '/api/tp-monitor') {
@@ -294,33 +301,29 @@ vm.runInThisContext(source.slice(start, end));
   if (elements['today-open-total'].textContent !== '1') throw new Error('open total is wrong');
   if (elements['today-closed-total'].textContent !== '1') throw new Error('closed total is wrong');
   if (elements['today-pnl'].textContent !== '-$25.00') throw new Error('day P&L is wrong');
-  const html = elements['today-body'].innerHTML;
-  for (const detail of [
-    'C-BTC-65000', 'P-BTC-64000', 'LIVE', 'LOSS',
-  ]) {
-    if (!html.includes(detail)) throw new Error(`missing today detail: ${detail}`);
-  }
-  for (const removed of ['Actions', 'Close Position', 'Protection', 'Payoff']) {
-    if (html.includes(removed)) throw new Error(`table exposed removed action: ${removed}`);
-  }
   const currentCard = elements['today-current-position'].innerHTML;
-  for (const control of ['Close Position', 'Protection', 'Payoff']) {
-    if (!currentCard.includes(control)) {
-      throw new Error(`current trade card is missing control: ${control}`);
+  if (!currentCard.includes('C-BTC-65000') || !currentCard.includes('>Exit</button>')) {
+    throw new Error(`current trade card is incomplete: ${currentCard}`);
+  }
+  for (const removed of ['Close Position', '>Protection</button>', '>Payoff</button>']) {
+    if (currentCard.includes(removed)) {
+      throw new Error(`current trade card exposed removed control: ${removed}`);
     }
+  }
+  const latestCard = elements['today-latest-trade'].innerHTML;
+  for (const detail of [
+    'P-BTC-64000', 'LOSS', '-$50.00', 'Realized P&amp;L',
+    'Entry time', 'Exit time', 'TRAILING STOP',
+  ]) {
+    if (!latestCard.includes(detail)) throw new Error(`missing latest detail: ${detail}`);
   }
   await closeTodayLiveTrade(0);
   if (!posted || posted.url !== '/api/square-off?slot=trend' ||
       posted.body?.target_mode !== 'live') {
     throw new Error(`LIVE close was not explicitly routed: ${JSON.stringify(posted)}`);
   }
-  await openTodayProtection(0);
-  if (!elements['today-protection-back'].classList.contains('show') ||
-      !elements['today-protection-fields'].innerHTML.includes('pdw-target')) {
-    throw new Error('LIVE protection editor did not open with active values');
-  }
   for (const removed of ['Open Positions', 'Engine health']) {
-    if (html.includes(removed)) throw new Error(`non-daily section leaked: ${removed}`);
+    if (latestCard.includes(removed)) throw new Error(`non-daily section leaked: ${removed}`);
   }
 })().catch(error => {
   console.error(error);

@@ -13,27 +13,23 @@ def test_today_page_contains_only_same_day_trade_content():
         'id="today-open-total"',
         'id="today-closed-total"',
         'id="today-pnl"',
-        "Today's Trades",
-        'id="today-body"',
+        "Latest Trade",
+        'id="today-latest-trade"',
+        'id="today-latest-note"',
         "jget('/api/today-trades')",
         "function updateTodaySummary(rows)",
-        "Close Position",
-        "Protection",
-        "Payoff",
+        "function latestCompletedTodayTrade(rows)",
+        "function renderTodayLatestTrade(trade)",
+        '>Exit</button>',
         "function closeTodayLiveTrade(index)",
-        "function openTodayProtection(index)",
-        "function showTodayPayoff(index)",
         "'/api/square-off?slot='",
         "target_mode: 'live'",
-        "jget('/api/tp-monitor')",
-        "saveProtectionConfig(",
-        'id="today-payoff-chart"',
         'aria-label="Today trading dashboard"',
         'data-metric="pnl"',
         'class="wide decision-primary"',
         'class="decision-key score"',
-        'Exchange protected',
-        'class="empty-row today-ledger-empty"',
+        'class="today-latest-detail"',
+        'Realized P&amp;L',
     ):
         assert required in source
 
@@ -49,6 +45,11 @@ def test_today_page_contains_only_same_day_trade_content():
         "loadStatusTiles",
         "loadStatsInto",
         "loadSlots",
+        'id="today-body"',
+        "Today's Trades",
+        ">Close Position</button>",
+        ">Protection</button>",
+        ">Payoff</button>",
         "openProtectionDrawer",
         "showPayoff",
         "squareOff",
@@ -80,7 +81,7 @@ def test_today_summary_cards_use_meaningful_svg_icons_not_empty_boxes():
     source = (ROOT / "templates" / "overview.html").read_text(encoding="utf-8")
     styles = (ROOT / "static" / "css" / "app.css").read_text(encoding="utf-8")
     summary = source.split('id="today-summary"', 1)[1].split(
-        'class="card overview-today-card"', 1)[0]
+        'class="card overview-today-card today-latest-trade-card"', 1)[0]
 
     assert summary.count('class="today-stat-icon"') == 4
     assert summary.count('<svg viewBox="0 0 24 24"') == 4
