@@ -31,7 +31,7 @@ async function loadLogs() {
   context.textContent = data.message || 'Account-scoped controller activity.';
   wrap.innerHTML = (data.lines || []).slice().reverse().map(line => {
     let cls = '';
-    if (/WARNING|BLOCKED/.test(line)) cls = 'warn';
+    if (/WARNING|BLOCKED|DATA WAIT/.test(line)) cls = 'warn';
     else if (/ERROR|CRITICAL/.test(line)) cls = 'error';
     else if (/TRADE OPENED|TRADE EXIT|ENTRY|EXIT|Filled|ORDER/.test(line)) cls = 'trade';
     return `<div class="log-line ${cls}">${esc(line)}</div>`;

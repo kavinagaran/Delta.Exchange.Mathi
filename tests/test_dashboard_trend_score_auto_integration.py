@@ -331,8 +331,52 @@ def test_score_collector_rejects_a_different_engine_candle(
     monkeypatch.setattr(dashboard, "_trend_engine_config_overrides", lambda: {})
     monkeypatch.setattr(dashboard, "_trend_engine_strategy_config", lambda: {})
 
-    with pytest.raises(RuntimeError, match="different completed 5-minute candles"):
+    with pytest.raises(
+        dashboard.TrendScoreDataSyncPending,
+        match="Waiting for market-data synchronization",
+    ):
         dashboard._collect_trend_score_auto_signal()
+
+
+@pytest.mark.parametrize("quality", ("STALE_L1", "SIGNAL_EXPIRED"))
+def test_score_collector_defers_retryable_engine_freshness_states(
+        isolated_score_account, monkeypatch, quality):
+    _write(isolated_score_account / "config.json", _safe_score_config())
+    monkeypatch.setattr(
+        dashboard,
+        "collect_delta_trend_snapshot",
+        lambda **kwargs: {"candles": {"5m": []}},
+    )
+    monkeypatch.setattr(
+        dashboard.trend_engine_client,
+        "get_snapshot",
+        lambda symbol="BTCUSD": {"data_quality": quality},
+    )
+    monkeypatch.setattr(dashboard, "_trend_engine_strategy_config", lambda: {})
+
+    with pytest.raises(
+        dashboard.TrendScoreDataSyncPending,
+        match=f"fresh Trend Engine market data.*{quality}",
+    ):
+        dashboard._collect_trend_score_auto_signal()
+
+
+def test_dry_cycle_waits_for_data_sync_without_audit_or_order(score_cycle):
+    pending = dashboard.TrendScoreDataSyncPending(
+        "Waiting for market-data synchronization; retrying automatically"
+    )
+    score_cycle["collector"].side_effect = pending
+
+    assert dashboard._maybe_auto_trend_score_cycle() is False
+
+    health = dashboard._trend_score_auto_health["alice"]
+    assert health["status"] == "waiting_for_data_sync"
+    assert health["last_error"] is None
+    assert health["data_sync_pending"] is True
+    assert health["execution_mode"] == "dry run"
+    score_cycle["prepare"].assert_not_called()
+    score_cycle["audit"].assert_not_called()
+    score_cycle["notify"].assert_not_called()
 
 
 def test_score_collector_rejects_a_zone_that_disagrees_with_the_score(

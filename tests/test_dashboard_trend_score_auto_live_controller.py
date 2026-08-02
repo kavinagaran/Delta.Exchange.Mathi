@@ -270,6 +270,30 @@ def test_explicit_live_mode_routes_only_to_live_controller(
     collector.assert_not_called()
 
 
+def test_live_cycle_waits_for_data_sync_without_audit_or_exchange(
+    live_account,
+    monkeypatch,
+):
+    collector = Mock(side_effect=dashboard.TrendScoreDataSyncPending(
+        "Waiting for market-data synchronization; retrying automatically"
+    ))
+    monkeypatch.setattr(
+        dashboard,
+        "_collect_trend_score_auto_signal",
+        collector,
+    )
+
+    assert dashboard._maybe_auto_trend_score_cycle() is False
+
+    health = dashboard._trend_score_auto_health["alice"]
+    assert health["status"] == "waiting_for_data_sync"
+    assert health["last_error"] is None
+    assert health["data_sync_pending"] is True
+    assert health["execution_mode"] == "live"
+    dashboard._trend_audit.assert_not_called()
+    dashboard._trend_score_auto_notify.assert_not_called()
+
+
 @pytest.mark.parametrize(
     ("score", "expected_zone", "expected_type", "expected_side"),
     (

@@ -1182,6 +1182,15 @@ class AccountConfigError(RuntimeError):
     """The active account's persisted strategy config cannot be trusted."""
 
 
+class TrendScoreDataSyncPending(RuntimeError):
+    """Market evidence is temporarily between completed-candle revisions.
+
+    This is a retryable wait state, not a controller fault.  It must remain a
+    distinct exception so both DRY RUN and LIVE fail closed without recording
+    a red error or approaching an order boundary.
+    """
+
+
 def _saved_user_cfg(
     *,
     tolerate_invalid_score_mode: bool = False,
@@ -4324,9 +4333,23 @@ def _account_audit_log_line(record: dict) -> str:
             details.append(f"next zone {zone}")
         return f"{at} · " + " · ".join(part for part in details if part)
 
-    if event == "trend_score_auto_error":
+    if event in {
+        "trend_score_auto_error",
+        "trend_score_auto_live_error",
+        "trend_score_auto_live_pending_recovery_error",
+    }:
         message = _safe_activity_text(record.get("error"))
-        prefix = "HOLD" if "hold band" in message.lower() else "WARNING"
+        lowered = message.lower()
+        if "hold band" in lowered:
+            prefix = "HOLD"
+        elif (
+            "stale_l1" in lowered
+            or "signal_expired" in lowered
+            or "different completed 5-minute candles" in lowered
+        ):
+            prefix = "DATA WAIT"
+        else:
+            prefix = "ERROR"
         return f"{at} · {prefix} · {message or 'Score-zone controller needs attention.'}"
 
     label = event.replace("_", " ").upper()
@@ -8606,6 +8629,11 @@ def _collect_trend_score_auto_signal() -> dict:
     # band, i.e. an outage would start selling straddles.
     engine_snapshot = trend_engine_client.get_snapshot("BTCUSD")
     engine_quality = str(engine_snapshot.get("data_quality") or "")
+    if engine_quality in {"STALE_L1", "SIGNAL_EXPIRED"}:
+        raise TrendScoreDataSyncPending(
+            "Waiting for fresh Trend Engine market data "
+            f"({engine_quality}); retrying automatically on the next cycle"
+        )
     if engine_quality != "OK":
         raise RuntimeError(
             f"trend engine is not healthy ({engine_quality}); entries fail closed")
@@ -8664,6 +8692,14 @@ def _collect_trend_score_auto_signal() -> dict:
         engine_candle = engine_candle.replace(tzinfo=timezone.utc)
     engine_candle = engine_candle.astimezone(timezone.utc)
     if engine_candle != opened_at:
+        candle_gap = abs((engine_candle - opened_at).total_seconds())
+        if candle_gap == 5 * 60:
+            raise TrendScoreDataSyncPending(
+                "Waiting for market-data synchronization: Trend Engine candle "
+                f"{engine_candle.strftime('%H:%M UTC')} and contract candle "
+                f"{opened_at.strftime('%H:%M UTC')} are one interval apart; "
+                "retrying automatically on the next cycle"
+            )
         raise RuntimeError(
             "trend engine and contract snapshot are on different completed "
             f"5-minute candles ({engine_candle.isoformat()} != "
@@ -9750,6 +9786,26 @@ def _trend_score_auto_health_update(user: str, **fields) -> dict:
         "configured_lots": configured_lots,
     })
     return health
+
+
+def _trend_score_auto_wait_for_data_sync(
+    user: str,
+    cycle_at: str,
+    pending: TrendScoreDataSyncPending,
+    *,
+    execution_mode: str,
+) -> bool:
+    """Publish a non-error retry state without consuming a signal or trading."""
+    _trend_score_auto_health_update(
+        user,
+        status="waiting_for_data_sync",
+        last_cycle_utc=cycle_at,
+        last_action=str(pending),
+        last_error=None,
+        data_sync_pending=True,
+        execution_mode=execution_mode.lower(),
+    )
+    return False
 
 
 def _trend_score_auto_live_owned_position(state: dict) -> dict | None:
@@ -11465,6 +11521,7 @@ def _maybe_auto_trend_score_live_cycle(
             engine_zone=current_signal["zone"],
             signal_key=current_signal["signal_key"],
             signal_bar_close_utc=current_signal["signal_bar_close_utc"],
+            data_sync_pending=False,
         )
 
         # Resolve the listed target before taking account/state locks.  A zone
@@ -12256,6 +12313,13 @@ def _maybe_auto_trend_score_live_cycle(
                     transition=transition,
                     action=action,
                 )
+    except TrendScoreDataSyncPending as pending:
+        return _trend_score_auto_wait_for_data_sync(
+            user,
+            cycle_at,
+            pending,
+            execution_mode="LIVE",
+        )
     except Exception as exc:
         previous_error = _trend_score_auto_health.get(
             user, {},
@@ -12267,6 +12331,7 @@ def _maybe_auto_trend_score_live_cycle(
             last_cycle_utc=cycle_at,
             last_action="LIVE score cycle failed closed",
             last_error=message,
+            data_sync_pending=False,
         )
         if previous_error != message:
             _trend_audit(
@@ -12337,6 +12402,7 @@ def _maybe_auto_trend_score_cycle() -> bool:
             engine_zone=signal["zone"],
             signal_key=signal["signal_key"],
             signal_bar_close_utc=signal["signal_bar_close_utc"],
+            data_sync_pending=False,
         )
 
         # Contract resolution is intentionally outside account/state locks.
@@ -12893,11 +12959,19 @@ def _maybe_auto_trend_score_cycle() -> bool:
                         "No exchange order was submitted."
                     )
                 return True
+    except TrendScoreDataSyncPending as pending:
+        return _trend_score_auto_wait_for_data_sync(
+            user,
+            cycle_at,
+            pending,
+            execution_mode="DRY RUN",
+        )
     except Exception as exc:
         previous_error = _trend_score_auto_health.get(user, {}).get("last_error")
         _trend_score_auto_health_update(
             user, status="error", last_cycle_utc=cycle_at,
             last_action="score cycle failed closed", last_error=str(exc)[:500],
+            data_sync_pending=False,
         )
         if previous_error != str(exc)[:500]:
             _trend_audit("trend_score_auto_error", {
