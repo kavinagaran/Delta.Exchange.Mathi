@@ -202,6 +202,9 @@ def test_trade_decisions_are_colored_capsules_below_the_circles():
     assert "BUY 2-STEP ITM PE" in TEMPLATE
     assert "SELL ATM MOVE" in TEMPLATE
     assert "HOLD — NO NEW TRADE" in TEMPLATE
+    assert "WAIT — 5M ADX NOT CALM" in TEMPLATE
+    assert "WAIT — 30-MIN CONFIRMATION" not in TEMPLATE
+    assert "six completed five-minute candles" not in TEMPLATE
     assert "g.label || formatCode(g.name)" in TEMPLATE
     assert "BEARISH / PE −100" not in TEMPLATE
     assert "BULLISH / CE +100" not in TEMPLATE
@@ -274,6 +277,14 @@ vm.runInThisContext(source.slice(start, end) + `
   }
   if (tradeDecisionMeta('SHORT_MOVE', false).label !== 'WAIT — CHECKS BLOCKED') {
     throw new Error('blocked committed decision is not fail-closed');
+  }
+  const calmBlock = tradeDecisionMeta(
+    'SHORT_MOVE', false,
+    'ADX is not below 30; calm-market confirmation is required before selling MOVE',
+  );
+  if (calmBlock.label !== 'WAIT — 5M ADX NOT CALM' ||
+      !calmBlock.detail.includes('ADX is not below 30')) {
+    throw new Error('ADX blocker is mislabeled: ' + JSON.stringify(calmBlock));
   }
 `);
 """
