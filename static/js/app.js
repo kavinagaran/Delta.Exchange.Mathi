@@ -50,6 +50,64 @@ function initThemeToggle() {
   });
 }
 
+/* ── Shared depth + motion interactions ───────────────────
+   CSS owns the visual treatment. This small delegated controller only feeds
+   pointer position into the active surface and creates a short click ripple,
+   so cards rendered later by API responses receive the same behaviour. */
+function initDynamicSurfaces() {
+  const root = document.documentElement;
+  const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+  const finePointer = window.matchMedia?.('(hover: hover) and (pointer: fine)').matches;
+
+  document.body.classList.add('motion-ready');
+  if (reduceMotion) return;
+
+  let activeSurface = null;
+  const surfaceSelector = '.card, .stat, .dry-run-hero, .section-title, .trend-box';
+
+  if (finePointer) {
+    document.addEventListener('pointermove', event => {
+      const surface = event.target.closest?.(surfaceSelector);
+      if (activeSurface && activeSurface !== surface) {
+        activeSurface.style.removeProperty('--tilt-x');
+        activeSurface.style.removeProperty('--tilt-y');
+      }
+      activeSurface = surface;
+      if (!surface) return;
+      const rect = surface.getBoundingClientRect();
+      if (!rect.width || !rect.height) return;
+      const x = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
+      const y = Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height));
+      surface.style.setProperty('--surface-x', `${(x * 100).toFixed(1)}%`);
+      surface.style.setProperty('--surface-y', `${(y * 100).toFixed(1)}%`);
+      surface.style.setProperty('--tilt-x', `${((.5 - y) * 1.25).toFixed(2)}deg`);
+      surface.style.setProperty('--tilt-y', `${((x - .5) * 1.25).toFixed(2)}deg`);
+    }, { passive: true });
+
+    document.addEventListener('pointerout', event => {
+      if (!activeSurface || event.relatedTarget?.closest?.(surfaceSelector) === activeSurface) return;
+      activeSurface.style.removeProperty('--tilt-x');
+      activeSurface.style.removeProperty('--tilt-y');
+      activeSurface = null;
+    }, { passive: true });
+  }
+
+  document.addEventListener('pointerdown', event => {
+    const target = event.target.closest?.('.btn, .nav a, .theme-toggle');
+    if (!target || target.matches(':disabled')) return;
+    const rect = target.getBoundingClientRect();
+    const ripple = document.createElement('span');
+    ripple.className = 'surface-ripple';
+    ripple.setAttribute('aria-hidden', 'true');
+    ripple.style.left = `${event.clientX - rect.left}px`;
+    ripple.style.top = `${event.clientY - rect.top}px`;
+    target.appendChild(ripple);
+    ripple.addEventListener('animationend', () => ripple.remove(), { once: true });
+  });
+
+  root.classList.add('dynamic-surfaces');
+}
+
 function setTradingModeIndicator(mode, dryRunMode) {
   const el = document.getElementById('tb-mode');
   if (!el) return;
@@ -187,6 +245,7 @@ function tickClock() {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
+  initDynamicSurfaces();
   initThemeToggle();
   tickClock();
   setInterval(tickClock, 10_000);

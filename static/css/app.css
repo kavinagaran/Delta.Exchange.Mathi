@@ -2855,3 +2855,210 @@ body:has(.overview-page) .nav a.active {
 @media (max-width: 420px) {
   .exposure-summary { grid-template-columns: 1fr; }
 }
+
+/* ── Dynamic depth system ──────────────────────────────────
+   One shared interaction language for every dashboard page. The movement is
+   intentionally restrained: depth clarifies hierarchy without making live
+   trading controls feel unstable. */
+:root {
+  --ease-spring: cubic-bezier(.2, .78, .2, 1);
+  --depth-rest: 0 12px 32px rgba(0, 0, 0, .24), inset 0 1px 0 rgba(255, 255, 255, .055);
+  --depth-hover: 0 22px 48px rgba(0, 0, 0, .34), 0 0 24px color-mix(in srgb, var(--accent) 14%, transparent), inset 0 1px 0 rgba(255, 255, 255, .10);
+}
+
+html, body,
+.sidebar, .topbar, .card, .stat, .dry-run-hero, .section-title,
+.chip, .pill, .trading-mode-pill, input, select, textarea {
+  transition:
+    background-color .38s var(--ease-spring),
+    border-color .38s var(--ease-spring),
+    color .28s ease,
+    box-shadow .38s var(--ease-spring);
+}
+
+.main {
+  position: relative;
+  isolation: isolate;
+}
+.main::before {
+  content: "";
+  position: fixed;
+  z-index: -1;
+  width: 42vw;
+  height: 42vw;
+  min-width: 420px;
+  min-height: 420px;
+  right: -18vw;
+  top: 18vh;
+  border-radius: 50%;
+  pointer-events: none;
+  background: radial-gradient(circle, color-mix(in srgb, var(--accent) 13%, transparent), transparent 68%);
+  filter: blur(12px);
+  animation: ambient-drift 12s ease-in-out infinite alternate;
+}
+
+.card, .stat, .dry-run-hero, .section-title, .trend-box {
+  --surface-x: 50%;
+  --surface-y: 50%;
+  --tilt-x: 0deg;
+  --tilt-y: 0deg;
+  position: relative;
+  transform: perspective(1200px) translate3d(0, 0, 0) rotateX(var(--tilt-x)) rotateY(var(--tilt-y));
+  transform-style: preserve-3d;
+  backface-visibility: hidden;
+  box-shadow: var(--depth-rest);
+  transition:
+    transform .34s var(--ease-spring),
+    box-shadow .34s var(--ease-spring),
+    border-color .3s ease,
+    background-color .3s ease;
+  will-change: transform;
+}
+.card::after, .stat::after, .dry-run-hero::after, .section-title::after, .trend-box::after {
+  content: "";
+  position: absolute;
+  z-index: 6;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  opacity: 0;
+  background:
+    radial-gradient(circle at var(--surface-x) var(--surface-y), rgba(255, 255, 255, .12), transparent 31%),
+    linear-gradient(115deg, transparent 18%, rgba(255, 255, 255, .035) 48%, transparent 72%);
+  transition: opacity .32s ease;
+}
+
+.card-hd, .stat > *, .dry-run-hero > *, .section-title > *, .trend-box > * {
+  position: relative;
+  z-index: 7;
+}
+.card-bd { position: relative; z-index: 7; }
+
+.btn, .nav a, .theme-toggle {
+  position: relative;
+  overflow: hidden;
+  isolation: isolate;
+  transform: translate3d(0, 0, 0);
+  transition:
+    transform .18s var(--ease-spring),
+    box-shadow .22s var(--ease-spring),
+    filter .18s ease,
+    border-color .18s ease;
+}
+.btn {
+  box-shadow:
+    0 6px 0 color-mix(in srgb, var(--bg) 72%, black),
+    0 10px 18px rgba(0, 0, 0, .22),
+    inset 0 1px 0 rgba(255, 255, 255, .19);
+}
+.btn.secondary {
+  box-shadow:
+    0 4px 0 color-mix(in srgb, var(--bg) 78%, black),
+    0 8px 15px rgba(0, 0, 0, .19),
+    inset 0 1px 0 rgba(255, 255, 255, .10);
+}
+.btn:active:not(:disabled) {
+  transform: translateY(4px) scale(.99);
+  box-shadow: 0 2px 0 color-mix(in srgb, var(--bg) 78%, black), inset 0 1px 0 rgba(255, 255, 255, .10);
+}
+.btn:disabled { box-shadow: none; }
+
+.surface-ripple {
+  position: absolute;
+  z-index: -1;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  pointer-events: none;
+  background: rgba(255, 255, 255, .42);
+  transform: translate(-50%, -50%) scale(0);
+  animation: surface-ripple .55s ease-out forwards;
+}
+
+.chip, .pill, .trading-mode-pill, .badge {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .09), 0 5px 14px rgba(0, 0, 0, .16);
+}
+input:focus, select:focus, textarea:focus {
+  transform: translateY(-1px);
+  box-shadow: 0 10px 24px rgba(0, 0, 0, .22), 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent);
+}
+
+table tbody tr { transition: background-color .18s ease, filter .18s ease; }
+table tbody td { transition: background-color .18s ease, border-color .18s ease; }
+table tbody tr:hover td {
+  background-color: color-mix(in srgb, var(--accent) 8%, var(--surface-subtle));
+  box-shadow: inset 0 1px color-mix(in srgb, var(--accent) 18%, transparent), inset 0 -1px color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.toast.show { animation: toast-arrive .36s var(--ease-spring) both; }
+.modal { animation: modal-lift .3s var(--ease-spring) both; }
+.drawer.open { box-shadow: -22px 0 48px rgba(0, 0, 0, .42), -1px 0 color-mix(in srgb, var(--accent) 32%, transparent); }
+
+body.motion-ready .content > * {
+  animation: page-surface-enter .5s var(--ease-spring) both;
+}
+body.motion-ready .content > *:nth-child(2) { animation-delay: .045s; }
+body.motion-ready .content > *:nth-child(3) { animation-delay: .09s; }
+body.motion-ready .content > *:nth-child(4) { animation-delay: .135s; }
+body.motion-ready .content > *:nth-child(5) { animation-delay: .18s; }
+body.motion-ready .content > *:nth-child(n + 6) { animation-delay: .22s; }
+
+@media (hover: hover) and (pointer: fine) and (prefers-reduced-motion: no-preference) {
+  .card:hover, .stat:hover, .dry-run-hero:hover, .section-title:hover, .trend-box:hover {
+    transform: perspective(1200px) translate3d(0, -4px, 14px) rotateX(var(--tilt-x)) rotateY(var(--tilt-y));
+    border-color: color-mix(in srgb, var(--accent) 43%, var(--border));
+    box-shadow: var(--depth-hover);
+  }
+  .card:hover::after, .stat:hover::after, .dry-run-hero:hover::after,
+  .section-title:hover::after, .trend-box:hover::after { opacity: 1; }
+  .btn:hover:not(:disabled) {
+    transform: translateY(-2px);
+    box-shadow:
+      0 8px 0 color-mix(in srgb, var(--bg) 72%, black),
+      0 14px 25px rgba(0, 0, 0, .28),
+      0 0 18px color-mix(in srgb, var(--accent) 20%, transparent),
+      inset 0 1px 0 rgba(255, 255, 255, .23);
+  }
+  .nav a:hover { transform: translate3d(5px, -1px, 0); }
+  .theme-toggle:hover, .chip:hover, .pill:hover { transform: translateY(-1px); }
+}
+
+@keyframes page-surface-enter {
+  from { opacity: 0; transform: perspective(1000px) translate3d(0, 16px, -24px) rotateX(1.4deg); }
+  to { opacity: 1; transform: perspective(1000px) translate3d(0, 0, 0) rotateX(0); }
+}
+@keyframes ambient-drift {
+  from { transform: translate3d(-3%, -4%, 0) scale(.94); opacity: .68; }
+  to { transform: translate3d(4%, 5%, 0) scale(1.08); opacity: 1; }
+}
+@keyframes surface-ripple {
+  from { opacity: .58; transform: translate(-50%, -50%) scale(0); }
+  to { opacity: 0; transform: translate(-50%, -50%) scale(18); }
+}
+@keyframes toast-arrive {
+  from { opacity: 0; transform: translate3d(0, 12px, -20px) scale(.96); }
+  to { opacity: 1; transform: translate3d(0, 0, 0) scale(1); }
+}
+@keyframes modal-lift {
+  from { opacity: 0; transform: perspective(1000px) translate3d(0, 20px, -45px) rotateX(3deg) scale(.98); }
+  to { opacity: 1; transform: perspective(1000px) translate3d(0, 0, 0) rotateX(0) scale(1); }
+}
+
+@media (max-width: 760px), (hover: none), (pointer: coarse) {
+  .card, .stat, .dry-run-hero, .section-title, .trend-box { will-change: auto; transform: none; }
+  .card::after, .stat::after, .dry-run-hero::after, .section-title::after, .trend-box::after { display: none; }
+  .main::before { width: 70vw; height: 70vw; right: -35vw; }
+  .btn { box-shadow: 0 4px 0 color-mix(in srgb, var(--bg) 72%, black), 0 8px 14px rgba(0,0,0,.2), inset 0 1px rgba(255,255,255,.15); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  .main::before { animation: none; }
+  body.motion-ready .content > *, .toast.show, .modal, .surface-ripple { animation: none !important; }
+  .card, .stat, .dry-run-hero, .section-title, .trend-box,
+  .btn, .nav a, .theme-toggle, .chip, .pill, .trading-mode-pill,
+  input, select, textarea, table tbody tr, table tbody td {
+    transition: none !important;
+    transform: none !important;
+  }
+}
