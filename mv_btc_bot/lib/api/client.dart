@@ -126,7 +126,14 @@ class DashboardApi {
     // Several endpoints wrap their rows; unwrap the common shapes rather than
     // making each screen guess.
     if (data is Map<String, dynamic>) {
-      for (final key in ['trades', 'rows', 'items', 'data', 'candles']) {
+      for (final key in [
+        'trades',
+        'records',
+        'rows',
+        'items',
+        'data',
+        'candles',
+      ]) {
         final value = data[key];
         if (value is List) return ApiResult.ok(value);
       }
@@ -142,6 +149,8 @@ class DashboardApi {
   Future<ApiResult<List<dynamic>>> todayTrades() =>
       getList('/api/today-trades');
   Future<ApiResult<List<dynamic>>> trades() => getList('/api/trades');
+  Future<ApiResult<List<dynamic>>> performanceTrades() =>
+      getList('/api/performance/delta-trades');
   Future<ApiResult<List<dynamic>>> allPositions() =>
       getList('/api/all-positions');
   Future<ApiResult<Map<String, dynamic>>> engineSnapshot() =>
@@ -152,6 +161,54 @@ class DashboardApi {
       getMap('/api/trend-engine/score-auto/status');
   Future<ApiResult<Map<String, dynamic>>> protectionStatus() =>
       getMap('/api/tp-monitor');
+
+  /// Live, account-scoped protection telemetry from the dashboard.
+  ///
+  /// Delta credentials remain server-side. The native client receives only
+  /// the same safe mark/P&L/protection fields exposed on Today in the web UI.
+  Stream<ApiResult<Map<String, dynamic>>> protectionStream() async* {
+    final client = http.Client();
+    try {
+      final request = http.Request(
+        'GET',
+        Uri.parse('$baseUrl/api/stream/protection'),
+      );
+      request.headers.addAll({
+        ...headers,
+        'Accept': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+      });
+      final response = await client.send(request).timeout(_timeout);
+      if (response.statusCode == 401 || response.statusCode == 403) {
+        yield const ApiResult.failed('Session expired', unauthorised: true);
+        return;
+      }
+      if (response.statusCode >= 400) {
+        yield ApiResult.failed('Server returned ${response.statusCode}');
+        return;
+      }
+      await for (final line in response.stream
+          .transform(utf8.decoder)
+          .transform(const LineSplitter())) {
+        if (!line.startsWith('data:')) continue;
+        try {
+          final decoded = jsonDecode(line.substring(5).trim());
+          if (decoded is Map<String, dynamic>) {
+            yield ApiResult.ok(decoded);
+          }
+        } catch (_) {
+          // Ignore one damaged SSE frame; the next complete snapshot repairs
+          // the display without terminating the long-lived connection.
+        }
+      }
+    } on TimeoutException {
+      yield const ApiResult.failed('Live protection stream timed out');
+    } catch (error) {
+      yield ApiResult.failed('Live protection stream unavailable: $error');
+    } finally {
+      client.close();
+    }
+  }
   Future<ApiResult<Map<String, dynamic>>> tradingMode() =>
       getMap('/api/trading-mode-availability');
   Future<ApiResult<Map<String, dynamic>>> engineLive() =>

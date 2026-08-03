@@ -136,7 +136,11 @@ class _DecisionHero extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final committed = _number(snapshot['trend_score']);
-    final preview = _number(live?['trend_score'] ?? live?['score']);
+    final preview = live?['available'] == false
+        ? null
+        : _number(
+            live?['live_score'] ?? live?['trend_score'] ?? live?['score'],
+          );
     final zone = '${snapshot['zone'] ?? 'HOLD'}';
     final quality = '${snapshot['data_quality'] ?? 'UNKNOWN'}';
     final confidence = _number(snapshot['confidence']);
@@ -200,17 +204,32 @@ class _DecisionHero extends StatelessWidget {
   }
 }
 
-class _DecisionChart extends StatelessWidget {
+class _DecisionChart extends StatefulWidget {
   const _DecisionChart({required this.history});
   final Map<String, dynamic>? history;
 
   @override
+  State<_DecisionChart> createState() => _DecisionChartState();
+}
+
+class _DecisionChartState extends State<_DecisionChart> {
+  final TransformationController _viewport = TransformationController();
+
+  @override
+  void dispose() {
+    _viewport.dispose();
+    super.dispose();
+  }
+
+  void _resetViewport() => _viewport.value = Matrix4.identity();
+
+  @override
   Widget build(BuildContext context) {
-    final points = _mapList(history?['decisions'])
+    final points = _mapList(widget.history?['decisions'])
         .map((item) => _number(item['committed_score']))
         .whereType<double>()
         .toList();
-    final markers = _mapList(history?['trade_markers']);
+    final markers = _mapList(widget.history?['trade_markers']);
     return AppCard(
       kicker: '24H · 5M',
       title: 'Committed score',
@@ -220,17 +239,71 @@ class _DecisionChart extends StatelessWidget {
               icon: Icons.show_chart_rounded,
               message: 'Collecting decisions…',
             )
-          : SizedBox(
-              height: 240,
-              child: CustomPaint(
-                painter: _ScoreChartPainter(
-                  values: points,
-                  markerCount: markers.length,
-                  grid: Theme.of(context).colorScheme.outline,
-                  label: Theme.of(context).colorScheme.onSurfaceVariant,
+          : Column(
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        'Pinch to zoom · drag to inspect · double-tap to reset',
+                        style: AppText.caption.copyWith(
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ),
+                    IconButton(
+                      visualDensity: VisualDensity.compact,
+                      tooltip: 'Reset chart',
+                      onPressed: _resetViewport,
+                      icon: const Icon(Icons.fit_screen_rounded, size: 18),
+                    ),
+                  ],
                 ),
-                size: Size.infinite,
-              ),
+                const SizedBox(height: Gap.xs),
+                LayoutBuilder(
+                  builder: (context, constraints) {
+                    final height = (constraints.maxWidth * .68).clamp(
+                      220.0,
+                      310.0,
+                    );
+                    return SizedBox(
+                      height: height,
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(Radii.sm),
+                        child: GestureDetector(
+                          onDoubleTap: _resetViewport,
+                          child: InteractiveViewer(
+                            key: const ValueKey('committed-score-chart'),
+                            transformationController: _viewport,
+                            constrained: true,
+                            panAxis: PanAxis.horizontal,
+                            minScale: 1,
+                            maxScale: 8,
+                            scaleEnabled: true,
+                            panEnabled: true,
+                            clipBehavior: Clip.hardEdge,
+                            child: SizedBox(
+                              width: constraints.maxWidth,
+                              height: height,
+                              child: CustomPaint(
+                                painter: _ScoreChartPainter(
+                                  values: points,
+                                  markerCount: markers.length,
+                                  grid: Theme.of(context).colorScheme.outline,
+                                  label: Theme.of(
+                                    context,
+                                  ).colorScheme.onSurfaceVariant,
+                                ),
+                                size: Size.infinite,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ],
             ),
     );
   }

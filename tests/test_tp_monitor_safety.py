@@ -21,11 +21,14 @@ class TpMonitorSafetyTests(unittest.TestCase):
         self.state_file = root / "state.json"
         self.history_file = root / "history.json"
         self.health_file = root / "health.json"
+        self.stream_file = root / "stream.json"
         self.path_patches = [
             patch.object(tp_monitor, "STATE_FILE", self.state_file),
             patch.object(tp_monitor, "HISTORY_FILE", self.history_file),
             patch.object(tp_monitor, "HEALTH_FILE", self.health_file),
+            patch.object(tp_monitor, "STREAM_FILE", self.stream_file),
             patch.object(tp_monitor, "USER_DIR", root),
+            patch.object(tp_monitor.DeltaMarkPriceStream, "start"),
             # Most tests exercise the legacy reconciliation branches in
             # isolation. Exchange-only behavior has a dedicated contract
             # test below.
@@ -2446,6 +2449,36 @@ class TpMonitorSafetyTests(unittest.TestCase):
             ledger["exit_order_ids"], ["manual-exit-1", "manual-exit-2"],
         )
         self.assertTrue(ledger["fill_fees_complete"])
+
+
+class MarkPriceStreamTests(unittest.TestCase):
+    def test_compact_mark_price_frame_is_validated_and_monotonic(self):
+        frame = json.dumps({
+            "type": "mark_price", "sy": "MARK:C-BTC-64000-030826",
+            "p": "423.125", "ts": 1_754_202_000_000_000,
+        })
+        self.assertEqual(
+            tp_monitor.parse_mark_price_frame(
+                frame, "C-BTC-64000-030826", last_timestamp=0,
+            ),
+            (423.125, 1_754_202_000_000_000),
+        )
+        self.assertIsNone(tp_monitor.parse_mark_price_frame(
+            frame, "P-BTC-64000-030826", last_timestamp=0,
+        ))
+        self.assertIsNone(tp_monitor.parse_mark_price_frame(
+            frame, "C-BTC-64000-030826",
+            last_timestamp=1_754_202_000_000_000,
+        ))
+
+    def test_heartbeat_and_invalid_prices_never_reach_protection(self):
+        self.assertIsNone(tp_monitor.parse_mark_price_frame(
+            {"type": "heartbeat", "sy": "MARK:C-BTC", "ts": 1}, "C-BTC",
+        ))
+        self.assertIsNone(tp_monitor.parse_mark_price_frame(
+            {"type": "mark_price", "sy": "MARK:C-BTC", "p": "nan", "ts": 2},
+            "C-BTC",
+        ))
 
 
 if __name__ == "__main__":

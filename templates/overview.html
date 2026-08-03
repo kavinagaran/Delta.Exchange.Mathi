@@ -99,6 +99,9 @@
 <script>
 const TODAY_CONTROL_SLOTS = new Set(['morning', 'evening', 'trend']);
 const todayClosing = new Set();
+let todayProtectionEvents = null;
+let todayRows = [];
+let todayCurrentIndex = -1;
 
 function todayTradePnl(trade) {
   return +(trade?._live ? trade.live_pnl : trade?.pnl_usd) || 0;
@@ -198,25 +201,30 @@ function todayInlineProtectionHtml(protection) {
     peak_pnl: protection.peak_pnl_usd,
   };
   const running = protection.running === true;
-  const armed = protection.tsl_armed === true;
+  const armed = protection.stream_tsl_armed === true || protection.tsl_armed === true;
   const status = armed ? 'TSL ARMED' : running ? 'RUNNING' : 'NOT RUNNING';
   const statusClass = armed || running ? 'live' : 'closed-loss';
   const value = (raw, fallback = 0) =>
     todayKnownNumber(raw) ? fN(Number(raw), 4) : fN(fallback, 4);
-  const peakValue = todayKnownNumber(health.peak_pnl)
-    ? Number(health.peak_pnl) : null;
+  const peakValue = todayKnownNumber(protection.stream_tsl_peak)
+    ? Number(protection.stream_tsl_peak)
+    : todayKnownNumber(health.peak_pnl) ? Number(health.peak_pnl) : null;
   const peak = peakValue !== null
     ? `Peak <strong class="${peakValue >= 0 ? 'today-telemetry-positive' : 'today-telemetry-negative'}">${esc(f$(peakValue))}</strong>`
     : '<span class="today-telemetry-warn">Peak pending</span>';
-  const floorValue = protection.tsl_floor ?? protection.tsl_floor_usd ?? health.stop_floor;
+  const floorValue = protection.stream_tsl_floor ?? protection.tsl_floor ??
+    protection.tsl_floor_usd ?? health.stop_floor;
   const floor = armed && todayKnownNumber(floorValue)
     ? `TSL floor <strong class="today-telemetry-tsl">${esc(f$(Number(floorValue)))}</strong>`
     : '<span class="today-telemetry-warn">TSL not armed</span>';
   const every = Number(protection.poll_secs || health.next_poll_secs || 0);
-  const timing = `${todayProtectionAgeHtml(health.heartbeat_utc)}` +
-    (every > 0
-      ? ` · every <strong class="today-telemetry-time">${esc(fN(every))}s</strong>`
-      : '');
+  const streaming = protection.streaming === true;
+  const cadence = Number(protection.stream_expected_interval_secs || 2);
+  const timing = streaming
+    ? `${todayProtectionAgeHtml(protection.stream_event_utc)} · live mark every ` +
+      `<strong class="today-telemetry-time">~${esc(fN(cadence))}s</strong>`
+    : `${todayProtectionAgeHtml(health.heartbeat_utc)}` +
+      (every > 0 ? ` · watchdog every <strong class="today-telemetry-time">${esc(fN(every))}s</strong>` : '');
   const rawCoverage = String(
     protection.coverage_status || (protection.running ? 'protected' : 'verifying')
   ).trim().toLowerCase();
@@ -241,8 +249,8 @@ function todayInlineProtectionHtml(protection) {
         <strong>${value(protection.tsl_trail_pnl)}</strong></div>
       <div class="today-protection-metric tone-lock"><span>Minimum locked $</span>
         <strong>${value(protection.tsl_lock_min_pnl)}</strong></div>
-      <div class="today-protection-metric tone-poll"><span>Poll secs</span>
-        <strong>${fN(every || 0)}</strong></div>
+      <div class="today-protection-metric tone-poll"><span>Price feed</span>
+        <strong>${streaming ? `LIVE · ~${fN(cadence)}s` : `WATCHDOG · ${fN(every || 0)}s`}</strong></div>
     </div>
     <div class="dry-protection-telemetry">
       <span>${timing}</span><span>${peak} · ${floor}${coverageHtml}</span>
@@ -476,8 +484,10 @@ async function loadToday() {
     jget('/api/engine/live').catch(() => ({available: false})),
   ]);
   updateTodaySummary(rows);
+  todayRows = Array.isArray(rows) ? rows : [];
   window._todayLiveTrades = {};
   const currentIndex = rows.findIndex(trade => trade?._live);
+  todayCurrentIndex = currentIndex;
   const currentTrade = currentIndex >= 0 ? rows[currentIndex] : null;
   if (currentTrade) {
     const controlSlot = todayControlSlot(currentTrade);
@@ -490,6 +500,37 @@ async function loadToday() {
   renderTodayTrades(rows);
   renderTodayEngineDecision(engineStatus, engineSnapshot, engineLive);
   return rows;
+}
+
+function applyTodayProtectionEvent(payload) {
+  if (!payload || todayCurrentIndex < 0 || !todayRows[todayCurrentIndex]) return;
+  const trade = todayRows[todayCurrentIndex];
+  if (trade.dry_run === true) return;
+  const slot = todayControlSlot(trade);
+  const protection = slot ? payload[slot] : null;
+  if (!protection) return;
+  if (protection.streaming && todayKnownNumber(protection.live_mark)) {
+    trade.current_mark = Number(protection.live_mark);
+  }
+  if (protection.streaming && todayKnownNumber(protection.live_pnl)) {
+    trade.live_pnl = Number(protection.live_pnl);
+  }
+  window._todayLiveTrades[todayCurrentIndex] = { ...trade, controlSlot: slot };
+  renderTodayCurrentTrade(trade, todayCurrentIndex, protection);
+  renderTodayTrades(todayRows);
+  updateTodaySummary(todayRows);
+}
+
+function connectTodayProtectionStream() {
+  if (!window.EventSource || todayProtectionEvents) return;
+  todayProtectionEvents = new EventSource('/api/stream/protection');
+  todayProtectionEvents.addEventListener('protection', event => {
+    try { applyTodayProtectionEvent(JSON.parse(event.data)); } catch (_) { /* REST watchdog remains active */ }
+  });
+  todayProtectionEvents.onerror = () => {
+    // EventSource reconnects automatically. The 12-second REST refresh below
+    // remains the authoritative fallback while the connection is recovering.
+  };
 }
 
 function todayLiveTrade(index) {
@@ -792,6 +833,7 @@ async function loadAll() {
 }
 
 loadAll();
+connectTodayProtectionStream();
 setInterval(loadAll, 12_000);
 </script>
 {% endblock %}

@@ -25,9 +25,9 @@ from urllib.parse import quote, urlencode
 
 import requests as req
 from dotenv import load_dotenv, set_key
-from flask import (Flask, jsonify, request, abort, session,
+from flask import (Flask, jsonify, request, abort, session, Response,
                    redirect, render_template, has_request_context, g,
-                   send_file)
+                   send_file, stream_with_context)
 
 import trend_engine_client
 from risk_controls import (account_entry_lock, account_file_lock, audit_event,
@@ -4042,8 +4042,7 @@ def _trend_score_auto_premium_protection_policy(
     )
 
 
-@app.route("/api/tp-monitor", methods=["GET"])
-def tp_monitor_status():
+def _tp_monitor_payload():
     user = _active_user()
     out = {}
     def lot_count(value) -> int:
@@ -4064,6 +4063,35 @@ def tp_monitor_status():
         health_fresh = _tp_health_fresh(health)
         health_matches = _tp_health_matches(health, st, user, slot)
         verified_health = health_fresh and health_matches
+        stream = _load_json(USERS_DIR / user / f"tp_{slot}_stream.json", {})
+        stream_matches = bool(
+            isinstance(stream, dict)
+            and str(stream.get("product_id") or "")
+                == str(st.get("product_id") or "")
+            and str(stream.get("position_cycle_id") or "")
+                == str(st.get("position_cycle_id") or "")
+            and int(stream.get("protection_revision") or 0)
+                == int(st.get("protection_revision") or 0)
+        )
+        try:
+            stream_at = datetime.fromisoformat(
+                str(stream.get("event_received_at_utc") or "")
+                .replace("Z", "+00:00")
+            )
+            if stream_at.tzinfo is None:
+                stream_at = stream_at.replace(tzinfo=timezone.utc)
+            stream_age = (
+                datetime.now(timezone.utc) - stream_at.astimezone(timezone.utc)
+            ).total_seconds()
+        except (TypeError, ValueError):
+            stream_age = float("inf")
+        stream_stale_after = max(float(stream.get("stale_after_secs") or 6), 6)
+        streaming = bool(
+            st.get("status") == "OPEN"
+            and stream_matches
+            and stream_age <= stream_stale_after + 2
+            and stream.get("status") in {"live", "rest_fallback"}
+        )
         protected_lots = lot_count(
             health.get("protected_lots") if verified_health else
             st.get("protection_lots") or st.get("lots")
@@ -4132,6 +4160,21 @@ def tp_monitor_status():
                      "manual_override_allowed": policy[
                          "manual_override_allowed"],
                      "healthy": bool(verified_health and health.get("status") == "healthy"),
+                     "streaming": streaming,
+                     "stream_status": stream.get("status") if stream_matches else "unavailable",
+                     "stream_source": stream.get("source") if stream_matches else None,
+                     "stream_event_utc": stream.get("event_received_at_utc")
+                                         if stream_matches else None,
+                     "stream_expected_interval_secs": stream.get(
+                         "expected_interval_secs", 2),
+                     "live_mark": stream.get("mark") if streaming else None,
+                     "live_pnl": stream.get("pnl") if streaming else None,
+                     "stream_tsl_peak": stream.get("tsl_peak")
+                                        if stream_matches else None,
+                     "stream_tsl_floor": stream.get("tsl_floor")
+                                         if stream_matches else None,
+                     "stream_tsl_armed": bool(stream.get("tsl_armed"))
+                                         if stream_matches else False,
                      "health_matches": health_matches, "health": health,
                      "protection_established": bool(
                          verified_health and health.get("protection_established")),
@@ -4160,7 +4203,51 @@ def tp_monitor_status():
                      "tp_on_exchange":  tp_proven}
     # Back-compat top-level fields = evening
     out.update(out["evening"])
-    return jsonify(out)
+    return out
+
+
+@app.route("/api/tp-monitor", methods=["GET"])
+def tp_monitor_status():
+    return jsonify(_tp_monitor_payload())
+
+
+@app.route("/api/stream/protection", methods=["GET"])
+def protection_event_stream():
+    """Account-scoped live protection telemetry for web and native clients."""
+    _active_user()  # authenticate before opening the long-lived response
+
+    @stream_with_context
+    def events():
+        previous = None
+        heartbeat_at = 0.0
+        while True:
+            try:
+                encoded = json.dumps(
+                    _tp_monitor_payload(), separators=(",", ":"),
+                    sort_keys=True, default=str,
+                )
+                if encoded != previous:
+                    yield f"event: protection\ndata: {encoded}\n\n"
+                    previous = encoded
+                    heartbeat_at = time.monotonic()
+                elif time.monotonic() - heartbeat_at >= 10:
+                    yield ": keep-alive\n\n"
+                    heartbeat_at = time.monotonic()
+                time.sleep(1)
+            except GeneratorExit:
+                return
+            except Exception as exc:
+                app.logger.warning("Protection event stream failed: %s", exc)
+                return
+
+    return Response(
+        events(), mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.route("/api/tp-monitor/start", methods=["POST"])

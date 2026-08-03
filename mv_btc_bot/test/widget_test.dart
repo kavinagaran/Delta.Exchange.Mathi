@@ -3,7 +3,9 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:mv_btc_bot/main.dart';
 import 'package:mv_btc_bot/api/client.dart';
+import 'package:mv_btc_bot/screens/performance_screen.dart';
 import 'package:mv_btc_bot/screens/today_screen.dart';
+import 'package:mv_btc_bot/screens/trend_engine_screen.dart';
 import 'package:mv_btc_bot/widgets/kit.dart';
 
 void main() {
@@ -124,6 +126,60 @@ void main() {
     // full 'Performance' does not fit a seven-tab bar at 360dp.
     expect(find.text('Trades'), findsOneWidget);
     expect(find.text('Performance'), findsNothing);
+  });
+
+  testWidgets('Performance uses complete Delta trade records and net P&L', (
+    WidgetTester tester,
+  ) async {
+    tester.view.physicalSize = const Size(390, 1000);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: buildAppTheme(blue: true),
+        home: PerformanceScreen(api: _PerformanceApi(), onUnauthorised: () {}),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text(r'+$50.00'), findsWidgets);
+    expect(find.text('50.0%'), findsOneWidget);
+    expect(find.text('1 : 2.25'), findsOneWidget);
+    expect(find.text(r'+$90.00'), findsWidgets);
+    expect(find.text(r'-$40.00'), findsWidgets);
+    expect(find.text(r'$22.00'), findsOneWidget);
+    expect(find.text('3 trade cycles'), findsOneWidget);
+  });
+
+  testWidgets('Trend preview reads live_score and chart supports touch zoom', (
+    WidgetTester tester,
+  ) async {
+    tester.view.physicalSize = const Size(390, 1200);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: buildAppTheme(blue: true),
+        home: TrendEngineScreen(api: _TrendApi(), onUnauthorised: () {}),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('-53.0'), findsOneWidget);
+    expect(find.text('-57.6'), findsOneWidget);
+    expect(find.byKey(const ValueKey('committed-score-chart')), findsOneWidget);
+    final chart = tester.widget<InteractiveViewer>(
+      find.byKey(const ValueKey('committed-score-chart')),
+    );
+    expect(chart.panEnabled, isTrue);
+    expect(chart.scaleEnabled, isTrue);
+    expect(chart.maxScale, 8);
+
+    await tester.pumpWidget(const SizedBox.shrink());
   });
 
   testWidgets('tab icons are neon green in both themes', (
@@ -251,6 +307,10 @@ class _TodayApi extends DashboardApi {
       const ApiResult.ok(<String, dynamic>{});
 
   @override
+  Stream<ApiResult<Map<String, dynamic>>> protectionStream() =>
+      const Stream.empty();
+
+  @override
   Future<ApiResult<List<dynamic>>> todayTrades() async => ApiResult.ok([
     <String, dynamic>{
       '_live': true,
@@ -277,4 +337,85 @@ class _TodayApi extends DashboardApi {
       'exit_trigger': 'trailing_stop',
     },
   ]);
+}
+
+class _PerformanceApi extends DashboardApi {
+  _PerformanceApi()
+    : super(baseUrl: 'https://example.invalid', sessionCookie: null);
+
+  @override
+  Future<ApiResult<List<dynamic>>> performanceTrades() async => ApiResult.ok([
+    <String, dynamic>{
+      'status': 'CLOSED',
+      'symbol': 'C-BTC-63000-030826',
+      'side': 'long',
+      'lots': 1000,
+      'gross_pnl_usd': 100.0,
+      'net_pnl_usd': 90.0,
+      'exit_at_utc': '2026-08-03T01:00:00Z',
+      'fees': [
+        <String, dynamic>{'asset': 'USD', 'amount': 10.0},
+      ],
+    },
+    <String, dynamic>{
+      'status': 'CLOSED',
+      'symbol': 'P-BTC-63000-030826',
+      'side': 'long',
+      'lots': 1000,
+      'gross_pnl_usd': -30.0,
+      'net_pnl_usd': -40.0,
+      'exit_at_utc': '2026-08-03T02:00:00Z',
+      'fees': [
+        <String, dynamic>{'asset': 'USD', 'amount': 10.0},
+      ],
+    },
+    <String, dynamic>{
+      'status': 'OPEN',
+      'symbol': 'MV-BTC-63000-030826',
+      'side': 'short',
+      'lots': 1000,
+      'fees': [
+        <String, dynamic>{'asset': 'USD', 'amount': 2.0},
+      ],
+    },
+  ]);
+}
+
+class _TrendApi extends DashboardApi {
+  _TrendApi() : super(baseUrl: 'https://example.invalid', sessionCookie: null);
+
+  @override
+  Future<ApiResult<Map<String, dynamic>>> engineSnapshot() async =>
+      const ApiResult.ok(<String, dynamic>{
+        'data_quality': 'OK',
+        'trend_score': -57.6,
+        'zone': 'PE_2_ITM',
+        'confidence': .84,
+        'regime': 'TREND_DOWN',
+        'components': <dynamic>[],
+        'timeframes': <dynamic>[],
+        'gates': <dynamic>[],
+        'reason_codes': <dynamic>[],
+      });
+
+  @override
+  Future<ApiResult<Map<String, dynamic>>> engineLive() async =>
+      const ApiResult.ok(<String, dynamic>{
+        'available': true,
+        'live_score': -53.0,
+      });
+
+  @override
+  Future<ApiResult<Map<String, dynamic>>> engineStatus() async =>
+      const ApiResult.ok(<String, dynamic>{'available': true});
+
+  @override
+  Future<ApiResult<Map<String, dynamic>>> decisionHistory() async =>
+      const ApiResult.ok(<String, dynamic>{
+        'decisions': <dynamic>[
+          <String, dynamic>{'committed_score': -40.0},
+          <String, dynamic>{'committed_score': -57.6},
+        ],
+        'trade_markers': <dynamic>[],
+      });
 }

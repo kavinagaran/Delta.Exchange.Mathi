@@ -10,7 +10,7 @@ Slot config (.env):
   morning: TP_TARGET_PNL_MORNING, TP_POLL_SECS_MORNING
   trend:   TP_TARGET_PNL_TREND, TP_POLL_SECS_TREND
 """
-import os, sys, time, hmac, hashlib, json, logging, math, signal, requests
+import os, sys, time, hmac, hashlib, json, logging, math, signal, threading, requests
 from contextlib import contextmanager
 from decimal import Decimal, InvalidOperation
 from datetime import datetime, timezone
@@ -86,6 +86,9 @@ else:
     API_KEY = _acct.get("api_key") or os.getenv("API_KEY", "")
     API_SECRET = _acct.get("api_secret") or os.getenv("API_SECRET", "")
 BASE_URL   = os.getenv("BASE_URL", "https://api.india.delta.exchange")
+PUBLIC_WS_URL = os.getenv(
+    "DELTA_PUBLIC_WS_URL", "wss://public-socket.india.delta.exchange",
+)
 TG_TOKEN   = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TG_CHAT    = os.getenv("TELEGRAM_CHAT_ID", "")
 
@@ -138,11 +141,16 @@ LOG_NAME = f"tp_{USER}_{SLOT}.log"
 
 HISTORY_FILE = USER_DIR / "trade_history.json"
 HEALTH_FILE = USER_DIR / f"tp_{SLOT}_health.json"
+STREAM_FILE = USER_DIR / f"tp_{SLOT}_stream.json"
 RECONCILE_SECS = max(int(_f("TP_ORDER_RECONCILE_SECS", 60)), 30)
 # When exchange-resident protection is unavailable, keep the local fallback
 # responsive while remaining well below normal REST API request-rate limits.
 LOCAL_FALLBACK_POLL_SECS = max(
     10, min(POLL_SECS, int(_f("TP_LOCAL_FALLBACK_POLL_SECS", 10)))
+)
+MARK_STREAM_EXPECTED_SECS = 2
+MARK_STREAM_STALE_SECS = max(
+    6, int(_f("TP_MARK_STREAM_STALE_SECS", 6)),
 )
 # Delta rejects exchange-resident stop orders for some MOVE/option products.
 # In that case, retain the verified 10-second local TP/SL/TSL monitor instead
@@ -180,6 +188,146 @@ def _sign(method, path, query="", body=""):
 def get_mark(symbol):
     r = requests.get(f"{BASE_URL}/v2/tickers/{symbol}", timeout=8)
     return float(r.json().get("result", {}).get("mark_price") or 0)
+
+
+def parse_mark_price_frame(frame, symbol, *, last_timestamp=0):
+    """Validate one compact Delta ``mark_price`` frame.
+
+    Returns ``(price, timestamp)`` for the requested contract or ``None`` for
+    heartbeat, unrelated, malformed, duplicated, or out-of-order frames.
+    """
+    try:
+        payload = json.loads(frame) if isinstance(frame, str) else frame
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict) or payload.get("type") != "mark_price":
+        return None
+    expected = f"MARK:{str(symbol or '').strip().upper()}"
+    if str(payload.get("sy") or "").strip().upper() != expected:
+        return None
+    try:
+        price = float(payload.get("p"))
+        timestamp = int(payload.get("ts") or 0)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if (
+        not math.isfinite(price)
+        or price <= 0
+        or timestamp <= 0
+        or timestamp <= int(last_timestamp or 0)
+    ):
+        return None
+    return price, timestamp
+
+
+class DeltaMarkPriceStream:
+    """Reconnecting public mark-price stream for one protected contract."""
+
+    def __init__(self, symbol, on_mark, on_status=None, *, url=PUBLIC_WS_URL):
+        self.symbol = str(symbol or "").strip().upper()
+        self.on_mark = on_mark
+        self.on_status = on_status or (lambda *_args: None)
+        self.url = url
+        self._stop = threading.Event()
+        self._thread = None
+        self._watchdog_thread = None
+        self._last_timestamp = 0
+        self._last_event_monotonic = 0.0
+
+    def start(self):
+        if self._thread and self._thread.is_alive():
+            return
+        self._thread = threading.Thread(
+            target=self._run,
+            name=f"mark-stream-{USER}-{SLOT}",
+            daemon=True,
+        )
+        self._thread.start()
+        self._watchdog_thread = threading.Thread(
+            target=self._rest_watchdog,
+            name=f"mark-watchdog-{USER}-{SLOT}",
+            daemon=True,
+        )
+        self._watchdog_thread.start()
+
+    def stop(self):
+        self._stop.set()
+
+    def _run(self):
+        # Import lazily so read-only tools and non-LIVE processes do not need
+        # to initialise a websocket transport merely by importing this module.
+        from websockets.sync.client import connect
+
+        delay = 1.0
+        while not self._stop.is_set():
+            self.on_status("connecting", "")
+            try:
+                with connect(
+                    self.url,
+                    open_timeout=8,
+                    close_timeout=3,
+                    ping_interval=20,
+                    ping_timeout=5,
+                    max_size=1_048_576,
+                ) as socket:
+                    socket.send(json.dumps({
+                        "type": "subscribe",
+                        "payload": {
+                            "channels": [{
+                                "name": "mark_price",
+                                "symbols": [f"MARK:{self.symbol}"],
+                            }],
+                        },
+                    }))
+                    socket.send(json.dumps({"type": "enable_heartbeat"}))
+                    self.on_status("live", "")
+                    delay = 1.0
+                    for frame in socket:
+                        if self._stop.is_set():
+                            return
+                        parsed = parse_mark_price_frame(
+                            frame,
+                            self.symbol,
+                            last_timestamp=self._last_timestamp,
+                        )
+                        if parsed is None:
+                            continue
+                        price, timestamp = parsed
+                        self._last_timestamp = timestamp
+                        self._last_event_monotonic = time.monotonic()
+                        self.on_mark(price, timestamp, "websocket")
+            except Exception as exc:
+                self.on_status(
+                    "reconnecting", f"{type(exc).__name__}: {exc}",
+                )
+                log.warning("Mark-price stream disconnected: %s", exc)
+            if self._stop.wait(delay):
+                return
+            delay = min(delay * 2, 30.0)
+
+    def _rest_watchdog(self):
+        """Use only the public ticker while websocket prices are stale."""
+        while not self._stop.wait(MARK_STREAM_EXPECTED_SECS):
+            age = (
+                time.monotonic() - self._last_event_monotonic
+                if self._last_event_monotonic else float("inf")
+            )
+            if age <= MARK_STREAM_STALE_SECS:
+                continue
+            try:
+                price = get_mark(self.symbol)
+                if not math.isfinite(price) or price <= 0:
+                    raise ValueError("public ticker returned an invalid mark")
+                self.on_status(
+                    "rest_fallback",
+                    "mark-price stream is stale; public ticker fallback active",
+                )
+                self.on_mark(price, time.time_ns() // 1000, "rest_fallback")
+            except Exception as exc:
+                self.on_status(
+                    "unavailable",
+                    f"stream and public ticker unavailable: {exc}",
+                )
 
 
 def get_exchange_position(product_id):
@@ -537,30 +685,37 @@ def _atomic_write_json(path, value):
 
 
 _CLOSE_LOCK_DEPTH = 0
+_CLOSE_THREAD_LOCK = threading.RLock()
+_STREAM_SNAPSHOT_LOCK = threading.Lock()
 
 
 @contextmanager
 def _close_state_lock(owner, *, stale_after_sec=30, wait_sec=2):
     """Process-local reentrant wrapper for the cross-process slot mutex."""
     global _CLOSE_LOCK_DEPTH
-    if _CLOSE_LOCK_DEPTH:
-        _CLOSE_LOCK_DEPTH += 1
-        try:
-            yield True
-        finally:
-            _CLOSE_LOCK_DEPTH -= 1
-        return
-    with account_file_lock(
-        USER_DIR, f"close-{SLOT}", owner,
-        stale_after_sec=stale_after_sec, wait_sec=wait_sec,
-    ) as acquired:
-        if acquired:
-            _CLOSE_LOCK_DEPTH = 1
-        try:
-            yield acquired
-        finally:
+    # The mark-price stream runs beside the reconciliation loop.  Serialize
+    # both threads before applying the existing process-wide reentrancy depth;
+    # otherwise a second thread could mistake another thread's lock for its
+    # own recursive acquisition and bypass the cross-process mutex.
+    with _CLOSE_THREAD_LOCK:
+        if _CLOSE_LOCK_DEPTH:
+            _CLOSE_LOCK_DEPTH += 1
+            try:
+                yield True
+            finally:
+                _CLOSE_LOCK_DEPTH -= 1
+            return
+        with account_file_lock(
+            USER_DIR, f"close-{SLOT}", owner,
+            stale_after_sec=stale_after_sec, wait_sec=wait_sec,
+        ) as acquired:
             if acquired:
-                _CLOSE_LOCK_DEPTH = 0
+                _CLOSE_LOCK_DEPTH = 1
+            try:
+                yield acquired
+            finally:
+                if acquired:
+                    _CLOSE_LOCK_DEPTH = 0
 
 
 def save_state_fields(**kw):
@@ -618,6 +773,30 @@ def load_state():
         except (OSError, ValueError, TypeError):
             log.critical("State and backup are unreadable: %s", STATE_FILE)
             return {}
+
+
+def write_stream_snapshot(**fields):
+    """Publish high-frequency display data without rewriting trade state."""
+    try:
+        with _STREAM_SNAPSHOT_LOCK:
+            current = {}
+            if STREAM_FILE.exists():
+                loaded = json.loads(STREAM_FILE.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    current = loaded
+            current.update(fields)
+            current.update({"user": USER, "slot": SLOT, "pid": os.getpid()})
+            tmp = STREAM_FILE.with_name(
+                f".{STREAM_FILE.name}.{os.getpid()}.{time.time_ns()}.tmp"
+            )
+            tmp.write_text(
+                json.dumps(current, separators=(",", ":")), encoding="utf-8",
+            )
+            os.replace(tmp, STREAM_FILE)
+            return current
+    except Exception as exc:
+        log.warning("Stream snapshot failed: %s", exc)
+        return {}
 
 
 _HEALTH_PROOF_DEFAULTS = {
@@ -4052,6 +4231,215 @@ def main():
         log.info("Resuming persisted orders: %s=%s (floor $%.2f), TP=%s, peak=$%.2f.",
                  stop_kind.upper(), stop_id, stop_floor, tp_id, peak_pnl)
 
+    def _stream_status(status, error):
+        write_stream_snapshot(
+            status=status,
+            last_error=str(error or ""),
+            transport_updated_at_utc=_utc_now(),
+            expected_interval_secs=MARK_STREAM_EXPECTED_SECS,
+            stale_after_secs=MARK_STREAM_STALE_SECS,
+            symbol=symbol,
+            product_id=product_id,
+        )
+
+    def _stream_health_allows_guard(current_state):
+        try:
+            health = json.loads(HEALTH_FILE.read_text(encoding="utf-8"))
+        except (OSError, TypeError, ValueError):
+            return None
+        if not isinstance(health, dict):
+            return None
+        identity_matches = (
+            str(health.get("product_id") or "") == str(product_id)
+            and int(health.get("protection_revision") or 0)
+            == int(current_state.get("protection_revision") or 0)
+            and str(health.get("position_cycle_id") or "")
+            == str(current_state.get("position_cycle_id") or "")
+        )
+        try:
+            heartbeat = datetime.fromisoformat(
+                str(health.get("heartbeat_utc") or "").replace("Z", "+00:00")
+            )
+            if heartbeat.tzinfo is None:
+                heartbeat = heartbeat.replace(tzinfo=timezone.utc)
+            health_age = (
+                datetime.now(timezone.utc) - heartbeat.astimezone(timezone.utc)
+            ).total_seconds()
+        except (TypeError, ValueError):
+            health_age = float("inf")
+        fresh = health_age <= max(poll_secs * 3, 30)
+        continuity_ok = (
+            SLOT != "trend" or health.get("continuity_verified") is True
+        )
+        if not (
+            identity_matches
+            and fresh
+            and continuity_ok
+            and health.get("status") == "healthy"
+            and health.get("protection_established") is True
+            and health.get("local_fallback_active") is True
+        ):
+            return None
+        return health
+
+    def _on_realtime_mark(mark, exchange_timestamp, source):
+        received_at = _utc_now()
+        preview = load_state()
+        if (
+            str(preview.get("status") or "").upper() != "OPEN"
+            or str(preview.get("product_id") or "") != str(product_id)
+        ):
+            return
+        try:
+            preview_entry = float(preview.get("entry_mark"))
+            preview_cv = float(preview.get("contract_value"))
+            preview_lots = abs(int(Decimal(str(preview.get("lots")))))
+            preview_sign = (
+                -1 if str(preview.get("side") or "").lower() == "short" else 1
+            )
+            preview_pnl = (
+                (float(mark) - preview_entry)
+                * preview_cv
+                * preview_lots
+                * preview_sign
+            )
+            if not all(math.isfinite(value) for value in (
+                preview_entry, preview_cv, preview_pnl,
+            )) or preview_entry <= 0 or preview_cv <= 0 or preview_lots <= 0:
+                raise ValueError("position dimensions are invalid")
+        except (InvalidOperation, TypeError, ValueError, OverflowError):
+            return
+
+        write_stream_snapshot(
+            status="live" if source == "websocket" else "rest_fallback",
+            source=source,
+            last_error=(
+                "" if source == "websocket"
+                else "mark-price stream stale; public ticker fallback active"
+            ),
+            symbol=symbol,
+            product_id=product_id,
+            mark=round(float(mark), 8),
+            pnl=round(preview_pnl, 8),
+            event_timestamp=int(exchange_timestamp),
+            event_received_at_utc=received_at,
+            expected_interval_secs=MARK_STREAM_EXPECTED_SECS,
+            stale_after_secs=MARK_STREAM_STALE_SECS,
+            position_cycle_id=preview.get("position_cycle_id"),
+            protection_revision=int(preview.get("protection_revision") or 0),
+        )
+
+        health = _stream_health_allows_guard(preview)
+        if health is None:
+            return
+        policy = preview.get("protection_config") or {}
+        try:
+            target = abs(float(policy.get("tp_target_pnl") or target_pnl))
+            stop_loss = abs(float(policy.get("sl_target_pnl") or sl_pnl))
+            arm = abs(float(policy.get("tsl_arm_pnl") or tsl_arm_pnl))
+            trail = abs(float(policy.get("tsl_trail_pnl") or tsl_trail_pnl))
+            lock_min = abs(float(
+                policy.get("tsl_lock_min_pnl") or tsl_lock_min_pnl
+            ))
+        except (TypeError, ValueError, OverflowError):
+            return
+
+        stored_peak = _finite_float(preview.get("tsl_peak"), 0.0)
+        stored_floor = _finite_float(preview.get("tsl_floor"), 0.0)
+        was_armed = bool(preview.get("tsl_armed"))
+        next_peak = max(stored_peak, preview_pnl)
+        next_armed = was_armed or (arm > 0 and trail > 0 and next_peak >= arm)
+        next_floor = stored_floor
+        if next_armed:
+            next_floor = max(stored_floor, lock_min, next_peak - trail)
+        ratchet = max(1.0, trail * 0.05)
+        state_change = (
+            next_armed != was_armed
+            or next_peak >= stored_peak + ratchet
+            or next_floor > stored_floor + 1e-8
+        )
+        tp_trigger = bool(
+            health.get("local_tp_fallback_active") and preview_pnl >= target
+        )
+        stop_fallback = bool(health.get("local_stop_fallback_active"))
+        trigger = None
+        if tp_trigger:
+            trigger = "take_profit"
+        elif stop_fallback and next_armed and preview_pnl <= next_floor:
+            trigger = "trailing_stop"
+        elif stop_fallback and stop_loss > 0 and preview_pnl <= -stop_loss:
+            trigger = "stop_loss"
+        if not state_change and trigger is None:
+            return
+
+        with _close_state_lock(
+            f"tp-stream-{SLOT}-{os.getpid()}", wait_sec=0,
+        ) as acquired:
+            if not acquired:
+                return
+            current = load_state()
+            if (
+                str(current.get("status") or "").upper() != "OPEN"
+                or str(current.get("product_id") or "") != str(product_id)
+                or str(current.get("position_cycle_id") or "")
+                != str(preview.get("position_cycle_id") or "")
+            ):
+                return
+            current_peak = _finite_float(current.get("tsl_peak"), 0.0)
+            current_floor = _finite_float(current.get("tsl_floor"), 0.0)
+            current_armed = bool(current.get("tsl_armed"))
+            resolved_peak = max(current_peak, next_peak)
+            resolved_armed = current_armed or next_armed
+            resolved_floor = (
+                max(current_floor, lock_min, resolved_peak - trail)
+                if resolved_armed else current_floor
+            )
+            current.update({
+                "tsl_peak": round(resolved_peak, 8),
+                "tsl_armed": resolved_armed,
+                "tsl_floor": round(resolved_floor, 8) if resolved_armed else None,
+                "protection_price_source": "mark_price_stream",
+                "protection_stream_event_utc": received_at,
+            })
+            _atomic_write_json(STATE_FILE, current)
+            write_stream_snapshot(
+                tsl_peak=round(resolved_peak, 8),
+                tsl_armed=resolved_armed,
+                tsl_floor=(
+                    round(resolved_floor, 8) if resolved_armed else None
+                ),
+                guard_verified=True,
+            )
+            if trigger is None:
+                return
+            closed = _close_position_locked(
+                current, float(mark), preview_pnl, trigger,
+            )
+            if closed:
+                cleaned = remove_exchange_protection(
+                    load_state(), confirmed_closed=True,
+                    reason="stream-driven reduce-only close confirmed",
+                )
+                if cleaned:
+                    write_monitor_health(
+                        "closed", state_status="CLOSED",
+                        exchange_position_size=0,
+                        protection_established=False,
+                    )
+                    write_stream_snapshot(
+                        status="closed", closed_at_utc=_utc_now(),
+                        close_trigger=trigger,
+                    )
+
+    mark_stream = DeltaMarkPriceStream(
+        symbol, _on_realtime_mark, _stream_status,
+    )
+    mark_stream.start()
+    save_state_fields(
+        protection_price_source="mark_price_stream",
+        protection_stream_expected_secs=MARK_STREAM_EXPECTED_SECS,
+    )
+
     while True:
         sleep_secs = poll_secs
         try:
@@ -4647,7 +5035,27 @@ def main():
                 if not math.isfinite(mark) or mark <= 0:
                     raise ValueError(f"invalid mark price {mark!r}")
                 pnl = (mark - entry_mark) * cv * lots * sign
-                peak_pnl = max(peak_pnl, pnl)
+                # The websocket guard may have advanced the trail between
+                # watchdog cycles. Never overwrite that newer high-water mark
+                # with this slower REST snapshot, and stop immediately if the
+                # stream already completed the close.
+                streamed_state = load_state()
+                if str(streamed_state.get("status") or "").upper() != "OPEN":
+                    return 0
+                if str(streamed_state.get("position_cycle_id") or "") != str(
+                    state.get("position_cycle_id") or ""
+                ):
+                    return 0
+                peak_pnl = max(
+                    peak_pnl,
+                    _finite_float(streamed_state.get("tsl_peak"), 0.0),
+                    pnl,
+                )
+                tsl_armed = tsl_armed or bool(streamed_state.get("tsl_armed"))
+                stop_floor = max(
+                    stop_floor,
+                    _finite_float(streamed_state.get("tsl_floor"), 0.0),
+                )
                 if peak_pnl - persist_pk >= 1.0:
                     persist_pk = peak_pnl
                     save_state_fields(tsl_peak=round(peak_pnl, 2), tsl_armed=tsl_armed)

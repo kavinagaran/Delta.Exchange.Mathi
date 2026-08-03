@@ -5,6 +5,8 @@
 /// removes a JavaScript chart library from the mobile path entirely.
 library;
 
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 
 import '../api/client.dart';
@@ -26,7 +28,6 @@ class PerformanceScreen extends StatefulWidget {
 }
 
 class _PerformanceScreenState extends State<PerformanceScreen> {
-  Map<String, dynamic>? _summary;
   List<Map<String, dynamic>> _trades = const [];
   String? _error;
   bool _loading = true;
@@ -40,30 +41,25 @@ class _PerformanceScreenState extends State<PerformanceScreen> {
   Future<void> _refresh() async {
     if (mounted) setState(() => _loading = true);
 
-    final results = await Future.wait([
-      widget.api.summary(),
-      widget.api.trades(),
-    ]);
+    final result = await widget.api.performanceTrades();
     if (!mounted) return;
-    if (results.any((r) => r.unauthorised)) {
+    if (result.unauthorised) {
       widget.onUnauthorised();
       return;
     }
 
     setState(() {
       _loading = false;
-      _summary = results[0].data as Map<String, dynamic>?;
-      _trades = ((results[1].data as List<dynamic>?) ?? const [])
+      _trades = (result.data ?? const [])
           .whereType<Map<String, dynamic>>()
-          .where((t) => t['pnl_usd'] != null)
           .toList();
-      _error = results[1].ok ? null : results[1].error;
+      _error = result.ok ? null : result.error;
     });
   }
 
   @override
   Widget build(BuildContext context) {
-    if (_loading && _trades.isEmpty && _summary == null) {
+    if (_loading && _trades.isEmpty) {
       return const Center(child: CircularProgressIndicator(strokeWidth: 2));
     }
     if (_error != null && _trades.isEmpty) {
@@ -76,9 +72,7 @@ class _PerformanceScreenState extends State<PerformanceScreen> {
       );
     }
 
-    // `_pnl_stats` returns {} when there are no closed trades, so an empty
-    // summary means "nothing yet", not "failed".
-    final hasStats = _summary != null && _summary!.isNotEmpty;
+    final stats = _PerformanceStats.fromTrades(_trades);
 
     return RefreshIndicator(
       onRefresh: _refresh,
@@ -92,19 +86,19 @@ class _PerformanceScreenState extends State<PerformanceScreen> {
             subtitle: 'Real-trade P&L, risk, fees and complete history.',
           ),
           const SizedBox(height: Gap.md),
-          if (!hasStats)
+          if (_trades.isEmpty)
             const AppCard(
               kicker: 'Performance',
-              title: 'No closed trades yet',
+              title: 'No exchange trades yet',
               child: Text(
-                'Statistics appear once a position has been closed.',
+                'Delta Exchange trade history will appear here.',
                 style: AppText.body,
               ),
             )
           else ...[
-            _SummaryCard(summary: _summary!),
+            _SummaryCard(stats: stats),
             const SizedBox(height: Gap.md),
-            _EquityCard(trades: _trades),
+            _EquityCard(stats: stats),
             const SizedBox(height: Gap.md),
             _TradeListCard(trades: _trades),
           ],
@@ -115,30 +109,24 @@ class _PerformanceScreenState extends State<PerformanceScreen> {
 }
 
 class _SummaryCard extends StatelessWidget {
-  const _SummaryCard({required this.summary});
+  const _SummaryCard({required this.stats});
 
-  final Map<String, dynamic> summary;
+  final _PerformanceStats stats;
 
   @override
   Widget build(BuildContext context) {
-    double? num_(String key) => (summary[key] as num?)?.toDouble();
-    final total = num_('total_pnl');
-    final winRate = num_('win_rate');
-    final wins = summary['wins'];
-    final losses = summary['losses'];
-
     return AppCard(
-      kicker: 'Performance',
-      title: 'Realised',
-      accent: signedColour(total),
+      kicker: 'Delta Exchange',
+      title: 'Real-trade performance',
+      accent: signedColour(stats.netPnl),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           MetricTile(
             label: 'Total P&L',
-            value: total == null ? '—' : _money(total),
-            colour: signedColour(total),
-            sub: '${summary['total_days'] ?? 0} closed trades',
+            value: stats.valued == 0 ? '—' : _money(stats.netPnl),
+            colour: signedColour(stats.valued == 0 ? null : stats.netPnl),
+            sub: '${stats.valued}/${stats.closed} closed trades valued',
             big: true,
           ),
           const SizedBox(height: Gap.lg),
@@ -147,16 +135,18 @@ class _SummaryCard extends StatelessWidget {
               Expanded(
                 child: MetricTile(
                   label: 'Win rate',
-                  value: winRate == null
+                  value: stats.winRate == null
                       ? '—'
-                      : '${winRate.toStringAsFixed(1)}%',
-                  sub: '$wins W · $losses L',
+                      : '${stats.winRate!.toStringAsFixed(1)}%',
+                  sub: '${stats.winners} W · ${stats.losers} L',
                 ),
               ),
               Expanded(
                 child: MetricTile(
-                  label: 'Reward : risk',
-                  value: num_('rr')?.toStringAsFixed(2) ?? '—',
+                  label: 'Risk : reward',
+                  value: stats.rewardRisk == null
+                      ? '—'
+                      : '1 : ${stats.rewardRisk!.toStringAsFixed(2)}',
                 ),
               ),
             ],
@@ -164,19 +154,28 @@ class _SummaryCard extends StatelessWidget {
           const SizedBox(height: Gap.md),
           StatRow(
             'Average win',
-            num_('avg_win') == null ? '—' : _money(num_('avg_win')!),
+            stats.averageWin == null ? '—' : _money(stats.averageWin!),
             valueColour: kPositive,
           ),
           StatRow(
             'Average loss',
-            num_('avg_loss') == null ? '—' : _money(num_('avg_loss')!),
+            stats.averageLoss == null ? '—' : _money(stats.averageLoss!),
             valueColour: kNegative,
           ),
           StatRow(
             'Max drawdown',
-            num_('max_dd') == null ? '—' : _money(num_('max_dd')!),
+            stats.valued == 0 ? '—' : _lossMoney(stats.maxDrawdown),
             valueColour: kNegative,
           ),
+          StatRow(
+            'Gross P&L',
+            stats.grossValued == 0 ? '—' : _money(stats.grossPnl),
+            valueColour: signedColour(
+              stats.grossValued == 0 ? null : stats.grossPnl,
+            ),
+          ),
+          StatRow('Fees & charges', stats.feeLabel, valueColour: kWarning),
+          StatRow('Trade cycles', '${stats.total} · ${stats.open} open'),
         ],
       ),
     );
@@ -184,25 +183,14 @@ class _SummaryCard extends StatelessWidget {
 }
 
 class _EquityCard extends StatelessWidget {
-  const _EquityCard({required this.trades});
+  const _EquityCard({required this.stats});
 
-  final List<Map<String, dynamic>> trades;
+  final _PerformanceStats stats;
 
   @override
   Widget build(BuildContext context) {
-    // Oldest first, so the curve reads left to right in time order. The API
-    // returns newest-first for the table.
-    final ordered = trades.reversed
-        .map((t) => (t['pnl_usd'] as num?)?.toDouble() ?? 0)
-        .toList();
-    if (ordered.length < 2) return const SizedBox.shrink();
-
-    var running = 0.0;
-    final cumulative = <double>[];
-    for (final pnl in ordered) {
-      running += pnl;
-      cumulative.add(running);
-    }
+    final cumulative = stats.equity;
+    if (cumulative.length < 2) return const SizedBox.shrink();
 
     return AppCard(
       kicker: 'Equity curve',
@@ -318,11 +306,11 @@ class _TradeListCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final shown = trades.take(40).toList();
+    final shown = trades.reversed.take(40).toList();
 
     return AppCard(
       kicker: 'History',
-      title: '${trades.length} closed trades',
+      title: '${trades.length} trade cycles',
       padding: const EdgeInsets.fromLTRB(Gap.lg, Gap.lg, Gap.lg, Gap.sm),
       child: Column(
         children: [
@@ -345,6 +333,7 @@ class _TradeListCard extends StatelessWidget {
                           [
                             trade['date'],
                             trade['side'],
+                            trade['status'],
                           ].where((v) => v != null).join(' · '),
                           style: AppText.caption.copyWith(
                             color: scheme.onSurfaceVariant,
@@ -354,12 +343,16 @@ class _TradeListCard extends StatelessWidget {
                     ),
                   ),
                   const SizedBox(width: Gap.sm),
-                  Text(
-                    _money((trade['pnl_usd'] as num).toDouble()),
-                    style: AppText.number.copyWith(
-                      color: signedColour(trade['pnl_usd'] as num),
+                  if (_number(trade['net_pnl_usd']) case final pnl?)
+                    Text(
+                      _money(pnl),
+                      style: AppText.number.copyWith(color: signedColour(pnl)),
+                    )
+                  else
+                    Text(
+                      trade['status'] == 'OPEN' ? 'OPEN' : '—',
+                      style: AppText.caption.copyWith(color: kWarning),
                     ),
-                  ),
                 ],
               ),
             ),
@@ -379,7 +372,153 @@ class _TradeListCard extends StatelessWidget {
   }
 }
 
+class _PerformanceStats {
+  const _PerformanceStats({
+    required this.total,
+    required this.open,
+    required this.closed,
+    required this.valued,
+    required this.grossValued,
+    required this.winners,
+    required this.losers,
+    required this.netPnl,
+    required this.grossPnl,
+    required this.averageWin,
+    required this.averageLoss,
+    required this.rewardRisk,
+    required this.winRate,
+    required this.maxDrawdown,
+    required this.equity,
+    required this.fees,
+  });
+
+  factory _PerformanceStats.fromTrades(List<Map<String, dynamic>> trades) {
+    final closed = trades
+        .where((trade) => '${trade['status']}'.toUpperCase() == 'CLOSED')
+        .toList();
+    final valued = <({double pnl, int order, double closedAt})>[];
+    var grossPnl = 0.0;
+    var grossValued = 0;
+    final fees = <String, double>{};
+
+    for (var index = 0; index < trades.length; index++) {
+      final trade = trades[index];
+      final isClosed = '${trade['status']}'.toUpperCase() == 'CLOSED';
+      final net = _number(trade['net_pnl_usd']);
+      if (isClosed && net != null) {
+        final parsed = DateTime.tryParse('${trade['exit_at_utc'] ?? ''}');
+        final sortTimestamp = _number(trade['sort_timestamp']);
+        valued.add((
+          pnl: net,
+          order: index,
+          closedAt:
+              parsed?.millisecondsSinceEpoch.toDouble() ??
+              (sortTimestamp == null ? index.toDouble() : sortTimestamp * 1000),
+        ));
+      }
+      final gross = _number(trade['gross_pnl_usd']);
+      if (isClosed && gross != null) {
+        grossPnl += gross;
+        grossValued++;
+      }
+      final tradeFees = trade['fees'];
+      if (tradeFees is List) {
+        for (final fee in tradeFees.whereType<Map>()) {
+          final amount = _number(fee['amount']);
+          if (amount == null) continue;
+          final asset = '${fee['asset'] ?? 'fee units'}';
+          fees[asset] = (fees[asset] ?? 0) + amount;
+        }
+      }
+    }
+
+    final pnlValues = valued.map((item) => item.pnl).toList();
+    final wins = pnlValues.where((pnl) => pnl > 0).toList();
+    final losses = pnlValues.where((pnl) => pnl < 0).toList();
+    final netPnl = pnlValues.fold<double>(0, (sum, pnl) => sum + pnl);
+    final winTotal = wins.fold<double>(0, (sum, pnl) => sum + pnl);
+    final lossTotal = losses.fold<double>(0, (sum, pnl) => sum + pnl);
+    final averageWin = wins.isEmpty ? null : winTotal / wins.length;
+    final averageLoss = losses.isEmpty ? null : lossTotal / losses.length;
+    final rewardRisk = averageWin == null || averageLoss == null
+        ? null
+        : averageWin / averageLoss.abs();
+
+    valued.sort(
+      (left, right) => left.closedAt.compareTo(right.closedAt) != 0
+          ? left.closedAt.compareTo(right.closedAt)
+          : left.order.compareTo(right.order),
+    );
+    var running = 0.0;
+    var peak = 0.0;
+    var maxDrawdown = 0.0;
+    final equity = <double>[];
+    for (final trade in valued) {
+      running += trade.pnl;
+      equity.add(running);
+      peak = math.max(peak, running);
+      maxDrawdown = math.max(maxDrawdown, peak - running);
+    }
+
+    return _PerformanceStats(
+      total: trades.length,
+      open: trades.length - closed.length,
+      closed: closed.length,
+      valued: valued.length,
+      grossValued: grossValued,
+      winners: wins.length,
+      losers: losses.length,
+      netPnl: netPnl,
+      grossPnl: grossPnl,
+      averageWin: averageWin,
+      averageLoss: averageLoss,
+      rewardRisk: rewardRisk,
+      winRate: valued.isEmpty ? null : wins.length / valued.length * 100,
+      maxDrawdown: maxDrawdown,
+      equity: equity,
+      fees: fees,
+    );
+  }
+
+  final int total;
+  final int open;
+  final int closed;
+  final int valued;
+  final int grossValued;
+  final int winners;
+  final int losers;
+  final double netPnl;
+  final double grossPnl;
+  final double? averageWin;
+  final double? averageLoss;
+  final double? rewardRisk;
+  final double? winRate;
+  final double maxDrawdown;
+  final List<double> equity;
+  final Map<String, double> fees;
+
+  String get feeLabel {
+    if (fees.isEmpty) return 'Not reported';
+    return fees.entries
+        .map((entry) {
+          if (entry.key.toUpperCase() == 'USD') {
+            return '\$${entry.value.toStringAsFixed(2)}';
+          }
+          return '${entry.value.toStringAsFixed(4)} ${entry.key}';
+        })
+        .join(' · ');
+  }
+}
+
+double? _number(Object? value) {
+  if (value is num) return value.toDouble();
+  return double.tryParse('$value');
+}
+
 String _money(double value) {
   final sign = value > 0 ? '+' : '';
   return '$sign\$${value.toStringAsFixed(2)}';
 }
+
+String _lossMoney(double value) =>
+    value <= 0 ? '\$0.00' : '-\$${value.toStringAsFixed(2)}';

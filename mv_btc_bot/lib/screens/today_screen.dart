@@ -43,11 +43,14 @@ class _TodayScreenState extends State<TodayScreen> {
   bool _loading = true;
   bool _closing = false;
   Timer? _poll;
+  Timer? _streamReconnect;
+  StreamSubscription<ApiResult<Map<String, dynamic>>>? _protectionEvents;
 
   @override
   void initState() {
     super.initState();
     _refresh();
+    _connectProtectionStream();
     // 20s: fast enough that a fill shows up while you are looking at the
     // screen, slow enough not to hammer a dashboard that also runs the
     // trading loop in-process.
@@ -60,7 +63,61 @@ class _TodayScreenState extends State<TodayScreen> {
   @override
   void dispose() {
     _poll?.cancel();
+    _streamReconnect?.cancel();
+    _protectionEvents?.cancel();
     super.dispose();
+  }
+
+  void _connectProtectionStream() {
+    _streamReconnect?.cancel();
+    _protectionEvents?.cancel();
+    _protectionEvents = widget.api.protectionStream().listen(
+      (result) {
+        if (!mounted) return;
+        if (result.unauthorised) {
+          widget.onUnauthorised();
+          return;
+        }
+        if (!result.ok || result.data == null) return;
+        _applyProtectionSnapshot(result.data!);
+      },
+      onError: (_) => _scheduleStreamReconnect(),
+      onDone: _scheduleStreamReconnect,
+      cancelOnError: false,
+    );
+  }
+
+  void _scheduleStreamReconnect() {
+    if (!mounted) return;
+    _streamReconnect?.cancel();
+    _streamReconnect = Timer(
+      const Duration(seconds: 2),
+      _connectProtectionStream,
+    );
+  }
+
+  void _applyProtectionSnapshot(Map<String, dynamic> payload) {
+    final nextTrades = _todayTrades
+        .map((row) => row is Map<String, dynamic>
+            ? <String, dynamic>{...row}
+            : row)
+        .toList();
+    for (final row in nextTrades.whereType<Map<String, dynamic>>()) {
+      if (!_isOpen(row) || row['dry_run'] == true) continue;
+      final slot = '${row['control_slot'] ?? row['slot'] ?? 'trend'}';
+      final record = payload[slot];
+      if (record is! Map<String, dynamic>) continue;
+      if (record['streaming'] == true) {
+        final mark = _number(record['live_mark']);
+        final pnl = _number(record['live_pnl']);
+        if (mark != null) row['current_mark'] = mark;
+        if (pnl != null) row['live_pnl'] = pnl;
+      }
+    }
+    setState(() {
+      _protection = payload;
+      _todayTrades = nextTrades;
+    });
   }
 
   Future<void> _refresh({bool quiet = false}) async {
@@ -319,7 +376,8 @@ class _ProtectionPanel extends StatelessWidget {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final running = protection['running'] == true;
-    final armed = protection['tsl_armed'] == true;
+    final armed = protection['stream_tsl_armed'] == true ||
+        protection['tsl_armed'] == true;
     String value(String key, [String? fallback]) {
       final raw =
           protection[key] ?? (fallback == null ? null : protection[fallback]);
@@ -377,8 +435,10 @@ class _ProtectionPanel extends StatelessWidget {
                 colour: const Color(0xFFC58CFF),
               ),
               MetricTile(
-                label: 'Poll',
-                value: '${protection['poll_secs'] ?? '—'} sec',
+                label: 'Price feed',
+                value: protection['streaming'] == true
+                    ? 'LIVE · ~${protection['stream_expected_interval_secs'] ?? 2}s'
+                    : 'WATCHDOG · ${protection['poll_secs'] ?? '—'}s',
                 colour: scheme.secondary,
               ),
             ],
