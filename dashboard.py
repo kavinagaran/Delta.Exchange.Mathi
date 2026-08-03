@@ -10107,10 +10107,14 @@ def _trend_score_auto_risk_snapshot(
         max_slippage = max(_as_float(
             cfg.get("TREND_MAX_SLIPPAGE_PCT") or 1, 1,
         ), 0)
-        # Size the long-option risk at the maximum approved buy boundary,
-        # rather than a transient best ask. This remains stable across the
-        # final quote recheck and conservatively covers every permitted fill.
-        price = reference_price * (1 + max_slippage / 100)
+        # Contract selection can precede execution by several seconds.  Size
+        # the long-option risk at the maximum boundary above the *fresh ask*,
+        # never merely the older selection mark.  This matches the LIVE IOC
+        # builder and prevents a marketable retry from escaping the configured
+        # wallet, premium, and risk-budget checks.
+        price = max(reference_price, quoted_price) * (
+            1 + max_slippage / 100
+        )
         protection = _trend_score_auto_premium_protection_policy(
             prepared, entry_price=price,
         )

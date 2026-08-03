@@ -435,7 +435,19 @@ def bounded_ioc_payload(
     slippage = _finite(max_slippage_pct, "maximum slippage")
     if slippage < 0:
         raise LiveScoreExecutionError("maximum slippage cannot be negative")
-    reference = entry["entry_price"]
+    # Contract selection can precede submission by several seconds.  Anchor
+    # the IOC guard to the fresh executable touch instead of the older
+    # selection mark; otherwise a valid, liquid order is guaranteed to miss
+    # whenever the option moves beyond the selection mark before submission.
+    # The configured slippage remains bounded against the price that can
+    # actually be traded now, and the caller risk-checks this same touch.
+    selection_reference = entry["entry_price"]
+    executable_reference = ask if side == "buy" else bid
+    reference = (
+        max(selection_reference, executable_reference)
+        if side == "buy"
+        else min(selection_reference, executable_reference)
+    )
     boundary = (
         reference * (1 + slippage / 100.0)
         if side == "buy"
@@ -486,6 +498,8 @@ def bounded_ioc_payload(
         "ask": ask,
         "spread_pct": spread,
         "entry_depth": depth,
+        "selection_reference_price": selection_reference,
+        "executable_reference_price": executable_reference,
         "reference_price": reference,
         "slippage_boundary": boundary,
         "limit_price": limit,

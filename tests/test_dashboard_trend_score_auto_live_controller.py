@@ -1047,6 +1047,25 @@ def _deep_preflight_state(
     return pending, risk
 
 
+def test_live_long_risk_uses_fresh_ask_slippage_boundary(live_account):
+    prepared = _prepared(dashboard.TREND_SCORE_CE_ZONE)
+    quote = {
+        **_execution_quote(prepared),
+        "bid": 222.0,
+        "ask": 223.0,
+    }
+
+    risk = dashboard._trend_score_auto_live_risk_snapshot(
+        prepared,
+        quote,
+        available_usd=10_000,
+    )
+
+    assert risk["quote_price_usd"] == 223.0
+    assert risk["risk_price_usd"] == 225.23
+    assert risk["premium_at_risk_usd"] == 225.23
+
+
 def _mock_flat_final_boundary(monkeypatch, final_quote: dict) -> None:
     monkeypatch.setattr(
         dashboard,

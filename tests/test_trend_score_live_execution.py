@@ -387,6 +387,25 @@ def test_bounded_ioc_is_exactly_1000_and_rounds_inside_slippage(
     assert snapshot["limit_price"] == expected_limit
 
 
+def test_bounded_ioc_reanchors_to_fresh_executable_touch():
+    prepared = _prepared()
+    quote = {**_quote(), "bid": 222.0, "ask": 223.0}
+
+    payload, snapshot = bounded_ioc_payload(
+        prepared,
+        quote,
+        client_order_id=score_entry_client_id("alice", "transition"),
+        max_slippage_pct=1,
+        max_spread_pct=3,
+        max_quote_age_sec=20,
+    )
+
+    assert payload["limit_price"] == "225.2"
+    assert snapshot["selection_reference_price"] == 220.0
+    assert snapshot["executable_reference_price"] == 223.0
+    assert snapshot["reference_price"] == 223.0
+
+
 def test_configured_order_size_survives_live_intent_fill_and_protection():
     prepared = _prepared()
     prepared["lots"] = 400
@@ -414,7 +433,6 @@ def test_configured_order_size_survives_live_intent_fill_and_protection():
         ({"bid": 200, "ask": 220}, "spread"),
         ({"ask_size": 999}, "requested IOC size"),
         ({"trading_status": "halted"}, "not operational"),
-        ({"ask": 223}, "bounded buy limit"),
         ({"price_band": {"upper_limit": 221}}, "price band"),
     ),
 )
