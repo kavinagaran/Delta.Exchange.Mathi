@@ -81,9 +81,10 @@ def score_zone(score: Any) -> str:
     source of truth for the 2026-07-29 operator spec — rather than being
     duplicated here, so the two modules cannot drift apart:
 
-        |score| >= 40   directional (CE_2_ITM / PE_2_ITM, both 2-step ITM)
+        |score| > 40    directional (CE_2_ITM / PE_2_ITM, both 2-step ITM),
+                        with 5m ADX >= 25 confirmed by the Trend Engine
         |score| <= 30   SHORT_MOVE candidate (the engine must also confirm
-                        5m ADX is below 35)
+                        5m ADX is below 25)
         otherwise       HOLD (no new action, keep any open position; see
                         zones.should_exit)
 

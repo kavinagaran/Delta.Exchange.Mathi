@@ -540,8 +540,8 @@ class _EngineCard extends StatelessWidget {
 
   static String _zoneFromScore(double? score) {
     if (score == null) return 'HOLD';
-    if (score >= 40) return 'CE_2_ITM';
-    if (score <= -40) return 'PE_2_ITM';
+    if (score > 40) return 'CE_2_ITM';
+    if (score < -40) return 'PE_2_ITM';
     if (score >= -30 && score <= 30) return 'SHORT_MOVE';
     return 'HOLD';
   }

@@ -584,8 +584,8 @@ String _regimeLabel(String regime) => switch (regime) {
 
 String _zoneForScore(double? score) {
   if (score == null) return 'HOLD';
-  if (score >= 40) return 'CE_2_ITM';
-  if (score <= -40) return 'PE_2_ITM';
+  if (score > 40) return 'CE_2_ITM';
+  if (score < -40) return 'PE_2_ITM';
   if (score.abs() <= 30) return 'SHORT_MOVE';
   return 'HOLD';
 }

@@ -1,13 +1,13 @@
 """Score -> action zone mapping (operator spec, 2026-07-29).
 
-    +40 .. +100   BULLISH    buy 2-step ITM CE
-    -40 .. -100   BEARISH    buy 2-step ITM PE
-    -30 .. +30    SIDEWAYS   sell ATM MOVE when 5m ADX is below 30
+    > +40         BULLISH    buy 2-step ITM CE when 5m ADX is at least 25
+    < -40         BEARISH    buy 2-step ITM PE when 5m ADX is at least 25
+    -30 .. +30    SIDEWAYS   sell ATM MOVE when 5m ADX is below 25
     all other gaps HOLD      no new action
 
 **The gaps are deliberate, not an oversight in the spec.** The only neutral
 entry range is ``-30 <= score <= +30``. Scores between 30 and 40 (or -40 and
--30) are HOLD bands: entering a directional trade needs |score| >= 40, while
+-30) are HOLD bands: entering a directional trade needs |score| > 40, while
 an open position is kept rather than churned through an inferred intermediate
 trade. This prevents a score oscillating around a boundary from paying both
 spreads on consecutive candles.
@@ -82,9 +82,9 @@ class ZoneDecision:
 def zone_for_score(score: float, policy: ZonePolicy | None = None) -> str:
     """Pure score -> zone. No hysteresis state; HOLD marks the dead band."""
     policy = policy or ZonePolicy()
-    if score >= policy.directional_entry_abs:
+    if score > policy.directional_entry_abs:
         return CE_2_ITM
-    if score <= -policy.directional_entry_abs:
+    if score < -policy.directional_entry_abs:
         return PE_2_ITM
     if abs(score) <= policy.sideways_max_abs:
         return SHORT_MOVE
@@ -110,6 +110,7 @@ def decide(
     gates_passed: bool,
     stop_loss_configured: bool = True,
     short_move_calm: bool = True,
+    directional_adx: float | None = None,
     policy: ZonePolicy | None = None,
 ) -> ZoneDecision:
     """Zone plus whether its action may actually be taken.
@@ -137,7 +138,7 @@ def decide(
         if not short_move_calm:
             return ZoneDecision(
                 zone, False,
-                "ADX is not below 30; calm-market confirmation is required "
+                "ADX is not below 25; calm-market confirmation is required "
                 "before selling MOVE")
         if not stop_loss_configured:
             return ZoneDecision(
@@ -149,6 +150,14 @@ def decide(
         return ZoneDecision(
             zone, True,
             "calm 5-minute ADX confirms SHORT_MOVE: sell ATM MOVE (stop required)")
+    if directional_adx is None:
+        return ZoneDecision(
+            zone, False,
+            "5m ADX is unavailable; ADX must be at least 25 for a directional entry")
+    if directional_adx < 25.0:
+        return ZoneDecision(
+            zone, False,
+            f"5m ADX {directional_adx:.1f} is below 25; directional strength is not confirmed")
     if not gates_passed:
         return ZoneDecision(zone, False, "one or more execution gates failed")
     if zone == CE_2_ITM:

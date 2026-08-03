@@ -331,12 +331,12 @@ def test_retiring_rsi_does_not_remove_rsi_from_the_score():
     assert moved.trend_score is not None and baseline.trend_score is not None
     assert moved.trend_score < baseline.trend_score
 
-    # The whole move is the ADX sign flip: strength is (45-30)/20 = 0.75, and
-    # reversing a 0.75 reading on a 0.20-weight component shifts the
-    # normalised sum by -2 * 0.75 * 0.20 = -0.30, before the tanh.
+    # The whole move is the ADX sign flip: strength is (45-25)/20 = 1.0, and
+    # reversing a 1.0 reading on a 0.20-weight component shifts the
+    # normalised sum by -2 * 1.0 * 0.20 = -0.40, before the tanh.
     before = math.atanh(baseline.trend_score / 100.0) / 1.5
     after = math.atanh(moved.trend_score / 100.0) / 1.5
-    assert after - before == pytest.approx(-0.30, abs=0.005)
+    assert after - before == pytest.approx(-0.40, abs=0.005)
 
 
 def test_insufficient_inputs_yield_no_score_not_neutral():
@@ -395,13 +395,13 @@ def test_breakout_requires_body():
                                setup=strong).regime is Regime.BREAKOUT_UP
 
 
-def test_adx_below_30_is_a_calm_sideways_regime_and_can_confirm_move():
+def test_adx_below_25_is_a_calm_sideways_regime_and_can_confirm_move():
     setup = _tf({"vol_ratio": 1.0, "volume_ratio": 1.0,
                  "adx": 62.0, "rsi": 72.0})
     decision = RegimeClassifier().classify(
         data_quality_ok=True, trend_score=85.0,
         setup=setup,
-        trigger=_tf({"adx": 29.9}),
+        trigger=_tf({"adx": 24.9}),
     )
     assert decision.regime is Regime.RANGE
     assert "calm-zone" in decision.reason
@@ -427,10 +427,12 @@ def test_signal_hysteresis_matrix():
     |30|. Scores between 30 and 40 are HOLD (see signals/zones.py)."""
     h = SignalHysteresis(SignalConfig())
     assert h.update(35.0) == 0        # inside the hold band, never entered
-    assert h.update(40.0) == 1        # enter long at >= 40
+    assert h.update(40.0) == 0        # exact boundary remains HOLD
+    assert h.update(40.1) == 1        # enter long only above +40
     assert h.update(35.0) == 1        # hold band keeps an OPEN position
     assert h.update(30.0) == 0        # exit at <= 30
-    assert h.update(-40.0) == -1      # enter short at <= -40
+    assert h.update(-40.0) == 0       # exact boundary remains HOLD
+    assert h.update(-40.1) == -1      # enter short only below -40
     assert h.update(-35.0) == -1      # hold
     assert h.update(-30.0) == 0       # exit
     assert h.update(None) == 0        # no score → flat, always
@@ -443,7 +445,7 @@ def test_the_hold_band_is_asymmetric_between_entering_and_holding():
     assert entering.update(35.0) == 0
 
     holding = SignalHysteresis(SignalConfig())
-    holding.update(40.0)
+    holding.update(40.1)
     assert holding.update(35.0) == 1
 
 
@@ -483,7 +485,7 @@ def test_snapshot_matches_contract_shape():
                 "reason_codes", "data_quality", "invalidation_price",
                 "zone", "zone_action_allowed", "zone_reason"):
         assert key in snapshot, key
-    # 1.3.0 carries the short-term 1h/30m/15m/5m production profile.
+    # The response shape remains 1.3.0; the model version carries rule changes.
     assert snapshot["schema_version"] == "1.3.0"
     assert snapshot["entry_allowed"] is True
     assert snapshot["invalidation_price"] == "63000.0"
@@ -526,7 +528,7 @@ def test_sideways_zone_ignores_only_directional_entry_gates():
         direction=0,
         score_value=0.0,
         gates=gates,
-        trigger_adx=29.9,
+        trigger_adx=24.9,
     )
     assert snapshot["zone"] == zones.SHORT_MOVE
     assert snapshot["zone_action_allowed"] is True
@@ -546,7 +548,7 @@ def test_short_move_is_immediately_actionable_once_5m_adx_is_calm():
         regime=Regime.RANGE,
         direction=0,
         score_value=10.0,
-        trigger_adx=29.9,
+        trigger_adx=24.9,
     )
     assert snapshot["zone"] == zones.SHORT_MOVE
     assert snapshot["zone_action_allowed"] is True
@@ -556,18 +558,18 @@ def test_short_move_is_immediately_actionable_once_5m_adx_is_calm():
     assert "GATE_SCORE_BEYOND_ENTRY_THRESHOLD_FAILED" not in snapshot["reason_codes"]
 
 
-def test_short_move_matrix_requires_adx_below_30():
+def test_short_move_matrix_requires_adx_below_25():
     snapshot = _snapshot(
         regime=Regime.RANGE,
         direction=0,
         score_value=0.0,
-        trigger_adx=30.0,
+        trigger_adx=25.0,
     )
     calm_gate = next(gate for gate in snapshot["gates"]
                      if gate["name"] == "calm_adx")
     assert calm_gate["passed"] is False
     assert snapshot["zone_action_allowed"] is False
-    assert "ADX is not below 30" in snapshot["zone_reason"]
+    assert "ADX is not below 25" in snapshot["zone_reason"]
 
 
 def test_hold_band_matrix_explains_that_an_entry_is_not_intended():
@@ -608,7 +610,7 @@ def test_directional_zone_requires_its_own_confidence_gate():
     snapshot = _snapshot(
         regime=Regime.TREND_UP,
         direction=0,
-        score_value=40.0,
+        score_value=40.1,
     )
     confidence_gate = next(
         gate for gate in snapshot["gates"]
@@ -619,11 +621,37 @@ def test_directional_zone_requires_its_own_confidence_gate():
     assert snapshot["zone_action_allowed"] is False
 
 
+def test_directional_zone_requires_5m_adx_at_least_25():
+    blocked = _snapshot(
+        regime=Regime.TREND_UP,
+        direction=1,
+        score_value=60.0,
+        trigger_adx=24.9,
+    )
+    adx_gate = next(
+        gate for gate in blocked["gates"] if gate["name"] == "directional_adx"
+    )
+    assert adx_gate["passed"] is False
+    assert blocked["zone_action_allowed"] is False
+
+    allowed = _snapshot(
+        regime=Regime.TREND_UP,
+        direction=1,
+        score_value=60.0,
+        trigger_adx=25.0,
+    )
+    adx_gate = next(
+        gate for gate in allowed["gates"] if gate["name"] == "directional_adx"
+    )
+    assert adx_gate["passed"] is True
+    assert allowed["zone_action_allowed"] is True
+
+
 def test_directional_zone_requires_regime_to_agree_with_score_side():
     snapshot = _snapshot(
         regime=Regime.BREAKOUT_DOWN,
         direction=1,
-        score_value=40.0,
+        score_value=40.1,
     )
     alignment_gate = next(
         gate for gate in snapshot["gates"]

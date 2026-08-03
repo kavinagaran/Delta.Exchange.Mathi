@@ -53,7 +53,7 @@ def test_committed_score_chart_is_a_zone_colored_line_with_every_boundary():
     assert "normaliseCommittedZone" in TEMPLATE
     assert "const colour = COMMITTED_ZONE_COLOURS[decision.zone]" in TEMPLATE
     assert "ctx.lineTo(decisionX(index), scoreY(decision.score))" in TEMPLATE
-    for label in ("BUY CE +40", "SHORT MOVE +30", "SHORT MOVE −30", "BUY PE −40"):
+    for label in ("BUY CE >+40", "SHORT MOVE +30", "SHORT MOVE −30", "BUY PE <−40"):
         assert label in TEMPLATE
     # Zone separators are deliberately fine; the axes stay strong neutral grey.
     assert "ctx.setLineDash([1, 6])" in TEMPLATE
@@ -217,10 +217,10 @@ const cases = [
   ['PE_2_ITM', 0, 'PE'],
   ['SHORT_MOVE', -45, 'MV'],
   ['HOLD', 90, 'HOLD'],
-  ['', 40, 'CE'],
+  ['', 40.1, 'CE'],
   ['', 30, 'MV'],
   ['', -30, 'MV'],
-  ['', -40, 'PE'],
+  ['', -40.1, 'PE'],
 ];
 for (const [zone, score, expected] of cases) {
   const actual = normaliseCommittedZone(zone, score);
@@ -337,10 +337,10 @@ vm.runInThisContext(source.slice(start, end) + `
   }
   const calmBlock = tradeDecisionMeta(
     'SHORT_MOVE', false,
-    'ADX is not below 30; calm-market confirmation is required before selling MOVE',
+    'ADX is not below 25; calm-market confirmation is required before selling MOVE',
   );
   if (calmBlock.label !== 'WAIT — 5M ADX NOT CALM' ||
-      !calmBlock.detail.includes('ADX is not below 30')) {
+      !calmBlock.detail.includes('ADX is not below 25')) {
     throw new Error('ADX blocker is mislabeled: ' + JSON.stringify(calmBlock));
   }
 `);

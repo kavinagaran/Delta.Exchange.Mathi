@@ -1,7 +1,7 @@
 """Score -> action zone mapping against the operator spec (2026-07-29):
 
-    +40..+100 bullish CE 2-step ITM · -40..-100 bearish PE 2-step ITM
-    -30..+30 sideways sell ATM MOVE with 5m ADX below 30 · all other gaps HOLD
+    score > +40 and ADX >= 25 buys CE · score < -40 and ADX >= 25 buys PE
+    -30..+30 sells ATM MOVE with 5m ADX below 25 · all other gaps HOLD
 """
 
 from __future__ import annotations
@@ -14,13 +14,14 @@ from btc_trend_engine.signals.zones import ZonePolicy
 
 def _decide(score, **kw):
     params = dict(score=score, regime="TREND_UP", data_quality="OK",
-                  gates_passed=True, stop_loss_configured=True)
+                  gates_passed=True, stop_loss_configured=True,
+                  directional_adx=25.0)
     params.update(kw)
     return zones.decide(**params)
 
 
 # ── the three specified bands, including their exact boundaries ─────────
-@pytest.mark.parametrize("score", [40.0, 40.1, 65.0, 99.9, 100.0])
+@pytest.mark.parametrize("score", [40.1, 65.0, 99.9, 100.0])
 def test_bullish_band_buys_two_step_itm_ce(score):
     decision = _decide(score)
     assert decision.zone == zones.CE_2_ITM
@@ -28,7 +29,7 @@ def test_bullish_band_buys_two_step_itm_ce(score):
     assert zones.strike_index_offset(decision.zone) == -2
 
 
-@pytest.mark.parametrize("score", [-40.0, -40.1, -65.0, -100.0])
+@pytest.mark.parametrize("score", [-40.1, -65.0, -100.0])
 def test_bearish_band_buys_two_step_itm_pe(score):
     decision = _decide(score)
     assert decision.zone == zones.PE_2_ITM
@@ -46,7 +47,8 @@ def test_sideways_band_sells_atm_move(score):
     assert zones.strike_index_offset(decision.zone) is None
 
 
-@pytest.mark.parametrize("score", [30.1, 35.0, 39.9, -30.1, -35.0, -39.9])
+@pytest.mark.parametrize("score", [30.1, 35.0, 39.9, 40.0,
+                                    -30.1, -35.0, -39.9, -40.0])
 def test_the_gap_between_the_bands_is_a_hold_not_an_action(score):
     """The spec makes 30<|s|<40 HOLD; treating it as either neighbour
     would make the engine thrash across a single threshold."""
@@ -56,9 +58,9 @@ def test_the_gap_between_the_bands_is_a_hold_not_an_action(score):
     assert "hold band" in decision.reason
 
 
-def test_the_boundaries_are_inclusive_exactly_as_written():
-    assert zones.zone_for_score(40.0) == zones.CE_2_ITM
-    assert zones.zone_for_score(-40.0) == zones.PE_2_ITM
+def test_directional_boundaries_are_strict_and_move_boundaries_are_inclusive():
+    assert zones.zone_for_score(40.0) == zones.HOLD
+    assert zones.zone_for_score(-40.0) == zones.HOLD
     assert zones.zone_for_score(30.0) == zones.SHORT_MOVE
     assert zones.zone_for_score(-30.0) == zones.SHORT_MOVE
 
@@ -89,7 +91,19 @@ def test_selling_move_is_refused_when_adx_does_not_confirm_calm():
     decision = zones.decide(score=0.0, regime="RANGE", data_quality="OK",
                             gates_passed=True, short_move_calm=False)
     assert decision.action_allowed is False
-    assert "ADX is not below 30" in decision.reason
+    assert "ADX is not below 25" in decision.reason
+
+
+@pytest.mark.parametrize("score", [40.1, -40.1])
+def test_directional_entry_requires_5m_adx_at_least_25(score):
+    regime = "TREND_UP" if score > 0 else "TREND_DOWN"
+    assert _decide(score, regime=regime, directional_adx=25.0).action_allowed
+    blocked = _decide(score, regime=regime, directional_adx=24.9)
+    assert blocked.action_allowed is False
+    assert "below 25" in blocked.reason
+    missing = _decide(score, regime=regime, directional_adx=None)
+    assert missing.action_allowed is False
+    assert "unavailable" in missing.reason
 
 
 def test_a_missing_stop_does_not_block_the_directional_zones():
@@ -98,7 +112,8 @@ def test_a_missing_stop_does_not_block_the_directional_zones():
     for score in (85.0, -85.0):
         assert zones.decide(score=score, regime="TREND_UP", data_quality="OK",
                             gates_passed=True,
-                            stop_loss_configured=False).action_allowed is True
+                            stop_loss_configured=False,
+                            directional_adx=25.0).action_allowed is True
 
 
 def test_range_does_not_block_the_move_action():
@@ -143,7 +158,8 @@ def test_overlapping_thresholds_are_rejected_rather_than_silently_inverted():
 def test_a_custom_policy_moves_both_boundaries():
     policy = ZonePolicy(directional_entry_abs=60.0, sideways_max_abs=20.0)
     assert zones.zone_for_score(50.0, policy) == zones.HOLD
-    assert zones.zone_for_score(60.0, policy) == zones.CE_2_ITM
+    assert zones.zone_for_score(60.0, policy) == zones.HOLD
+    assert zones.zone_for_score(60.1, policy) == zones.CE_2_ITM
     assert zones.zone_for_score(20.0, policy) == zones.SHORT_MOVE
 
 
@@ -265,7 +281,7 @@ def test_directional_regime_alignment_is_explicit(zone, regime, expected):
 
 
 def test_score_drift_within_a_zone_never_exits():
-    """+40 -> +90 -> +41 is all one CE zone: no exit, no re-entry, no churn."""
-    open_zone = zones.zone_for_score(40.0)
+    """>+40 remains one CE zone: no exit, no re-entry, no churn."""
+    open_zone = zones.zone_for_score(40.1)
     for score in (90.0, 41.0, 100.0, 40.0):
         assert zones.should_exit(open_zone, zones.zone_for_score(score))[0] is False

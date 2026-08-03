@@ -27,7 +27,7 @@ from .score import ScoreResult
 SCHEMA_VERSION = "1.3.0"
 # The model version participates in signal_id. This version introduces the
 # +/-30/+/-40 zone profile and ADX/RSI regime confirmation.
-MODEL_VERSION = "trend-rules-v1.3.0"
+MODEL_VERSION = "trend-rules-v1.4.0"
 
 # These two v1 gates describe whether a *directional* entry is available. They
 # remain in the public gate matrix for backward compatibility, but they are not
@@ -41,7 +41,8 @@ _DIRECTIONAL_ONLY_GATE_NAMES = frozenset({
 
 @dataclass(frozen=True, slots=True)
 class SignalConfig:
-    # Operator spec: directional entry at |score| >= 40; the neutral candidate
+    # Operator spec: directional entry at |score| > 40 with 5m ADX >= 25;
+    # the neutral candidate
     # range is only |score| <= 30 and must persist for six closed 5m candles.
     # Every intermediate score is HOLD -- see signals/zones.py. Was 65/25;
     # entry threshold moved to match the zone spec so `direction` and `zone`
@@ -73,9 +74,9 @@ class SignalHysteresis:
             if trend_score >= -config.hold_score:
                 self.direction = 0
         if self.direction == 0:
-            if trend_score >= config.entry_score:
+            if trend_score > config.entry_score:
                 self.direction = 1
-            elif trend_score <= -config.entry_score:
+            elif trend_score < -config.entry_score:
                 self.direction = -1
         return self.direction
 
@@ -157,8 +158,23 @@ def _zone_entry_gates(
     """
     if zone in {zones.CE_2_ITM, zones.PE_2_ITM}:
         matching_regime = zones.directional_regime_matches(zone, regime.value)
+        directional_strength = (
+            trigger_adx is not None and trigger_adx >= CALM_ADX_MAX
+        )
         return [
             *(dict(gate) for gate in gates),
+            {
+                "name": "directional_adx",
+                "label": "DIRECTIONAL ADX",
+                "passed": directional_strength,
+                "detail": (
+                    f"5m ADX {trigger_adx:.1f} meets the minimum {CALM_ADX_MAX:.0f}"
+                    if directional_strength else
+                    (f"5m ADX {trigger_adx:.1f} is below the required {CALM_ADX_MAX:.0f}"
+                     if trigger_adx is not None else
+                     "5m ADX is unavailable; directional entry is blocked")
+                ),
+            },
             {
                 "name": "directional_confidence",
                 "label": "DIRECTIONAL CONFIDENCE",
@@ -347,6 +363,7 @@ def build_snapshot(
         gates_passed=zone_gates_passed,
         stop_loss_configured=stop_loss_configured,
         short_move_calm=short_move_calm,
+        directional_adx=trigger_adx,
     )
     reason_codes = build_reason_codes(
         regime=regime, direction=direction, timeframe_biases=biases,

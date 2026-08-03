@@ -297,14 +297,14 @@ def test_live_cycle_waits_for_data_sync_without_audit_or_exchange(
 @pytest.mark.parametrize(
     ("score", "expected_zone", "expected_type", "expected_side"),
     (
-        # Directional at |40|; +/-30 is the confirmed short-MOVE candidate.
+        # Directional beyond |40|; +/-30 is the confirmed short-MOVE candidate.
         # Every intermediate score is HOLD and maps to no contract class.
         (-100, dashboard.TREND_SCORE_PE_ZONE, "PE", "long"),
-        (-40, dashboard.TREND_SCORE_PE_ZONE, "PE", "long"),
+        (-40.1, dashboard.TREND_SCORE_PE_ZONE, "PE", "long"),
         (-30, dashboard.TREND_SCORE_MOVE_ZONE, "MOVE", "short"),
         (0, dashboard.TREND_SCORE_MOVE_ZONE, "MOVE", "short"),
         (30, dashboard.TREND_SCORE_MOVE_ZONE, "MOVE", "short"),
-        (40, dashboard.TREND_SCORE_CE_ZONE, "CE", "long"),
+        (40.1, dashboard.TREND_SCORE_CE_ZONE, "CE", "long"),
         (100, dashboard.TREND_SCORE_CE_ZONE, "CE", "long"),
     ),
 )
@@ -389,7 +389,7 @@ def test_short_move_with_non_calm_5m_adx_does_not_close_or_replace_a_live_positi
         0.0,
         suffix="10:10:00Z",
         zone_action_allowed=False,
-        zone_reason="5m ADX 40.0 must be below 30 before selling MOVE",
+        zone_reason="5m ADX 40.0 must be below 25 before selling MOVE",
     )
     prepare = Mock(side_effect=AssertionError("blocked MOVE must not prepare"))
     close = Mock(side_effect=AssertionError("blocked MOVE must not close"))

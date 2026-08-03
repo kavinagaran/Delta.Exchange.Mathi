@@ -8848,7 +8848,7 @@ def _trend_score_auto_engine_action_ready(
     """Do not mutate a position until the engine has approved this zone.
 
     A SHORT_MOVE is actionable only when the engine confirms the current
-    closed 5m score is neutral and its 5m ADX is below 30. The same fail-safe
+    closed 5m score is neutral and its 5m ADX is below 25. The same fail-safe
     rule applies to every other engine action gate.
     """
     if signal.get("zone") == TREND_SCORE_HOLD_ZONE:

@@ -179,10 +179,10 @@
       <div class="te-preview-chart-intro">
         <p>Each point is the committed score from a completed five-minute decision. Line colour shows the active score zone used by automation.</p>
         <div class="te-preview-chart-legend" aria-label="Committed score zones and trade markers">
-          <span class="is-ce"><i></i>Buy CE ≥ +40</span>
+          <span class="is-ce"><i></i>Buy CE &gt; +40 · ADX ≥ 25</span>
           <span class="is-hold"><i></i>Hold +30…+40 / −40…−30</span>
-          <span class="is-move"><i></i>Short MOVE −30 to +30</span>
-          <span class="is-pe"><i></i>Buy PE ≤ −40</span>
+          <span class="is-move"><i></i>Short MOVE −30 to +30 · ADX &lt; 25</span>
+          <span class="is-pe"><i></i>Buy PE &lt; −40 · ADX ≥ 25</span>
           <span><b aria-hidden="true">+</b>Entry</span>
           <span><b aria-hidden="true">×</b>Exit</span>
         </div>
@@ -382,7 +382,7 @@ function tradeDecisionMeta(zone, actionAllowed = true, reason = '') {
       return {
         label: 'WAIT — 5M ADX NOT CALM',
         tone: 'is-blocked',
-        detail: blocker || 'The latest completed 5-minute ADX must be below 30 before an ATM MOVE straddle can be sold.',
+        detail: blocker || 'The latest completed 5-minute ADX must be below 25 before an ATM MOVE straddle can be sold.',
       };
     }
     if (key === 'SHORT_MOVE' && /stop loss/i.test(blocker)) {
@@ -500,10 +500,10 @@ function renderHero(snapshot, liveView) {
 }
 
 const COMMITTED_SCORE_ZONE_LEVELS = [
-  { value: 40, label: 'BUY CE +40', color: '#39f0ad' },
+  { value: 40, label: 'BUY CE >+40', color: '#39f0ad' },
   { value: 30, label: 'SHORT MOVE +30', color: '#d9e1ea' },
   { value: -30, label: 'SHORT MOVE −30', color: '#d9e1ea' },
-  { value: -40, label: 'BUY PE −40', color: '#ff5f7e' },
+  { value: -40, label: 'BUY PE <−40', color: '#ff5f7e' },
 ];
 
 const COMMITTED_ZONE_COLOURS = {
@@ -521,8 +521,8 @@ function normaliseCommittedZone(value, score) {
       || raw.includes('BUY_PE') || raw.includes('PUT')) return 'PE';
   if (raw === 'MV' || raw.includes('MOVE') || raw.includes('STRADDLE')) return 'MV';
   if (raw.includes('HOLD')) return 'HOLD';
-  if (score >= 40) return 'CE';
-  if (score <= -40) return 'PE';
+  if (score > 40) return 'CE';
+  if (score < -40) return 'PE';
   if (score >= -30 && score <= 30) return 'MV';
   return 'HOLD';
 }

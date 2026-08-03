@@ -69,7 +69,7 @@ def adx(candles: Sequence[Candle], period: int = 14) -> float | None:
     """Wilder Average Directional Index, returned on its usual 0..100 scale.
 
     ADX measures trend *strength*, not direction.  Direction remains the job
-    of price structure and RSI; the regime classifier treats ADX below 30 as
+    of price structure and RSI; the regime classifier treats ADX below 25 as
     a calm/sideways market.  ``None`` is returned until a complete Wilder
     warm-up exists rather than inventing a weak-trend reading.
     """

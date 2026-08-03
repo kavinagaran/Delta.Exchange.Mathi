@@ -17,9 +17,9 @@ from dataclasses import dataclass
 
 from ..features.pipeline import TimeframeFeatures
 
-# Five-minute ADX below 30 is a calm/sideways market.  At 30 or above the
+# Five-minute ADX below 25 is a calm/sideways market.  At 25 or above the
 # engine may classify a directional CE/PE setup when score and RSI agree.
-CALM_ADX_MAX = 30.0
+CALM_ADX_MAX = 25.0
 
 
 class Regime(enum.StrEnum):
@@ -49,7 +49,7 @@ class RegimeConfig:
     # as "the engine rarely trades", not as an error.
     trend_enter_score: float = 40.0   # was 60.0 (§8.2 example)
     trend_exit_score: float = 30.0    # matches the neutral candidate boundary
-    # ADX below 30 is the calm/sideways condition.  RANGE is deliberately
+    # ADX below 25 is the calm/sideways condition.  RANGE is deliberately
     # permitted by the SHORT_MOVE zone, so this is a positive confirmation for
     # that setup — not a blanket "do not trade" state.
     calm_adx_max: float = CALM_ADX_MAX
@@ -155,12 +155,12 @@ class RegimeClassifier:
         # below the exit threshold; a new trend needs the full entry threshold.
         holding_up = self._current in (Regime.TREND_UP, Regime.BREAKOUT_UP)
         holding_down = self._current in (Regime.TREND_DOWN, Regime.BREAKOUT_DOWN)
-        if ((trend_score >= config.trend_enter_score
+        if ((trend_score > config.trend_enter_score
              and rsi >= config.bullish_rsi_min)
                 or (holding_up and trend_score > config.trend_exit_score
                     and rsi >= 50.0)):
             return Regime.TREND_UP, f"score {trend_score:.1f}; ADX {adx:.1f}; RSI {rsi:.1f}"
-        if ((trend_score <= -config.trend_enter_score
+        if ((trend_score < -config.trend_enter_score
              and rsi <= config.bearish_rsi_max)
                 or (holding_down and trend_score < -config.trend_exit_score
                     and rsi <= 50.0)):

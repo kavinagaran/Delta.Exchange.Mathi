@@ -80,10 +80,10 @@ def _move_product(expiry, strike, *, product_id=20_001, **changes):
 @pytest.mark.parametrize(
     ("score", "expected"),
     [
-        # Directional at |40|; only +/-30 is a SHORT_MOVE candidate.  Every
-        # intermediate score is HOLD (the engine separately confirms 30 min).
+        # Directional only beyond |40|; exact +/-40 and every intermediate
+        # score are HOLD. Only +/-30 is a SHORT_MOVE candidate.
         (-100, PE_2_ITM),
-        (-40, PE_2_ITM),
+        (-40, HOLD),
         (-39.999, HOLD),
         (-30.001, HOLD),
         (-30, SHORT_MOVE),
@@ -91,11 +91,11 @@ def _move_product(expiry, strike, *, product_id=20_001, **changes):
         (30, SHORT_MOVE),
         (30.001, HOLD),
         (39.999, HOLD),
-        (40, CE_2_ITM),
+        (40, HOLD),
         (100, CE_2_ITM),
     ],
 )
-def test_score_zone_uses_inclusive_directional_boundaries(score, expected):
+def test_score_zone_uses_strict_directional_boundaries(score, expected):
     assert score_zone(score) == expected
 
 
@@ -393,7 +393,7 @@ def test_transition_closes_then_opens_new_zone_on_same_signal():
         "trend_score_zone": SHORT_MOVE,
     }
     plan = plan_score_transition(
-        score=-40, signal_key="signal-3", owned_positions=[move]
+        score=-40.1, signal_key="signal-3", owned_positions=[move]
     )
     assert plan["action"] == "CLOSE_THEN_OPEN"
     assert plan["current_zone"] == SHORT_MOVE

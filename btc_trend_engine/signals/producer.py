@@ -240,9 +240,9 @@ class SnapshotProducer:
                  Regime.RANGE, Regime.HIGH_VOL_SHOCK, Regime.LOW_LIQUIDITY,
                  Regime.DEGRADED) else f"regime is {regime.value}"},
             {"name": "score_beyond_entry_threshold",
-             "passed": abs(score) >= self.config.entry_score,
-             "detail": None if abs(score) >= self.config.entry_score
-             else f"|score| {abs(score):.1f} < {self.config.entry_score}"},
+             "passed": abs(score) > self.config.entry_score,
+             "detail": None if abs(score) > self.config.entry_score
+             else f"|score| {abs(score):.1f} <= {self.config.entry_score}"},
             # The risk lock is genuinely not evaluable here: risk/ needs an
             # account's data_dir and kill-switch state, and the engine holds
             # neither (ADR 0001 — it never reads users/).  Mark it deferred
