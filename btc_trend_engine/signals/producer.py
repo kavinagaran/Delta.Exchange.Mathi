@@ -157,6 +157,7 @@ class SnapshotProducer:
         candles: Mapping[str, Sequence[Candle]],
         forming: Candle | None,
         data_quality: str,
+        ticker: Mapping[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         """A continuously-updating score for display. **Never a decision.**
 
@@ -169,8 +170,10 @@ class SnapshotProducer:
         as the score crossed a band and came back.
 
         The forming candle is appended to the closed trigger series, so this
-        moves within the bar. That is the feature and also exactly why it must
-        not drive orders.
+        moves within the bar. All other score inputs, including derivatives
+        context, match the committed pipeline. That makes the preview answer
+        "what would commit if this forming candle closed now?" without making
+        it eligible to drive orders.
         """
         trigger = list(candles.get(TRIGGER) or [])
         if forming is not None:
@@ -186,7 +189,7 @@ class SnapshotProducer:
         score = compute_score(
             structural=features[STRUCTURAL], primary=features[PRIMARY],
             setup=features[SETUP], trigger=features[TRIGGER],
-            derivatives={},
+            derivatives=derivatives_features(ticker or {}),
         )
         # ``live_score`` remains the one-decimal value used by the dial.  The
         # separate chart value keeps enough precision for a faithful OHLC

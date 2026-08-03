@@ -339,6 +339,7 @@ class EngineService:
                 candles={resolution: series.closed_candles()
                          for resolution, series in self.candles.series.items()},
                 forming=self.candles.series[TRIGGER_RESOLUTION].forming(),
+                ticker=self.last_ticker,
                 data_quality=self.current_data_quality(),
             )
             if view is not None:

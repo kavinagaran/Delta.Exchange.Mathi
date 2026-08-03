@@ -115,10 +115,36 @@ def test_live_view_keeps_extra_precision_for_the_display_only_chart(monkeypatch)
     producer = SnapshotProducer("BTCUSD")
     view = producer.produce_live(
         now=T0, candles=_all_timeframes(), forming=_forming(63000.0),
-        data_quality="OK")
+        ticker={}, data_quality="OK")
     assert view is not None
     assert view["live_score"] == 12.3
     assert view["chart_score"] == 12.3456
+
+
+def test_live_and_committed_scores_match_when_market_inputs_match():
+    """Preview uses every committed component, including derivatives.
+
+    With no forming candle, identical closed candles and ticker context leave
+    no legitimate source of score divergence.
+    """
+    ticker = {
+        "mark_price": "63000",
+        "spot_price": "62900",
+        "funding_rate": "0.0001",
+        "oi_change_usd_6h": "80000",
+        "oi_value_usd": "1000000",
+    }
+    producer = SnapshotProducer("BTCUSD")
+    candles = _all_timeframes()
+    committed = producer.produce(
+        now=T0, candles=candles, ticker=ticker,
+        data_quality="OK", book_valid=True, spread_bps=2.0)
+    live = producer.produce_live(
+        now=T0, candles=candles, forming=None, ticker=ticker,
+        data_quality="OK")
+
+    assert committed is not None and live is not None
+    assert live["live_score"] == committed["trend_score"]
 
 
 def test_the_committed_score_does_NOT_move_with_the_forming_candle():
