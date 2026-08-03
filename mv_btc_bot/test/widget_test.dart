@@ -69,6 +69,8 @@ void main() {
     expect(find.text('2 trades'), findsOneWidget);
     expect(find.text('+42.4'), findsOneWidget);
     expect(find.text('+46.8'), findsOneWidget);
+    expect(find.text('ENTRY READY'), findsNothing);
+    expect(find.text('SIGNAL CONSUMED'), findsNothing);
     expect(find.text('P-BTC-63000-020826'), findsOneWidget);
     expect(find.text(r'-$65.90'), findsWidgets);
     expect(find.textContaining('7:41 AM IST'), findsOneWidget);
@@ -108,10 +110,6 @@ void main() {
                   icon: Icon(appPages[index].icon),
                   label: appPages[index].navLabel,
                 ),
-              const NavigationDestination(
-                icon: Icon(Icons.grid_view_rounded),
-                label: 'More',
-              ),
             ],
           ),
         ),
@@ -121,7 +119,7 @@ void main() {
     expect(tester.takeException(), isNull);
     expect(find.text('Trend'), findsOneWidget);
     expect(find.text('Paper'), findsOneWidget);
-    expect(find.text('More'), findsOneWidget);
+    expect(find.text('Config'), findsOneWidget);
     // The /trades tab is labelled by its route, not by the page title — the
     // full 'Performance' does not fit a seven-tab bar at 360dp.
     expect(find.text('Trades'), findsOneWidget);
@@ -300,7 +298,7 @@ class _TodayApi extends DashboardApi {
 
   @override
   Future<ApiResult<Map<String, dynamic>>> engineLive() async =>
-      const ApiResult.ok(<String, dynamic>{'trend_score': 46.8});
+      const ApiResult.ok(<String, dynamic>{'live_score': 46.8});
 
   @override
   Future<ApiResult<Map<String, dynamic>>> protectionStatus() async =>

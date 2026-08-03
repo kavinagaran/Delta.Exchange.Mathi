@@ -71,7 +71,7 @@ const kBlueBackgroundAsset = 'assets/sparkling-blue-dashboard-bg.png';
 
 final appTheme = AppThemeController();
 
-const kWebAssetRevision = '6.2.0+24-live-protection';
+const kWebAssetRevision = '6.2.1+25-today-preview';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -619,9 +619,9 @@ const appPages = <AppPageSpec>[
   ),
 ];
 
-/// The high-frequency phone tabs. Other native pages live in the More sheet;
-/// tablets expose all destinations in a NavigationRail.
-const primaryPageIndexes = <int>[0, 1, 2, 7];
+/// The five phone tabs, ordered for the trading workflow requested by the
+/// operator. Auxiliary pages remain available from the app-bar workspace menu.
+const primaryPageIndexes = <int>[0, 1, 7, 4, 2];
 
 class SessionService {
   static const _defaultUrl = 'https://mathibot.duckdns.org';
@@ -852,7 +852,7 @@ class _HomeShellState extends State<HomeShell> {
   }
 
   Future<void> _showMore() async {
-    const secondary = [3, 4, 5, 6];
+    const secondary = [3, 5, 6];
     final selected = await showModalBottomSheet<int>(
       context: context,
       useSafeArea: true,
@@ -1046,6 +1046,7 @@ class _HomeShellState extends State<HomeShell> {
             tooltip: 'Account',
             onSelected: (value) {
               if (value == 'logout') unawaited(_signOut());
+              if (value == 'workspace') unawaited(_showMore());
             },
             itemBuilder: (context) => [
               PopupMenuItem(
@@ -1068,6 +1069,16 @@ class _HomeShellState extends State<HomeShell> {
                 ),
               ),
               const PopupMenuDivider(),
+              const PopupMenuItem(
+                value: 'workspace',
+                child: Row(
+                  children: [
+                    Icon(Icons.grid_view_rounded, size: 18),
+                    SizedBox(width: 10),
+                    Text('More pages'),
+                  ],
+                ),
+              ),
               const PopupMenuItem(
                 value: 'logout',
                 child: Row(
@@ -1147,13 +1158,9 @@ class _HomeShellState extends State<HomeShell> {
                 ),
                 clipBehavior: Clip.antiAlias,
                 child: NavigationBar(
-                  selectedIndex: primaryIndex >= 0 ? primaryIndex : 4,
+                  selectedIndex: primaryIndex >= 0 ? primaryIndex : 0,
                   onDestinationSelected: (index) {
-                    if (index == 4) {
-                      _showMore();
-                    } else {
-                      _selectTab(primaryPageIndexes[index]);
-                    }
+                    _selectTab(primaryPageIndexes[index]);
                   },
                   destinations: [
                     for (final index in primaryPageIndexes)
@@ -1162,11 +1169,6 @@ class _HomeShellState extends State<HomeShell> {
                         selectedIcon: Icon(appPages[index].icon),
                         label: appPages[index].navLabel,
                       ),
-                    const NavigationDestination(
-                      icon: Icon(Icons.grid_view_rounded),
-                      selectedIcon: Icon(Icons.grid_view_rounded),
-                      label: 'More',
-                    ),
                   ],
                 ),
               ),

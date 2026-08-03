@@ -125,12 +125,13 @@ void main() {
     });
 
     test('phone primary navigation is intentionally compact', () {
-      expect(primaryPageIndexes, [0, 1, 2, 7]);
+      expect(primaryPageIndexes, [0, 1, 7, 4, 2]);
       expect(primaryPageIndexes.map((index) => appPages[index].label), [
         'Today',
         'Performance',
-        'Paper',
         'Trend Engine',
+        'Bot Config',
+        'Paper',
       ]);
     });
   });

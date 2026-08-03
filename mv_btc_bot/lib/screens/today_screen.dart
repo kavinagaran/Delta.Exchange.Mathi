@@ -36,13 +36,14 @@ class _TodayScreenState extends State<TodayScreen> {
   Map<String, dynamic>? _status;
   Map<String, dynamic>? _engine;
   Map<String, dynamic>? _engineLive;
-  Map<String, dynamic>? _controller;
   Map<String, dynamic>? _protection;
   List<dynamic> _todayTrades = const [];
   String? _error;
   bool _loading = true;
   bool _closing = false;
   Timer? _poll;
+  Timer? _previewPoll;
+  bool _previewLoading = false;
   Timer? _streamReconnect;
   StreamSubscription<ApiResult<Map<String, dynamic>>>? _protectionEvents;
 
@@ -58,14 +59,36 @@ class _TodayScreenState extends State<TodayScreen> {
       const Duration(seconds: 20),
       (_) => _refresh(quiet: true),
     );
+    // The forming-candle preview is display-only and cheap to refresh. Keep it
+    // separate from the heavier account/trade refresh so the dial feels live.
+    _previewPoll = Timer.periodic(
+      const Duration(seconds: 2),
+      (_) => _refreshPreview(),
+    );
   }
 
   @override
   void dispose() {
     _poll?.cancel();
+    _previewPoll?.cancel();
     _streamReconnect?.cancel();
     _protectionEvents?.cancel();
     super.dispose();
+  }
+
+  Future<void> _refreshPreview() async {
+    if (_previewLoading) return;
+    _previewLoading = true;
+    final result = await widget.api.engineLive();
+    _previewLoading = false;
+    if (!mounted) return;
+    if (result.unauthorised) {
+      widget.onUnauthorised();
+      return;
+    }
+    if (result.ok && result.data != null) {
+      setState(() => _engineLive = result.data);
+    }
   }
 
   void _connectProtectionStream() {
@@ -98,9 +121,10 @@ class _TodayScreenState extends State<TodayScreen> {
 
   void _applyProtectionSnapshot(Map<String, dynamic> payload) {
     final nextTrades = _todayTrades
-        .map((row) => row is Map<String, dynamic>
-            ? <String, dynamic>{...row}
-            : row)
+        .map(
+          (row) =>
+              row is Map<String, dynamic> ? <String, dynamic>{...row} : row,
+        )
         .toList();
     for (final row in nextTrades.whereType<Map<String, dynamic>>()) {
       if (!_isOpen(row) || row['dry_run'] == true) continue;
@@ -127,7 +151,6 @@ class _TodayScreenState extends State<TodayScreen> {
       widget.api.status(),
       widget.api.todayTrades(),
       widget.api.engineSnapshot(),
-      widget.api.scoreAutoStatus(),
       widget.api.engineLive(),
       widget.api.protectionStatus(),
     ]);
@@ -145,9 +168,8 @@ class _TodayScreenState extends State<TodayScreen> {
       _status = results[0].data as Map<String, dynamic>?;
       _todayTrades = (results[1].data as List<dynamic>?) ?? const [];
       _engine = results[2].data as Map<String, dynamic>?;
-      _controller = results[3].data as Map<String, dynamic>?;
-      _engineLive = results[4].data as Map<String, dynamic>?;
-      _protection = results[5].data as Map<String, dynamic>?;
+      _engineLive = results[3].data as Map<String, dynamic>?;
+      _protection = results[4].data as Map<String, dynamic>?;
       // Only the primary call's failure blanks the screen; the engine being
       // unreachable is itself information and gets its own card.
       _error = results[0].ok ? null : results[0].error;
@@ -275,11 +297,7 @@ class _TodayScreenState extends State<TodayScreen> {
               onClose: () => _close(current),
             ),
           const SizedBox(height: Gap.md),
-          _EngineCard(
-            engine: _engine,
-            live: _engineLive,
-            controller: _controller,
-          ),
+          _EngineCard(engine: _engine, live: _engineLive),
           const SizedBox(height: Gap.md),
           _TodayTradesCard(trades: trades),
         ],
@@ -376,7 +394,8 @@ class _ProtectionPanel extends StatelessWidget {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final running = protection['running'] == true;
-    final armed = protection['stream_tsl_armed'] == true ||
+    final armed =
+        protection['stream_tsl_armed'] == true ||
         protection['tsl_armed'] == true;
     String value(String key, [String? fallback]) {
       final raw =
@@ -451,20 +470,13 @@ class _ProtectionPanel extends StatelessWidget {
 
 /// Engine state: score, zone, and whether an entry is currently permitted.
 class _EngineCard extends StatelessWidget {
-  const _EngineCard({
-    required this.engine,
-    required this.live,
-    required this.controller,
-  });
+  const _EngineCard({required this.engine, required this.live});
 
   final Map<String, dynamic>? engine;
   final Map<String, dynamic>? live;
-  final Map<String, dynamic>? controller;
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-
     if (engine == null) {
       return const AppCard(
         kicker: 'Trend engine',
@@ -479,12 +491,13 @@ class _EngineCard extends StatelessWidget {
     }
 
     final score = _number(engine!['trend_score']);
-    final preview = _number(live?['trend_score'] ?? live?['score']);
+    final preview = _number(
+      live?['live_score'] ??
+          live?['preview_score'] ??
+          live?['trend_score'] ??
+          live?['score'],
+    );
     final zone = engine!['zone'] as String?;
-    final quality = engine!['data_quality'] as String?;
-    final allowed = engine!['zone_action_allowed'] == true;
-    final reason = engine!['zone_reason'] as String?;
-    final healthy = quality == 'OK';
     final previewZone = _zoneFromScore(preview);
 
     return AppCard(
@@ -518,33 +531,7 @@ class _EngineCard extends StatelessWidget {
             ],
           ),
           const SizedBox(height: Gap.sm),
-          Wrap(
-            spacing: Gap.sm,
-            runSpacing: Gap.xs,
-            children: [
-              StatusPill(
-                healthy
-                    ? (allowed ? 'ENTRY READY' : 'WAITING')
-                    : (quality ?? 'DEGRADED'),
-                colour: healthy ? (allowed ? kPositive : kWarning) : kNegative,
-              ),
-              if (controller?['status'] != null)
-                StatusPill(
-                  '${controller!['status']}'.replaceAll('_', ' ').toUpperCase(),
-                  colour: scheme.onSurfaceVariant,
-                  dot: false,
-                ),
-            ],
-          ),
-          const SizedBox(height: Gap.sm),
           if (score != null) ScoreMeter(score: score),
-          if (reason != null && reason.isNotEmpty) ...[
-            const SizedBox(height: Gap.sm),
-            Text(
-              reason,
-              style: AppText.caption.copyWith(color: scheme.onSurfaceVariant),
-            ),
-          ],
         ],
       ),
     );
