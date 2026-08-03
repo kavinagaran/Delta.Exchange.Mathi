@@ -24,7 +24,12 @@ from btc_trend_engine.signals.regime import (
     Regime,
     RegimeClassifier,
 )
-from btc_trend_engine.signals.score import V1_WEIGHTS, compute_score
+from btc_trend_engine.signals.score import (
+    DERIVATIVES_CONTEXT_CAP,
+    V1_WEIGHTS,
+    _derivatives_context,
+    compute_score,
+)
 from btc_trend_engine.signals.snapshot import (
     SignalConfig,
     SignalHysteresis,
@@ -253,6 +258,30 @@ def test_score_is_antisymmetric_for_mirrored_inputs():
         trigger=_tf(down), derivatives={"oi_change_6h_pct": 4.0,
                                         "funding_percentile": 0.5}).trend_score
     assert bear == pytest.approx(-bull, abs=1.0)
+
+
+def test_derivatives_context_is_continuous_when_direction_crosses_zero():
+    derivatives = {"oi_change_6h_pct": 4.0}
+    just_bearish = _derivatives_context(derivatives, -0.01)
+    just_bullish = _derivatives_context(derivatives, 0.01)
+
+    assert just_bearish == pytest.approx(-0.004)
+    assert just_bullish == pytest.approx(0.004)
+    assert just_bullish - just_bearish == pytest.approx(0.008)
+
+
+def test_derivatives_context_is_bounded_even_with_extreme_inputs():
+    positive = _derivatives_context({
+        "oi_change_6h_pct": 500.0,
+        "mark_spot_basis_pct": 50.0,
+    }, 1.0)
+    negative = _derivatives_context({
+        "oi_change_6h_pct": -500.0,
+        "mark_spot_basis_pct": -50.0,
+    }, 1.0)
+
+    assert positive == DERIVATIVES_CONTEXT_CAP
+    assert negative == -DERIVATIVES_CONTEXT_CAP
 
 
 def test_order_flow_weight_is_zero_and_unavailable_in_v1():

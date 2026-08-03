@@ -25,9 +25,10 @@ from .score import ScoreResult
 # zone_option_type, zone_itm_steps). Minor bump -- the client compares major
 # only, so existing consumers are unaffected.
 SCHEMA_VERSION = "1.3.0"
-# The model version participates in signal_id. This version introduces the
-# +/-30/+/-40 zone profile and ADX/RSI regime confirmation.
-MODEL_VERSION = "trend-rules-v1.4.0"
+# The model version participates in signal_id. v1.4.1 makes derivatives
+# context continuous around a flat higher-timeframe reading and caps it so a
+# context-only reversal cannot dominate the price/ADX evidence.
+MODEL_VERSION = "trend-rules-v1.4.1"
 
 # These two v1 gates describe whether a *directional* entry is available. They
 # remain in the public gate matrix for backward compatibility, but they are not

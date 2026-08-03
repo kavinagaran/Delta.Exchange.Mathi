@@ -100,6 +100,14 @@ V1_WEIGHTS: dict[str, float] = {
     "derivatives_context": 0.25,
 }
 
+# Derivatives data is context, not a stand-alone direction signal.  Even with
+# its research-backed weight, one OI/basis observation must not contribute
+# more than 12.5 points to the pre-tanh weighted score (0.25 * 0.50).  More
+# importantly, its OI term is scaled by the continuous higher-timeframe trend
+# reading below rather than its sign, preventing a tiny cross through zero
+# from flipping the full component from roughly +50 to -50 in one candle.
+DERIVATIVES_CONTEXT_CAP = 0.50
+
 
 @dataclass(frozen=True, slots=True)
 class ComponentScore:
@@ -251,27 +259,36 @@ def _breakout_quality(setup: TimeframeFeatures) -> float | None:
 
 
 def _derivatives_context(derivatives: Mapping[str, float],
-                         underlying_sign: float) -> float | None:
+                         underlying_direction: float) -> float | None:
     """§9.5: probabilistic context only. Crowded funding *against* the current
-    direction is a mild contradiction; OI expanding with price confirms."""
+    direction is a mild contradiction; OI expanding with price confirms.
+
+    ``underlying_direction`` is deliberately continuous in [-1, +1].  Treating
+    every non-zero reading as a full +/-1 made this component discontinuous:
+    an almost-flat higher-timeframe input crossing zero inverted the entire OI
+    contribution even though the market evidence had barely changed.
+    """
     if not derivatives:
         return None
+    direction = _clamp(underlying_direction)
     score = 0.0
     used = False
     funding_rank = derivatives.get("funding_percentile")
-    if funding_rank is not None and underlying_sign != 0.0:
+    if funding_rank is not None and direction != 0.0:
         crowding = (funding_rank - 0.5) * 2.0   # -1 .. +1
-        score += -0.5 * crowding * underlying_sign
+        score += -0.5 * crowding * direction
         used = True
     oi_change = derivatives.get("oi_change_6h_pct")
-    if oi_change is not None and underlying_sign != 0.0:
-        score += 0.5 * _clamp(oi_change / 5.0) * underlying_sign
+    if oi_change is not None and direction != 0.0:
+        score += 0.5 * _clamp(oi_change / 5.0) * direction
         used = True
     basis = derivatives.get("mark_spot_basis_pct")
     if basis is not None:
         score += 0.2 * _clamp(basis / 0.5)
         used = True
-    return _clamp(score) if used else None
+    return _clamp(
+        score, -DERIVATIVES_CONTEXT_CAP, DERIVATIVES_CONTEXT_CAP,
+    ) if used else None
 
 
 def compute_score(
@@ -288,9 +305,9 @@ def compute_score(
         raise ValueError("score weights must sum to 1.0")
 
     direction_hint = _higher_timeframe_trend(structural, primary)
-    underlying_sign = (0.0 if direction_hint is None
-                      else (1.0 if direction_hint > 0 else
-                            -1.0 if direction_hint < 0 else 0.0))
+    underlying_direction = (
+        0.0 if direction_hint is None else _clamp(direction_hint)
+    )
     rsi_score = _rsi_momentum(structural, primary, setup, trigger)
     raw: dict[str, float | None] = {
         "higher_timeframe_trend": direction_hint,
@@ -301,7 +318,9 @@ def compute_score(
             trigger, rsi_score, direction_hint),
         "order_flow": None,  # ADR 0004: not computed in v1
         "breakout_quality": _breakout_quality(setup),
-        "derivatives_context": _derivatives_context(derivatives, underlying_sign),
+        "derivatives_context": _derivatives_context(
+            derivatives, underlying_direction,
+        ),
     }
 
     components: list[ComponentScore] = []
