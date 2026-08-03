@@ -282,12 +282,6 @@ class _AccountsScreenState extends State<AccountsScreen> {
         physics: const AlwaysScrollableScrollPhysics(),
         padding: const EdgeInsets.fromLTRB(Gap.lg, Gap.md, Gap.lg, Gap.xxl),
         children: [
-          const PageIntro(
-            icon: Icons.manage_accounts_rounded,
-            title: 'API Accounts',
-            subtitle: 'Users, exchange access and bot availability.',
-          ),
-          const SizedBox(height: Gap.md),
           AppCard(
             kicker: 'Accounts',
             title: '${_accounts.length} connected users',

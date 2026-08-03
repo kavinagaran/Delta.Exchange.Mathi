@@ -98,16 +98,6 @@ class _TrendEngineScreenState extends State<TrendEngineScreen> {
         physics: const AlwaysScrollableScrollPhysics(),
         padding: const EdgeInsets.fromLTRB(Gap.lg, Gap.md, Gap.lg, Gap.xxl),
         children: [
-          PageIntro(
-            icon: Icons.insights_rounded,
-            title: 'Trend Engine',
-            subtitle: 'Preview, committed decision and market evidence.',
-            trailing: StatusPill(
-              '${snapshot['data_quality'] ?? 'UNKNOWN'}',
-              colour: snapshot['data_quality'] == 'OK' ? kPositive : kWarning,
-            ),
-          ),
-          const SizedBox(height: Gap.md),
           _DecisionHero(snapshot: snapshot, live: _live),
           const SizedBox(height: Gap.md),
           _DecisionChart(history: _history),
