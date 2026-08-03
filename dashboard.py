@@ -143,8 +143,14 @@ TREND_SCORE_AUTO_LEDGER_SIGNAL_LIMIT = 576
 # A zero-fill IOC is a transient liquidity outcome, not a completed trading
 # setup.  Retry only on a later completed candle and back off aggressively so
 # an unchanged zone cannot create an order/alert storm.
-TREND_SCORE_AUTO_NO_FILL_RETRY_BASE_SECONDS = 15 * 60
-TREND_SCORE_AUTO_NO_FILL_RETRY_MAX_SECONDS = 60 * 60
+# A terminal zero-fill IOC is safe to retry on a newer completed candle: the
+# exact order is already cancelled, its fill is proven zero, and real-time
+# exposure is proven flat.  Keep a short debounce so concurrent supervisors
+# cannot churn, but do not strand a valid zone for 15 minutes.  The controller
+# is completed-5m-candle driven, therefore a 60-second base makes the next
+# candle the first practical retry while retaining one order per signal.
+TREND_SCORE_AUTO_NO_FILL_RETRY_BASE_SECONDS = 60
+TREND_SCORE_AUTO_NO_FILL_RETRY_MAX_SECONDS = 5 * 60
 # Fixed strategy rule: both DRY RUN and LIVE use the same quoted ATM MOVE
 # premium floor before a SHORT MOVE can be opened.
 SHORT_MOVE_MIN_PREMIUM_USD = 300.0
@@ -9343,7 +9349,7 @@ def _trend_score_auto_no_fill_attempt_count(setup: dict) -> int:
 
 
 def _trend_score_auto_no_fill_retry_delay_seconds(attempt_count: int) -> int:
-    """Exponential 15m/30m/60m retry delay, capped at one hour."""
+    """Exponential 1m/2m/4m retry delay, capped at five minutes."""
     exponent = max(0, min(int(attempt_count) - 1, 16))
     return min(
         TREND_SCORE_AUTO_NO_FILL_RETRY_BASE_SECONDS * (2 ** exponent),
@@ -9352,7 +9358,22 @@ def _trend_score_auto_no_fill_retry_delay_seconds(attempt_count: int) -> int:
 
 
 def _trend_score_auto_no_fill_retry_not_before(setup: dict) -> datetime:
-    """Resolve an explicit or backward-compatible automatic retry time."""
+    """Resolve the retry time, shortening legacy 15-minute cooldowns.
+
+    Older ledgers persist an explicit 15/30/60-minute timestamp.  Taking the
+    earlier of that timestamp and the current policy makes this release take
+    effect without an operator reset or unsafe manual ledger edit.
+    """
+    recorded_at = _parse_utc_stamp(setup.get("recorded_at_utc"))
+    if recorded_at is None:
+        raise RuntimeError(
+            "Trend score-auto NO_FILL recorded timestamp is invalid"
+        )
+    policy_retry_at = recorded_at + timedelta(
+        seconds=_trend_score_auto_no_fill_retry_delay_seconds(
+            _trend_score_auto_no_fill_attempt_count(setup)
+        )
+    )
     explicit = setup.get("retry_not_before_utc")
     if explicit not in (None, ""):
         retry_at = _parse_utc_stamp(explicit)
@@ -9360,17 +9381,8 @@ def _trend_score_auto_no_fill_retry_not_before(setup: dict) -> datetime:
             raise RuntimeError(
                 "Trend score-auto NO_FILL retry timestamp is invalid"
             )
-        return retry_at
-    recorded_at = _parse_utc_stamp(setup.get("recorded_at_utc"))
-    if recorded_at is None:
-        raise RuntimeError(
-            "Trend score-auto NO_FILL recorded timestamp is invalid"
-        )
-    return recorded_at + timedelta(
-        seconds=_trend_score_auto_no_fill_retry_delay_seconds(
-            _trend_score_auto_no_fill_attempt_count(setup)
-        )
-    )
+        return min(retry_at, policy_retry_at)
+    return policy_retry_at
 
 
 def _trend_score_auto_no_fill_retry_due(

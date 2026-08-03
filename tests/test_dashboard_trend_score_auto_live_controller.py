@@ -631,7 +631,7 @@ def test_no_fill_retries_automatically_on_a_later_candle_after_cooldown(
     ledger_path = live_account / dashboard.TREND_SCORE_AUTO_LEDGER_FILE
     ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
     assert ledger["no_fill_setup"]["attempt_count"] == 1
-    assert ledger["no_fill_setup"]["retry_delay_seconds"] == 15 * 60
+    assert ledger["no_fill_setup"]["retry_delay_seconds"] == 60
     dashboard._trend_score_auto_notify.assert_not_called()
 
     # Simulate the durable cooldown elapsing.  The next completed candle in
@@ -653,6 +653,23 @@ def test_no_fill_retries_automatically_on_a_later_candle_after_cooldown(
         if call.args[0] == "trend_score_auto_live_no_fill_retry_released"
     ]
     assert len(release_events) == 1
+
+
+def test_no_fill_legacy_long_cooldown_is_shortened_by_current_policy():
+    recorded = datetime.now(timezone.utc) - timedelta(minutes=2)
+    setup = {
+        "recorded_at_utc": recorded.isoformat(),
+        "target_zone": dashboard.TREND_SCORE_PE_ZONE,
+        "attempt_count": 1,
+        # Persisted by the previous 15-minute policy.
+        "retry_not_before_utc": (
+            recorded + timedelta(minutes=15)
+        ).isoformat(),
+    }
+
+    retry_at = dashboard._trend_score_auto_no_fill_retry_not_before(setup)
+
+    assert retry_at == recorded + timedelta(seconds=60)
 
 
 def test_repeated_no_fill_uses_exponential_backoff_without_alerts(
@@ -694,7 +711,7 @@ def test_repeated_no_fill_uses_exponential_backoff_without_alerts(
     assert dashboard._maybe_auto_trend_score_cycle() is True
     ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
     assert ledger["no_fill_setup"]["attempt_count"] == 2
-    assert ledger["no_fill_setup"]["retry_delay_seconds"] == 30 * 60
+    assert ledger["no_fill_setup"]["retry_delay_seconds"] == 2 * 60
     assert prepare.call_count == 2
     assert executor.call_count == 2
     dashboard._trend_score_auto_notify.assert_not_called()
