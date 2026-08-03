@@ -67,7 +67,7 @@ def test_committed_score_chart_is_a_zone_colored_line_with_every_boundary():
 
 
 def test_committed_score_chart_supports_axis_drag_scaling_and_zone_label_lane():
-    assert "Drag inside the chart to pan." in TEMPLATE
+    assert "Move the pointer for score/time crosshairs." in TEMPLATE
     assert "24H · 5M" in TEMPLATE
     assert "previewScoreChartStates" in TEMPLATE
     assert "installPreviewScoreChartInteractions" in TEMPLATE
@@ -92,6 +92,63 @@ def test_committed_score_chart_supports_axis_drag_scaling_and_zone_label_lane():
     assert "const labelX = plot.right + 6" in TEMPLATE
     assert "ctx.rect(plot.left, plot.top, plotWidth, plotHeight)" in TEMPLATE
     assert "touch-action: none" in STYLE
+
+
+def test_committed_score_chart_is_bounded_and_has_axis_crosshairs():
+    assert "function boundedPreviewScore" in TEMPLATE
+    assert "function previewScoreViewport" in TEMPLATE
+    assert "-100 + scoreSpan / 2" in TEMPLATE
+    assert "100 - scoreSpan / 2" in TEMPLATE
+    assert "function drawPreviewChartCrosshair" in TEMPLATE
+    assert "state.hover" in TEMPLATE
+    assert "canvas.addEventListener('pointerleave'" in TEMPLATE
+    assert "ctx.lineWidth = .65" in TEMPLATE
+    assert "score.toFixed(1)" in TEMPLATE
+    assert "formatPreviewChartTime(" in TEMPLATE
+
+
+@pytest.mark.skipif(NODE is None, reason="Node.js is required for frontend tests")
+def test_score_viewport_never_leaves_minus_100_to_plus_100():
+    script = r"""
+const fs = require('fs');
+const vm = require('vm');
+const source = fs.readFileSync('templates/trend_engine.html', 'utf8');
+const start = source.indexOf('function clampPreviewChart');
+const end = source.indexOf('function drawPreviewChartCrosshair', start);
+if (start < 0 || end <= start) throw new Error('viewport helpers not found');
+vm.runInThisContext(source.slice(start, end));
+
+const cases = [
+  [[-500, 500], 1, 0],
+  [[92, 97], 8, 200],
+  [[-97, -92], .35, -200],
+  [[12, 14, 15], 1, 0],
+];
+for (const [scores, zoom, pan] of cases) {
+  const view = previewScoreViewport(scores, zoom, pan);
+  if (view.scoreMinimum < -100 - 1e-9 || view.scoreMaximum > 100 + 1e-9) {
+    throw new Error('viewport escaped score bounds: ' + JSON.stringify(view));
+  }
+  if (!(view.scoreMinimum < view.scoreMaximum)) {
+    throw new Error('viewport collapsed: ' + JSON.stringify(view));
+  }
+}
+if (boundedPreviewScore(-500) !== -100 || boundedPreviewScore(500) !== 100) {
+  throw new Error('historical outliers were not bounded');
+}
+const fitted = previewScoreViewport([12, 14, 15], 1, 0);
+if (fitted.scoreMinimum <= -100 || fitted.scoreMaximum >= 100) {
+  throw new Error('ordinary data did not use a tight min/max range');
+}
+"""
+    result = subprocess.run(
+        [NODE, "-e", script],
+        cwd=Path(dashboard.BASE),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_committed_line_marks_trade_lifecycle_with_large_signed_dots():

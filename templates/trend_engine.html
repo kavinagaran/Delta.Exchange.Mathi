@@ -188,7 +188,7 @@
         </div>
       </div>
       <div class="te-preview-chart-controls" id="te-preview-chart-controls">
-        <span>Drag inside the chart to pan. Drag an axis or use the mouse wheel to zoom. Double-click to return to the latest score-aware view.</span>
+        <span>Move the pointer for score/time crosshairs. Drag to pan, use an axis or mouse wheel to zoom, and double-click to reset.</span>
         <span class="te-preview-chart-window" id="te-preview-chart-window">24-hour history · automatic score range</span>
         <button class="te-preview-chart-reset" id="te-preview-chart-reset" type="button">Reset view</button>
       </div>
@@ -563,7 +563,8 @@ function renderCommittedDecisionChart(history) {
     const scoreValue = raw?.committed_score ?? raw?.trend_score
       ?? raw?.score;
     if (!finite(scoreValue)) return;
-    const score = Number(scoreValue);
+    const rawScore = Number(scoreValue);
+    const score = boundedPreviewScore(rawScore);
     const time = String(raw?.time_utc || raw?.candle_close_utc
       || raw?.timestamp || raw?.end_utc || raw?.start_utc || '');
     const timeMillis = Date.parse(time);
@@ -571,6 +572,7 @@ function renderCommittedDecisionChart(history) {
     const decision = {
       ...raw,
       score,
+      raw_score: rawScore,
       zone: normaliseCommittedZone(raw?.zone, score),
       time_utc: time,
       _sortKey: timeMillis,
@@ -628,6 +630,7 @@ function previewScoreChartState(canvas) {
       yZoom: 1,
       yPan: 0,
       manualY: false,
+      hover: null,
       decisions: [],
       trades: [],
       geometry: null,
@@ -641,6 +644,10 @@ function previewScoreChartState(canvas) {
 
 function clampPreviewChart(value, minimum, maximum) {
   return Math.min(maximum, Math.max(minimum, value));
+}
+
+function boundedPreviewScore(value) {
+  return clampPreviewChart(Number(value) || 0, -100, 100);
 }
 
 function nicePreviewScoreStep(rawStep) {
@@ -711,6 +718,7 @@ function installPreviewScoreChartInteractions(canvas, state) {
     const axis = previewChartAxisAt(state, point);
     if (!axis) return;
     event.preventDefault();
+    state.hover = null;
     state.drag = {
       axis,
       pointerId: event.pointerId,
@@ -736,7 +744,14 @@ function installPreviewScoreChartInteractions(canvas, state) {
       const axis = previewChartAxisAt(state, point);
       canvas.style.cursor = axis === 'x' ? 'ew-resize'
         : axis === 'y' ? 'ns-resize'
-        : axis === 'plot' ? 'grab' : 'default';
+        : axis === 'plot' ? 'crosshair' : 'default';
+      const nextHover = axis === 'plot' ? point : null;
+      const changed = !state.hover !== !nextHover
+        || (state.hover && nextHover
+          && (Math.abs(state.hover.x - nextHover.x) > .25
+            || Math.abs(state.hover.y - nextHover.y) > .25));
+      state.hover = nextHover;
+      if (changed) redrawPreviewChartFromState(canvas, state);
       return;
     }
     event.preventDefault();
@@ -781,10 +796,15 @@ function installPreviewScoreChartInteractions(canvas, state) {
     const axis = previewChartAxisAt(state, previewChartPointer(canvas, event));
     canvas.style.cursor = axis === 'x' ? 'ew-resize'
       : axis === 'y' ? 'ns-resize'
-      : axis === 'plot' ? 'grab' : 'default';
+      : axis === 'plot' ? 'crosshair' : 'default';
   };
   canvas.addEventListener('pointerup', stopDragging);
   canvas.addEventListener('pointercancel', stopDragging);
+  canvas.addEventListener('pointerleave', () => {
+    if (state.drag || !state.hover) return;
+    state.hover = null;
+    redrawPreviewChartFromState(canvas, state);
+  });
 
   canvas.addEventListener('dblclick', event => {
     const axis = previewChartAxisAt(state, previewChartPointer(canvas, event));
@@ -925,6 +945,107 @@ function drawCommittedTradeMarker(ctx, x, anchorY, code, action, stack, plot) {
   ctx.restore();
 }
 
+function previewScoreViewport(scores, yZoom = 1, yPan = 0) {
+  const bounded = scores.map(boundedPreviewScore);
+  const visibleLow = Math.min(...bounded);
+  const visibleHigh = Math.max(...bounded);
+  const rawRange = Math.max(.5, visibleHigh - visibleLow);
+  const padding = Math.max(1, rawRange * .08);
+  const autoTick = nicePreviewScoreStep((rawRange + padding * 2) / 6);
+  let paddedMinimum = Math.floor((visibleLow - padding) / autoTick) * autoTick;
+  let paddedMaximum = Math.ceil((visibleHigh + padding) / autoTick) * autoTick;
+  let autoSpan = clampPreviewChart(
+    Math.max(8, paddedMaximum - paddedMinimum), 2, 200,
+  );
+  let autoCenter = (paddedMaximum + paddedMinimum) / 2;
+  autoCenter = clampPreviewChart(
+    autoCenter,
+    -100 + autoSpan / 2,
+    100 - autoSpan / 2,
+  );
+  const scoreSpan = clampPreviewChart(autoSpan / yZoom, 2, 200);
+  const scoreCenter = clampPreviewChart(
+    autoCenter + yPan,
+    -100 + scoreSpan / 2,
+    100 - scoreSpan / 2,
+  );
+  return {
+    scoreMinimum: scoreCenter - scoreSpan / 2,
+    scoreMaximum: scoreCenter + scoreSpan / 2,
+    scoreSpan,
+  };
+}
+
+function drawPreviewChartCrosshair(
+  ctx, hover, geometry, visibleDecisions, decisionOffset, includeDate,
+) {
+  if (!hover || !visibleDecisions.length) return;
+  const { plot, slot, scoreMinimum, scoreMaximum } = geometry;
+  if (hover.x < plot.left || hover.x > plot.right
+      || hover.y < plot.top || hover.y > plot.bottom) return;
+  const plotHeight = plot.bottom - plot.top;
+  const score = scoreMaximum
+    - ((hover.y - plot.top) / plotHeight) * (scoreMaximum - scoreMinimum);
+  const decisionIndex = Math.round(
+    (hover.x - plot.left - decisionOffset) / slot - .5,
+  );
+  const boundedIndex = clampPreviewChart(
+    decisionIndex, 0, visibleDecisions.length - 1,
+  );
+  const timeLabel = formatPreviewChartTime(
+    visibleDecisions[boundedIndex].time_utc, includeDate,
+  );
+  const scoreLabel = `${score >= 0 ? '+' : ''}${score.toFixed(1)}`;
+
+  ctx.save();
+  ctx.strokeStyle = 'rgba(229, 237, 245, .76)';
+  ctx.lineWidth = .65;
+  ctx.setLineDash([3, 4]);
+  ctx.beginPath();
+  ctx.moveTo(hover.x, plot.top);
+  ctx.lineTo(hover.x, plot.bottom);
+  ctx.moveTo(plot.left, hover.y);
+  ctx.lineTo(plot.right, hover.y);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  ctx.font = '900 10px Inter, Segoe UI, sans-serif';
+  ctx.textBaseline = 'middle';
+  const yLabelWidth = Math.max(44, ctx.measureText(scoreLabel).width + 14);
+  const yLabelLeft = Math.max(2, plot.left - yLabelWidth - 5);
+  previewChartRoundedPath(
+    ctx, yLabelLeft, hover.y - 10, yLabelWidth, 20, 4,
+  );
+  ctx.fillStyle = 'rgba(9, 22, 37, .98)';
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(229, 237, 245, .78)';
+  ctx.lineWidth = .7;
+  ctx.stroke();
+  ctx.fillStyle = '#f4f8fb';
+  ctx.textAlign = 'center';
+  ctx.fillText(scoreLabel, yLabelLeft + yLabelWidth / 2, hover.y + .3);
+
+  const xLabelWidth = Math.min(
+    plot.right - plot.left,
+    Math.max(94, ctx.measureText(timeLabel).width + 16),
+  );
+  const xLabelLeft = clampPreviewChart(
+    hover.x - xLabelWidth / 2,
+    plot.left,
+    plot.right - xLabelWidth,
+  );
+  previewChartRoundedPath(
+    ctx, xLabelLeft, plot.bottom + 4, xLabelWidth, 21, 4,
+  );
+  ctx.fillStyle = 'rgba(9, 22, 37, .98)';
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(229, 237, 245, .78)';
+  ctx.stroke();
+  ctx.fillStyle = '#f4f8fb';
+  ctx.fillText(timeLabel, xLabelLeft + xLabelWidth / 2, plot.bottom + 14.7);
+  ctx.restore();
+}
+
 function drawCommittedDecisionChart(canvas, decisions, trades = []) {
   const state = previewScoreChartState(canvas);
   state.decisions = decisions;
@@ -979,31 +1100,13 @@ function drawCommittedDecisionChart(canvas, decisions, trades = []) {
   const visiblePlotWidth = slot * visibleDecisions.length;
   const decisionOffset = Math.max(0, plotWidth - visiblePlotWidth);
 
-  // Fit the vertical axis to the committed scores currently on screen. A
-  // small nice-number margin keeps the line prominent without implying more
-  // precision than the engine reports.
-  const visibleLow = Math.min(...visibleDecisions.map(decision => decision.score));
-  const visibleHigh = Math.max(...visibleDecisions.map(decision => decision.score));
-  const rawRange = Math.max(.5, visibleHigh - visibleLow);
-  const padding = Math.max(1, rawRange * .08);
-  const autoTick = nicePreviewScoreStep((rawRange + padding * 2) / 6);
-  let autoMinimum = Math.floor((visibleLow - padding) / autoTick) * autoTick;
-  let autoMaximum = Math.ceil((visibleHigh + padding) / autoTick) * autoTick;
-  if (autoMaximum - autoMinimum < 8) {
-    const midpoint = (autoMaximum + autoMinimum) / 2;
-    autoMinimum = midpoint - 4;
-    autoMaximum = midpoint + 4;
-  }
-  if (visibleLow >= -100 && visibleHigh <= 100) {
-    autoMinimum = Math.max(-100, autoMinimum);
-    autoMaximum = Math.min(100, autoMaximum);
-  }
-  const autoCenter = (autoMaximum + autoMinimum) / 2;
-  const autoSpan = Math.max(4, autoMaximum - autoMinimum);
-  const scoreSpan = autoSpan / state.yZoom;
-  const scoreCenter = autoCenter + state.yPan;
-  const scoreMaximum = scoreCenter + scoreSpan / 2;
-  const scoreMinimum = scoreCenter - scoreSpan / 2;
+  // Fit only the values visible on screen, but honour the Trend Engine's
+  // absolute score contract at every zoom and pan level.
+  const { scoreMinimum, scoreMaximum, scoreSpan } = previewScoreViewport(
+    visibleDecisions.map(decision => decision.score),
+    state.yZoom,
+    state.yPan,
+  );
   const scoreY = value =>
     plot.top + ((scoreMaximum - value) / scoreSpan) * plotHeight;
   const scoreLabel = value => {
@@ -1237,6 +1340,14 @@ function drawCommittedDecisionChart(canvas, decisions, trades = []) {
   ctx.textAlign = 'left';
   ctx.font = '800 9px Inter, Segoe UI, sans-serif';
   ctx.fillText('COMMITTED DECISION SCORE', plot.left, 5);
+  drawPreviewChartCrosshair(
+    ctx,
+    state.hover,
+    state.geometry,
+    visibleDecisions,
+    decisionOffset,
+    includeDate,
+  );
   const windowLabel = document.getElementById('te-preview-chart-window');
   if (windowLabel) {
     const rangeLabel =
