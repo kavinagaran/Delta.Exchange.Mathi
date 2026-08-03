@@ -256,33 +256,6 @@ class _TodayScreenState extends State<TodayScreen> {
         physics: const AlwaysScrollableScrollPhysics(),
         padding: const EdgeInsets.fromLTRB(Gap.lg, Gap.md, Gap.lg, Gap.xxl),
         children: [
-          PageIntro(
-            icon: Icons.space_dashboard_rounded,
-            title: 'Today',
-            subtitle: 'Live position, engine decision and every trade today.',
-            trailing: StatusPill(
-              current == null ? 'FLAT' : 'LIVE',
-              colour: current == null
-                  ? kNeutral
-                  : signedColour(
-                      _number(current['live_pnl'] ?? current['pnl_usd']),
-                    ),
-            ),
-          ),
-          const SizedBox(height: Gap.md),
-          MetricWrap(
-            children: [
-              MetricTile(label: 'Trades', value: '${trades.length}'),
-              MetricTile(label: 'Open', value: current == null ? '0' : '1'),
-              MetricTile(label: 'Closed', value: '$closed'),
-              MetricTile(
-                label: 'Day P&L',
-                value: _money(dayPnl),
-                colour: signedColour(dayPnl),
-              ),
-            ],
-          ),
-          const SizedBox(height: Gap.md),
           if (current == null)
             const AppCard(
               kicker: 'Current trade',
@@ -298,6 +271,19 @@ class _TodayScreenState extends State<TodayScreen> {
             ),
           const SizedBox(height: Gap.md),
           _EngineCard(engine: _engine, live: _engineLive),
+          const SizedBox(height: Gap.md),
+          MetricWrap(
+            children: [
+              MetricTile(label: 'Trades', value: '${trades.length}'),
+              MetricTile(label: 'Open', value: current == null ? '0' : '1'),
+              MetricTile(label: 'Closed', value: '$closed'),
+              MetricTile(
+                label: 'Day P&L',
+                value: _money(dayPnl),
+                colour: signedColour(dayPnl),
+              ),
+            ],
+          ),
           const SizedBox(height: Gap.md),
           _TodayTradesCard(trades: trades),
         ],
@@ -511,20 +497,20 @@ class _EngineCard extends StatelessWidget {
             children: [
               Expanded(
                 child: DecisionScoreDial(
-                  label: 'Committed',
-                  score: score,
-                  colour: zoneColour(zone),
-                  caption: zone == null ? 'No decision' : _shortZone(zone),
+                  label: 'Live preview',
+                  score: preview,
+                  colour: zoneColour(previewZone),
+                  caption: _shortZone(previewZone),
                   maxSize: 112,
                 ),
               ),
               const SizedBox(width: Gap.md),
               Expanded(
                 child: DecisionScoreDial(
-                  label: 'Live preview',
-                  score: preview,
-                  colour: zoneColour(previewZone),
-                  caption: _shortZone(previewZone),
+                  label: 'Committed',
+                  score: score,
+                  colour: zoneColour(zone),
+                  caption: zone == null ? 'No decision' : _shortZone(zone),
                   maxSize: 112,
                 ),
               ),

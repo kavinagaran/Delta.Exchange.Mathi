@@ -71,7 +71,7 @@ const kBlueBackgroundAsset = 'assets/sparkling-blue-dashboard-bg.png';
 
 final appTheme = AppThemeController();
 
-const kWebAssetRevision = '6.2.1+25-today-preview';
+const kWebAssetRevision = '6.2.2+26-today-layout';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -1166,7 +1166,6 @@ class _HomeShellState extends State<HomeShell> {
                     for (final index in primaryPageIndexes)
                       NavigationDestination(
                         icon: Icon(appPages[index].icon),
-                        selectedIcon: Icon(appPages[index].icon),
                         label: appPages[index].navLabel,
                       ),
                   ],
