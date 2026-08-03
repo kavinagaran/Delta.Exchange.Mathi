@@ -10,7 +10,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:mv_btc_bot/api/client.dart';
-import 'package:mv_btc_bot/main.dart' show appPages, primaryPageIndexes;
+import 'package:mv_btc_bot/main.dart'
+    show appPages, buildAppTheme, primaryPageIndexes;
 import 'package:mv_btc_bot/theme/design.dart';
 import 'package:mv_btc_bot/widgets/kit.dart';
 
@@ -98,6 +99,29 @@ void main() {
       expect(find.text('+100'), findsOneWidget);
       final scoreText = tester.widget<Text>(find.text('+26.0'));
       expect(scoreText.style?.color, theme.colorScheme.primary);
+    });
+
+    testWidgets('committed ADX shows the exact SHORT MOVE exit boundary', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: buildAppTheme(blue: true),
+          home: const Scaffold(
+            body: Column(
+              children: [
+                CommittedAdxPill(adx: 24.9, zone: 'SHORT_MOVE'),
+                CommittedAdxPill(adx: 25.0, zone: 'SHORT_MOVE'),
+                CommittedAdxPill(adx: 35.0, zone: 'CE_2_ITM'),
+              ],
+            ),
+          ),
+        ),
+      );
+
+      expect(find.text('5M ADX 24.9 · CALM'), findsOneWidget);
+      expect(find.text('5M ADX 25.0 · EXIT MOVE'), findsOneWidget);
+      expect(find.text('5M ADX 35.0 · TREND'), findsOneWidget);
     });
   });
 

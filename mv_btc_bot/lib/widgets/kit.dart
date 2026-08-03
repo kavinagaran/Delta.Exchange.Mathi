@@ -484,6 +484,37 @@ class StatusPill extends StatelessWidget {
   }
 }
 
+/// Compact view of the committed 5-minute ADX policy shared by Today and the
+/// full Trend Engine screen. Execution remains server-owned; this widget only
+/// makes the exact evidence and boundary visible on the phone.
+class CommittedAdxPill extends StatelessWidget {
+  const CommittedAdxPill({super.key, required this.adx, required this.zone});
+
+  final double? adx;
+  final String? zone;
+
+  @override
+  Widget build(BuildContext context) {
+    final value = adx;
+    if (value == null || !value.isFinite) {
+      return const StatusPill('5M ADX —', colour: kNeutral, dot: false);
+    }
+    final calm = value < 25;
+    final invalidatesMove = !calm && zone == 'SHORT_MOVE';
+    final label = invalidatesMove
+        ? '5M ADX ${value.toStringAsFixed(1)} · EXIT MOVE'
+        : calm
+        ? '5M ADX ${value.toStringAsFixed(1)} · CALM'
+        : '5M ADX ${value.toStringAsFixed(1)} · TREND';
+    final tone = invalidatesMove
+        ? kNegative
+        : calm
+        ? kZoneMove
+        : kPositive;
+    return StatusPill(label, colour: tone, dot: false);
+  }
+}
+
 /// A circular, instrument-style score gauge shared by Today and Trend Engine.
 /// The fixed red-to-green segmented scale makes the score direction readable
 /// at a glance; the needle carries the current value without changing scale.

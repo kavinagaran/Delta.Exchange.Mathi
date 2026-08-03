@@ -477,6 +477,7 @@ class _EngineCard extends StatelessWidget {
     }
 
     final score = _number(engine!['trend_score']);
+    final triggerAdx = _number(engine!['trigger_adx']);
     final preview = _number(
       live?['live_score'] ??
           live?['preview_score'] ??
@@ -518,6 +519,8 @@ class _EngineCard extends StatelessWidget {
           ),
           const SizedBox(height: Gap.sm),
           if (score != null) ScoreMeter(score: score),
+          const SizedBox(height: Gap.sm),
+          CommittedAdxPill(adx: triggerAdx, zone: zone),
         ],
       ),
     );

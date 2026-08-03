@@ -457,7 +457,11 @@ class _ZoneBand extends StatelessWidget {
     children: const [
       StatusPill('CE > +40 · ADX ≥ 25', colour: kZoneCall, dot: false),
       StatusPill('HOLD', colour: kZoneHold, dot: false),
-      StatusPill('MV −30…+30 · ADX < 25', colour: kZoneMove, dot: false),
+      StatusPill(
+        'MV −30…+30 · ADX < 25 · EXIT ≥ 25',
+        colour: kZoneMove,
+        dot: false,
+      ),
       StatusPill('HOLD', colour: kZoneHold, dot: false),
       StatusPill('PE < −40 · ADX ≥ 25', colour: kZonePut, dot: false),
     ],

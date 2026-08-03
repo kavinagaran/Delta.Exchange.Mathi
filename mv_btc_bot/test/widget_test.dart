@@ -69,6 +69,7 @@ void main() {
     expect(find.text('2 trades'), findsOneWidget);
     expect(find.text('+42.4'), findsOneWidget);
     expect(find.text('+46.8'), findsOneWidget);
+    expect(find.text('5M ADX 28.4 · TREND'), findsOneWidget);
     expect(find.text('ENTRY READY'), findsNothing);
     expect(find.text('SIGNAL CONSUMED'), findsNothing);
     expect(find.text('P-BTC-63000-020826'), findsOneWidget);
@@ -169,6 +170,7 @@ void main() {
 
     expect(find.text('-53.0'), findsOneWidget);
     expect(find.text('-57.6'), findsOneWidget);
+    expect(find.text('5M ADX 25.0 · TREND'), findsOneWidget);
     expect(find.byKey(const ValueKey('committed-score-chart')), findsOneWidget);
     final chart = tester.widget<InteractiveViewer>(
       find.byKey(const ValueKey('committed-score-chart')),
@@ -289,6 +291,7 @@ class _TodayApi extends DashboardApi {
         'data_quality': 'OK',
         'zone': 'CE_2_ITM',
         'trend_score': 42.4,
+        'trigger_adx': 28.4,
         'zone_action_allowed': true,
       });
 
@@ -387,6 +390,7 @@ class _TrendApi extends DashboardApi {
       const ApiResult.ok(<String, dynamic>{
         'data_quality': 'OK',
         'trend_score': -57.6,
+        'trigger_adx': 25.0,
         'zone': 'PE_2_ITM',
         'confidence': .84,
         'regime': 'TREND_DOWN',
