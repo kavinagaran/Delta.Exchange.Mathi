@@ -4,6 +4,8 @@
 /// change to card treatment lands everywhere at once.
 library;
 
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 
 import '../theme/design.dart';
@@ -482,8 +484,9 @@ class StatusPill extends StatelessWidget {
   }
 }
 
-/// A compact professional decision dial. Scores always remain inside the
-/// ring, including on narrow phones and with Android display scaling enabled.
+/// A circular, instrument-style score gauge shared by Today and Trend Engine.
+/// The fixed red-to-green segmented scale makes the score direction readable
+/// at a glance; the needle carries the current value without changing scale.
 class DecisionScoreDial extends StatelessWidget {
   const DecisionScoreDial({
     super.key,
@@ -503,90 +506,260 @@ class DecisionScoreDial extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final progress = score == null ? 0.0 : (score!.abs() / 100).clamp(0.0, 1.0);
     final value = score == null
         ? '—'
         : '${score! > 0 ? '+' : ''}${score!.toStringAsFixed(1)}';
-    return Center(
-      child: ConstrainedBox(
-        constraints: BoxConstraints(maxWidth: maxSize, maxHeight: maxSize),
-        child: AspectRatio(
-          aspectRatio: 1,
-          child: DecoratedBox(
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: scheme.surface.withValues(alpha: .76),
-              boxShadow: [
-                BoxShadow(color: colour.withValues(alpha: .16), blurRadius: 16),
-              ],
-            ),
-            child: Stack(
-              fit: StackFit.expand,
-              children: [
-                Padding(
-                  padding: const EdgeInsets.all(2),
-                  child: CircularProgressIndicator(
-                    value: progress,
-                    strokeWidth: 8,
-                    backgroundColor: scheme.surfaceContainerHighest,
-                    color: colour,
-                    strokeCap: StrokeCap.round,
-                  ),
+    return Semantics(
+      label: '$label score',
+      value: score?.toStringAsFixed(1) ?? 'unavailable',
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final width = constraints.maxWidth.isFinite
+              ? constraints.maxWidth
+              : maxSize;
+          final height = constraints.maxHeight.isFinite
+              ? constraints.maxHeight
+              : maxSize;
+          final dimension = math.min(maxSize, math.min(width, height));
+          return Center(
+            child: SizedBox.square(
+              dimension: dimension,
+              child: CustomPaint(
+                painter: _DecisionGaugePainter(
+                  score: score,
+                  tone: colour,
+                  surface: scheme.surface,
                 ),
-                Padding(
-                  padding: const EdgeInsets.all(12),
-                  child: DecoratedBox(
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      border: Border.all(color: colour.withValues(alpha: .24)),
-                    ),
-                  ),
-                ),
-                Center(
-                  child: FittedBox(
-                    fit: BoxFit.scaleDown,
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text(
-                          label.toUpperCase(),
-                          style: AppText.kicker.copyWith(
-                            color: scheme.onSurfaceVariant,
-                            fontSize: 7,
-                            letterSpacing: .65,
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    Center(
+                      child: Padding(
+                        padding: const EdgeInsets.fromLTRB(22, 27, 22, 31),
+                        child: FittedBox(
+                          fit: BoxFit.scaleDown,
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text(
+                                label.toUpperCase(),
+                                style: AppText.kicker.copyWith(
+                                  color: scheme.onSurface,
+                                  fontSize: 7,
+                                  fontWeight: FontWeight.w800,
+                                  letterSpacing: .6,
+                                ),
+                              ),
+                              const SizedBox(height: 2),
+                              Text(
+                                value,
+                                style: AppText.metric.copyWith(
+                                  color: colour,
+                                  fontSize: 22,
+                                  fontWeight: FontWeight.w900,
+                                  shadows: [
+                                    Shadow(
+                                      color: colour.withValues(alpha: .55),
+                                      blurRadius: 9,
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              if (caption != null) ...[
+                                const SizedBox(height: 1),
+                                Text(
+                                  caption!.toUpperCase(),
+                                  style: AppText.kicker.copyWith(
+                                    color: scheme.onSurfaceVariant,
+                                    fontSize: 6.2,
+                                    letterSpacing: .4,
+                                  ),
+                                ),
+                              ],
+                            ],
                           ),
                         ),
-                        const SizedBox(height: 2),
-                        Text(
-                          value,
-                          style: AppText.metric.copyWith(
-                            color: colour,
-                            fontSize: 21,
-                            fontWeight: FontWeight.w800,
-                          ),
-                        ),
-                        if (caption != null) ...[
-                          const SizedBox(height: 1),
-                          Text(
-                            caption!.toUpperCase(),
-                            style: AppText.kicker.copyWith(
-                              color: scheme.onSurfaceVariant,
-                              fontSize: 6.5,
-                              letterSpacing: .45,
-                            ),
-                          ),
-                        ],
-                      ],
+                      ),
                     ),
-                  ),
+                    Positioned(
+                      left: 14,
+                      bottom: 13,
+                      child: Text(
+                        '−100',
+                        style: AppText.kicker.copyWith(
+                          color: scheme.onSurface,
+                          fontSize: 7,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                    ),
+                    Positioned(
+                      right: 14,
+                      bottom: 13,
+                      child: Text(
+                        '+100',
+                        style: AppText.kicker.copyWith(
+                          color: scheme.onSurface,
+                          fontSize: 7,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
-              ],
+              ),
             ),
-          ),
-        ),
+          );
+        },
       ),
     );
   }
+}
+
+class _DecisionGaugePainter extends CustomPainter {
+  const _DecisionGaugePainter({
+    required this.score,
+    required this.tone,
+    required this.surface,
+  });
+
+  final double? score;
+  final Color tone;
+  final Color surface;
+
+  static const _start = math.pi * .75;
+  static const _sweep = math.pi * 1.5;
+  static const _segments = 20;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final centre = Offset(size.width / 2, size.height / 2);
+    final radius = math.min(size.width, size.height) / 2 - 4;
+    final circle = Rect.fromCircle(center: centre, radius: radius);
+
+    canvas.drawCircle(
+      centre,
+      radius,
+      Paint()
+        ..style = PaintingStyle.fill
+        ..shader = RadialGradient(
+          colors: [tone.withValues(alpha: .12), surface.withValues(alpha: .97)],
+          stops: const [.05, .74],
+        ).createShader(circle),
+    );
+    canvas.drawCircle(
+      centre,
+      radius,
+      Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2
+        ..color = const Color(0xFF7EDBFF)
+        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 5),
+    );
+    canvas.drawCircle(
+      centre,
+      radius - 1,
+      Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.1
+        ..color = const Color(0xFFC2F1FF),
+    );
+
+    final arcRect = Rect.fromCircle(center: centre, radius: radius - 8);
+    final segmentSweep = _sweep / _segments;
+    const gap = .026;
+    for (var index = 0; index < _segments; index++) {
+      final fraction = index / (_segments - 1);
+      canvas.drawArc(
+        arcRect,
+        _start + index * segmentSweep + gap / 2,
+        segmentSweep - gap,
+        false,
+        Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 9
+          ..strokeCap = StrokeCap.butt
+          ..color = _scaleColour(fraction),
+      );
+    }
+
+    canvas.drawCircle(
+      centre,
+      radius - 20,
+      Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1
+        ..color = const Color(0xFF3D759A).withValues(alpha: .72),
+    );
+
+    final bounded = score?.clamp(-100.0, 100.0).toDouble();
+    if (bounded == null) return;
+    final angle = _start + ((bounded + 100) / 200) * _sweep;
+    final tip =
+        centre + Offset(math.cos(angle), math.sin(angle)) * (radius - 17);
+    canvas.drawLine(
+      centre,
+      tip,
+      Paint()
+        ..strokeWidth = 6
+        ..strokeCap = StrokeCap.round
+        ..color = tone.withValues(alpha: .34)
+        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 5),
+    );
+    canvas.drawLine(
+      centre,
+      tip,
+      Paint()
+        ..strokeWidth = 3
+        ..strokeCap = StrokeCap.round
+        ..shader = const LinearGradient(
+          colors: [Color(0xFFF8FEFF), Color(0xFF73B8D9)],
+        ).createShader(Rect.fromPoints(centre, tip)),
+    );
+    canvas.drawCircle(
+      centre,
+      5,
+      Paint()
+        ..color = const Color(0xFF071727)
+        ..style = PaintingStyle.fill,
+    );
+    canvas.drawCircle(
+      centre,
+      5,
+      Paint()
+        ..color = const Color(0xFFDDF8FF)
+        ..strokeWidth = 1.6
+        ..style = PaintingStyle.stroke,
+    );
+  }
+
+  Color _scaleColour(double value) {
+    if (value <= .34) {
+      return Color.lerp(
+        const Color(0xFFFF435F),
+        const Color(0xFF864FB0),
+        value / .34,
+      )!;
+    }
+    if (value <= .67) {
+      return Color.lerp(
+        const Color(0xFF864FB0),
+        const Color(0xFF238DD8),
+        (value - .34) / .33,
+      )!;
+    }
+    return Color.lerp(
+      const Color(0xFF22CFAA),
+      const Color(0xFF58ED68),
+      (value - .67) / .33,
+    )!;
+  }
+
+  @override
+  bool shouldRepaint(covariant _DecisionGaugePainter oldDelegate) =>
+      oldDelegate.score != score ||
+      oldDelegate.tone != tone ||
+      oldDelegate.surface != surface;
 }
 
 /// Empty / error / loading placeholder, so every screen fails the same way.

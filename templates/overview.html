@@ -389,7 +389,10 @@ function todayScoreDial(label, value, quality) {
   const meterValue = available ? ` aria-valuenow="${esc(accessible)}"` : '';
   return `<div class="today-score-dial-item">
     <div class="today-score-dial" role="meter" aria-label="${esc(label)} score" aria-valuemin="-100" aria-valuemax="100"${meterValue}
-      style="--today-score-angle:${Math.abs(score) * 3.6}deg;--today-score-tone:${color}">
+      style="--today-needle-angle:${score * 1.35}deg;--today-needle-opacity:${available ? 1 : 0};--today-score-tone:${color}">
+      <span class="today-score-needle" aria-hidden="true"><i></i></span>
+      <span class="today-score-limit is-min" aria-hidden="true">−100</span>
+      <span class="today-score-limit is-max" aria-hidden="true">+100</span>
       <div class="today-score-dial-core">
         <span>${esc(label)}</span>
         <strong class="today-odometer" aria-label="${esc(accessible)}">${todayOdometerScore(available ? score : null)}</strong>

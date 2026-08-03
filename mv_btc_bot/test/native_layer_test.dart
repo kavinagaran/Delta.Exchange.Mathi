@@ -12,6 +12,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:mv_btc_bot/api/client.dart';
 import 'package:mv_btc_bot/main.dart' show appPages, primaryPageIndexes;
 import 'package:mv_btc_bot/theme/design.dart';
+import 'package:mv_btc_bot/widgets/kit.dart';
 
 void main() {
   group('design tokens', () {
@@ -59,6 +60,38 @@ void main() {
           reason: 'numbers must not reflow as digits change',
         );
       }
+    });
+
+    testWidgets('decision score gauge remains a perfect circle when narrow', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        const MaterialApp(
+          home: Scaffold(
+            body: SizedBox(
+              width: 90,
+              height: 140,
+              child: DecisionScoreDial(
+                label: 'Live preview',
+                score: 26,
+                colour: kPositive,
+              ),
+            ),
+          ),
+        ),
+      );
+
+      final paint = find.descendant(
+        of: find.byType(DecisionScoreDial),
+        matching: find.byType(CustomPaint),
+      );
+      expect(paint, findsOneWidget);
+      final size = tester.getSize(paint);
+      expect(size.width, size.height);
+      expect(size.width, 90);
+      expect(find.text('+26.0'), findsOneWidget);
+      expect(find.text('−100'), findsOneWidget);
+      expect(find.text('+100'), findsOneWidget);
     });
   });
 

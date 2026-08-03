@@ -44,6 +44,25 @@ def test_trend_engine_page_is_registered_and_reads_only():
     assert "/api/trend-engine'" not in TEMPLATE  # the legacy endpoint, not this page's
 
 
+def test_score_dials_are_segmented_circular_gauges_with_needles():
+    assert TEMPLATE.count('class="te-score-needle"') == 2
+    assert TEMPLATE.count('class="te-score-limit is-min"') == 2
+    assert TEMPLATE.count('class="te-score-limit is-max"') == 2
+    assert "--te-needle-angle" in TEMPLATE
+    assert "score * 1.35" in TEMPLATE
+    for required in (
+        ".te-score-gauge::before",
+        "repeating-conic-gradient",
+        "conic-gradient(from 225deg",
+        ".te-score-needle",
+        ".te-score-limit.is-min",
+        ".te-score-limit.is-max",
+        "aspect-ratio: 1",
+        "border-radius: 50%",
+    ):
+        assert required in STYLE
+
+
 def test_committed_score_chart_is_a_zone_colored_line_with_every_boundary():
     assert 'id="te-preview-score-chart"' in TEMPLATE
     assert "renderCommittedDecisionChart(decisionHistory)" in TEMPLATE

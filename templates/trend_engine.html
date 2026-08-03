@@ -46,6 +46,9 @@
       <div class="te-score-pair">
         <div class="te-score-item">
           <div class="te-score-gauge" id="te-live-score-gauge" role="meter" aria-label="Live preview score" aria-valuemin="-100" aria-valuemax="100" aria-valuenow="0">
+            <span class="te-score-needle" aria-hidden="true"><i></i></span>
+            <span class="te-score-limit is-min" aria-hidden="true">−100</span>
+            <span class="te-score-limit is-max" aria-hidden="true">+100</span>
             <div class="te-score-core">
               <span>Live preview</span>
               <strong id="te-live-score">—</strong>
@@ -59,6 +62,9 @@
         </div>
         <div class="te-score-item">
           <div class="te-score-gauge" id="te-committed-score-gauge" role="meter" aria-label="Committed decision score" aria-valuemin="-100" aria-valuemax="100" aria-valuenow="0">
+            <span class="te-score-needle" aria-hidden="true"><i></i></span>
+            <span class="te-score-limit is-min" aria-hidden="true">−100</span>
+            <span class="te-score-limit is-max" aria-hidden="true">+100</span>
             <div class="te-score-core">
               <span>Committed decision</span>
               <strong id="te-committed-score">—</strong>
@@ -348,9 +354,11 @@ function scoreColor(value, quality) {
 
 function updateScoreGauge(id, value, quality) {
   const gauge = document.getElementById(id);
-  const score = finite(value) ? Math.max(-100, Math.min(100, Number(value))) : 0;
+  const available = finite(value);
+  const score = available ? Math.max(-100, Math.min(100, Number(value))) : 0;
   gauge.setAttribute('aria-valuenow', String(score));
-  gauge.style.setProperty('--te-score-angle', `${Math.abs(score) * 3.6}deg`);
+  gauge.style.setProperty('--te-needle-angle', `${score * 1.35}deg`);
+  gauge.style.setProperty('--te-needle-opacity', available ? '1' : '0');
   gauge.style.setProperty('--te-score-tone', scoreColor(value, quality));
 }
 
