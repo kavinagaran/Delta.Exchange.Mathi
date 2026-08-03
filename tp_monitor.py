@@ -991,6 +991,24 @@ def _finite_float(value, default=None):
     return number if math.isfinite(number) else default
 
 
+def _stream_tsl_snapshot(state):
+    """Return complete TSL telemetry for exactly one position state.
+
+    Stream files are patch-written.  Publishing these related values as a
+    complete unit prevents a peak, floor, or armed flag from an earlier
+    position surviving under the current position identity.
+    """
+    state = state if isinstance(state, dict) else {}
+    peak = max(_finite_float(state.get("tsl_peak"), 0.0), 0.0)
+    armed = bool(state.get("tsl_armed"))
+    floor = _finite_float(state.get("tsl_floor"), None) if armed else None
+    return {
+        "tsl_peak": round(peak, 8),
+        "tsl_armed": armed,
+        "tsl_floor": round(floor, 8) if floor is not None else None,
+    }
+
+
 def _estimate_option_entry_fee(state, price, lots):
     """Conservative configured fee estimate for an option entry component."""
     price = _finite_float(price, 0.0)
@@ -4232,6 +4250,7 @@ def main():
                  stop_kind.upper(), stop_id, stop_floor, tp_id, peak_pnl)
 
     def _stream_status(status, error):
+        current_state = load_state()
         write_stream_snapshot(
             status=status,
             last_error=str(error or ""),
@@ -4240,6 +4259,11 @@ def main():
             stale_after_secs=MARK_STREAM_STALE_SECS,
             symbol=symbol,
             product_id=product_id,
+            position_cycle_id=current_state.get("position_cycle_id"),
+            protection_revision=int(
+                current_state.get("protection_revision") or 0
+            ),
+            **_stream_tsl_snapshot(current_state),
         )
 
     def _stream_health_allows_guard(current_state):
@@ -4327,6 +4351,7 @@ def main():
             stale_after_secs=MARK_STREAM_STALE_SECS,
             position_cycle_id=preview.get("position_cycle_id"),
             protection_revision=int(preview.get("protection_revision") or 0),
+            **_stream_tsl_snapshot(preview),
         )
 
         health = _stream_health_allows_guard(preview)

@@ -109,6 +109,37 @@ class TpMonitorSafetyTests(unittest.TestCase):
         self.assertEqual(settings["tsl_arm_pnl"], 125)
         self.assertEqual(settings["tsl_trail_pnl"], 40)
 
+    def test_stream_snapshot_replaces_previous_positions_tsl_telemetry(self):
+        self.stream_file.write_text(json.dumps({
+            "product_id": 101,
+            "position_cycle_id": "old-cycle",
+            "protection_revision": 0,
+            "tsl_peak": 238.62,
+            "tsl_armed": True,
+            "tsl_floor": 132.87,
+        }), encoding="utf-8")
+        current = {
+            "product_id": 101,
+            "position_cycle_id": "new-cycle",
+            "protection_revision": 0,
+            "tsl_peak": 7.83,
+            "tsl_armed": False,
+            "tsl_floor": None,
+        }
+
+        tp_monitor.write_stream_snapshot(
+            product_id=current["product_id"],
+            position_cycle_id=current["position_cycle_id"],
+            protection_revision=current["protection_revision"],
+            **tp_monitor._stream_tsl_snapshot(current),
+        )
+
+        stream = json.loads(self.stream_file.read_text(encoding="utf-8"))
+        self.assertEqual(stream["position_cycle_id"], "new-cycle")
+        self.assertEqual(stream["tsl_peak"], 7.83)
+        self.assertFalse(stream["tsl_armed"])
+        self.assertIsNone(stream["tsl_floor"])
+
     def test_realtime_position_endpoint_signs_query_and_distinguishes_failure(self):
         response = Mock()
         response.json.return_value = {
