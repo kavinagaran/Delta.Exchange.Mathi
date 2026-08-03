@@ -2567,6 +2567,17 @@ body:has(.overview-page) .nav a.active {
 .today-protection-metric.tone-tsl-trail { color: #70b8ff; }
 .today-protection-metric.tone-lock { color: #c58cff; }
 .today-protection-metric.tone-poll { color: var(--accent-dark); }
+.today-inline-protection .dry-protection-telemetry {
+  color: var(--text); font-weight: 750;
+}
+.today-inline-protection .dry-protection-telemetry strong { font-weight: 850; }
+.today-inline-protection > p { color: var(--text); font-weight: 700; }
+.today-telemetry-time,
+.today-telemetry-tsl { color: #70b8ff; }
+.today-telemetry-positive { color: var(--pos); }
+.today-telemetry-negative { color: var(--neg); }
+.today-telemetry-warn { color: #ffc267; }
+.today-telemetry-coverage { color: var(--accent-dark); }
 .today-protection-state { display: inline-flex; align-items: center; justify-content: flex-end; gap: 6px; font-size: 10.5px; }
 .today-protection-state .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
 .today-protection-state.protected { color: var(--pos); }

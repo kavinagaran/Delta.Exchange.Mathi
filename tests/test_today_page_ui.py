@@ -101,6 +101,19 @@ def test_today_page_uses_compact_responsive_terminal_layout():
         assert required in styles
 
 
+def test_today_protection_footer_is_bold_colored_and_hides_local_fallback():
+    source = (ROOT / "templates" / "overview.html").read_text(encoding="utf-8")
+    styles = (ROOT / "static" / "css" / "app.css").read_text(encoding="utf-8")
+
+    assert "rawCoverage === 'local_fallback' ? ''" in source
+    assert 'class="today-telemetry-time"' in source
+    assert "today-telemetry-positive" in source
+    assert "today-telemetry-negative" in source
+    assert "today-telemetry-warn" in source
+    assert ".today-inline-protection .dry-protection-telemetry" in styles
+    assert ".today-inline-protection > p" in styles
+
+
 def test_today_summary_cards_use_meaningful_svg_icons_not_empty_boxes():
     source = (ROOT / "templates" / "overview.html").read_text(encoding="utf-8")
     styles = (ROOT / "static" / "css" / "app.css").read_text(encoding="utf-8")

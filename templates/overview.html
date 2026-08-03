@@ -174,11 +174,14 @@ function todayKnownNumber(value) {
     Number.isFinite(Number(value));
 }
 
-function todayProtectionAge(value) {
+function todayProtectionAgeHtml(value) {
   const checked = Date.parse(value || '');
-  if (!Number.isFinite(checked)) return 'First check pending';
+  if (!Number.isFinite(checked)) {
+    return '<span class="today-telemetry-warn">First check pending</span>';
+  }
   const age = Math.max(Math.floor((Date.now() - checked) / 1000), 0);
-  return `Checked ${age < 60 ? age + 's' : Math.floor(age / 60) + 'm'} ago`;
+  const ageText = age < 60 ? `${age}s` : `${Math.floor(age / 60)}m`;
+  return `Checked <strong class="today-telemetry-time">${ageText}</strong> ago`;
 }
 
 function todayInlineProtectionHtml(protection) {
@@ -200,16 +203,28 @@ function todayInlineProtectionHtml(protection) {
   const statusClass = armed || running ? 'live' : 'closed-loss';
   const value = (raw, fallback = 0) =>
     todayKnownNumber(raw) ? fN(Number(raw), 4) : fN(fallback, 4);
-  const peak = todayKnownNumber(health.peak_pnl)
-    ? `Peak ${f$(Number(health.peak_pnl))}` : 'Peak pending';
+  const peakValue = todayKnownNumber(health.peak_pnl)
+    ? Number(health.peak_pnl) : null;
+  const peak = peakValue !== null
+    ? `Peak <strong class="${peakValue >= 0 ? 'today-telemetry-positive' : 'today-telemetry-negative'}">${esc(f$(peakValue))}</strong>`
+    : '<span class="today-telemetry-warn">Peak pending</span>';
   const floorValue = protection.tsl_floor ?? protection.tsl_floor_usd ?? health.stop_floor;
   const floor = armed && todayKnownNumber(floorValue)
-    ? `TSL floor ${f$(Number(floorValue))}` : 'TSL not armed';
+    ? `TSL floor <strong class="today-telemetry-tsl">${esc(f$(Number(floorValue)))}</strong>`
+    : '<span class="today-telemetry-warn">TSL not armed</span>';
   const every = Number(protection.poll_secs || health.next_poll_secs || 0);
-  const timing = `${todayProtectionAge(health.heartbeat_utc)}` +
-    (every > 0 ? ` · every ${fN(every)}s` : '');
-  const coverage = String(protection.coverage_status || (protection.running ? 'simulated protection' : 'verifying'))
-    .replaceAll('_', ' ').toUpperCase();
+  const timing = `${todayProtectionAgeHtml(health.heartbeat_utc)}` +
+    (every > 0
+      ? ` · every <strong class="today-telemetry-time">${esc(fN(every))}s</strong>`
+      : '');
+  const rawCoverage = String(
+    protection.coverage_status || (protection.running ? 'protected' : 'verifying')
+  ).trim().toLowerCase();
+  const coverage = rawCoverage === 'local_fallback' ? ''
+    : rawCoverage.replaceAll('_', ' ').toUpperCase();
+  const coverageHtml = coverage
+    ? ` · <strong class="today-telemetry-coverage">${esc(coverage)}</strong>`
+    : '';
   return `<section class="dry-protection-box today-inline-protection" aria-label="Live TP, SL and TSL monitor">
     <div class="dry-protection-hd">
       <div><span>Live protection</span><strong>TP / SL / TSL Monitor</strong></div>
@@ -230,7 +245,7 @@ function todayInlineProtectionHtml(protection) {
         <strong>${fN(every || 0)}</strong></div>
     </div>
     <div class="dry-protection-telemetry">
-      <span>${esc(timing)}</span><span>${esc(peak)} · ${esc(floor)} · ${esc(coverage)}</span>
+      <span>${timing}</span><span>${peak} · ${floor}${coverageHtml}</span>
     </div>
     <p>Automatic protection from the filled premium. Values are read-only on Today.</p>
   </section>`;
