@@ -43,7 +43,7 @@ void main() {
     expect(find.text('Visible content'), findsOneWidget);
   });
 
-  testWidgets('Today shows one Exit action and a detailed latest trade', (
+  testWidgets('Today shows one Exit action and every trade today', (
     WidgetTester tester,
   ) async {
     tester.view.physicalSize = const Size(390, 1000);
@@ -59,11 +59,25 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('Latest Trade'), findsOneWidget);
+    await expectLater(
+      find.byType(TodayScreen),
+      matchesGoldenFile('goldens/today_compact.png'),
+    );
+
+    expect(find.text('2 trades'), findsOneWidget);
+    expect(find.text('+42.4'), findsOneWidget);
+    expect(find.text('+46.8'), findsOneWidget);
     expect(find.text('P-BTC-63000-020826'), findsOneWidget);
-    expect(find.text(r'-$65.90'), findsOneWidget);
-    expect(find.text('7:41 AM IST'), findsOneWidget);
-    expect(find.text('8:01 AM IST'), findsOneWidget);
+    expect(find.text(r'-$65.90'), findsWidgets);
+    expect(find.textContaining('7:41 AM IST'), findsOneWidget);
+    await tester.scrollUntilVisible(
+      find.text('P-BTC-63000-020826'),
+      300,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.tap(find.text('P-BTC-63000-020826'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('8:01 AM IST'), findsOneWidget);
     expect(find.text('Exit'), findsOneWidget);
     expect(find.text('Close'), findsNothing);
     expect(find.text('Protection'), findsNothing);
@@ -213,6 +227,27 @@ class _TodayApi extends DashboardApi {
 
   @override
   Future<ApiResult<Map<String, dynamic>>> status() async =>
+      const ApiResult.ok(<String, dynamic>{});
+
+  @override
+  Future<ApiResult<Map<String, dynamic>>> engineSnapshot() async =>
+      const ApiResult.ok(<String, dynamic>{
+        'data_quality': 'OK',
+        'zone': 'CE_2_ITM',
+        'trend_score': 42.4,
+        'zone_action_allowed': true,
+      });
+
+  @override
+  Future<ApiResult<Map<String, dynamic>>> scoreAutoStatus() async =>
+      const ApiResult.ok(<String, dynamic>{});
+
+  @override
+  Future<ApiResult<Map<String, dynamic>>> engineLive() async =>
+      const ApiResult.ok(<String, dynamic>{'trend_score': 46.8});
+
+  @override
+  Future<ApiResult<Map<String, dynamic>>> protectionStatus() async =>
       const ApiResult.ok(<String, dynamic>{});
 
   @override

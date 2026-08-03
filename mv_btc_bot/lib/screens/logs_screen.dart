@@ -80,6 +80,12 @@ class _LogsScreenState extends State<LogsScreen> {
         physics: const AlwaysScrollableScrollPhysics(),
         padding: const EdgeInsets.fromLTRB(Gap.lg, Gap.md, Gap.lg, Gap.xxl),
         children: [
+          const PageIntro(
+            icon: Icons.receipt_long_rounded,
+            title: 'Activity Log',
+            subtitle: 'Orders, decisions, protection and safety events.',
+          ),
+          const SizedBox(height: Gap.md),
           AppCard(
             kicker: 'Activity',
             title: _source == 'account_activity' ? 'Account events' : 'Bot log',

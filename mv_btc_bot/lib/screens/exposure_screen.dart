@@ -94,6 +94,16 @@ class _ExposureScreenState extends State<ExposureScreen> {
         physics: const AlwaysScrollableScrollPhysics(),
         padding: const EdgeInsets.fromLTRB(Gap.lg, Gap.md, Gap.lg, Gap.xxl),
         children: [
+          PageIntro(
+            icon: Icons.account_balance_wallet_rounded,
+            title: 'Exposure',
+            subtitle: 'Account value and every exchange position.',
+            trailing: StatusPill(
+              '${_positions.length} OPEN',
+              colour: _positions.isEmpty ? kNeutral : kWarning,
+            ),
+          ),
+          const SizedBox(height: Gap.md),
           _WalletCard(wallet: _wallet),
           const SizedBox(height: Gap.md),
           if (_error != null)

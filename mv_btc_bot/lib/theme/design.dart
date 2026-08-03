@@ -110,11 +110,11 @@ const bluePalette = AppPalette(
 
 abstract final class Gap {
   static const xs = 4.0;
-  static const sm = 8.0;
-  static const md = 12.0;
-  static const lg = 16.0;
-  static const xl = 24.0;
-  static const xxl = 32.0;
+  static const sm = 7.0;
+  static const md = 10.0;
+  static const lg = 14.0;
+  static const xl = 20.0;
+  static const xxl = 28.0;
 }
 
 abstract final class Radii {
@@ -122,6 +122,15 @@ abstract final class Radii {
   static const md = 12.0;
   static const lg = 16.0;
   static const pill = 999.0;
+}
+
+/// Motion is intentionally quick: the interface should feel responsive while
+/// live prices and positions continue to be the visual focus.
+abstract final class Motion {
+  static const fast = Duration(milliseconds: 140);
+  static const normal = Duration(milliseconds: 260);
+  static const slow = Duration(milliseconds: 420);
+  static const curve = Curves.easeOutCubic;
 }
 
 // ── Type ────────────────────────────────────────────────────────────────
@@ -134,7 +143,7 @@ abstract final class AppText {
 
   /// Big hero number — account value, day P&L.
   static const display = TextStyle(
-    fontSize: 32,
+    fontSize: 25,
     fontWeight: FontWeight.w800,
     letterSpacing: -.8,
     height: 1.05,
@@ -143,34 +152,42 @@ abstract final class AppText {
 
   /// Card-level metric.
   static const metric = TextStyle(
-    fontSize: 20,
+    fontSize: 17,
     fontWeight: FontWeight.w700,
     letterSpacing: -.3,
     fontFeatures: _tabular,
   );
 
   static const title = TextStyle(
-    fontSize: 15,
+    fontSize: 13,
     fontWeight: FontWeight.w700,
     letterSpacing: -.1,
   );
 
-  static const body = TextStyle(fontSize: 13.5, fontWeight: FontWeight.w500);
+  static const body = TextStyle(
+    fontSize: 11.5,
+    fontWeight: FontWeight.w500,
+    height: 1.35,
+  );
 
   static const number = TextStyle(
-    fontSize: 13.5,
+    fontSize: 11.5,
     fontWeight: FontWeight.w600,
     fontFeatures: _tabular,
   );
 
   /// Small uppercase label above a value — the web's `.te-kicker`.
   static const kicker = TextStyle(
-    fontSize: 9,
+    fontSize: 8,
     fontWeight: FontWeight.w800,
     letterSpacing: 1.1,
   );
 
-  static const caption = TextStyle(fontSize: 11, fontWeight: FontWeight.w600);
+  static const caption = TextStyle(
+    fontSize: 9.5,
+    fontWeight: FontWeight.w600,
+    height: 1.3,
+  );
 }
 
 /// Colour for a signed value, or [kNeutral] when it is exactly zero.

@@ -71,7 +71,7 @@ const kBlueBackgroundAsset = 'assets/sparkling-blue-dashboard-bg.png';
 
 final appTheme = AppThemeController();
 
-const kWebAssetRevision = '5.1.0+21-native-exposure-performance';
+const kWebAssetRevision = '6.1.0+23-professional-mobile';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -184,6 +184,57 @@ ThemeData buildAppTheme({required bool blue}) {
     useMaterial3: true,
     brightness: Brightness.dark,
     fontFamily: 'Roboto',
+    visualDensity: const VisualDensity(horizontal: -1, vertical: -1),
+    textTheme: TextTheme(
+      displayLarge: TextStyle(
+        color: text,
+        fontSize: 26,
+        fontWeight: FontWeight.w800,
+      ),
+      headlineLarge: TextStyle(
+        color: text,
+        fontSize: 21,
+        fontWeight: FontWeight.w800,
+      ),
+      headlineMedium: TextStyle(
+        color: text,
+        fontSize: 18,
+        fontWeight: FontWeight.w800,
+      ),
+      titleLarge: TextStyle(
+        color: text,
+        fontSize: 15,
+        fontWeight: FontWeight.w700,
+      ),
+      titleMedium: TextStyle(
+        color: text,
+        fontSize: 13,
+        fontWeight: FontWeight.w700,
+      ),
+      titleSmall: TextStyle(
+        color: text,
+        fontSize: 11.5,
+        fontWeight: FontWeight.w700,
+      ),
+      bodyLarge: TextStyle(color: text, fontSize: 12, height: 1.35),
+      bodyMedium: TextStyle(color: text, fontSize: 11.5, height: 1.35),
+      bodySmall: TextStyle(color: muted, fontSize: 9.5, height: 1.3),
+      labelLarge: TextStyle(
+        color: text,
+        fontSize: 10.5,
+        fontWeight: FontWeight.w700,
+      ),
+      labelMedium: TextStyle(
+        color: muted,
+        fontSize: 9.5,
+        fontWeight: FontWeight.w700,
+      ),
+      labelSmall: TextStyle(
+        color: muted,
+        fontSize: 8,
+        fontWeight: FontWeight.w700,
+      ),
+    ),
     scaffoldBackgroundColor: Colors.transparent,
     canvasColor: surface,
     colorScheme: scheme,
@@ -218,7 +269,7 @@ ThemeData buildAppTheme({required bool blue}) {
       fillColor: subtle.withValues(alpha: .86),
       labelStyle: TextStyle(color: muted, fontSize: 13),
       hintStyle: TextStyle(color: muted, fontSize: 13),
-      contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+      contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
       border: OutlineInputBorder(
         borderRadius: BorderRadius.circular(10),
         borderSide: BorderSide(color: border),
@@ -236,13 +287,13 @@ ThemeData buildAppTheme({required bool blue}) {
       style: FilledButton.styleFrom(
         backgroundColor: accent,
         foregroundColor: Colors.white,
-        minimumSize: const Size(0, 48),
-        textStyle: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+        minimumSize: const Size(0, 40),
+        textStyle: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(9)),
       ),
     ),
     navigationBarTheme: NavigationBarThemeData(
-      height: 70,
+      height: 62,
       backgroundColor: surface.withValues(alpha: .94),
       indicatorColor: kNeon.withValues(alpha: .16),
       surfaceTintColor: Colors.transparent,
@@ -253,7 +304,7 @@ ThemeData buildAppTheme({required bool blue}) {
       labelTextStyle: WidgetStateProperty.resolveWith(
         (states) => TextStyle(
           color: states.contains(WidgetState.selected) ? accent : muted,
-          fontSize: 9,
+          fontSize: 8.5,
           fontWeight: states.contains(WidgetState.selected)
               ? FontWeight.w700
               : FontWeight.w600,
@@ -267,12 +318,12 @@ ThemeData buildAppTheme({required bool blue}) {
         (states) => states.contains(WidgetState.selected)
             ? const IconThemeData(
                 color: kNeon,
-                size: 21,
+                size: 20,
                 shadows: kNeonIconGlowStrong,
               )
             : IconThemeData(
                 color: kNeon.withValues(alpha: .72),
-                size: 21,
+                size: 20,
                 shadows: kNeonIconGlow,
               ),
       ),
@@ -481,10 +532,17 @@ class MathiBotApp extends StatelessWidget {
         debugShowCheckedModeBanner: false,
         theme: buildAppTheme(blue: appTheme.isBlue),
         themeAnimationDuration: const Duration(milliseconds: 220),
-        builder: (context, child) => ThemeBackdrop(
-          blue: appTheme.isBlue,
-          child: child ?? const SizedBox.shrink(),
-        ),
+        builder: (context, child) {
+          final media = MediaQuery.of(context);
+          final scale = media.textScaler.scale(1).clamp(.9, 1.08).toDouble();
+          return MediaQuery(
+            data: media.copyWith(textScaler: TextScaler.linear(scale)),
+            child: ThemeBackdrop(
+              blue: appTheme.isBlue,
+              child: child ?? const SizedBox.shrink(),
+            ),
+          );
+        },
         home: const HomeShell(),
       ),
     );
@@ -798,9 +856,23 @@ class _HomeShellState extends State<HomeShell> {
     final selected = await showModalBottomSheet<int>(
       context: context,
       useSafeArea: true,
-      backgroundColor: Theme.of(context).colorScheme.surface,
-      builder: (context) => Padding(
+      backgroundColor: Colors.transparent,
+      builder: (context) => Container(
         padding: const EdgeInsets.fromLTRB(18, 18, 18, 24),
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [
+              Theme.of(context).colorScheme.surfaceContainerHighest,
+              Theme.of(context).colorScheme.surface,
+            ],
+          ),
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(26)),
+          border: Border(
+            top: BorderSide(color: Theme.of(context).colorScheme.primary),
+          ),
+        ),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -809,8 +881,8 @@ class _HomeShellState extends State<HomeShell> {
               children: [
                 const Expanded(
                   child: Text(
-                    'Workspace',
-                    style: TextStyle(fontSize: 17, fontWeight: FontWeight.w800),
+                    'Complete workspace',
+                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800),
                   ),
                 ),
                 IconButton(
@@ -818,6 +890,14 @@ class _HomeShellState extends State<HomeShell> {
                   icon: const Icon(Icons.close_rounded),
                 ),
               ],
+            ),
+            Text(
+              'Every dashboard page, natively designed for Android.',
+              style: TextStyle(
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+                fontSize: 12,
+                fontWeight: FontWeight.w500,
+              ),
             ),
             const SizedBox(height: 10),
             GridView.count(
@@ -849,6 +929,15 @@ class _HomeShellState extends State<HomeShell> {
                         border: Border.all(
                           color: Theme.of(context).colorScheme.outline,
                         ),
+                        boxShadow: [
+                          BoxShadow(
+                            color: Theme.of(
+                              context,
+                            ).colorScheme.primary.withValues(alpha: .10),
+                            blurRadius: 15,
+                            offset: const Offset(0, 7),
+                          ),
+                        ],
                       ),
                       child: Row(
                         children: [
@@ -913,24 +1002,34 @@ class _HomeShellState extends State<HomeShell> {
     );
     return Scaffold(
       appBar: AppBar(
-        toolbarHeight: 62,
-        leadingWidth: 58,
+        toolbarHeight: 60,
+        leadingWidth: 57,
         leading: const Padding(
-          padding: EdgeInsets.fromLTRB(14, 10, 6, 10),
+          padding: EdgeInsets.fromLTRB(14, 10, 7, 10),
           child: Center(child: NeonLogo(size: 34, radius: 10)),
         ),
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           mainAxisSize: MainAxisSize.min,
           children: [
-            Text('Nithi Bot', style: neonBrandTextStyle(fontSize: 16)),
+            Text(
+              appPages[_tab].label,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: Theme.of(context).colorScheme.onSurface,
+                fontSize: 15,
+                fontWeight: FontWeight.w800,
+                letterSpacing: -.25,
+              ),
+            ),
             const SizedBox(height: 2),
             Text(
-              '${appPages[_tab].label} · ${SessionService.displayName.isEmpty ? SessionService.username : SessionService.displayName}',
+              'NITHI BOT  ·  ${SessionService.displayName.isEmpty ? SessionService.username : SessionService.displayName}',
               style: const TextStyle(
                 color: kNeonSubtle,
-                fontSize: 10.5,
-                fontWeight: FontWeight.w500,
+                fontSize: 8.5,
+                fontWeight: FontWeight.w700,
+                letterSpacing: .45,
                 // Tighter than the title on purpose: at this size a wide halo
                 // bleeds across the letterforms, same as `.brand .sub`.
                 shadows: [
@@ -1026,34 +1125,50 @@ class _HomeShellState extends State<HomeShell> {
           : pageStack,
       bottomNavigationBar: wide
           ? null
-          : DecoratedBox(
-              decoration: BoxDecoration(
-                border: Border(
-                  top: BorderSide(color: Theme.of(context).dividerColor),
-                ),
-              ),
-              child: NavigationBar(
-                selectedIndex: primaryIndex >= 0 ? primaryIndex : 4,
-                onDestinationSelected: (index) {
-                  if (index == 4) {
-                    _showMore();
-                  } else {
-                    _selectTab(primaryPageIndexes[index]);
-                  }
-                },
-                destinations: [
-                  for (final index in primaryPageIndexes)
-                    NavigationDestination(
-                      icon: Icon(appPages[index].icon),
-                      selectedIcon: Icon(appPages[index].icon),
-                      label: appPages[index].navLabel,
+          : Padding(
+              padding: const EdgeInsets.fromLTRB(8, 4, 8, 8),
+              child: Container(
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(22),
+                  border: Border.all(color: Theme.of(context).dividerColor),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: .42),
+                      blurRadius: 22,
+                      offset: const Offset(0, 8),
                     ),
-                  const NavigationDestination(
-                    icon: Icon(Icons.grid_view_rounded),
-                    selectedIcon: Icon(Icons.grid_view_rounded),
-                    label: 'More',
-                  ),
-                ],
+                    BoxShadow(
+                      color: Theme.of(
+                        context,
+                      ).colorScheme.primary.withValues(alpha: .14),
+                      blurRadius: 20,
+                    ),
+                  ],
+                ),
+                clipBehavior: Clip.antiAlias,
+                child: NavigationBar(
+                  selectedIndex: primaryIndex >= 0 ? primaryIndex : 4,
+                  onDestinationSelected: (index) {
+                    if (index == 4) {
+                      _showMore();
+                    } else {
+                      _selectTab(primaryPageIndexes[index]);
+                    }
+                  },
+                  destinations: [
+                    for (final index in primaryPageIndexes)
+                      NavigationDestination(
+                        icon: Icon(appPages[index].icon),
+                        selectedIcon: Icon(appPages[index].icon),
+                        label: appPages[index].navLabel,
+                      ),
+                    const NavigationDestination(
+                      icon: Icon(Icons.grid_view_rounded),
+                      selectedIcon: Icon(Icons.grid_view_rounded),
+                      label: 'More',
+                    ),
+                  ],
+                ),
               ),
             ),
     );

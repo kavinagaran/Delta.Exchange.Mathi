@@ -9,14 +9,14 @@ import 'package:flutter/material.dart';
 import '../theme/design.dart';
 
 /// Section card: a titled surface with an optional trailing accessory.
-class AppCard extends StatelessWidget {
+class AppCard extends StatefulWidget {
   const AppCard({
     super.key,
     this.kicker,
     this.title,
     this.trailing,
     required this.child,
-    this.padding = const EdgeInsets.all(Gap.lg),
+    this.padding = const EdgeInsets.all(Gap.md),
     this.accent,
   });
 
@@ -31,88 +31,225 @@ class AppCard extends StatelessWidget {
   final Color? accent;
 
   @override
+  State<AppCard> createState() => _AppCardState();
+}
+
+class _AppCardState extends State<AppCard> {
+  bool _pressed = false;
+
+  @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final hasHeader = kicker != null || title != null || trailing != null;
+    final hasHeader =
+        widget.kicker != null ||
+        widget.title != null ||
+        widget.trailing != null;
+    final tone = widget.accent ?? scheme.primary;
 
+    return Listener(
+      onPointerDown: (_) => setState(() => _pressed = true),
+      onPointerUp: (_) => setState(() => _pressed = false),
+      onPointerCancel: (_) => setState(() => _pressed = false),
+      child: AnimatedScale(
+        scale: _pressed ? .992 : 1,
+        duration: Motion.fast,
+        curve: Motion.curve,
+        child: Container(
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: [
+                Color.alphaBlend(
+                  tone.withValues(alpha: .13),
+                  scheme.surface.withValues(alpha: .97),
+                ),
+                scheme.surface.withValues(alpha: .90),
+                Color.alphaBlend(tone.withValues(alpha: .045), scheme.surface),
+              ],
+            ),
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: scheme.outline.withValues(alpha: .58)),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: .28),
+                blurRadius: 16,
+                offset: const Offset(0, 7),
+              ),
+              BoxShadow(
+                color: tone.withValues(alpha: .10),
+                blurRadius: 18,
+                offset: const Offset(0, 4),
+              ),
+            ],
+          ),
+          clipBehavior: Clip.antiAlias,
+          child: Stack(
+            children: [
+              Positioned(
+                left: 14,
+                right: 14,
+                top: 0,
+                height: 1,
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      colors: [
+                        Colors.transparent,
+                        tone.withValues(alpha: .72),
+                        Colors.transparent,
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+              Padding(
+                padding: EdgeInsets.fromLTRB(
+                  widget.padding.left + (widget.accent == null ? 0 : 3),
+                  widget.padding.top,
+                  widget.padding.right,
+                  widget.padding.bottom,
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (hasHeader) ...[
+                      Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                if (widget.kicker != null)
+                                  Text(
+                                    widget.kicker!.toUpperCase(),
+                                    style: AppText.kicker.copyWith(
+                                      color: scheme.onSurfaceVariant,
+                                    ),
+                                  ),
+                                if (widget.title != null)
+                                  Padding(
+                                    padding: const EdgeInsets.only(top: 2),
+                                    child: Text(
+                                      widget.title!,
+                                      style: AppText.title,
+                                    ),
+                                  ),
+                              ],
+                            ),
+                          ),
+                          ?widget.trailing,
+                        ],
+                      ),
+                      const SizedBox(height: Gap.md),
+                    ],
+                    widget.child,
+                  ],
+                ),
+              ),
+              if (widget.accent != null)
+                Positioned(
+                  left: 0,
+                  top: 9,
+                  bottom: 9,
+                  width: 2,
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      color: widget.accent,
+                      borderRadius: const BorderRadius.horizontal(
+                        right: Radius.circular(5),
+                      ),
+                      boxShadow: [
+                        BoxShadow(
+                          color: widget.accent!.withValues(alpha: .65),
+                          blurRadius: 10,
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Compact screen introduction shared by all data-heavy pages. It gives a
+/// phone page a clear identity without spending vertical space on prose.
+class PageIntro extends StatelessWidget {
+  const PageIntro({
+    super.key,
+    required this.icon,
+    required this.title,
+    required this.subtitle,
+    this.trailing,
+  });
+
+  final IconData icon;
+  final String title;
+  final String subtitle;
+  final Widget? trailing;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
     return Container(
+      padding: const EdgeInsets.all(Gap.md),
       decoration: BoxDecoration(
         gradient: LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
           colors: [
-            Color.alphaBlend(
-              (accent ?? scheme.primary).withValues(alpha: .075),
-              scheme.surface.withValues(alpha: .96),
-            ),
-            scheme.surface.withValues(alpha: .86),
+            scheme.primary.withValues(alpha: .24),
+            scheme.surface.withValues(alpha: .92),
           ],
         ),
-        borderRadius: BorderRadius.circular(Radii.lg),
-        border: Border.all(color: scheme.outline),
-        boxShadow: [
-          BoxShadow(
-            color: (accent ?? scheme.primary).withValues(alpha: .07),
-            blurRadius: 24,
-            offset: const Offset(0, 10),
-          ),
-        ],
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: scheme.primary.withValues(alpha: .28)),
       ),
-      clipBehavior: Clip.antiAlias,
-      child: Stack(
+      child: Row(
         children: [
-          Padding(
-            padding: EdgeInsets.fromLTRB(
-              padding.left + (accent == null ? 0 : 3),
-              padding.top,
-              padding.right,
-              padding.bottom,
+          Container(
+            width: 36,
+            height: 36,
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: [scheme.primary, scheme.secondary],
+              ),
+              borderRadius: BorderRadius.circular(Radii.md),
+              boxShadow: [
+                BoxShadow(
+                  color: scheme.primary.withValues(alpha: .35),
+                  blurRadius: 16,
+                ),
+              ],
             ),
+            child: Icon(icon, color: Colors.white, size: 19),
+          ),
+          const SizedBox(width: Gap.md),
+          Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
               children: [
-                if (hasHeader) ...[
-                  Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            if (kicker != null)
-                              Text(
-                                kicker!.toUpperCase(),
-                                style: AppText.kicker.copyWith(
-                                  color: scheme.onSurfaceVariant,
-                                ),
-                              ),
-                            if (title != null)
-                              Padding(
-                                padding: const EdgeInsets.only(top: 2),
-                                child: Text(title!, style: AppText.title),
-                              ),
-                          ],
-                        ),
-                      ),
-                      ?trailing,
-                    ],
+                Text(title, style: AppText.title.copyWith(fontSize: 14)),
+                const SizedBox(height: 3),
+                Text(
+                  subtitle,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: AppText.caption.copyWith(
+                    color: scheme.onSurfaceVariant,
                   ),
-                  const SizedBox(height: Gap.md),
-                ],
-                child,
+                ),
               ],
             ),
           ),
-          if (accent != null)
-            Positioned(
-              left: 0,
-              top: 0,
-              bottom: 0,
-              width: 3,
-              child: ColoredBox(color: accent!),
-            ),
+          ?trailing,
         ],
       ),
     );
@@ -141,9 +278,9 @@ class CompactAction extends StatelessWidget {
     final scheme = Theme.of(context).colorScheme;
     final colour = tone ?? scheme.primary;
     final style = ButtonStyle(
-      minimumSize: const WidgetStatePropertyAll(Size(0, 40)),
+      minimumSize: const WidgetStatePropertyAll(Size(0, 34)),
       padding: const WidgetStatePropertyAll(
-        EdgeInsets.symmetric(horizontal: 13, vertical: 9),
+        EdgeInsets.symmetric(horizontal: 11, vertical: 7),
       ),
       foregroundColor: WidgetStatePropertyAll(filled ? Colors.white : colour),
       backgroundColor: WidgetStatePropertyAll(
@@ -154,13 +291,13 @@ class CompactAction extends StatelessWidget {
       ),
       shape: const WidgetStatePropertyAll(StadiumBorder()),
       textStyle: const WidgetStatePropertyAll(
-        TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700),
+        TextStyle(fontSize: 10, fontWeight: FontWeight.w700),
       ),
     );
     return TextButton.icon(
       onPressed: onPressed,
       style: style,
-      icon: Icon(icon, size: 17),
+      icon: Icon(icon, size: 15),
       label: Text(label),
     );
   }
@@ -191,11 +328,13 @@ class MetricWrap extends StatelessWidget {
                         .withValues(alpha: .45),
                     borderRadius: BorderRadius.circular(Radii.md),
                     border: Border.all(
-                      color: Theme.of(context).colorScheme.outline,
+                      color: Theme.of(
+                        context,
+                      ).colorScheme.outline.withValues(alpha: .55),
                     ),
                   ),
                   child: Padding(
-                    padding: const EdgeInsets.all(Gap.md),
+                    padding: const EdgeInsets.all(Gap.sm),
                     child: child,
                   ),
                 ),
@@ -313,7 +452,7 @@ class StatusPill extends StatelessWidget {
     final scheme = Theme.of(context).colorScheme;
     final tone = colour ?? scheme.onSurfaceVariant;
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
       decoration: BoxDecoration(
         color: tone.withValues(alpha: .13),
         borderRadius: BorderRadius.circular(Radii.pill),
@@ -338,6 +477,113 @@ class StatusPill extends StatelessWidget {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// A compact professional decision dial. Scores always remain inside the
+/// ring, including on narrow phones and with Android display scaling enabled.
+class DecisionScoreDial extends StatelessWidget {
+  const DecisionScoreDial({
+    super.key,
+    required this.label,
+    required this.score,
+    required this.colour,
+    this.caption,
+    this.maxSize = 126,
+  });
+
+  final String label;
+  final double? score;
+  final Color colour;
+  final String? caption;
+  final double maxSize;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final progress = score == null ? 0.0 : (score!.abs() / 100).clamp(0.0, 1.0);
+    final value = score == null
+        ? '—'
+        : '${score! > 0 ? '+' : ''}${score!.toStringAsFixed(1)}';
+    return Center(
+      child: ConstrainedBox(
+        constraints: BoxConstraints(maxWidth: maxSize, maxHeight: maxSize),
+        child: AspectRatio(
+          aspectRatio: 1,
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: scheme.surface.withValues(alpha: .76),
+              boxShadow: [
+                BoxShadow(color: colour.withValues(alpha: .16), blurRadius: 16),
+              ],
+            ),
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.all(2),
+                  child: CircularProgressIndicator(
+                    value: progress,
+                    strokeWidth: 8,
+                    backgroundColor: scheme.surfaceContainerHighest,
+                    color: colour,
+                    strokeCap: StrokeCap.round,
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      border: Border.all(color: colour.withValues(alpha: .24)),
+                    ),
+                  ),
+                ),
+                Center(
+                  child: FittedBox(
+                    fit: BoxFit.scaleDown,
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          label.toUpperCase(),
+                          style: AppText.kicker.copyWith(
+                            color: scheme.onSurfaceVariant,
+                            fontSize: 7,
+                            letterSpacing: .65,
+                          ),
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          value,
+                          style: AppText.metric.copyWith(
+                            color: colour,
+                            fontSize: 21,
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
+                        if (caption != null) ...[
+                          const SizedBox(height: 1),
+                          Text(
+                            caption!.toUpperCase(),
+                            style: AppText.kicker.copyWith(
+                              color: scheme.onSurfaceVariant,
+                              fontSize: 6.5,
+                              letterSpacing: .45,
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
       ),
     );
   }

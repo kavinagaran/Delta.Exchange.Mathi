@@ -217,6 +217,12 @@ class _ConfigScreenState extends State<ConfigScreen> {
         physics: const AlwaysScrollableScrollPhysics(),
         padding: const EdgeInsets.fromLTRB(Gap.lg, Gap.md, Gap.lg, 110),
         children: [
+          PageIntro(
+            icon: Icons.tune_rounded,
+            title: 'Bot Config',
+            subtitle: "Configure ${widget.displayName}'s Trend Engine.",
+          ),
+          const SizedBox(height: Gap.md),
           AppCard(
             kicker: 'Trend engine',
             title: '${widget.displayName} configuration',

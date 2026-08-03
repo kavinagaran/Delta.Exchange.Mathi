@@ -86,6 +86,12 @@ class _PerformanceScreenState extends State<PerformanceScreen> {
         physics: const AlwaysScrollableScrollPhysics(),
         padding: const EdgeInsets.fromLTRB(Gap.lg, Gap.md, Gap.lg, Gap.xxl),
         children: [
+          const PageIntro(
+            icon: Icons.query_stats_rounded,
+            title: 'Performance',
+            subtitle: 'Real-trade P&L, risk, fees and complete history.',
+          ),
+          const SizedBox(height: Gap.md),
           if (!hasStats)
             const AppCard(
               kicker: 'Performance',

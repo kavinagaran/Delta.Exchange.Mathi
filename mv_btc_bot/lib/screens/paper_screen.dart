@@ -155,6 +155,16 @@ class _PaperScreenState extends State<PaperScreen> {
         physics: const AlwaysScrollableScrollPhysics(),
         padding: const EdgeInsets.fromLTRB(Gap.lg, Gap.md, Gap.lg, Gap.xxl),
         children: [
+          PageIntro(
+            icon: Icons.science_rounded,
+            title: 'Paper Trading',
+            subtitle: 'Live-market simulation with no exchange exposure.',
+            trailing: StatusPill(
+              position == null ? 'FLAT' : 'OPEN',
+              colour: position == null ? kNeutral : kWarning,
+            ),
+          ),
+          const SizedBox(height: Gap.md),
           _PaperHero(summary: _summary, today: _today, controller: _controller),
           const SizedBox(height: Gap.md),
           if (position == null)

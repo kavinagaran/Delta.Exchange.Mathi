@@ -98,6 +98,16 @@ class _TrendEngineScreenState extends State<TrendEngineScreen> {
         physics: const AlwaysScrollableScrollPhysics(),
         padding: const EdgeInsets.fromLTRB(Gap.lg, Gap.md, Gap.lg, Gap.xxl),
         children: [
+          PageIntro(
+            icon: Icons.insights_rounded,
+            title: 'Trend Engine',
+            subtitle: 'Preview, committed decision and market evidence.',
+            trailing: StatusPill(
+              '${snapshot['data_quality'] ?? 'UNKNOWN'}',
+              colour: snapshot['data_quality'] == 'OK' ? kPositive : kWarning,
+            ),
+          ),
+          const SizedBox(height: Gap.md),
           _DecisionHero(snapshot: snapshot, live: _live),
           const SizedBox(height: Gap.md),
           _DecisionChart(history: _history),
@@ -144,18 +154,20 @@ class _DecisionHero extends StatelessWidget {
           Row(
             children: [
               Expanded(
-                child: _ScoreDial(
+                child: DecisionScoreDial(
                   label: 'Preview',
                   score: preview,
-                  zone: _zoneForScore(preview),
+                  colour: zoneColour(_zoneForScore(preview)),
+                  caption: _zoneLabel(_zoneForScore(preview)),
                 ),
               ),
               const SizedBox(width: Gap.md),
               Expanded(
-                child: _ScoreDial(
+                child: DecisionScoreDial(
                   label: 'Committed',
                   score: committed,
-                  zone: zone,
+                  colour: zoneColour(zone),
+                  caption: _zoneLabel(zone),
                 ),
               ),
             ],
@@ -181,60 +193,6 @@ class _DecisionHero extends StatelessWidget {
                 dot: false,
               ),
             ],
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _ScoreDial extends StatelessWidget {
-  const _ScoreDial({
-    required this.label,
-    required this.score,
-    required this.zone,
-  });
-  final String label;
-  final double? score;
-  final String zone;
-
-  @override
-  Widget build(BuildContext context) {
-    final colour = zoneColour(zone);
-    return AspectRatio(
-      aspectRatio: 1,
-      child: Stack(
-        fit: StackFit.expand,
-        children: [
-          CircularProgressIndicator(
-            value: score == null
-                ? 0
-                : (score!.abs() / 100).clamp(0, 1).toDouble(),
-            strokeWidth: 9,
-            backgroundColor: Theme.of(
-              context,
-            ).colorScheme.surfaceContainerHighest,
-            color: colour,
-            strokeCap: StrokeCap.round,
-          ),
-          Center(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  label.toUpperCase(),
-                  style: AppText.kicker.copyWith(
-                    color: Theme.of(context).colorScheme.onSurfaceVariant,
-                    fontSize: 7.5,
-                  ),
-                ),
-                const SizedBox(height: 3),
-                Text(
-                  score == null ? '—' : _signed(score!, 1),
-                  style: AppText.metric.copyWith(color: colour, fontSize: 24),
-                ),
-              ],
-            ),
           ),
         ],
       ),

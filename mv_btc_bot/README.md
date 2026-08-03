@@ -1,17 +1,17 @@
-# mv_btc_bot
+# Nithi Bot Android
 
-A new Flutter project.
+Native Android companion for the Nithi Bot trading dashboard. The app uses the
+same authenticated server APIs as the web dashboard and includes Today,
+Performance, Paper, Exposure, Bot Config, API Accounts, Logs and Trend Engine.
 
-## Getting Started
+## Release build
 
-This project is a starting point for a Flutter application.
+```powershell
+flutter pub get
+flutter analyze
+flutter test
+flutter build apk --release
+```
 
-A few resources to get you started if this is your first Flutter project:
-
-- [Learn Flutter](https://docs.flutter.dev/get-started/learn-flutter)
-- [Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Flutter learning resources](https://docs.flutter.dev/reference/learning-resources)
-
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+The signed/unsigned release artifact (depending on the local Android signing
+configuration) is written to `build/app/outputs/flutter-apk/app-release.apk`.

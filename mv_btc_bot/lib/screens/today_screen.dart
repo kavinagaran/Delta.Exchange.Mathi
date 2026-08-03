@@ -34,6 +34,10 @@ class TodayScreen extends StatefulWidget {
 
 class _TodayScreenState extends State<TodayScreen> {
   Map<String, dynamic>? _status;
+  Map<String, dynamic>? _engine;
+  Map<String, dynamic>? _engineLive;
+  Map<String, dynamic>? _controller;
+  Map<String, dynamic>? _protection;
   List<dynamic> _todayTrades = const [];
   String? _error;
   bool _loading = true;
@@ -65,6 +69,10 @@ class _TodayScreenState extends State<TodayScreen> {
     final results = await Future.wait([
       widget.api.status(),
       widget.api.todayTrades(),
+      widget.api.engineSnapshot(),
+      widget.api.scoreAutoStatus(),
+      widget.api.engineLive(),
+      widget.api.protectionStatus(),
     ]);
     if (!mounted) return;
 
@@ -79,6 +87,10 @@ class _TodayScreenState extends State<TodayScreen> {
       _loading = false;
       _status = results[0].data as Map<String, dynamic>?;
       _todayTrades = (results[1].data as List<dynamic>?) ?? const [];
+      _engine = results[2].data as Map<String, dynamic>?;
+      _controller = results[3].data as Map<String, dynamic>?;
+      _engineLive = results[4].data as Map<String, dynamic>?;
+      _protection = results[5].data as Map<String, dynamic>?;
       // Only the primary call's failure blanks the screen; the engine being
       // unreachable is itself information and gets its own card.
       _error = results[0].ok ? null : results[0].error;
@@ -92,25 +104,6 @@ class _TodayScreenState extends State<TodayScreen> {
       }
     }
     return null;
-  }
-
-  Map<String, dynamic>? get _latestTrade {
-    final closed = _todayTrades
-        .whereType<Map<String, dynamic>>()
-        .where(
-          (row) =>
-              row['_live'] != true &&
-              '${row['status'] ?? 'CLOSED'}'.toUpperCase() != 'OPEN',
-        )
-        .toList();
-    if (closed.isEmpty) return null;
-    closed.sort(
-      (left, right) => _tradeMoment(
-        left,
-        exit: true,
-      ).compareTo(_tradeMoment(right, exit: true)),
-    );
-    return closed.last;
   }
 
   Future<void> _close(Map<String, dynamic> trade) async {
@@ -164,13 +157,53 @@ class _TodayScreenState extends State<TodayScreen> {
     }
 
     final current = _currentTrade;
-    final latest = _latestTrade;
+    final trades = _todayTrades.whereType<Map<String, dynamic>>().toList()
+      ..sort(
+        (left, right) => _tradeMoment(
+          right,
+          exit: false,
+        ).compareTo(_tradeMoment(left, exit: false)),
+      );
+    final closed = trades.where((row) => !_isOpen(row)).length;
+    final dayPnl = trades.fold<double>(
+      0,
+      (total, row) =>
+          total +
+          (_number(row['pnl_usd'] ?? row['net_pnl'] ?? row['live_pnl']) ?? 0),
+    );
     return RefreshIndicator(
       onRefresh: _refresh,
       child: ListView(
         physics: const AlwaysScrollableScrollPhysics(),
         padding: const EdgeInsets.fromLTRB(Gap.lg, Gap.md, Gap.lg, Gap.xxl),
         children: [
+          PageIntro(
+            icon: Icons.space_dashboard_rounded,
+            title: 'Today',
+            subtitle: 'Live position, engine decision and every trade today.',
+            trailing: StatusPill(
+              current == null ? 'FLAT' : 'LIVE',
+              colour: current == null
+                  ? kNeutral
+                  : signedColour(
+                      _number(current['live_pnl'] ?? current['pnl_usd']),
+                    ),
+            ),
+          ),
+          const SizedBox(height: Gap.md),
+          MetricWrap(
+            children: [
+              MetricTile(label: 'Trades', value: '${trades.length}'),
+              MetricTile(label: 'Open', value: current == null ? '0' : '1'),
+              MetricTile(label: 'Closed', value: '$closed'),
+              MetricTile(
+                label: 'Day P&L',
+                value: _money(dayPnl),
+                colour: signedColour(dayPnl),
+              ),
+            ],
+          ),
+          const SizedBox(height: Gap.md),
           if (current == null)
             const AppCard(
               kicker: 'Current trade',
@@ -180,25 +213,45 @@ class _TodayScreenState extends State<TodayScreen> {
           else
             _CurrentTradeCard(
               trade: current,
+              protection: _protectionFor(current),
               busy: _closing,
               onClose: () => _close(current),
             ),
           const SizedBox(height: Gap.md),
-          _LatestTradeCard(trade: latest),
+          _EngineCard(
+            engine: _engine,
+            live: _engineLive,
+            controller: _controller,
+          ),
+          const SizedBox(height: Gap.md),
+          _TodayTradesCard(trades: trades),
         ],
       ),
     );
   }
+
+  Map<String, dynamic>? _protectionFor(Map<String, dynamic> trade) {
+    final embedded = trade['dry_protection'];
+    if (embedded is Map<String, dynamic>) return embedded;
+    final slot = '${trade['control_slot'] ?? trade['slot'] ?? 'trend'}';
+    final value = _protection?[slot];
+    return value is Map<String, dynamic> ? value : null;
+  }
 }
+
+bool _isOpen(Map<String, dynamic> row) =>
+    row['_live'] == true || '${row['status']}'.toUpperCase() == 'OPEN';
 
 class _CurrentTradeCard extends StatelessWidget {
   const _CurrentTradeCard({
     required this.trade,
+    required this.protection,
     required this.busy,
     required this.onClose,
   });
 
   final Map<String, dynamic> trade;
+  final Map<String, dynamic>? protection;
   final bool busy;
   final VoidCallback onClose;
 
@@ -247,6 +300,89 @@ class _CurrentTradeCard extends StatelessWidget {
               onPressed: busy ? null : onClose,
             ),
           ),
+          if (protection != null) ...[
+            const SizedBox(height: Gap.lg),
+            _ProtectionPanel(protection: protection!),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _ProtectionPanel extends StatelessWidget {
+  const _ProtectionPanel({required this.protection});
+
+  final Map<String, dynamic> protection;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final running = protection['running'] == true;
+    final armed = protection['tsl_armed'] == true;
+    String value(String key, [String? fallback]) {
+      final raw =
+          protection[key] ?? (fallback == null ? null : protection[fallback]);
+      final number = _number(raw);
+      return number == null ? '—' : '\$${number.toStringAsFixed(2)}';
+    }
+
+    return Container(
+      padding: const EdgeInsets.all(Gap.md),
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainerHighest.withValues(alpha: .52),
+        borderRadius: BorderRadius.circular(Radii.md),
+        border: Border.all(color: scheme.outline),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Expanded(
+                child: Text('TP / SL / TSL Monitor', style: AppText.title),
+              ),
+              StatusPill(
+                running ? (armed ? 'TSL ARMED' : 'RUNNING') : 'VERIFYING',
+                colour: running ? (armed ? kWarning : kPositive) : kNeutral,
+              ),
+            ],
+          ),
+          const SizedBox(height: Gap.md),
+          MetricWrap(
+            children: [
+              MetricTile(
+                label: 'Take profit',
+                value: value('target_pnl', 'tp_target_pnl'),
+                colour: kPositive,
+              ),
+              MetricTile(
+                label: 'Stop loss',
+                value: value('sl_pnl', 'sl_target_pnl'),
+                colour: kNegative,
+              ),
+              MetricTile(
+                label: 'TSL arm',
+                value: value('tsl_arm_pnl'),
+                colour: kWarning,
+              ),
+              MetricTile(
+                label: 'TSL trail',
+                value: value('tsl_trail_pnl'),
+                colour: const Color(0xFF70B8FF),
+              ),
+              MetricTile(
+                label: 'Minimum lock',
+                value: value('tsl_lock_min_pnl'),
+                colour: const Color(0xFFC58CFF),
+              ),
+              MetricTile(
+                label: 'Poll',
+                value: '${protection['poll_secs'] ?? '—'} sec',
+                colour: scheme.secondary,
+              ),
+            ],
+          ),
         ],
       ),
     );
@@ -254,11 +390,15 @@ class _CurrentTradeCard extends StatelessWidget {
 }
 
 /// Engine state: score, zone, and whether an entry is currently permitted.
-// ignore: unused_element
 class _EngineCard extends StatelessWidget {
-  const _EngineCard({required this.engine, required this.controller});
+  const _EngineCard({
+    required this.engine,
+    required this.live,
+    required this.controller,
+  });
 
   final Map<String, dynamic>? engine;
+  final Map<String, dynamic>? live;
   final Map<String, dynamic>? controller;
 
   @override
@@ -278,47 +418,65 @@ class _EngineCard extends StatelessWidget {
       );
     }
 
-    final score = (engine!['trend_score'] as num?)?.toDouble();
+    final score = _number(engine!['trend_score']);
+    final preview = _number(live?['trend_score'] ?? live?['score']);
     final zone = engine!['zone'] as String?;
     final quality = engine!['data_quality'] as String?;
     final allowed = engine!['zone_action_allowed'] == true;
     final reason = engine!['zone_reason'] as String?;
     final healthy = quality == 'OK';
+    final previewZone = _zoneFromScore(preview);
 
     return AppCard(
       kicker: 'Trend engine',
       title: zone == null ? 'No zone' : _zoneLabel(zone),
       accent: zoneColour(zone),
-      trailing: StatusPill(
-        healthy ? (allowed ? 'Armed' : 'Holding') : (quality ?? 'Degraded'),
-        colour: healthy ? (allowed ? kPositive : kWarning) : kNegative,
-      ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
-            crossAxisAlignment: CrossAxisAlignment.end,
             children: [
               Expanded(
-                child: MetricTile(
-                  label: 'Decision score',
-                  value: score == null ? '—' : _signed(score, 1),
-                  colour: signedColour(score),
-                  big: true,
+                child: DecisionScoreDial(
+                  label: 'Committed',
+                  score: score,
+                  colour: zoneColour(zone),
+                  caption: zone == null ? 'No decision' : _shortZone(zone),
+                  maxSize: 112,
                 ),
               ),
+              const SizedBox(width: Gap.md),
+              Expanded(
+                child: DecisionScoreDial(
+                  label: 'Live preview',
+                  score: preview,
+                  colour: zoneColour(previewZone),
+                  caption: _shortZone(previewZone),
+                  maxSize: 112,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: Gap.sm),
+          Wrap(
+            spacing: Gap.sm,
+            runSpacing: Gap.xs,
+            children: [
+              StatusPill(
+                healthy
+                    ? (allowed ? 'ENTRY READY' : 'WAITING')
+                    : (quality ?? 'DEGRADED'),
+                colour: healthy ? (allowed ? kPositive : kWarning) : kNegative,
+              ),
               if (controller?['status'] != null)
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 6),
-                  child: StatusPill(
-                    '${controller!['status']}'.replaceAll('_', ' '),
-                    colour: scheme.onSurfaceVariant,
-                    dot: false,
-                  ),
+                StatusPill(
+                  '${controller!['status']}'.replaceAll('_', ' ').toUpperCase(),
+                  colour: scheme.onSurfaceVariant,
+                  dot: false,
                 ),
             ],
           ),
-          const SizedBox(height: Gap.md),
+          const SizedBox(height: Gap.sm),
           if (score != null) ScoreMeter(score: score),
           if (reason != null && reason.isNotEmpty) ...[
             const SizedBox(height: Gap.sm),
@@ -339,6 +497,175 @@ class _EngineCard extends StatelessWidget {
     'HOLD' => 'Hold · no new action',
     _ => zone,
   };
+
+  static String _shortZone(String zone) => switch (zone) {
+    'CE_2_ITM' => 'Buy CE',
+    'PE_2_ITM' || 'PE_3_ITM' => 'Buy PE',
+    'SHORT_MOVE' => 'Short MOVE',
+    _ => 'Hold',
+  };
+
+  static String _zoneFromScore(double? score) {
+    if (score == null) return 'HOLD';
+    if (score >= 40) return 'CE_2_ITM';
+    if (score <= -40) return 'PE_2_ITM';
+    if (score >= -30 && score <= 30) return 'SHORT_MOVE';
+    return 'HOLD';
+  }
+}
+
+/// Every trade opened today, presented as compact expandable rows so the full
+/// web table remains usable on a 360dp phone without horizontal scrolling.
+class _TodayTradesCard extends StatelessWidget {
+  const _TodayTradesCard({required this.trades});
+
+  final List<Map<String, dynamic>> trades;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    if (trades.isEmpty) {
+      return AppCard(
+        kicker: "Today's activity",
+        title: 'No trades yet',
+        child: Text(
+          'New entries will appear here automatically.',
+          style: AppText.body.copyWith(color: scheme.onSurfaceVariant),
+        ),
+      );
+    }
+    return AppCard(
+      kicker: "Today's activity",
+      title: '${trades.length} ${trades.length == 1 ? 'trade' : 'trades'}',
+      trailing: const Icon(Icons.receipt_long_rounded, size: 19),
+      padding: const EdgeInsets.fromLTRB(Gap.md, Gap.lg, Gap.md, Gap.sm),
+      child: Column(
+        children: [
+          for (var index = 0; index < trades.length; index++) ...[
+            _TradeHistoryRow(trade: trades[index]),
+            if (index != trades.length - 1)
+              Divider(height: 1, color: scheme.outline),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _TradeHistoryRow extends StatelessWidget {
+  const _TradeHistoryRow({required this.trade});
+
+  final Map<String, dynamic> trade;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final open = _isOpen(trade);
+    final pnl = _number(
+      trade['pnl_usd'] ?? trade['net_pnl'] ?? trade['live_pnl'],
+    );
+    final status = open
+        ? 'OPEN'
+        : (pnl ?? 0) > 0
+        ? 'WIN'
+        : (pnl ?? 0) < 0
+        ? 'LOSS'
+        : 'CLOSED';
+    return Material(
+      color: Colors.transparent,
+      child: Theme(
+        data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+        child: ExpansionTile(
+          tilePadding: const EdgeInsets.symmetric(
+            horizontal: Gap.xs,
+            vertical: 3,
+          ),
+          childrenPadding: const EdgeInsets.fromLTRB(Gap.sm, 0, Gap.sm, Gap.md),
+          iconColor: scheme.primary,
+          collapsedIconColor: scheme.onSurfaceVariant,
+          title: Text(
+            '${trade['symbol'] ?? 'Unknown contract'}',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: AppText.title.copyWith(fontSize: 13),
+          ),
+          subtitle: Padding(
+            padding: const EdgeInsets.only(top: 5),
+            child: Row(
+              children: [
+                StatusPill(
+                  _tradeType(trade),
+                  colour: zoneColour(switch (_tradeType(trade)) {
+                    'CE' => 'CE_2_ITM',
+                    'PE' => 'PE_2_ITM',
+                    'MV' => 'SHORT_MOVE',
+                    _ => 'HOLD',
+                  }),
+                  dot: false,
+                ),
+                const SizedBox(width: Gap.sm),
+                Expanded(
+                  child: Text(
+                    '${_tradeTime(trade)}  ·  ${_lots(trade['lots'])} lots',
+                    overflow: TextOverflow.ellipsis,
+                    style: AppText.caption.copyWith(
+                      color: scheme.onSurfaceVariant,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          trailing: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              Text(
+                pnl == null ? '—' : _money(pnl),
+                style: AppText.number.copyWith(color: signedColour(pnl)),
+              ),
+              Text(
+                status,
+                style: AppText.kicker.copyWith(
+                  color: open ? kWarning : signedColour(pnl),
+                ),
+              ),
+            ],
+          ),
+          children: [
+            StatRow('Opened', '${_tradeDate(trade)} · ${_tradeTime(trade)}'),
+            StatRow('Closed', open ? '—' : _tradeTime(trade, exit: true)),
+            StatRow(
+              'Direction',
+              '${trade['side'] ?? '—'}'.toUpperCase(),
+              valueColour: _sideColour(trade['side']),
+            ),
+            StatRow('Entry', _tradePrice(trade['entry_mark'])),
+            StatRow(
+              'Exit / mark',
+              _tradePrice(open ? trade['current_mark'] : trade['exit_mark']),
+            ),
+            if (_number(trade['gross_pnl'] ?? trade['gross_pnl_usd']) != null)
+              StatRow(
+                'Gross P&L',
+                _money(_number(trade['gross_pnl'] ?? trade['gross_pnl_usd'])!),
+                valueColour: signedColour(
+                  _number(trade['gross_pnl'] ?? trade['gross_pnl_usd']),
+                ),
+              ),
+            if (_number(trade['fees'] ?? trade['fees_usd']) != null)
+              StatRow('Fees', _tradePrice(trade['fees'] ?? trade['fees_usd'])),
+            if ('${trade['exit_trigger'] ?? ''}'.trim().isNotEmpty)
+              StatRow(
+                'Exit reason',
+                '${trade['exit_trigger']}'.replaceAll('_', ' ').toUpperCase(),
+                mono: false,
+              ),
+          ],
+        ),
+      ),
+    );
+  }
 }
 
 /// Open positions across every slot, flattened for a phone.
@@ -440,100 +767,6 @@ class _PositionRow extends StatelessWidget {
         if (lots != null) StatRow('Lots', '$lots'),
         if (entry != null) StatRow('Entry', entry.toStringAsFixed(1)),
       ],
-    );
-  }
-}
-
-/// The most recent completed trade today, presented with the same strong
-/// hierarchy as the open-position card instead of being buried in a list.
-class _LatestTradeCard extends StatelessWidget {
-  const _LatestTradeCard({required this.trade});
-
-  final Map<String, dynamic>? trade;
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    final row = trade;
-    if (row == null) {
-      return AppCard(
-        title: 'Latest Trade',
-        child: Text(
-          'No completed trade today.',
-          style: AppText.body.copyWith(color: scheme.onSurfaceVariant),
-        ),
-      );
-    }
-
-    final pnl = _number(row['pnl_usd']);
-    final result = pnl == null
-        ? 'CLOSED'
-        : pnl > 0
-        ? 'WIN'
-        : pnl < 0
-        ? 'LOSS'
-        : 'FLAT';
-    final resultColour = pnl == null ? kNeutral : signedColour(pnl);
-
-    return AppCard(
-      title: 'Latest Trade',
-      accent: resultColour,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Expanded(
-                child: Text(
-                  'LAST COMPLETED POSITION',
-                  style: AppText.kicker.copyWith(
-                    color: scheme.onSurfaceVariant,
-                  ),
-                ),
-              ),
-              StatusPill(result, colour: resultColour, dot: false),
-            ],
-          ),
-          const SizedBox(height: Gap.lg),
-          Center(
-            child: Column(
-              children: [
-                Text(
-                  pnl == null ? '—' : _money(pnl),
-                  style: AppText.display.copyWith(color: resultColour),
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  'REALIZED P&L',
-                  style: AppText.kicker.copyWith(
-                    color: scheme.onSurfaceVariant,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: Gap.lg),
-          StatRow('Trade date', _tradeDate(row)),
-          StatRow('Entry time', _tradeTime(row)),
-          StatRow('Exit time', _tradeTime(row, exit: true)),
-          StatRow('Trade type', _tradeType(row), valueColour: resultColour),
-          StatRow('Contract', '${row['symbol'] ?? '—'}'),
-          StatRow(
-            'Side',
-            '${row['side'] ?? '—'}'.toUpperCase(),
-            valueColour: _sideColour(row['side']),
-          ),
-          StatRow('Lots', _lots(row['lots'])),
-          StatRow('Entry', _tradePrice(row['entry_mark'])),
-          StatRow('Exit price', _tradePrice(row['exit_mark'])),
-          if ('${row['exit_trigger'] ?? ''}'.trim().isNotEmpty)
-            StatRow(
-              'Exit reason',
-              '${row['exit_trigger']}'.replaceAll('_', ' ').toUpperCase(),
-              mono: false,
-            ),
-        ],
-      ),
     );
   }
 }

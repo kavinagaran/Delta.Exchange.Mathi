@@ -150,6 +150,8 @@ class DashboardApi {
       getMap('/api/engine/health');
   Future<ApiResult<Map<String, dynamic>>> scoreAutoStatus() =>
       getMap('/api/trend-engine/score-auto/status');
+  Future<ApiResult<Map<String, dynamic>>> protectionStatus() =>
+      getMap('/api/tp-monitor');
   Future<ApiResult<Map<String, dynamic>>> tradingMode() =>
       getMap('/api/trading-mode-availability');
   Future<ApiResult<Map<String, dynamic>>> engineLive() =>
