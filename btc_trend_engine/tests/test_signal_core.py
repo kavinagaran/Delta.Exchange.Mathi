@@ -515,7 +515,7 @@ def test_snapshot_matches_contract_shape():
                 "zone", "zone_action_allowed", "zone_reason"):
         assert key in snapshot, key
     # The response shape remains 1.3.0; the model version carries rule changes.
-    assert snapshot["schema_version"] == "1.3.0"
+    assert snapshot["schema_version"] == "1.4.0"
     assert snapshot["entry_allowed"] is True
     assert snapshot["invalidation_price"] == "63000.0"
     assert snapshot["suggested_stop_bps"] == pytest.approx(58.5)
@@ -561,6 +561,7 @@ def test_sideways_zone_ignores_only_directional_entry_gates():
     )
     assert snapshot["zone"] == zones.SHORT_MOVE
     assert snapshot["zone_action_allowed"] is True
+    assert snapshot["trigger_adx"] == pytest.approx(24.9)
     names = {gate["name"] for gate in snapshot["gates"]}
     assert "regime_tradeable" not in names
     assert "score_beyond_entry_threshold" not in names
@@ -598,6 +599,7 @@ def test_short_move_matrix_requires_adx_below_25():
                      if gate["name"] == "calm_adx")
     assert calm_gate["passed"] is False
     assert snapshot["zone_action_allowed"] is False
+    assert snapshot["trigger_adx"] == pytest.approx(25.0)
     assert "ADX is not below 25" in snapshot["zone_reason"]
 
 

@@ -48,6 +48,7 @@ from trend_score_auto import (
     score_zone,
     select_directional_option,
     select_move_contract,
+    short_move_adx_exit_required,
 )
 from trend_score_live_execution import (
     ExactOrderLookup as TrendScoreExactOrderLookup,
@@ -8743,6 +8744,7 @@ def _collect_trend_score_auto_signal() -> dict:
         raise RuntimeError("trend engine committed signal has no signal_id")
     zone_action_allowed = engine_snapshot.get("zone_action_allowed") is True
     zone_reason = str(engine_snapshot.get("zone_reason") or "").strip()
+    trigger_adx = engine_snapshot.get("trigger_adx")
     decision = {
         "direction_score": score,
         "market_regime": engine_snapshot.get("regime") or "UNCLEAR",
@@ -8750,6 +8752,7 @@ def _collect_trend_score_auto_signal() -> dict:
         "engine_candle_close_utc": engine_snapshot.get("candle_close_utc"),
         "zone_action_allowed": zone_action_allowed,
         "zone_reason": zone_reason,
+        "trigger_adx": trigger_adx,
         "decision_id": engine_signal_id,
         "model_version": engine_snapshot.get("model_version"),
         "schema_version": engine_snapshot.get("schema_version"),
@@ -8818,6 +8821,7 @@ def _collect_trend_score_auto_signal() -> dict:
         "zone": zone,
         "zone_action_allowed": zone_action_allowed,
         "zone_reason": zone_reason,
+        "trigger_adx": trigger_adx,
         "engine_signal_id": engine_signal_id,
         "engine_candle_close_utc": engine_candle.isoformat().replace(
             "+00:00", "Z"
@@ -8847,9 +8851,11 @@ def _trend_score_auto_engine_action_ready(
 ) -> bool:
     """Do not mutate a position until the engine has approved this zone.
 
-    A SHORT_MOVE is actionable only when the engine confirms the current
-    closed 5m score is neutral and its 5m ADX is below 25. The same fail-safe
-    rule applies to every other engine action gate.
+    A SHORT_MOVE entry is actionable only when the engine confirms the current
+    closed 5m score is neutral and its 5m ADX is below 25.  A committed ADX at
+    or above 25 is nevertheless allowed through as an exit-only invalidation
+    so an already-open SHORT_MOVE can be flattened. The planner guarantees
+    that this exception cannot open or switch a position.
     """
     if signal.get("zone") == TREND_SCORE_HOLD_ZONE:
         # HOLD can still carry an exit-only invalidation for an existing CE/PE
@@ -8857,6 +8863,11 @@ def _trend_score_auto_engine_action_ready(
         # opens a position from this branch.
         return True
     if signal.get("zone_action_allowed") is True:
+        return True
+    if (
+        signal.get("zone") == TREND_SCORE_MOVE_ZONE
+        and short_move_adx_exit_required(signal.get("trigger_adx"))
+    ):
         return True
     reason = str(signal.get("zone_reason") or "engine action gate is closed")
     _trend_score_auto_health_update(
@@ -9342,6 +9353,7 @@ def _trend_score_auto_signal_record(
         "direction_score": signal["score"],
         "market_regime": signal["market_regime"],
         "target_zone": signal["zone"],
+        "trigger_adx": signal.get("trigger_adx"),
         "action": action,
         "symbol": (state or {}).get("symbol"),
         "lots": (state or {}).get("lots"),
@@ -11676,6 +11688,7 @@ def _maybe_auto_trend_score_live_cycle(
                         [guessed_owned] if guessed_owned else []
                     ),
                     consumed_signal_keys=guessed_consumed,
+                    short_move_adx=current_signal.get("trigger_adx"),
                 )
                 if (
                     guessed_plan["action"] in {"OPEN", "CLOSE_THEN_OPEN"}
@@ -12003,6 +12016,7 @@ def _maybe_auto_trend_score_live_cycle(
                         signal_key=current_signal["signal_key"],
                         owned_positions=[owned] if owned else [],
                         consumed_signal_keys=consumed,
+                        short_move_adx=current_signal.get("trigger_adx"),
                     )
 
                     if plan["action"] == "NOOP":
@@ -12234,7 +12248,10 @@ def _maybe_auto_trend_score_live_cycle(
                             "trend",
                             owned,
                             reason=(
-                                "trend_engine_directional_invalidation"
+                                "trend_engine_short_move_adx_exit"
+                                if plan.get("reason")
+                                == "SHORT_MOVE_ADX_NO_LONGER_CALM"
+                                else "trend_engine_directional_invalidation"
                                 if plan["action"] == "CLOSE"
                                 else "trend_engine_score_zone_switch"
                             ),
@@ -12340,7 +12357,13 @@ def _maybe_auto_trend_score_live_cycle(
                     )
                     _trend_score_auto_health_update(
                         user, status="flat",
-                        last_action="exited the invalidated directional LIVE position",
+                        last_action=(
+                            "exited SHORT MOVE because committed 5-minute ADX "
+                            "is no longer calm"
+                            if plan.get("reason")
+                            == "SHORT_MOVE_ADX_NO_LONGER_CALM"
+                            else "exited the invalidated directional LIVE position"
+                        ),
                         last_error=None, current_zone=None, symbol=None, lots=0,
                         last_transition_id=transition_id,
                     )
@@ -12348,7 +12371,15 @@ def _maybe_auto_trend_score_live_cycle(
                         _trend_score_auto_notify(
                             f"🤖 <b>TREND ENGINE LIVE — {user.upper()}</b>\n"
                             f"Exited <code>{closed_state.get('symbol', '')}</code> "
-                            "after directional invalidation. No replacement was opened."
+                            + (
+                                f"because committed 5-minute ADX reached "
+                                f"<code>{current_signal.get('trigger_adx')}</code> "
+                                "(calm requires below 25). "
+                                if plan.get("reason")
+                                == "SHORT_MOVE_ADX_NO_LONGER_CALM"
+                                else "after directional invalidation. "
+                            )
+                            + "No replacement was opened."
                         )
                     return True
 
@@ -12712,6 +12743,7 @@ def _maybe_auto_trend_score_cycle() -> bool:
                     signal_key=signal["signal_key"],
                     owned_positions=[owned] if owned else [],
                     consumed_signal_keys=consumed,
+                    short_move_adx=signal.get("trigger_adx"),
                 )
 
                 if _trend_score_auto_entry_is_setup_locked(
@@ -12810,7 +12842,10 @@ def _maybe_auto_trend_score_cycle() -> bool:
                     closed = _close_dry_simulation_locked(
                         "trend", owned,
                         trigger=(
-                            "trend_engine_directional_invalidation"
+                            "trend_engine_short_move_adx_exit"
+                            if plan.get("reason")
+                            == "SHORT_MOVE_ADX_NO_LONGER_CALM"
+                            else "trend_engine_directional_invalidation"
                             if plan["action"] == "CLOSE"
                             else "trend_engine_score_zone_switch"
                         ),
@@ -12860,7 +12895,13 @@ def _maybe_auto_trend_score_cycle() -> bool:
                     _trend_score_auto_write_ledger(data_dir, ledger)
                     _trend_score_auto_health_update(
                         user, status="flat",
-                        last_action="exited the invalidated directional paper position",
+                        last_action=(
+                            "exited SHORT MOVE because committed 5-minute ADX "
+                            "is no longer calm"
+                            if plan.get("reason")
+                            == "SHORT_MOVE_ADX_NO_LONGER_CALM"
+                            else "exited the invalidated directional paper position"
+                        ),
                         last_error=None, current_zone=None, symbol=None, lots=0,
                         last_transition_id=transition_id,
                     )
@@ -12868,7 +12909,15 @@ def _maybe_auto_trend_score_cycle() -> bool:
                         _trend_score_auto_notify(
                             f"🤖 <b>TREND ENGINE DRY RUN — {user.upper()}</b>\n"
                             f"Exited <code>{closed.get('symbol', '')}</code> after "
-                            "directional invalidation. No replacement was opened."
+                            + (
+                                f"committed 5-minute ADX reached "
+                                f"<code>{signal.get('trigger_adx')}</code> "
+                                "(calm requires below 25). "
+                                if plan.get("reason")
+                                == "SHORT_MOVE_ADX_NO_LONGER_CALM"
+                                else "directional invalidation. "
+                            )
+                            + "No replacement was opened."
                         )
                     return True
 

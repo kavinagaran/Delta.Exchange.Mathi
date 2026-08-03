@@ -1,4 +1,4 @@
-# TrendSnapshot contract — v1.3.0
+# TrendSnapshot contract — v1.4.0
 
 **Frozen at v1.0.0:** 2026-07-25 · **Source:** `Trend_Engine.md` §5.3
 **Producer:** `btc_trend_engine` · **Consumer:** `trend_engine_client.py` → `dashboard.py`
@@ -27,11 +27,15 @@ controller, not falsely reported as an engine pass.
 closed 5m candle. The model version changed so the new profile creates a
 distinct signal identity for both paper and real execution controllers.
 
+**v1.4.0 (2026-08-03)** — additive `trigger_adx` field containing the raw
+committed 5-minute ADX. The execution controller uses it to close an open
+`SHORT_MOVE` when the calm-market condition ends at ADX >= 25.
+
 ## Payload
 
 ```json
 {
-  "schema_version": "1.3.0",
+  "schema_version": "1.4.0",
   "symbol": "BTCUSD",
   "timestamp": "2026-07-25T10:15:00Z",
   "candle_close_utc": "2026-07-25T10:15:00Z",
@@ -42,6 +46,7 @@ distinct signal identity for both paper and real execution controllers.
   "direction": 1,
   "trend_score": 72.0,
   "confidence": 0.68,
+  "trigger_adx": 31.4,
 
   "forecast_horizon_seconds": 900,
   "expected_return_bps": 18.0,
@@ -100,6 +105,7 @@ distinct signal identity for both paper and real execution controllers.
 | `direction` | `-1` \| `0` \| `+1` |
 | `trend_score` | `-100.0 … +100.0`, `100·tanh(raw)` |
 | `confidence` | `0.0 … 1.0` |
+| `trigger_adx` | raw ADX from the committed 5-minute trigger candle, or `null` when unavailable |
 | `invalidation_price` | **string**, parsed with `Decimal`. Never a float |
 | `entry_allowed` | `false` whenever `data_quality != "OK"` — invariant, tested |
 | `zone` | `CE_2_ITM` \| `PE_2_ITM` \| `SHORT_MOVE` \| `HOLD` (v1.1.0) |

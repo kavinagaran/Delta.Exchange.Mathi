@@ -46,6 +46,7 @@ def _signal(
     suffix: str = "10:00:00Z",
     zone_action_allowed: bool = True,
     zone_reason: str = "test signal allowed",
+    trigger_adx=None,
 ) -> dict:
     zone = dashboard.score_zone(score)
     return {
@@ -60,6 +61,7 @@ def _signal(
         "zone": zone,
         "zone_action_allowed": zone_action_allowed,
         "zone_reason": zone_reason,
+        "trigger_adx": trigger_adx,
         "signal_key": f"trend-score-auto|BTCUSD|5m|2026-07-23T{suffix}",
         "signal_bar_close_utc": f"2026-07-23T{suffix}",
         "market_regime": (
@@ -377,7 +379,7 @@ def test_matching_live_zone_holds_partial_fill_without_topping_up(
     assert ledger["signals"][signal["signal_key"]]["action"] == "HOLD"
 
 
-def test_short_move_with_non_calm_5m_adx_does_not_close_or_replace_a_live_position(
+def test_non_calm_short_move_signal_does_not_close_or_replace_a_live_ce_position(
     live_account,
     monkeypatch,
 ):
@@ -390,6 +392,7 @@ def test_short_move_with_non_calm_5m_adx_does_not_close_or_replace_a_live_positi
         suffix="10:10:00Z",
         zone_action_allowed=False,
         zone_reason="5m ADX 40.0 must be below 25 before selling MOVE",
+        trigger_adx=40.0,
     )
     prepare = Mock(side_effect=AssertionError("blocked MOVE must not prepare"))
     close = Mock(side_effect=AssertionError("blocked MOVE must not close"))
@@ -406,7 +409,59 @@ def test_short_move_with_non_calm_5m_adx_does_not_close_or_replace_a_live_positi
     prepare.assert_not_called()
     close.assert_not_called()
     execute.assert_not_called()
-    assert dashboard._trend_score_auto_health["alice"]["status"] == "blocked"
+    assert dashboard._trend_score_auto_health["alice"]["status"] == "signal_consumed"
+
+
+def test_committed_non_calm_adx_closes_an_open_live_short_move(
+    live_account,
+    monkeypatch,
+):
+    old_state = _owned_state(dashboard.TREND_SCORE_MOVE_ZONE)
+    _write(live_account / "trend_state.json", old_state)
+    signal = _signal(
+        dashboard._trading_mode_payload(),
+        0.0,
+        suffix="10:15:00Z",
+        zone_action_allowed=False,
+        zone_reason="5m ADX 25.0 must be below 25 before selling MOVE",
+        trigger_adx=25.0,
+    )
+    prepare = Mock(side_effect=AssertionError("ADX exit must not prepare an entry"))
+    execute = Mock(side_effect=AssertionError("ADX exit must not submit an entry"))
+
+    def close(slot, state, *, reason):
+        assert slot == "trend"
+        assert reason == "trend_engine_short_move_adx_exit"
+        _write(
+            live_account / "trend_state.json",
+            _reconciled_closed_state(state),
+        )
+
+    close_mock = Mock(side_effect=close)
+    monkeypatch.setattr(
+        dashboard, "_collect_trend_score_auto_signal", Mock(return_value=signal),
+    )
+    monkeypatch.setattr(dashboard, "_prepare_trend_score_auto_entry", prepare)
+    monkeypatch.setattr(dashboard, "_close_move_state_locked", close_mock)
+    monkeypatch.setattr(
+        dashboard,
+        "_strict_realtime_position",
+        Mock(return_value={"product_id": old_state["product_id"], "size": 0}),
+    )
+    monkeypatch.setattr(dashboard, "_trend_score_auto_live_execute", execute)
+
+    assert dashboard._maybe_auto_trend_score_cycle() is True
+    close_mock.assert_called_once()
+    prepare.assert_not_called()
+    execute.assert_not_called()
+    state = json.loads((live_account / "trend_state.json").read_text("utf-8"))
+    assert state["status"] == "CLOSED"
+    ledger = json.loads(
+        (live_account / dashboard.TREND_SCORE_AUTO_LEDGER_FILE).read_text("utf-8")
+    )
+    assert ledger["signals"][signal["signal_key"]]["action"] == "EXIT"
+    assert ledger["signals"][signal["signal_key"]]["trigger_adx"] == 25.0
+    assert "ADX" in dashboard._trend_score_auto_health["alice"]["last_action"]
 
 
 @pytest.mark.parametrize(

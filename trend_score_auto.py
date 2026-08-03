@@ -18,6 +18,8 @@ import math
 from datetime import datetime, timezone
 from typing import Any, Collection, Mapping, Sequence
 
+from btc_trend_engine.signals.regime import CALM_ADX_MAX
+
 
 PE_3_ITM = "PE_3_ITM"   # legacy strike policy; still closable, never opened
 PE_2_ITM = "PE_2_ITM"   # 2026-07-26 spec
@@ -100,6 +102,24 @@ def score_zone(score: Any) -> str:
     from btc_trend_engine.signals import zones
 
     return zones.zone_for_score(value)
+
+
+def short_move_adx_exit_required(adx: Any) -> bool:
+    """Whether a committed 5-minute ADX invalidates an open SHORT_MOVE.
+
+    SHORT_MOVE entry requires a calm reading strictly below ``CALM_ADX_MAX``.
+    The complementary boundary is therefore inclusive: an open MOVE is no
+    longer a calm-market trade as soon as the committed ADX is >= 25. Missing
+    or invalid ADX is rejected instead of being guessed into an exit.
+    """
+
+    if adx is None:
+        return False
+    try:
+        value = _finite(adx, "5m ADX")
+    except TrendScoreAutoInputError:
+        return False
+    return value >= CALM_ADX_MAX
 
 
 def completed_candle_signal_key(
@@ -536,6 +556,7 @@ def plan_score_transition(
     signal_key: str,
     owned_positions: Sequence[Mapping[str, Any]],
     consumed_signal_keys: Collection[str] | Mapping[str, Any] = (),
+    short_move_adx: Any = None,
 ) -> dict[str, Any]:
     """Plan one idempotent transition for zero or one owned position.
 
@@ -578,15 +599,40 @@ def plan_score_transition(
             "consume_signal": False,
         }
 
+    current = (
+        position_score_zone(owned_positions[0]) if owned_positions else None
+    )
+    if target == SHORT_MOVE and short_move_adx_exit_required(short_move_adx):
+        if current == SHORT_MOVE:
+            return {
+                "action": "CLOSE",
+                "reason": "SHORT_MOVE_ADX_NO_LONGER_CALM",
+                "signal_key": key,
+                "target_zone": target,
+                "current_zone": current,
+                "close_position": dict(owned_positions[0]),
+                "open_zone": None,
+                "consume_signal": True,
+            }
+        # Directional ADX blocks a new SHORT_MOVE but must never manufacture
+        # an exit or replacement for a CE/PE position.
+        return {
+            "action": "NOOP",
+            "reason": "SHORT_MOVE_BLOCKED_BY_DIRECTIONAL_ADX",
+            "signal_key": key,
+            "target_zone": target,
+            "current_zone": current,
+            "close_position": None,
+            "open_zone": None,
+            "consume_signal": False,
+        }
+
     if target == HOLD:
         # A HOLD band normally keeps the position.  There is one deliberate
         # exception: an existing directional position is closed when the score
         # crossed through the *opposite* neutral boundary.  That is an exit,
         # never a guessed replacement, so a CE cannot remain open at -30 just
         # because -30 is inside the PE hold band.
-        current = (
-            position_score_zone(owned_positions[0]) if owned_positions else None
-        )
         if current is not None:
             from btc_trend_engine.signals import zones
 
@@ -668,6 +714,7 @@ __all__ = [
     "plan_score_transition",
     "position_score_zone",
     "score_zone",
+    "short_move_adx_exit_required",
     "select_directional_option",
     "select_move_contract",
 ]

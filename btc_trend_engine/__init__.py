@@ -6,5 +6,5 @@ computation, regime classification and TrendSnapshot generation.  It holds no
 trading credentials, never touches ``users/``, and cannot place an order.
 """
 
-__version__ = "0.6.1"  # continuous, bounded derivatives context
-ENGINE_SCHEMA_VERSION = "1.3.0"  # docs/trend-snapshot-contract.md
+__version__ = "0.6.2"  # committed 5m ADX exposed for SHORT_MOVE exits
+ENGINE_SCHEMA_VERSION = "1.4.0"  # docs/trend-snapshot-contract.md

@@ -18,6 +18,7 @@ from trend_score_auto import (
     score_zone,
     select_directional_option,
     select_move_contract,
+    short_move_adx_exit_required,
 )
 
 
@@ -399,6 +400,57 @@ def test_transition_closes_then_opens_new_zone_on_same_signal():
     assert plan["current_zone"] == SHORT_MOVE
     assert plan["open_zone"] == PE_2_ITM
     assert plan["close_position"] == move
+
+
+@pytest.mark.parametrize(
+    ("adx", "expected"),
+    ((24.9, False), (25.0, True), (40.0, True), (None, False), ("bad", False)),
+)
+def test_short_move_adx_exit_uses_the_complementary_calm_boundary(adx, expected):
+    assert short_move_adx_exit_required(adx) is expected
+
+
+def test_non_calm_committed_adx_closes_only_an_open_short_move():
+    move = {
+        "symbol": "MV-BTC-64800-230726",
+        "side": "short",
+        "trend_score_zone": SHORT_MOVE,
+    }
+    plan = plan_score_transition(
+        score=0,
+        signal_key="signal-adx-exit",
+        owned_positions=[move],
+        short_move_adx=25.0,
+    )
+    assert plan["action"] == "CLOSE"
+    assert plan["reason"] == "SHORT_MOVE_ADX_NO_LONGER_CALM"
+    assert plan["close_position"] == move
+    assert plan["open_zone"] is None
+
+
+def test_non_calm_short_move_signal_cannot_close_or_open_other_positions():
+    call = {
+        "symbol": "C-BTC-64400-230726",
+        "side": "long",
+        "trend_score_zone": CE_2_ITM,
+    }
+    held = plan_score_transition(
+        score=0,
+        signal_key="signal-adx-ce",
+        owned_positions=[call],
+        short_move_adx=45.0,
+    )
+    flat = plan_score_transition(
+        score=0,
+        signal_key="signal-adx-flat",
+        owned_positions=[],
+        short_move_adx=45.0,
+    )
+    assert held["action"] == "NOOP"
+    assert held["close_position"] is None
+    assert held["open_zone"] is None
+    assert flat["action"] == "NOOP"
+    assert flat["open_zone"] is None
 
 
 def test_transition_fails_closed_for_multiple_or_unrecognized_positions():

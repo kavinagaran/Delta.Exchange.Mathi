@@ -21,10 +21,10 @@ from . import zones
 from .regime import CALM_ADX_MAX, NON_TRADEABLE, Regime, is_calm_adx
 from .score import ScoreResult
 
-# 1.1.0: additive zone fields (zone, zone_action_allowed, zone_reason,
-# zone_option_type, zone_itm_steps). Minor bump -- the client compares major
-# only, so existing consumers are unaffected.
-SCHEMA_VERSION = "1.3.0"
+# 1.4.0 adds the raw committed 5-minute trigger ADX.  The trading controller
+# consumes it for an explicit SHORT_MOVE invalidation exit; exposing the
+# numeric evidence avoids brittle parsing of human-readable gate text.
+SCHEMA_VERSION = "1.4.0"
 # The model version participates in signal_id. v1.4.1 makes derivatives
 # context continuous around a flat higher-timeframe reading and caps it so a
 # context-only reversal cannot dominate the price/ADX evidence.
@@ -405,6 +405,7 @@ def build_snapshot(
         "zone_reason": zone_decision.reason,
         "zone_option_type": zone_decision.option_type,
         "zone_itm_steps": zone_decision.itm_steps,
+        "trigger_adx": trigger_adx,
         "signal_ttl_seconds": config.ttl_seconds,
         "components": [
             {"name": c.name, "weight": c.weight, "score": c.score,
