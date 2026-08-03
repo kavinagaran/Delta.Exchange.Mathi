@@ -65,9 +65,13 @@ void main() {
     testWidgets('decision score gauge remains a perfect circle when narrow', (
       tester,
     ) async {
+      final theme = ThemeData(
+        colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFFEF274D)),
+      );
       await tester.pumpWidget(
-        const MaterialApp(
-          home: Scaffold(
+        MaterialApp(
+          theme: theme,
+          home: const Scaffold(
             body: SizedBox(
               width: 90,
               height: 140,
@@ -92,6 +96,8 @@ void main() {
       expect(find.text('+26.0'), findsOneWidget);
       expect(find.text('−100'), findsOneWidget);
       expect(find.text('+100'), findsOneWidget);
+      final scoreText = tester.widget<Text>(find.text('+26.0'));
+      expect(scoreText.style?.color, theme.colorScheme.primary);
     });
   });
 

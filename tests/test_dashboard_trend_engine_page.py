@@ -61,6 +61,8 @@ def test_score_dials_are_segmented_circular_gauges_with_needles():
         "border-radius: 50%",
     ):
         assert required in STYLE
+    gauge_styles = STYLE.split('.te-score-core strong {', 1)[1].split('}', 1)[0]
+    assert 'color: var(--accent)' in gauge_styles
 
 
 def test_committed_score_chart_is_a_zone_colored_line_with_every_boundary():

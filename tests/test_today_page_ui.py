@@ -107,6 +107,8 @@ def test_today_page_uses_compact_responsive_terminal_layout():
         "prefers-reduced-motion",
     ):
         assert required in styles
+    odometer_styles = styles.split('.today-odometer {', 1)[1].split('}', 1)[0]
+    assert 'color: var(--accent)' in odometer_styles
 
 
 def test_today_protection_footer_is_bold_colored_and_hides_local_fallback():

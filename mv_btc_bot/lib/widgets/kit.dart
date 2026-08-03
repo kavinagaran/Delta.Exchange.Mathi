@@ -554,12 +554,14 @@ class DecisionScoreDial extends StatelessWidget {
                               Text(
                                 value,
                                 style: AppText.metric.copyWith(
-                                  color: colour,
+                                  color: scheme.primary,
                                   fontSize: 22,
                                   fontWeight: FontWeight.w900,
                                   shadows: [
                                     Shadow(
-                                      color: colour.withValues(alpha: .55),
+                                      color: scheme.primary.withValues(
+                                        alpha: .62,
+                                      ),
                                       blurRadius: 9,
                                     ),
                                   ],
@@ -582,26 +584,58 @@ class DecisionScoreDial extends StatelessWidget {
                       ),
                     ),
                     Positioned(
-                      left: 14,
-                      bottom: 13,
-                      child: Text(
-                        '−100',
-                        style: AppText.kicker.copyWith(
-                          color: scheme.onSurface,
-                          fontSize: 7,
-                          fontWeight: FontWeight.w800,
+                      left: 10,
+                      bottom: 17,
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          color: const Color(0xE6010812),
+                          border: Border.all(color: const Color(0xFFFF7189)),
+                          borderRadius: BorderRadius.circular(99),
+                          boxShadow: const [
+                            BoxShadow(color: Color(0x88000000), blurRadius: 5),
+                          ],
+                        ),
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 5,
+                            vertical: 3,
+                          ),
+                          child: Text(
+                            '−100',
+                            style: AppText.kicker.copyWith(
+                              color: const Color(0xFFFF7189),
+                              fontSize: 8,
+                              fontWeight: FontWeight.w900,
+                            ),
+                          ),
                         ),
                       ),
                     ),
                     Positioned(
-                      right: 14,
-                      bottom: 13,
-                      child: Text(
-                        '+100',
-                        style: AppText.kicker.copyWith(
-                          color: scheme.onSurface,
-                          fontSize: 7,
-                          fontWeight: FontWeight.w800,
+                      right: 10,
+                      bottom: 17,
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          color: const Color(0xE6010812),
+                          border: Border.all(color: const Color(0xFF5DF282)),
+                          borderRadius: BorderRadius.circular(99),
+                          boxShadow: const [
+                            BoxShadow(color: Color(0x88000000), blurRadius: 5),
+                          ],
+                        ),
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 5,
+                            vertical: 3,
+                          ),
+                          child: Text(
+                            '+100',
+                            style: AppText.kicker.copyWith(
+                              color: const Color(0xFF5DF282),
+                              fontSize: 8,
+                              fontWeight: FontWeight.w900,
+                            ),
+                          ),
                         ),
                       ),
                     ),
