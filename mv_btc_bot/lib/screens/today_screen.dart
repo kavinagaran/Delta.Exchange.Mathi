@@ -477,7 +477,6 @@ class _EngineCard extends StatelessWidget {
     }
 
     final score = _number(engine!['trend_score']);
-    final triggerAdx = _number(engine!['trigger_adx']);
     final preview = _number(
       live?['live_score'] ??
           live?['preview_score'] ??
@@ -486,6 +485,11 @@ class _EngineCard extends StatelessWidget {
     );
     final zone = engine!['zone'] as String?;
     final previewZone = _zoneFromScore(preview);
+    final decision = tradeDecisionLabel(
+      zone,
+      actionAllowed: engine!['zone_action_allowed'] == true,
+      reason: '${engine!['zone_reason'] ?? ''}',
+    );
 
     return AppCard(
       kicker: 'Trend engine',
@@ -501,7 +505,6 @@ class _EngineCard extends StatelessWidget {
                   label: 'Live preview',
                   score: preview,
                   colour: zoneColour(previewZone),
-                  caption: _shortZone(previewZone),
                   maxSize: 112,
                 ),
               ),
@@ -511,7 +514,6 @@ class _EngineCard extends StatelessWidget {
                   label: 'Committed',
                   score: score,
                   colour: zoneColour(zone),
-                  caption: zone == null ? 'No decision' : _shortZone(zone),
                   maxSize: 112,
                 ),
               ),
@@ -520,7 +522,7 @@ class _EngineCard extends StatelessWidget {
           const SizedBox(height: Gap.sm),
           if (score != null) ScoreMeter(score: score),
           const SizedBox(height: Gap.sm),
-          CommittedAdxPill(adx: triggerAdx, zone: zone),
+          ScoreDecisionPill(label: decision, score: score),
         ],
       ),
     );
@@ -532,13 +534,6 @@ class _EngineCard extends StatelessWidget {
     'SHORT_MOVE' => 'Sideways · sell ATM MOVE',
     'HOLD' => 'Hold · no new action',
     _ => zone,
-  };
-
-  static String _shortZone(String zone) => switch (zone) {
-    'CE_2_ITM' => 'Buy CE',
-    'PE_2_ITM' || 'PE_3_ITM' => 'Buy PE',
-    'SHORT_MOVE' => 'Short MOVE',
-    _ => 'Hold',
   };
 
   static String _zoneFromScore(double? score) {

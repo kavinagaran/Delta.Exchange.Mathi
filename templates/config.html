@@ -43,7 +43,7 @@
       <div class="score-zone-band-grid" aria-label="Score zone rules">
         <div class="score-zone-band is-call"><strong>&gt; +40</strong><span>BUY CE</span></div>
         <div class="score-zone-band is-hold"><strong>+30 &lt; score ≤ +40</strong><span>HOLD</span></div>
-        <div class="score-zone-band is-move"><strong>−30 … +30</strong><span>SHORT MOVE · ADX &lt; 25</span></div>
+        <div class="score-zone-band is-move"><strong>−30 … +30</strong><span>SHORT MOVE · ADX ≤ 20</span></div>
         <div class="score-zone-band is-hold"><strong>−40 ≤ score &lt; −30</strong><span>HOLD</span></div>
         <div class="score-zone-band is-put"><strong>&lt; −40</strong><span>BUY PE</span></div>
       </div>
@@ -429,7 +429,7 @@ async function saveConfig() {
   }
   if (scoreMode === 'dry_run' && loadedScoreAutoMode !== 'dry_run' && !confirm(
       'Enable automatic DRY RUN Trend trading?\n\n' +
-      `Every eligible trade uses ${Number(document.getElementById('c-TREND_SCORE_AUTO_LOTS').value || 0).toLocaleString()} lots. A score above +40 buys a 2-step ITM Call and a score below −40 buys a 2-step ITM Put; directional entries do not require ADX confirmation. Scores from −30 through +30 sell ATM MOVE only when 5-minute ADX is below 25, the current bid is above $300, and more than 90 minutes remain. Leaving that neutral score range or ADX reaching 25 exits an open MOVE. Exact +40 and −40 are HOLD.\n\n` +
+      `Every eligible trade uses ${Number(document.getElementById('c-TREND_SCORE_AUTO_LOTS').value || 0).toLocaleString()} lots. A score above +40 buys a 2-step ITM Call and a score below −40 buys a 2-step ITM Put; directional entries do not require ADX confirmation. Scores from −30 through +30 sell ATM MOVE only when 5-minute ADX is 20 or below, the current bid is above $300, and more than 90 minutes remain. Leaving that neutral score range or ADX rising above 20 exits an open MOVE. Exact +40 and −40 are HOLD.\n\n` +
       'No exchange order will be placed.')) return;
   if (scoreMode === 'live' && loadedScoreAutoMode !== 'live' && !confirm(
       'Enable LIVE automatic Trend trading?\n\n' +

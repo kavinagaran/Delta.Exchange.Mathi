@@ -499,7 +499,7 @@ class CommittedAdxPill extends StatelessWidget {
     if (value == null || !value.isFinite) {
       return const StatusPill('5M ADX —', colour: kNeutral, dot: false);
     }
-    final calm = value < 25;
+    final calm = value <= 20;
     final invalidatesMove = !calm && zone == 'SHORT_MOVE';
     final label = invalidatesMove
         ? '5M ADX ${value.toStringAsFixed(1)} · EXIT MOVE'
@@ -515,23 +515,20 @@ class CommittedAdxPill extends StatelessWidget {
   }
 }
 
-/// A circular, instrument-style score gauge shared by Today and Trend Engine.
-/// The fixed red-to-green segmented scale makes the score direction readable
-/// at a glance; the needle carries the current value without changing scale.
+/// A circular score gauge shared by Today and Trend Engine. The ring and the
+/// large centre value continuously interpolate from red to green by score.
 class DecisionScoreDial extends StatelessWidget {
   const DecisionScoreDial({
     super.key,
     required this.label,
     required this.score,
     required this.colour,
-    this.caption,
     this.maxSize = 126,
   });
 
   final String label;
   final double? score;
   final Color colour;
-  final String? caption;
   final double maxSize;
 
   @override
@@ -576,18 +573,7 @@ class DecisionScoreDial extends StatelessWidget {
                             ),
                           ),
                           const SizedBox(height: 3),
-                          _DialScore(score: score, colour: scheme.primary),
-                          if (caption != null) ...[
-                            const SizedBox(height: 3),
-                            Text(
-                              caption!.toUpperCase(),
-                              style: AppText.kicker.copyWith(
-                                color: scheme.onSurfaceVariant,
-                                fontSize: 6.2,
-                                letterSpacing: .4,
-                              ),
-                            ),
-                          ],
+                          _DialScore(score: score, colour: scoreColour(score)),
                         ],
                       ),
                     ),
@@ -658,7 +644,7 @@ class _DecisionGaugePainter extends CustomPainter {
         ).createShader(circle),
     );
     final bounded = score?.clamp(-100.0, 100.0).toDouble();
-    final scoreTone = bounded == null ? tone : _scoreColour(bounded);
+    final scoreTone = bounded == null ? tone : scoreColour(bounded);
     canvas.drawCircle(
       centre,
       radius,
@@ -726,17 +712,84 @@ class _DecisionGaugePainter extends CustomPainter {
     );
   }
 
-  Color _scoreColour(double value) => Color.lerp(
-    const Color(0xFFFF6178),
-    const Color(0xFF45E3A6),
-    (value + 100) / 200,
-  )!;
-
   @override
   bool shouldRepaint(covariant _DecisionGaugePainter oldDelegate) =>
       oldDelegate.score != score ||
       oldDelegate.tone != tone ||
       oldDelegate.surface != surface;
+}
+
+String tradeDecisionLabel(
+  String? zone, {
+  required bool actionAllowed,
+  String? reason,
+}) {
+  final key = (zone ?? '').toUpperCase();
+  final blocker = reason ?? '';
+  if (key == 'HOLD') return 'HOLD — NO NEW TRADE';
+  if (key.isEmpty) return 'NO DECISION';
+  if (!actionAllowed) {
+    if (key == 'SHORT_MOVE' && blocker.toUpperCase().contains('ADX')) {
+      return 'WAIT — 5M ADX NOT CALM';
+    }
+    if (key == 'SHORT_MOVE' && blocker.toLowerCase().contains('stop loss')) {
+      return 'WAIT — STOP REQUIRED';
+    }
+    return 'WAIT — CHECKS BLOCKED';
+  }
+  return switch (key) {
+    'CE_2_ITM' => 'BUY 2-STEP ITM CE',
+    'PE_2_ITM' || 'PE_3_ITM' => 'BUY 2-STEP ITM PE',
+    'SHORT_MOVE' => 'SELL ATM MOVE',
+    _ => key.replaceAll('_', ' '),
+  };
+}
+
+class ScoreDecisionPill extends StatelessWidget {
+  const ScoreDecisionPill({
+    super.key,
+    required this.label,
+    required this.score,
+  });
+
+  final String label;
+  final double? score;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final tone = scoreColour(score);
+    return Align(
+      alignment: Alignment.center,
+      child: Container(
+        constraints: const BoxConstraints(minWidth: 220),
+        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 8),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(999),
+          border: Border.all(color: tone.withValues(alpha: .64)),
+          gradient: LinearGradient(
+            colors: [
+              Color.lerp(scheme.surface, tone, .24)!,
+              Color.lerp(scheme.surfaceContainer, tone, .08)!,
+            ],
+          ),
+          boxShadow: [
+            BoxShadow(color: tone.withValues(alpha: .16), blurRadius: 16),
+          ],
+        ),
+        child: Text(
+          label,
+          textAlign: TextAlign.center,
+          style: AppText.kicker.copyWith(
+            color: tone,
+            fontSize: 9,
+            fontWeight: FontWeight.w900,
+            letterSpacing: .35,
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 /// Empty / error / loading placeholder, so every screen fails the same way.

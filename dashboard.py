@@ -4026,9 +4026,33 @@ def _trend_score_auto_premium_protection_policy(
     ))
     configured_lots = _trend_score_auto_configured_lots()
     if lots != configured_lots:
-        raise RuntimeError(
-            "Prepared order size differs from the configured Trend Engine size"
+        # LIVE orders may be deliberately reduced by the wallet/depth sizing
+        # pass. Protection must follow the actual selected/fill size, not the
+        # unattainable configured request. Accept a reduction only when the
+        # full affordability proof is attached and exactly matches both the
+        # configured ceiling and the prepared lot count. Paper orders and
+        # unproven mutations remain strict fixed-size failures.
+        sizing = prepared.get("live_affordability")
+        if not isinstance(sizing, dict):
+            raise RuntimeError(
+                "Prepared order size differs from the configured Trend Engine size"
+            )
+        sizing_configured = _trend_score_auto_exact_int(
+            sizing.get("configured_lots"),
+            "affordability configured size", positive=True,
         )
+        sizing_selected = _trend_score_auto_exact_int(
+            sizing.get("selected_lots"),
+            "affordability selected size", positive=True,
+        )
+        if (
+            sizing_configured != configured_lots
+            or sizing_selected != lots
+            or lots > configured_lots
+        ):
+            raise RuntimeError(
+                "Prepared order size differs from verified LIVE affordability"
+            )
     cfg = _user_cfg()
     poll_secs = _tp_policy("trend").get("poll_secs", 30)
     return build_premium_percent_protection_policy(
@@ -8852,8 +8876,8 @@ def _trend_score_auto_engine_action_ready(
     """Do not mutate a position until the engine has approved this zone.
 
     A SHORT_MOVE entry is actionable only when the engine confirms the current
-    closed 5m score is neutral and its 5m ADX is below 25.  A committed ADX at
-    or above 25 is nevertheless allowed through as an exit-only invalidation
+    closed 5m score is neutral and its 5m ADX is at or below 20. A committed
+    ADX above 20 is nevertheless allowed through as an exit-only invalidation
     so an already-open SHORT_MOVE can be flattened. The planner guarantees
     that this exception cannot open or switch a position.
     """
@@ -12679,7 +12703,7 @@ def _maybe_auto_trend_score_live_cycle(
                             + (
                                 f"because committed 5-minute ADX reached "
                                 f"<code>{current_signal.get('trigger_adx')}</code> "
-                                "(calm requires below 25). "
+                                "(calm requires ADX at or below 20). "
                                 if plan.get("reason")
                                 == "SHORT_MOVE_ADX_NO_LONGER_CALM"
                                 else "after directional invalidation. "
@@ -13217,7 +13241,7 @@ def _maybe_auto_trend_score_cycle() -> bool:
                             + (
                                 f"committed 5-minute ADX reached "
                                 f"<code>{signal.get('trigger_adx')}</code> "
-                                "(calm requires below 25). "
+                                "(calm requires ADX at or below 20). "
                                 if plan.get("reason")
                                 == "SHORT_MOVE_ADX_NO_LONGER_CALM"
                                 else "directional invalidation. "

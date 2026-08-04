@@ -1221,14 +1221,14 @@ def test_setup_lock_reset_endpoint_clears_only_the_lock(score_cycle):
         mock.assert_not_called()
 
 
-def test_dry_cycle_closes_short_move_when_committed_5m_adx_reaches_25(
+def test_dry_cycle_closes_short_move_when_committed_5m_adx_rises_above_20(
         score_cycle, monkeypatch):
     state_path = score_cycle["dry"] / "trend_state.json"
     score_cycle["holder"]["signal"] = _score_signal(
         score_cycle["mode"],
         score=0,
         zone=dashboard.TREND_SCORE_MOVE_ZONE,
-        trigger_adx=24.9,
+        trigger_adx=20.0,
     )
     assert dashboard._maybe_auto_trend_score_cycle() is True
     opened = json.loads(state_path.read_text(encoding="utf-8"))
@@ -1239,9 +1239,9 @@ def test_dry_cycle_closes_short_move_when_committed_5m_adx_reaches_25(
         score=0,
         zone=dashboard.TREND_SCORE_MOVE_ZONE,
         suffix="10:05:00Z",
-        trigger_adx=25.0,
+        trigger_adx=20.1,
         zone_action_allowed=False,
-        zone_reason="5m ADX 25.0 must be below 25 before selling MOVE",
+        zone_reason="5m ADX 20.1 must be at or below 20 before selling MOVE",
     )
     monkeypatch.setattr(
         dashboard, "_dry_run_mark_and_pnl",

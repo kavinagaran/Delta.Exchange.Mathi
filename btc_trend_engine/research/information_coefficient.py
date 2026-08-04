@@ -452,12 +452,12 @@ def sideways_gate_profile(
          lambda obs, flag: abs(obs.score) <= active.sideways_max_abs),
     ]
     # The live calm test. `zones.decide` refuses SHORT_MOVE unless the 5m ADX
-    # is below CALM_ADX_MAX, so it belongs in the cumulative profile; a bar
+    # is at or below CALM_ADX_MAX, so it belongs in the cumulative profile; a bar
     # whose ADX was never computed cannot have passed it.
     if calm_adx_max is not None:
         stages.append((
-            f"+ 5m ADX < {calm_adx_max:g}",
-            lambda obs, flag: obs.adx is not None and obs.adx < calm_adx_max,
+            f"+ 5m ADX <= {calm_adx_max:g}",
+            lambda obs, flag: obs.adx is not None and obs.adx <= calm_adx_max,
         ))
     # Superseded 2026-07-29: the engine replaced the N-bar confirmation window
     # with the ADX test above. Kept as an opt-in research stage (0 = off) so

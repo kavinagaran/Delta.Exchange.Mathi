@@ -367,7 +367,8 @@ vm.runInThisContext(source.slice(start, end));
   }
   if (todayTable.includes(' IST')) throw new Error('Today table still prints IST');
   const decisionCard = elements['today-engine-decision'].innerHTML;
-  for (const detail of ['Live preview', 'Committed decision', 'today-odometer-window']) {
+  for (const detail of ['Live preview', 'Committed decision', 'today-score-dial',
+                        'today-trade-decision-pill']) {
     if (!decisionCard.includes(detail)) throw new Error(`missing engine dial detail: ${detail}`);
   }
   if (decisionCard.includes('View Trend Engine')) {

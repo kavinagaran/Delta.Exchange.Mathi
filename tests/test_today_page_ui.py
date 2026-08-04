@@ -28,6 +28,7 @@ def test_today_page_contains_only_same_day_trade_content():
         "jget('/api/engine/snapshot')",
         "jget('/api/engine/live')",
         "function todayEngineScoreDials(snapshot, liveView, status)",
+        "function todayTradeDecisionPill(status, snapshot)",
         "Live preview",
         "Committed decision",
         'aria-label="Live TP, SL and TSL monitor"',
@@ -100,8 +101,9 @@ def test_today_page_uses_compact_responsive_terminal_layout():
     ):
         assert required in styles
     score_styles = styles.split('.today-score-dial-core > strong {', 1)[1].split('}', 1)[0]
-    assert 'color: var(--accent)' in score_styles
+    assert 'color: var(--today-score-tone)' in score_styles
     assert 'font: 900 32px/1' in score_styles
+    assert '.today-trade-decision-pill' in styles
     assert '.today-score-needle' not in styles
     assert '.today-score-limit' not in styles
 

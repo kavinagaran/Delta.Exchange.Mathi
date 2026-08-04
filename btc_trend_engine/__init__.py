@@ -6,5 +6,5 @@ computation, regime classification and TrendSnapshot generation.  It holds no
 trading credentials, never touches ``users/``, and cannot place an order.
 """
 
-__version__ = "0.6.2"  # committed 5m ADX exposed for SHORT_MOVE exits
+__version__ = "0.6.3"  # Calm ADX is now the inclusive 5m boundary <= 20
 ENGINE_SCHEMA_VERSION = "1.4.0"  # docs/trend-snapshot-contract.md

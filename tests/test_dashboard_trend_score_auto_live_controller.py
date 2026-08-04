@@ -414,7 +414,7 @@ def test_non_calm_short_move_signal_does_not_close_or_replace_a_live_ce_position
         0.0,
         suffix="10:10:00Z",
         zone_action_allowed=False,
-        zone_reason="5m ADX 40.0 must be below 25 before selling MOVE",
+        zone_reason="5m ADX 40.0 must be at or below 20 before selling MOVE",
         trigger_adx=40.0,
     )
     prepare = Mock(side_effect=AssertionError("blocked MOVE must not prepare"))
@@ -446,8 +446,8 @@ def test_committed_non_calm_adx_closes_an_open_live_short_move(
         0.0,
         suffix="10:15:00Z",
         zone_action_allowed=False,
-        zone_reason="5m ADX 25.0 must be below 25 before selling MOVE",
-        trigger_adx=25.0,
+        zone_reason="5m ADX 20.1 must be at or below 20 before selling MOVE",
+        trigger_adx=20.1,
     )
     prepare = Mock(side_effect=AssertionError("ADX exit must not prepare an entry"))
     execute = Mock(side_effect=AssertionError("ADX exit must not submit an entry"))
@@ -483,7 +483,7 @@ def test_committed_non_calm_adx_closes_an_open_live_short_move(
         (live_account / dashboard.TREND_SCORE_AUTO_LEDGER_FILE).read_text("utf-8")
     )
     assert ledger["signals"][signal["signal_key"]]["action"] == "EXIT"
-    assert ledger["signals"][signal["signal_key"]]["trigger_adx"] == 25.0
+    assert ledger["signals"][signal["signal_key"]]["trigger_adx"] == 20.1
     assert "ADX" in dashboard._trend_score_auto_health["alice"]["last_action"]
 
 
@@ -1216,6 +1216,34 @@ def test_live_affordability_caps_size_by_executable_depth(live_account):
     assert sizing["selected_lots"] == 275
     assert sizing["book_depth_lots"] == 275
     assert sizing["downsized"] is True
+
+
+def test_downsized_live_entry_builds_protection_for_actual_affordable_lots(
+    live_account,
+):
+    prepared = _prepared(dashboard.TREND_SCORE_CE_ZONE)
+    quote = {**_execution_quote(prepared), "ask_size": 275}
+    _attach_live_affordability(prepared, quote)
+
+    assert prepared["lots"] == 275
+    policy = dashboard._trend_score_auto_premium_protection_policy(prepared)
+
+    assert policy["entry_premium_usd"] == pytest.approx(
+        prepared["entry_price"] * prepared["contract_value"] * 275
+    )
+    assert policy["tp_target_pnl"] == pytest.approx(
+        prepared["entry_price"] * prepared["contract_value"] * 275
+    )
+
+
+def test_downsized_live_protection_rejects_unverified_lot_mutation(live_account):
+    prepared = _prepared(dashboard.TREND_SCORE_CE_ZONE)
+    quote = {**_execution_quote(prepared), "ask_size": 275}
+    _attach_live_affordability(prepared, quote)
+    prepared["lots"] = 274
+
+    with pytest.raises(RuntimeError, match="verified LIVE affordability"):
+        dashboard._trend_score_auto_premium_protection_policy(prepared)
 
 
 def test_live_affordability_fails_closed_when_one_lot_is_unfunded(

@@ -86,7 +86,7 @@ def score_zone(score: Any) -> str:
         |score| > 40    directional (CE_2_ITM / PE_2_ITM, both 2-step ITM),
                         independent of ADX
         |score| <= 30   SHORT_MOVE candidate (the engine must also confirm
-                        5m ADX is below 25)
+                        5m ADX is at or below 20)
         otherwise       HOLD (no new action; keep a directional position,
                         but exit SHORT_MOVE after it leaves +/-30)
 
@@ -107,9 +107,9 @@ def score_zone(score: Any) -> str:
 def short_move_adx_exit_required(adx: Any) -> bool:
     """Whether a committed 5-minute ADX invalidates an open SHORT_MOVE.
 
-    SHORT_MOVE entry requires a calm reading strictly below ``CALM_ADX_MAX``.
-    The complementary boundary is therefore inclusive: an open MOVE is no
-    longer a calm-market trade as soon as the committed ADX is >= 25. Missing
+    SHORT_MOVE entry requires a calm reading at or below ``CALM_ADX_MAX``.
+    An open MOVE is therefore no longer a calm-market trade as soon as the
+    committed ADX is above 20. Missing
     or invalid ADX is rejected instead of being guessed into an exit.
     """
 
@@ -119,7 +119,7 @@ def short_move_adx_exit_required(adx: Any) -> bool:
         value = _finite(adx, "5m ADX")
     except TrendScoreAutoInputError:
         return False
-    return value >= CALM_ADX_MAX
+    return value > CALM_ADX_MAX
 
 
 def completed_candle_signal_key(

@@ -354,7 +354,6 @@ function todayDecisionTime(value) {
 }
 
 function todayScoreColor(value, quality) {
-  if (quality && String(quality).toUpperCase() !== 'OK') return 'var(--neg)';
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) return 'var(--muted)';
   const score = Math.max(-100, Math.min(100, numeric));
@@ -393,6 +392,23 @@ function todayEngineScoreDials(snapshot, liveView, status) {
   </div>`;
 }
 
+function todayTradeDecisionPill(status, snapshot) {
+  const score = Number(snapshot?.trend_score ?? status?.direction_score);
+  const tone = todayScoreColor(Number.isFinite(score) ? score : null, snapshot?.data_quality);
+  const zone = String(snapshot?.zone || status?.engine_zone || '');
+  const allowed = snapshot?.zone_action_allowed === true;
+  const reason = String(snapshot?.zone_reason || status?.last_action || '');
+  let label = 'NO DECISION';
+  if (zone === 'HOLD') label = 'HOLD — NO NEW TRADE';
+  else if (!allowed && zone === 'SHORT_MOVE' && /ADX/i.test(reason)) label = 'WAIT — 5M ADX NOT CALM';
+  else if (!allowed) label = 'WAIT — CHECKS BLOCKED';
+  else if (zone === 'CE_2_ITM') label = 'BUY 2-STEP ITM CE';
+  else if (zone === 'PE_2_ITM' || zone === 'PE_3_ITM') label = 'BUY 2-STEP ITM PE';
+  else if (zone === 'SHORT_MOVE') label = 'SELL ATM MOVE';
+  return `<div class="today-trade-decision-row"><div class="today-trade-decision-pill"
+    style="--today-decision-tone:${tone}">${esc(label)}</div></div>`;
+}
+
 function renderTodayEngineDecision(status, snapshot, liveView) {
   const root = document.getElementById('today-engine-decision');
   if (!status) {
@@ -413,9 +429,9 @@ function renderTodayEngineDecision(status, snapshot, liveView) {
   const lots = Number.isFinite(Number(status.lots)) ? fN(status.lots) : '—';
   root.innerHTML = `<section class="dry-engine-panel today-decision-panel ${tone}" data-zone="${esc(zone || 'WAITING')}" aria-label="Latest live engine decision">
     <div class="dry-engine-hd"><div><span>TREND SCORE AUTOMATION · LIVE</span>
-      <strong>Entries, exits and trade transitions happen automatically</strong></div>
-      <span class="dry-engine-decision">${esc(todayDecisionLabel(status.status || zone).toUpperCase())}</span></div>
+      <strong>Entries, exits and trade transitions happen automatically</strong></div></div>
     ${todayEngineScoreDials(snapshot, liveView, status)}
+    ${todayTradeDecisionPill(status, snapshot)}
     <dl class="dry-engine-metrics">
       <div class="wide decision-primary"><dt>Current automatic action</dt><dd>${esc(action)}</dd></div>
       <div class="wide decision-key regime"><dt>Market regime</dt><dd>${esc(todayDecisionLabel(status.market_regime || 'Waiting'))}</dd></div>

@@ -23,8 +23,9 @@ def test_page_reads_both_live_preview_and_committed_decision():
     assert "jget('/api/engine/live')" in TEMPLATE
     assert "jget('/api/engine/snapshot')" in TEMPLATE
     assert "Live preview" in TEMPLATE
-    assert "Preview decision" in TEMPLATE
     assert "Committed decision" in TEMPLATE
+    assert 'id="te-trade-decision"' in TEMPLATE
+    assert "Preview decision" not in TEMPLATE
 
 
 def test_live_preview_cannot_supply_an_order_identity_or_permission():

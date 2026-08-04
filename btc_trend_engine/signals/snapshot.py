@@ -25,10 +25,10 @@ from .score import ScoreResult
 # consumes it for an explicit SHORT_MOVE invalidation exit; exposing the
 # numeric evidence avoids brittle parsing of human-readable gate text.
 SCHEMA_VERSION = "1.4.0"
-# The model version participates in signal_id. v1.5.0 makes ADX exclusive to
-# SHORT_MOVE eligibility/exit; directional CE/PE entries depend on the strict
-# score thresholds and the remaining shared safety gates.
-MODEL_VERSION = "trend-rules-v1.5.0"
+# The model version participates in signal_id. v1.6.0 defines Calm ADX as an
+# inclusive 5-minute reading at or below 20. Directional CE/PE entries remain
+# independent of ADX.
+MODEL_VERSION = "trend-rules-v1.6.0"
 
 # These two v1 gates describe whether a *directional* entry is available. They
 # remain in the public gate matrix for backward compatibility, but they are not
@@ -159,7 +159,7 @@ def _zone_entry_gates(
     """
     if zone in {zones.CE_2_ITM, zones.PE_2_ITM}:
         # The raw v1 ``regime_tradeable`` gate treats RANGE as untradeable.
-        # RANGE can be caused solely by ADX < 25, so retaining that gate here
+        # RANGE can be caused solely by ADX <= 20, so retaining that gate here
         # would reintroduce the directional ADX requirement indirectly.  Keep
         # the genuinely unsafe regimes blocked and preserve all other shared
         # execution/data gates.
@@ -225,9 +225,9 @@ def _zone_entry_gates(
             "label": "CALM ADX",
             "passed": short_move_calm,
             "detail": (
-                f"5m ADX {trigger_adx:.1f} is below {CALM_ADX_MAX:.0f}; calm market confirms SHORT_MOVE"
+                f"5m ADX {trigger_adx:.1f} is at or below {CALM_ADX_MAX:.0f}; calm market confirms SHORT_MOVE"
                 if short_move_calm else
-                (f"5m ADX {trigger_adx:.1f} must be below {CALM_ADX_MAX:.0f} before selling MOVE"
+                (f"5m ADX {trigger_adx:.1f} must be at or below {CALM_ADX_MAX:.0f} before selling MOVE"
                  if trigger_adx is not None else
                  "5m ADX is unavailable; calm-market confirmation is required before selling MOVE")
             ),

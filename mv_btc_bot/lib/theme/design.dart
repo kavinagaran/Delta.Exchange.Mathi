@@ -199,6 +199,17 @@ Color signedColour(num? value) {
   return value > 0 ? kPositive : kNegative;
 }
 
+/// Continuous red-to-green tone for the engine's bounded −100…+100 score.
+Color scoreColour(num? value) {
+  if (value == null || !value.isFinite) return kNeutral;
+  final bounded = value.clamp(-100, 100).toDouble();
+  return Color.lerp(
+    const Color(0xFFFF6178),
+    const Color(0xFF45E3A6),
+    (bounded + 100) / 200,
+  )!;
+}
+
 /// Colour for a decision zone name as the engine reports it.
 Color zoneColour(String? zone) => switch (zone) {
   'CE_2_ITM' => kZoneCall,

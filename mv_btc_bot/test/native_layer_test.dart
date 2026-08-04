@@ -98,7 +98,7 @@ void main() {
       expect(find.text('−100'), findsNothing);
       expect(find.text('+100'), findsNothing);
       final scoreText = tester.widget<Text>(find.text('+26.0'));
-      expect(scoreText.style?.color, theme.colorScheme.primary);
+      expect(scoreText.style?.color, scoreColour(26));
     });
 
     testWidgets('committed ADX shows the exact SHORT MOVE exit boundary', (
@@ -110,8 +110,8 @@ void main() {
           home: const Scaffold(
             body: Column(
               children: [
-                CommittedAdxPill(adx: 24.9, zone: 'SHORT_MOVE'),
-                CommittedAdxPill(adx: 25.0, zone: 'SHORT_MOVE'),
+                CommittedAdxPill(adx: 20.0, zone: 'SHORT_MOVE'),
+                CommittedAdxPill(adx: 20.1, zone: 'SHORT_MOVE'),
                 CommittedAdxPill(adx: 35.0, zone: 'CE_2_ITM'),
               ],
             ),
@@ -119,8 +119,8 @@ void main() {
         ),
       );
 
-      expect(find.text('5M ADX 24.9 · CALM'), findsOneWidget);
-      expect(find.text('5M ADX 25.0 · EXIT MOVE'), findsOneWidget);
+      expect(find.text('5M ADX 20.0 · CALM'), findsOneWidget);
+      expect(find.text('5M ADX 20.1 · EXIT MOVE'), findsOneWidget);
       expect(find.text('5M ADX 35.0 · TREND'), findsOneWidget);
     });
   });

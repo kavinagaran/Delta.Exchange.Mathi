@@ -424,13 +424,13 @@ def test_breakout_requires_body():
                                setup=strong).regime is Regime.BREAKOUT_UP
 
 
-def test_adx_below_25_is_a_calm_sideways_regime_and_can_confirm_move():
+def test_adx_at_or_below_20_is_a_calm_sideways_regime_and_can_confirm_move():
     setup = _tf({"vol_ratio": 1.0, "volume_ratio": 1.0,
                  "adx": 62.0, "rsi": 72.0})
     decision = RegimeClassifier().classify(
         data_quality_ok=True, trend_score=85.0,
         setup=setup,
-        trigger=_tf({"adx": 24.9}),
+        trigger=_tf({"adx": 20.0}),
     )
     assert decision.regime is Regime.RANGE
     assert "calm-zone" in decision.reason
@@ -557,11 +557,11 @@ def test_sideways_zone_ignores_only_directional_entry_gates():
         direction=0,
         score_value=0.0,
         gates=gates,
-        trigger_adx=24.9,
+        trigger_adx=20.0,
     )
     assert snapshot["zone"] == zones.SHORT_MOVE
     assert snapshot["zone_action_allowed"] is True
-    assert snapshot["trigger_adx"] == pytest.approx(24.9)
+    assert snapshot["trigger_adx"] == pytest.approx(20.0)
     names = {gate["name"] for gate in snapshot["gates"]}
     assert "regime_tradeable" not in names
     assert "score_beyond_entry_threshold" not in names
@@ -578,7 +578,7 @@ def test_short_move_is_immediately_actionable_once_5m_adx_is_calm():
         regime=Regime.RANGE,
         direction=0,
         score_value=10.0,
-        trigger_adx=24.9,
+        trigger_adx=20.0,
     )
     assert snapshot["zone"] == zones.SHORT_MOVE
     assert snapshot["zone_action_allowed"] is True
@@ -588,19 +588,19 @@ def test_short_move_is_immediately_actionable_once_5m_adx_is_calm():
     assert "GATE_SCORE_BEYOND_ENTRY_THRESHOLD_FAILED" not in snapshot["reason_codes"]
 
 
-def test_short_move_matrix_requires_adx_below_25():
+def test_short_move_matrix_requires_adx_at_or_below_20():
     snapshot = _snapshot(
         regime=Regime.RANGE,
         direction=0,
         score_value=0.0,
-        trigger_adx=25.0,
+        trigger_adx=20.1,
     )
     calm_gate = next(gate for gate in snapshot["gates"]
                      if gate["name"] == "calm_adx")
     assert calm_gate["passed"] is False
     assert snapshot["zone_action_allowed"] is False
-    assert snapshot["trigger_adx"] == pytest.approx(25.0)
-    assert "ADX is not below 25" in snapshot["zone_reason"]
+    assert snapshot["trigger_adx"] == pytest.approx(20.1)
+    assert "ADX is above 20" in snapshot["zone_reason"]
 
 
 def test_hold_band_matrix_explains_that_an_entry_is_not_intended():

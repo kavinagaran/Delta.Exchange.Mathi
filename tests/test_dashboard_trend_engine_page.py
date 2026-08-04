@@ -62,8 +62,17 @@ def test_score_dials_are_smooth_circular_gauges_without_needles():
     assert ".te-score-needle" not in STYLE
     assert ".te-score-limit" not in STYLE
     gauge_styles = STYLE.split('.te-score-core strong {', 1)[1].split('}', 1)[0]
-    assert 'color: var(--accent)' in gauge_styles
+    assert 'color: var(--te-score-tone)' in gauge_styles
     assert 'font-size: 39px' in gauge_styles
+
+
+def test_dials_have_one_score_coloured_committed_trade_decision_pill():
+    assert 'id="te-live-decision"' not in TEMPLATE
+    assert 'id="te-committed-decision"' not in TEMPLATE
+    assert 'id="te-trade-decision"' in TEMPLATE
+    assert 'class="te-trade-decision-row"' in TEMPLATE
+    assert "--te-decision-tone" in TEMPLATE
+    assert ".te-trade-decision-row" in STYLE
 
 
 def test_committed_score_chart_is_a_zone_colored_line_with_every_boundary():
@@ -272,9 +281,11 @@ def test_live_and_committed_scores_have_separate_colored_circles():
     assert "width: 170px" in STYLE
 
 
-def test_trade_decisions_are_colored_capsules_below_the_circles():
-    assert 'id="te-live-decision"' in TEMPLATE
-    assert 'id="te-committed-decision"' in TEMPLATE
+def test_one_committed_trade_decision_is_centered_below_the_circles():
+    assert 'id="te-live-decision"' not in TEMPLATE
+    assert 'id="te-committed-decision"' not in TEMPLATE
+    assert 'id="te-trade-decision"' in TEMPLATE
+    assert 'class="te-trade-decision-row"' in TEMPLATE
     assert "tradeDecisionMeta(" in TEMPLATE
     assert "renderTradeDecision(" in TEMPLATE
     assert "BUY 2-STEP ITM CE" in TEMPLATE
@@ -287,6 +298,7 @@ def test_trade_decisions_are_colored_capsules_below_the_circles():
     assert "g.label || formatCode(g.name)" in TEMPLATE
     assert "BEARISH / PE −100" not in TEMPLATE
     assert "BULLISH / CE +100" not in TEMPLATE
+    assert "--te-decision-tone" in TEMPLATE
     for tone in ("is-ce", "is-pe", "is-move", "is-hold", "is-blocked"):
         assert f".te-decision-capsule.{tone}" in STYLE
 
@@ -327,8 +339,8 @@ vm.runInThisContext(source.slice(start, end) + `
   if (scoreColor(70, 'OK') === scoreColor(-70, 'OK')) {
     throw new Error('positive and negative scores do not have distinct colors');
   }
-  if (scoreColor(70, 'CLOCK_DRIFT') !== 'var(--neg)') {
-    throw new Error('degraded data is not fail-closed red');
+  if (scoreColor(70, 'CLOCK_DRIFT') !== scoreColor(70, 'OK')) {
+    throw new Error('data quality incorrectly overrides the score colour');
   }
   const regimes = {
     TREND_UP: 'Bullish Trend',
@@ -359,10 +371,10 @@ vm.runInThisContext(source.slice(start, end) + `
   }
   const calmBlock = tradeDecisionMeta(
     'SHORT_MOVE', false,
-    'ADX is not below 25; calm-market confirmation is required before selling MOVE',
+    'ADX is above 20; calm-market confirmation is required before selling MOVE',
   );
   if (calmBlock.label !== 'WAIT — 5M ADX NOT CALM' ||
-      !calmBlock.detail.includes('ADX is not below 25')) {
+      !calmBlock.detail.includes('ADX is above 20')) {
     throw new Error('ADX blocker is mislabeled: ' + JSON.stringify(calmBlock));
   }
 `);

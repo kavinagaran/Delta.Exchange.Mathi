@@ -17,9 +17,9 @@ from dataclasses import dataclass
 
 from ..features.pipeline import TimeframeFeatures
 
-# Five-minute ADX below 25 is a calm/sideways market.  At 25 or above the
-# engine may classify a directional CE/PE setup when score and RSI agree.
-CALM_ADX_MAX = 25.0
+# Five-minute ADX at or below 20 is a calm/sideways market. Above 20 the
+# reading is no longer calm. Directional CE/PE entries remain score-driven.
+CALM_ADX_MAX = 20.0
 
 
 class Regime(enum.StrEnum):
@@ -49,7 +49,7 @@ class RegimeConfig:
     # as "the engine rarely trades", not as an error.
     trend_enter_score: float = 40.0   # was 60.0 (§8.2 example)
     trend_exit_score: float = 30.0    # matches the neutral candidate boundary
-    # ADX below 25 is the calm/sideways condition.  RANGE is deliberately
+    # ADX at or below 20 is the calm/sideways condition. RANGE is deliberately
     # permitted by the SHORT_MOVE zone, so this is a positive confirmation for
     # that setup — not a blanket "do not trade" state.
     calm_adx_max: float = CALM_ADX_MAX
@@ -132,7 +132,7 @@ class RegimeClassifier:
             return Regime.RANGE, "ADX is unavailable; direction is unconfirmed"
         if is_calm_adx(adx, threshold=config.calm_adx_max):
             return Regime.RANGE, (
-                f"ADX {adx:.1f} is below the calm-zone threshold "
+                f"ADX {adx:.1f} is at or below the calm-zone threshold "
                 f"{config.calm_adx_max:.0f}")
 
         rsi = setup.get("rsi")
@@ -176,4 +176,4 @@ def is_calm_adx(adx: float | None, *, threshold: float = CALM_ADX_MAX) -> bool:
     A missing ADX is deliberately not treated as calm.  The caller must not
     convert incomplete strength data into permission to sell volatility.
     """
-    return adx is not None and adx < threshold
+    return adx is not None and adx <= threshold

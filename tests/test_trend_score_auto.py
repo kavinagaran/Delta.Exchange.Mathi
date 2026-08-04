@@ -404,7 +404,7 @@ def test_transition_closes_then_opens_new_zone_on_same_signal():
 
 @pytest.mark.parametrize(
     ("adx", "expected"),
-    ((24.9, False), (25.0, True), (40.0, True), (None, False), ("bad", False)),
+    ((19.9, False), (20.0, False), (20.1, True), (40.0, True), (None, False), ("bad", False)),
 )
 def test_short_move_adx_exit_uses_the_complementary_calm_boundary(adx, expected):
     assert short_move_adx_exit_required(adx) is expected
@@ -420,7 +420,7 @@ def test_non_calm_committed_adx_closes_only_an_open_short_move():
         score=0,
         signal_key="signal-adx-exit",
         owned_positions=[move],
-        short_move_adx=25.0,
+        short_move_adx=20.1,
     )
     assert plan["action"] == "CLOSE"
     assert plan["reason"] == "SHORT_MOVE_ADX_NO_LONGER_CALM"
@@ -439,7 +439,7 @@ def test_score_leaving_neutral_range_closes_short_move_even_in_hold_band(score):
         score=score,
         signal_key=f"signal-score-exit-{score}",
         owned_positions=[move],
-        short_move_adx=24.9,
+        short_move_adx=20.0,
     )
     assert plan["action"] == "CLOSE"
     assert plan["target_zone"] == HOLD

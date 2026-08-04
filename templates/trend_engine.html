@@ -51,11 +51,6 @@
               <strong id="te-live-score">—</strong>
             </div>
           </div>
-          <div class="te-decision-capsule is-waiting" id="te-live-decision">
-            <span>Preview decision</span>
-            <strong>Waiting</strong>
-          </div>
-          <time id="te-live-time">—</time>
         </div>
         <div class="te-score-item">
           <div class="te-score-gauge" id="te-committed-score-gauge" role="meter" aria-label="Committed decision score" aria-valuemin="-100" aria-valuemax="100" aria-valuenow="0">
@@ -64,11 +59,6 @@
               <strong id="te-committed-score">—</strong>
             </div>
           </div>
-          <div class="te-decision-capsule is-waiting" id="te-committed-decision">
-            <span>Trade decision</span>
-            <strong>Waiting</strong>
-          </div>
-          <time id="te-committed-time">—</time>
         </div>
       </div>
     </div>
@@ -173,6 +163,11 @@
         <span class="te-kicker">TRADE INPUT · COMMITTED DECISIONS</span>
         <strong id="te-preview-chart-title">Committed Decision · 5-minute score line</strong>
       </div>
+      <div class="te-trade-decision-row">
+        <div class="te-decision-capsule is-waiting" id="te-trade-decision">
+          <strong>Waiting</strong>
+        </div>
+      </div>
       <span class="te-preview-chart-badge">24H · 5M</span>
     </div>
     <div class="card-bd">
@@ -181,7 +176,7 @@
         <div class="te-preview-chart-legend" aria-label="Committed score zones and trade markers">
           <span class="is-ce"><i></i>Buy CE &gt; +40</span>
           <span class="is-hold"><i></i>Hold +30…+40 / −40…−30</span>
-          <span class="is-move"><i></i>Short MOVE −30 to +30 · ADX &lt; 25</span>
+          <span class="is-move"><i></i>Short MOVE −30 to +30 · ADX ≤ 20</span>
           <span class="is-pe"><i></i>Buy PE &lt; −40</span>
           <span><b aria-hidden="true">+</b>Entry</span>
           <span><b aria-hidden="true">×</b>Exit</span>
@@ -336,7 +331,6 @@ function formatIstTimestamp(value) {
 }
 
 function scoreColor(value, quality) {
-  if (quality && String(quality).toUpperCase() !== 'OK') return 'var(--neg)';
   if (!finite(value)) return 'var(--muted)';
   const score = Math.max(-100, Math.min(100, Number(value)));
   const t = (score + 100) / 200;
@@ -389,7 +383,7 @@ function tradeDecisionMeta(zone, actionAllowed = true, reason = '') {
       return {
         label: 'WAIT — 5M ADX NOT CALM',
         tone: 'is-blocked',
-        detail: blocker || 'The latest completed 5-minute ADX must be below 25 before an ATM MOVE straddle can be sold.',
+        detail: blocker || 'The latest completed 5-minute ADX must be 20 or below before an ATM MOVE straddle can be sold.',
       };
     }
     if (key === 'SHORT_MOVE' && /stop loss/i.test(blocker)) {
@@ -429,12 +423,12 @@ function tradeDecisionMeta(zone, actionAllowed = true, reason = '') {
   };
 }
 
-function renderTradeDecision(id, zone, actionAllowed, caption, reason = '') {
+function renderTradeDecision(id, zone, actionAllowed, reason = '', score = null, quality = null) {
   const element = document.getElementById(id);
   const meta = tradeDecisionMeta(zone, actionAllowed, reason);
   element.className = `te-decision-capsule ${meta.tone}`;
-  element.querySelector('span').textContent = caption;
   element.querySelector('strong').textContent = meta.label;
+  element.style.setProperty('--te-decision-tone', scoreColor(score, quality));
   element.title = meta.detail;
 }
 
@@ -476,24 +470,15 @@ function renderHero(snapshot, liveView) {
   const committedScore = finite(snapshot.trend_score)
     ? Number(snapshot.trend_score) : null;
   document.getElementById('te-live-score').textContent = signedScore(liveScore);
-  renderTradeDecision(
-    'te-live-decision',
-    liveAvailable ? liveView.live_zone : null,
-    true,
-    'Preview decision',
-  );
-  document.getElementById('te-live-time').textContent =
-    liveAvailable ? formatIstTimestamp(liveView.as_of) : 'No live preview';
   document.getElementById('te-committed-score').textContent = signedScore(committedScore);
   renderTradeDecision(
-    'te-committed-decision',
+    'te-trade-decision',
     snapshot.zone,
     snapshot.zone_action_allowed === true,
-    'Trade decision',
     snapshot.zone_reason,
+    committedScore,
+    snapshot.data_quality,
   );
-  document.getElementById('te-committed-time').textContent =
-    formatIstTimestamp(snapshot.candle_close_utc || snapshot.timestamp);
   updateScoreGauge(
     'te-live-score-gauge',
     liveScore,

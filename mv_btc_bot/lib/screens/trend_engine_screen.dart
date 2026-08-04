@@ -133,9 +133,12 @@ class _DecisionHero extends StatelessWidget {
           );
     final zone = '${snapshot['zone'] ?? 'HOLD'}';
     final quality = '${snapshot['data_quality'] ?? 'UNKNOWN'}';
-    final confidence = _number(snapshot['confidence']);
-    final triggerAdx = _number(snapshot['trigger_adx']);
     final regime = _regimeLabel('${snapshot['regime'] ?? 'DEGRADED'}');
+    final decision = tradeDecisionLabel(
+      zone,
+      actionAllowed: snapshot['zone_action_allowed'] == true,
+      reason: '${snapshot['zone_reason'] ?? ''}',
+    );
     return AppCard(
       kicker: 'BTC Trend Engine',
       title: regime,
@@ -153,7 +156,6 @@ class _DecisionHero extends StatelessWidget {
                   label: 'Preview',
                   score: preview,
                   colour: zoneColour(_zoneForScore(preview)),
-                  caption: _zoneLabel(_zoneForScore(preview)),
                 ),
               ),
               const SizedBox(width: Gap.md),
@@ -162,7 +164,6 @@ class _DecisionHero extends StatelessWidget {
                   label: 'Committed',
                   score: committed,
                   colour: zoneColour(zone),
-                  caption: _zoneLabel(zone),
                 ),
               ),
             ],
@@ -170,30 +171,7 @@ class _DecisionHero extends StatelessWidget {
           const SizedBox(height: Gap.md),
           ScoreMeter(score: committed ?? 0),
           const SizedBox(height: Gap.sm),
-          Align(
-            alignment: Alignment.centerLeft,
-            child: CommittedAdxPill(adx: triggerAdx, zone: zone),
-          ),
-          const SizedBox(height: Gap.sm),
-          Row(
-            children: [
-              Expanded(
-                child: StatusPill(
-                  _zoneLabel(zone),
-                  colour: zoneColour(zone),
-                  dot: false,
-                ),
-              ),
-              const SizedBox(width: Gap.sm),
-              StatusPill(
-                confidence == null
-                    ? '—'
-                    : '${(confidence * 100).round()}% CONF',
-                colour: kNeutral,
-                dot: false,
-              ),
-            ],
-          ),
+          ScoreDecisionPill(label: decision, score: committed),
         ],
       ),
     );
@@ -595,10 +573,3 @@ String _zoneForScore(double? score) {
   if (score.abs() <= 30) return 'SHORT_MOVE';
   return 'HOLD';
 }
-
-String _zoneLabel(String zone) => switch (zone) {
-  'CE_2_ITM' => 'BUY CE',
-  'PE_2_ITM' || 'PE_3_ITM' => 'BUY PE',
-  'SHORT_MOVE' => 'SHORT MOVE',
-  _ => 'HOLD',
-};
