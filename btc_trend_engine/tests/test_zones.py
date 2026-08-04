@@ -1,6 +1,6 @@
 """Score -> action zone mapping against the operator spec (2026-07-29):
 
-    score > +40 and ADX >= 25 buys CE · score < -40 and ADX >= 25 buys PE
+    score > +40 buys CE · score < -40 buys PE (both ADX-independent)
     -30..+30 sells ATM MOVE with 5m ADX below 25 · all other gaps HOLD
 """
 
@@ -95,15 +95,12 @@ def test_selling_move_is_refused_when_adx_does_not_confirm_calm():
 
 
 @pytest.mark.parametrize("score", [40.1, -40.1])
-def test_directional_entry_requires_5m_adx_at_least_25(score):
+@pytest.mark.parametrize("adx", [None, 0.0, 24.9, 25.0, 80.0])
+def test_directional_entry_is_independent_of_5m_adx(score, adx):
     regime = "TREND_UP" if score > 0 else "TREND_DOWN"
-    assert _decide(score, regime=regime, directional_adx=25.0).action_allowed
-    blocked = _decide(score, regime=regime, directional_adx=24.9)
-    assert blocked.action_allowed is False
-    assert "below 25" in blocked.reason
-    missing = _decide(score, regime=regime, directional_adx=None)
-    assert missing.action_allowed is False
-    assert "unavailable" in missing.reason
+    assert _decide(
+        score, regime=regime, directional_adx=adx
+    ).action_allowed is True
 
 
 def test_a_missing_stop_does_not_block_the_directional_zones():
@@ -242,13 +239,22 @@ def test_a_real_zone_change_exits():
     assert zones.should_exit("SHORT_MOVE", "CE_2_ITM")[0] is True
 
 
-def test_drifting_into_the_hold_band_does_not_exit():
+def test_drifting_into_the_hold_band_keeps_directional_positions():
     """If HOLD forced an exit, the hysteresis band would cause exactly the
     churn it exists to prevent."""
-    for held in ("CE_2_ITM", "PE_2_ITM", "SHORT_MOVE"):
+    for held in ("CE_2_ITM", "PE_2_ITM"):
         exits, reason = zones.should_exit(held, "HOLD")
         assert exits is False
         assert "hold band" in reason
+
+
+@pytest.mark.parametrize("score", [30.1, 40.0, -30.1, -40.0])
+def test_short_move_exits_as_soon_as_score_leaves_neutral_range(score):
+    exits, reason = zones.should_exit(
+        zones.SHORT_MOVE, zones.zone_for_score(score), score=score,
+    )
+    assert exits is True
+    assert "left the neutral range" in reason
 
 
 def test_opposite_hold_band_invalidates_an_existing_directional_position():

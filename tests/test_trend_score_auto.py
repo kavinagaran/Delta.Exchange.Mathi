@@ -428,6 +428,38 @@ def test_non_calm_committed_adx_closes_only_an_open_short_move():
     assert plan["open_zone"] is None
 
 
+@pytest.mark.parametrize("score", [30.1, 40.0, -30.1, -40.0])
+def test_score_leaving_neutral_range_closes_short_move_even_in_hold_band(score):
+    move = {
+        "symbol": "MV-BTC-64800-230726",
+        "side": "short",
+        "trend_score_zone": SHORT_MOVE,
+    }
+    plan = plan_score_transition(
+        score=score,
+        signal_key=f"signal-score-exit-{score}",
+        owned_positions=[move],
+        short_move_adx=24.9,
+    )
+    assert plan["action"] == "CLOSE"
+    assert plan["target_zone"] == HOLD
+    assert plan["close_position"] == move
+    assert plan["open_zone"] is None
+
+
+@pytest.mark.parametrize("score", [40.1, 80.0, -40.1, -80.0])
+@pytest.mark.parametrize("adx", [None, 10.0, 24.9, 25.0, 60.0])
+def test_directional_transition_is_independent_of_adx(score, adx):
+    plan = plan_score_transition(
+        score=score,
+        signal_key=f"signal-directional-{score}-{adx}",
+        owned_positions=[],
+        short_move_adx=adx,
+    )
+    assert plan["action"] == "OPEN"
+    assert plan["open_zone"] == (CE_2_ITM if score > 0 else PE_2_ITM)
+
+
 def test_non_calm_short_move_signal_cannot_close_or_open_other_positions():
     call = {
         "symbol": "C-BTC-64400-230726",

@@ -84,11 +84,11 @@ def score_zone(score: Any) -> str:
     duplicated here, so the two modules cannot drift apart:
 
         |score| > 40    directional (CE_2_ITM / PE_2_ITM, both 2-step ITM),
-                        with 5m ADX >= 25 confirmed by the Trend Engine
+                        independent of ADX
         |score| <= 30   SHORT_MOVE candidate (the engine must also confirm
                         5m ADX is below 25)
-        otherwise       HOLD (no new action, keep any open position; see
-                        zones.should_exit)
+        otherwise       HOLD (no new action; keep a directional position,
+                        but exit SHORT_MOVE after it leaves +/-30)
 
     A missing/invalid score is never treated as neutral, because that would
     turn a feed failure into permission to short MOVE.

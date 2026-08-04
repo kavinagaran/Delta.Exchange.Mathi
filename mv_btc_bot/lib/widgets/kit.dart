@@ -537,9 +537,6 @@ class DecisionScoreDial extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final value = score == null
-        ? '—'
-        : '${score! > 0 ? '+' : ''}${score!.toStringAsFixed(1)}';
     return Semantics(
       label: '$label score',
       value: score?.toStringAsFixed(1) ?? 'unavailable',
@@ -582,21 +579,9 @@ class DecisionScoreDial extends StatelessWidget {
                                 ),
                               ),
                               const SizedBox(height: 2),
-                              Text(
-                                value,
-                                style: AppText.metric.copyWith(
-                                  color: scheme.primary,
-                                  fontSize: 22,
-                                  fontWeight: FontWeight.w900,
-                                  shadows: [
-                                    Shadow(
-                                      color: scheme.primary.withValues(
-                                        alpha: .62,
-                                      ),
-                                      blurRadius: 9,
-                                    ),
-                                  ],
-                                ),
+                              _OdometerScore(
+                                score: score,
+                                colour: scheme.primary,
                               ),
                               if (caption != null) ...[
                                 const SizedBox(height: 1),
@@ -679,6 +664,43 @@ class DecisionScoreDial extends StatelessWidget {
       ),
     );
   }
+}
+
+class _OdometerScore extends StatelessWidget {
+  const _OdometerScore({required this.score, required this.colour});
+
+  final double? score;
+  final Color colour;
+
+  @override
+  Widget build(BuildContext context) {
+    if (score == null || !score!.isFinite) {
+      return Text('—', style: _style);
+    }
+    final bounded = score!.clamp(-100.0, 100.0).toDouble();
+    final value = '${bounded > 0 ? '+' : ''}${bounded.toStringAsFixed(1)}';
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 3, vertical: 1),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(3),
+        gradient: const LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [Color(0x18FFFFFF), Color(0x08000000), Color(0x24000000)],
+        ),
+        border: Border.all(color: const Color(0x12FFFFFF)),
+      ),
+      child: Text(value, style: _style),
+    );
+  }
+
+  TextStyle get _style => AppText.metric.copyWith(
+    color: colour,
+    fontSize: 22,
+    fontWeight: FontWeight.w900,
+    fontFeatures: const [FontFeature.tabularFigures()],
+    shadows: [Shadow(color: colour.withValues(alpha: .62), blurRadius: 9)],
+  );
 }
 
 class _DecisionGaugePainter extends CustomPainter {

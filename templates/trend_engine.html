@@ -51,7 +51,7 @@
             <span class="te-score-limit is-max" aria-hidden="true">+100</span>
             <div class="te-score-core">
               <span>Live preview</span>
-              <strong id="te-live-score">—</strong>
+              <strong class="te-odometer" id="te-live-score">—</strong>
             </div>
           </div>
           <div class="te-decision-capsule is-waiting" id="te-live-decision">
@@ -67,7 +67,7 @@
             <span class="te-score-limit is-max" aria-hidden="true">+100</span>
             <div class="te-score-core">
               <span>Committed decision</span>
-              <strong id="te-committed-score">—</strong>
+              <strong class="te-odometer" id="te-committed-score">—</strong>
             </div>
           </div>
           <div class="te-decision-capsule is-waiting" id="te-committed-decision">
@@ -185,10 +185,10 @@
       <div class="te-preview-chart-intro">
         <p>Each point is the committed score from a completed five-minute decision. Line colour shows the active score zone used by automation.</p>
         <div class="te-preview-chart-legend" aria-label="Committed score zones and trade markers">
-          <span class="is-ce"><i></i>Buy CE &gt; +40 · ADX ≥ 25</span>
+          <span class="is-ce"><i></i>Buy CE &gt; +40</span>
           <span class="is-hold"><i></i>Hold +30…+40 / −40…−30</span>
           <span class="is-move"><i></i>Short MOVE −30 to +30 · ADX &lt; 25</span>
-          <span class="is-pe"><i></i>Buy PE &lt; −40 · ADX ≥ 25</span>
+          <span class="is-pe"><i></i>Buy PE &lt; −40</span>
           <span><b aria-hidden="true">+</b>Entry</span>
           <span><b aria-hidden="true">×</b>Exit</span>
         </div>
@@ -360,6 +360,27 @@ function updateScoreGauge(id, value, quality) {
   gauge.style.setProperty('--te-needle-angle', `${score * 1.35}deg`);
   gauge.style.setProperty('--te-needle-opacity', available ? '1' : '0');
   gauge.style.setProperty('--te-score-tone', scoreColor(value, quality));
+  const readout = gauge.querySelector('.te-odometer');
+  if (readout) {
+    readout.innerHTML = scoreOdometer(available ? score : null);
+    readout.setAttribute(
+      'aria-label', available ? signedScore(score) : 'unavailable');
+  }
+}
+
+function scoreOdometer(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return '<span class="te-odometer-empty">—</span>';
+  }
+  const formatted = `${numeric > 0 ? '+' : numeric < 0 ? '−' : ''}${Math.abs(numeric).toFixed(1)}`;
+  return [...formatted].map(character => {
+    if (!/\d/.test(character)) {
+      return `<span class="te-odometer-symbol">${character}</span>`;
+    }
+    const digits = Array.from({length: 10}, (_, digit) => `<i>${digit}</i>`).join('');
+    return `<span class="te-odometer-window"><span class="te-odometer-strip" style="--te-odometer-digit:${character}">${digits}</span></span>`;
+  }).join('');
 }
 
 function signedScore(value) {

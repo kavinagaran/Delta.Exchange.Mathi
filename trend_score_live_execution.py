@@ -599,6 +599,13 @@ def build_pending_entry_state(
         "contract_value": entry["contract_value"],
         "lots": requested_lots,
         "requested_lots": requested_lots,
+        "configured_lots": entry.get("configured_lots", requested_lots),
+        "affordability_limited": bool(
+            entry.get("affordability_limited")
+        ),
+        "live_affordability": copy.deepcopy(
+            entry.get("live_affordability")
+        ),
         "owned_entry_lots": 0,
         "protection_lots": 0,
         "entry_mark": None,
@@ -1453,6 +1460,15 @@ def execute_or_recover_entry(
                     "symbol": entry["symbol"],
                     "side": entry["exchange_side"],
                     "size": entry["lots"],
+                    "configured_size": entry.get(
+                        "configured_lots", entry["lots"]
+                    ),
+                    "affordability_limited": bool(
+                        entry.get("affordability_limited")
+                    ),
+                    "affordability": copy.deepcopy(
+                        entry.get("live_affordability")
+                    ),
                     "limit_price": payload["limit_price"],
                     "time_in_force": "ioc",
                 },

@@ -112,6 +112,7 @@ def _prepared(zone: str) -> dict:
         "lots": 1_000,
         "symbol": symbol,
         "product_id": product_id,
+        "spot": 65_850,
         "strike": strike,
         "settlement": "2099-07-24T12:00:00Z",
         "contract_value": 0.001,
@@ -127,6 +128,28 @@ def _prepared(zone: str) -> dict:
             "quote_timestamp": "2099-07-23T10:00:00Z",
         },
     }
+
+
+def _attach_live_affordability(
+    prepared: dict,
+    quote: dict,
+    *,
+    available_usd: float = 10_000,
+) -> dict:
+    sizing = dashboard._trend_score_auto_live_affordability(
+        prepared,
+        quote,
+        available_usd=available_usd,
+        configured_lots=1_000,
+    )
+    prepared.update({
+        "lots": sizing["selected_lots"],
+        "requested_lots": 1_000,
+        "configured_lots": 1_000,
+        "affordability_limited": sizing["downsized"],
+        "live_affordability": sizing,
+    })
+    return prepared
 
 
 def _owned_state(
@@ -1083,6 +1106,7 @@ def _deep_preflight_state(
     prepared: dict,
     quote: dict,
 ) -> tuple[dict, dict]:
+    _attach_live_affordability(prepared, quote)
     pending = _pending_state()
     payload, _ = dashboard.build_trend_score_live_ioc_payload(
         prepared,
@@ -1109,6 +1133,7 @@ def test_live_long_risk_uses_fresh_ask_slippage_boundary(live_account):
         "bid": 222.0,
         "ask": 223.0,
     }
+    _attach_live_affordability(prepared, quote)
 
     risk = dashboard._trend_score_auto_live_risk_snapshot(
         prepared,
@@ -1119,6 +1144,93 @@ def test_live_long_risk_uses_fresh_ask_slippage_boundary(live_account):
     assert risk["quote_price_usd"] == 223.0
     assert risk["risk_price_usd"] == 225.23
     assert risk["premium_at_risk_usd"] == 225.23
+
+
+def test_short_move_affordability_downsizes_with_margin_and_charges(
+    live_account,
+):
+    prepared = {
+        **_prepared(dashboard.TREND_SCORE_MOVE_ZONE),
+        "lots": 750,
+        "spot": 63_800,
+        "strike": 63_800,
+        "entry_price": 353.5,
+        "raw_product": {
+            "initial_margin": "0.5",
+            "max_leverage_notional": "200000",
+            "initial_margin_scaling_factor": "0.000002",
+            "taker_commission_rate": "0.0001",
+            "product_specs": {"premium_commission_rate": "0.035"},
+        },
+    }
+    quote = {
+        **_execution_quote(prepared),
+        "bid": 353.5,
+        "ask": 354.0,
+    }
+
+    sizing = dashboard._trend_score_auto_live_affordability(
+        prepared,
+        quote,
+        available_usd=444.46061876,
+        configured_lots=750,
+        cfg={"TREND_SCORE_AUTO_LOTS": "750"},
+    )
+
+    assert sizing["selected_lots"] == 669
+    assert sizing["downsized"] is True
+    assert sizing["estimated_entry_fees_usd"] > 0
+    assert (
+        sizing["estimated_total_required_usd"]
+        <= sizing["usable_balance_usd"]
+    )
+    one_more = dashboard._trend_score_auto_live_required_funds(
+        prepared,
+        quote,
+        670,
+        cfg={"TREND_SCORE_AUTO_LOTS": "750"},
+    )
+    assert (
+        one_more["estimated_total_required_usd"]
+        > sizing["usable_balance_usd"]
+    )
+
+
+def test_live_affordability_caps_size_by_executable_depth(live_account):
+    prepared = {
+        **_prepared(dashboard.TREND_SCORE_CE_ZONE),
+        "lots": 1_000,
+    }
+    quote = {
+        **_execution_quote(prepared),
+        "ask_size": 275,
+    }
+
+    sizing = dashboard._trend_score_auto_live_affordability(
+        prepared,
+        quote,
+        available_usd=10_000,
+        configured_lots=1_000,
+    )
+
+    assert sizing["selected_lots"] == 275
+    assert sizing["book_depth_lots"] == 275
+    assert sizing["downsized"] is True
+
+
+def test_live_affordability_fails_closed_when_one_lot_is_unfunded(
+    live_account,
+):
+    prepared = _prepared(dashboard.TREND_SCORE_CE_ZONE)
+    quote = _execution_quote(prepared)
+
+    with pytest.raises(RuntimeError, match="cannot fund one lot.*charges"):
+        dashboard._trend_score_auto_live_affordability(
+            prepared,
+            quote,
+            available_usd=0.0001,
+            configured_lots=1_000,
+        )
 
 
 def _mock_flat_final_boundary(monkeypatch, final_quote: dict) -> None:

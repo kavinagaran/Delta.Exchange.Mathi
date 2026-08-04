@@ -455,15 +455,15 @@ class _ZoneBand extends StatelessWidget {
     spacing: Gap.xs,
     runSpacing: Gap.xs,
     children: const [
-      StatusPill('CE > +40 · ADX ≥ 25', colour: kZoneCall, dot: false),
+      StatusPill('CE > +40', colour: kZoneCall, dot: false),
       StatusPill('HOLD', colour: kZoneHold, dot: false),
       StatusPill(
-        'MV −30…+30 · ADX < 25 · EXIT ≥ 25',
+        'MV −30…+30 · ADX < 25 · EXIT OUTSIDE / ADX ≥ 25',
         colour: kZoneMove,
         dot: false,
       ),
       StatusPill('HOLD', colour: kZoneHold, dot: false),
-      StatusPill('PE < −40 · ADX ≥ 25', colour: kZonePut, dot: false),
+      StatusPill('PE < −40', colour: kZonePut, dot: false),
     ],
   );
 }

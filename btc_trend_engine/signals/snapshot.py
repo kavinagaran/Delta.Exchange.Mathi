@@ -25,10 +25,10 @@ from .score import ScoreResult
 # consumes it for an explicit SHORT_MOVE invalidation exit; exposing the
 # numeric evidence avoids brittle parsing of human-readable gate text.
 SCHEMA_VERSION = "1.4.0"
-# The model version participates in signal_id. v1.4.1 makes derivatives
-# context continuous around a flat higher-timeframe reading and caps it so a
-# context-only reversal cannot dominate the price/ADX evidence.
-MODEL_VERSION = "trend-rules-v1.4.1"
+# The model version participates in signal_id. v1.5.0 makes ADX exclusive to
+# SHORT_MOVE eligibility/exit; directional CE/PE entries depend on the strict
+# score thresholds and the remaining shared safety gates.
+MODEL_VERSION = "trend-rules-v1.5.0"
 
 # These two v1 gates describe whether a *directional* entry is available. They
 # remain in the public gate matrix for backward compatibility, but they are not
@@ -42,7 +42,7 @@ _DIRECTIONAL_ONLY_GATE_NAMES = frozenset({
 
 @dataclass(frozen=True, slots=True)
 class SignalConfig:
-    # Operator spec: directional entry at |score| > 40 with 5m ADX >= 25;
+    # Operator spec: directional entry at |score| > 40, independent of ADX;
     # the neutral candidate
     # range is only |score| <= 30 and must persist for six closed 5m candles.
     # Every intermediate score is HOLD -- see signals/zones.py. Was 65/25;
@@ -158,22 +158,27 @@ def _zone_entry_gates(
     operator-facing entry matrix shown by the dashboard.
     """
     if zone in {zones.CE_2_ITM, zones.PE_2_ITM}:
-        matching_regime = zones.directional_regime_matches(zone, regime.value)
-        directional_strength = (
-            trigger_adx is not None and trigger_adx >= CALM_ADX_MAX
-        )
+        # The raw v1 ``regime_tradeable`` gate treats RANGE as untradeable.
+        # RANGE can be caused solely by ADX < 25, so retaining that gate here
+        # would reintroduce the directional ADX requirement indirectly.  Keep
+        # the genuinely unsafe regimes blocked and preserve all other shared
+        # execution/data gates.
+        shared = [
+            dict(gate)
+            for gate in gates
+            if gate.get("name") != "regime_tradeable"
+        ]
+        regime_safe = regime.value not in zones.UNSAFE_REGIMES
         return [
-            *(dict(gate) for gate in gates),
+            *shared,
             {
-                "name": "directional_adx",
-                "label": "DIRECTIONAL ADX",
-                "passed": directional_strength,
+                "name": "regime_safe_for_directional_entry",
+                "label": "REGIME SAFETY",
+                "passed": regime_safe,
                 "detail": (
-                    f"5m ADX {trigger_adx:.1f} meets the minimum {CALM_ADX_MAX:.0f}"
-                    if directional_strength else
-                    (f"5m ADX {trigger_adx:.1f} is below the required {CALM_ADX_MAX:.0f}"
-                     if trigger_adx is not None else
-                     "5m ADX is unavailable; directional entry is blocked")
+                    "regime permits directional entry"
+                    if regime_safe else
+                    f"regime is {regime.value}; directional entry is blocked"
                 ),
             },
             {
@@ -186,16 +191,6 @@ def _zone_entry_gates(
                     if confidence >= config.minimum_confidence else
                     f"confidence {confidence:.0%} is below the required "
                     f"{config.minimum_confidence:.0%}"
-                ),
-            },
-            {
-                "name": "regime_matches_directional_zone",
-                "label": "DIRECTIONAL REGIME ALIGNMENT",
-                "passed": matching_regime,
-                "detail": (
-                    f"{regime.value} agrees with {zone}"
-                    if matching_regime else
-                    f"{regime.value} conflicts with {zone}; directional entry is blocked"
                 ),
             },
         ]
@@ -379,6 +374,14 @@ def build_snapshot(
                 "GATE_SCORE_BEYOND_ENTRY_THRESHOLD_FAILED",
                 "SCORE_BELOW_ENTRY_THRESHOLD",
             }
+        ]
+    elif zone in {zones.CE_2_ITM, zones.PE_2_ITM}:
+        # RANGE may mean only that 5m ADX is calm.  Directional entries are
+        # now score-driven, so the legacy regime gate is not a failure in the
+        # zone policy and must not be reported as if it blocked the trade.
+        reason_codes = [
+            code for code in reason_codes
+            if code != "GATE_REGIME_TRADEABLE_FAILED"
         ]
 
     return {

@@ -1,7 +1,7 @@
 """Score -> action zone mapping (operator spec, 2026-07-29).
 
-    > +40         BULLISH    buy 2-step ITM CE when 5m ADX is at least 25
-    < -40         BEARISH    buy 2-step ITM PE when 5m ADX is at least 25
+    > +40         BULLISH    buy 2-step ITM CE (ADX-independent)
+    < -40         BEARISH    buy 2-step ITM PE (ADX-independent)
     -30 .. +30    SIDEWAYS   sell ATM MOVE when 5m ADX is below 25
     all other gaps HOLD      no new action
 
@@ -150,14 +150,10 @@ def decide(
         return ZoneDecision(
             zone, True,
             "calm 5-minute ADX confirms SHORT_MOVE: sell ATM MOVE (stop required)")
-    if directional_adx is None:
-        return ZoneDecision(
-            zone, False,
-            "5m ADX is unavailable; ADX must be at least 25 for a directional entry")
-    if directional_adx < 25.0:
-        return ZoneDecision(
-            zone, False,
-            f"5m ADX {directional_adx:.1f} is below 25; directional strength is not confirmed")
+    # ``directional_adx`` remains in the signature for callers pinned to the
+    # v1.4 API, but it deliberately does not gate CE/PE.  ADX is now solely a
+    # SHORT_MOVE calm-entry / non-calm-exit input; the strict score threshold
+    # selects directional entries.
     if not gates_passed:
         return ZoneDecision(zone, False, "one or more execution gates failed")
     if zone == CE_2_ITM:
@@ -184,6 +180,11 @@ def should_exit(
     the old directional position but does not open a replacement.  This keeps
     the anti-churn band while avoiding a long CE being held at (say) -30.
 
+    SHORT_MOVE has a stricter exception: it is valid only inside the inclusive
+    -30..+30 neutral band.  Crossing either boundary exits it immediately,
+    including when the new score is in a HOLD band rather than a directional
+    entry zone.
+
     Protective exits (SL / TSL / TP) are handled by ``tp_monitor.py`` and are
     deliberately outside this function: they act on price, continuously, and
     must not be gated on a candle close or on the signal engine being healthy.
@@ -193,6 +194,10 @@ def should_exit(
     if current_zone == HOLD:
         active_policy = policy or ZonePolicy()
         if score is not None:
+            if (open_zone == SHORT_MOVE
+                    and abs(score) > active_policy.sideways_max_abs):
+                return True, (
+                    "SHORT_MOVE invalidated: score left the neutral range")
             if open_zone == CE_2_ITM and score < -active_policy.sideways_max_abs:
                 return True, (
                     "bullish position invalidated: score crossed below the "

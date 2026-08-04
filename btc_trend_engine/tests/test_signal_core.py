@@ -652,45 +652,35 @@ def test_directional_zone_requires_its_own_confidence_gate():
     assert snapshot["zone_action_allowed"] is False
 
 
-def test_directional_zone_requires_5m_adx_at_least_25():
-    blocked = _snapshot(
-        regime=Regime.TREND_UP,
+@pytest.mark.parametrize("score", [60.0, -60.0])
+@pytest.mark.parametrize("adx", [None, 24.9, 25.0, 60.0])
+def test_directional_zone_is_independent_of_5m_adx(score, adx):
+    snapshot = _snapshot(
+        # RANGE proves a calm-ADX classification cannot indirectly block the
+        # strict directional score zone.
+        regime=Regime.RANGE,
         direction=1,
-        score_value=60.0,
-        trigger_adx=24.9,
+        score_value=score,
+        trigger_adx=adx,
     )
-    adx_gate = next(
-        gate for gate in blocked["gates"] if gate["name"] == "directional_adx"
-    )
-    assert adx_gate["passed"] is False
-    assert blocked["zone_action_allowed"] is False
-
-    allowed = _snapshot(
-        regime=Regime.TREND_UP,
-        direction=1,
-        score_value=60.0,
-        trigger_adx=25.0,
-    )
-    adx_gate = next(
-        gate for gate in allowed["gates"] if gate["name"] == "directional_adx"
-    )
-    assert adx_gate["passed"] is True
-    assert allowed["zone_action_allowed"] is True
+    names = {gate["name"] for gate in snapshot["gates"]}
+    assert "directional_adx" not in names
+    assert "regime_tradeable" not in names
+    assert snapshot["zone_action_allowed"] is True
+    assert "GATE_REGIME_TRADEABLE_FAILED" not in snapshot["reason_codes"]
 
 
-def test_directional_zone_requires_regime_to_agree_with_score_side():
+def test_directional_zone_does_not_require_regime_direction_alignment():
     snapshot = _snapshot(
         regime=Regime.BREAKOUT_DOWN,
         direction=1,
         score_value=40.1,
     )
-    alignment_gate = next(
-        gate for gate in snapshot["gates"]
-        if gate["name"] == "regime_matches_directional_zone"
-    )
     assert snapshot["zone"] == zones.CE_2_ITM
-    assert alignment_gate["passed"] is False
-    assert snapshot["zone_action_allowed"] is False
+    assert "regime_matches_directional_zone" not in {
+        gate["name"] for gate in snapshot["gates"]
+    }
+    assert snapshot["zone_action_allowed"] is True
 
 
 def test_deferred_account_risk_is_visible_but_not_an_engine_pass():

@@ -9052,6 +9052,7 @@ def _prepare_trend_score_auto_entry(signal: dict) -> dict:
         (snapshot.get("market") or {}).get("spot"), "BTC spot", positive=True,
     )
     lots = _trend_score_auto_configured_lots()
+    live_sizing = _trend_score_auto_mode() == "live"
     now = datetime.now(timezone.utc)
     if zone in {TREND_SCORE_CE_ZONE, TREND_SCORE_PE_ZONE}:
         selection = select_directional_option(
@@ -9077,11 +9078,11 @@ def _prepare_trend_score_auto_entry(signal: dict) -> dict:
             contract.get("ask_size") or contract.get("ask_quantity"),
             "option ask depth", positive=True,
         )
-        if depth < lots:
+        if not live_sizing and depth < lots:
             raise RuntimeError(
                 "option ask depth cannot fill the configured order size"
             )
-        return {
+        prepared = {
             **selection,
             "side": "long",
             "instrument_kind": "BTC_OPTION",
@@ -9094,6 +9095,10 @@ def _prepare_trend_score_auto_entry(signal: dict) -> dict:
             "entry_depth": depth,
             "quote_snapshot": copy.deepcopy(contract),
         }
+        return (
+            _trend_score_auto_live_affordable_entry(prepared)
+            if live_sizing else prepared
+        )
 
     if zone != TREND_SCORE_MOVE_ZONE:
         raise RuntimeError("unsupported Trend score zone")
@@ -9104,9 +9109,15 @@ def _prepare_trend_score_auto_entry(signal: dict) -> dict:
         raise RuntimeError(
             "No operational ATM MOVE contract with more than 90 minutes remains"
         )
-    quote = _trend_score_auto_move_quote(selection["symbol"], lots)
+    # LIVE sizing needs the executable quote before it can turn the account's
+    # available USD into an affordable whole-lot quantity.  Require at least
+    # one quoted lot here; the sizing step below applies both the wallet and
+    # full top-of-book limits.  Paper retains the configured-size depth rule.
+    quote = _trend_score_auto_move_quote(
+        selection["symbol"], 1 if live_sizing else lots,
+    )
     move_eligibility = _trend_score_auto_short_move_eligibility(selection, quote)
-    return {
+    prepared = {
         **selection,
         "side": "short",
         "option_type": "MOVE",
@@ -9118,6 +9129,10 @@ def _prepare_trend_score_auto_entry(signal: dict) -> dict:
         "quote_snapshot": quote,
         "move_eligibility": move_eligibility,
     }
+    return (
+        _trend_score_auto_live_affordable_entry(prepared)
+        if live_sizing else prepared
+    )
 
 
 def _trend_score_auto_transition_id(user: str, signal_key: str, zone: str) -> str:
@@ -10125,6 +10140,253 @@ def _trend_score_auto_live_available_usd(
     raise RuntimeError("LIVE score USD wallet balance is unavailable")
 
 
+TREND_LIVE_BALANCE_RESERVE_PCT = 2.0
+
+
+def _trend_score_auto_product_fee_per_lot(
+    prepared: dict,
+    *,
+    price: float,
+    legs: int = 1,
+) -> float:
+    """Estimate the opening taker charge from authoritative product fields.
+
+    Delta caps option commission by both underlying notional and premium.  A
+    MOVE contract represents a call and put together, hence ``legs=2``.  The
+    configured fee defaults are retained only for older product snapshots
+    that do not carry the current exchange fields.
+    """
+    product = prepared.get("raw_product")
+    if not isinstance(product, dict):
+        product = {}
+    specs = product.get("product_specs")
+    if not isinstance(specs, dict):
+        specs = {}
+    try:
+        taker_rate = float(product.get("taker_commission_rate"))
+    except (TypeError, ValueError, OverflowError):
+        taker_rate = max(_as_float(_cfg("OPTION_FEE_RATE", "0.00010"), 0.00010), 0)
+    try:
+        premium_rate = float(specs.get("premium_commission_rate"))
+    except (TypeError, ValueError, OverflowError):
+        premium_rate = max(_as_float(_cfg("OPTION_FEE_CAP_PCT", "0.035"), 0.035), 0)
+    if (
+        not math.isfinite(taker_rate) or taker_rate < 0
+        or not math.isfinite(premium_rate) or premium_rate < 0
+    ):
+        raise RuntimeError("selected contract commission fields are invalid")
+    cv = _trend_score_auto_number(
+        prepared.get("contract_value"), "contract value", positive=True,
+    )
+    reference = max(
+        _trend_score_auto_number(
+            prepared.get("spot"), "BTC spot", positive=True,
+        ),
+        _trend_score_auto_number(
+            prepared.get("strike"), "contract strike", positive=True,
+        ),
+    )
+    premium = _trend_score_auto_number(
+        price, "entry premium", positive=True,
+    )
+    per_leg = min(taker_rate * reference, premium_rate * premium) * cv
+    return per_leg * _trend_score_auto_exact_int(
+        legs, "commission leg count", positive=True,
+    )
+
+
+def _trend_score_auto_live_required_funds(
+    prepared: dict,
+    quote: dict,
+    lots: int,
+    *,
+    cfg: dict | None = None,
+) -> dict:
+    """Return estimated entry margin/premium and opening charges for ``lots``.
+
+    Long options are wallet-funded by their bounded IOC premium.  SHORT MOVE
+    is a two-leg short straddle, so its isolated initial margin is calculated
+    from both legs.  Delta's published scaling fields are applied above the
+    product's maximum-leverage notional threshold.
+    """
+    requested = _trend_score_auto_exact_int(
+        lots, "affordability lot count", positive=True,
+    )
+    config = cfg if isinstance(cfg, dict) else _user_cfg()
+    cv = _trend_score_auto_number(
+        prepared.get("contract_value"), "contract value", positive=True,
+    )
+    is_short = prepared.get("zone") == TREND_SCORE_MOVE_ZONE
+    price_key = "bid" if is_short else "ask"
+    touch = _trend_score_auto_number(
+        quote.get(price_key), f"fresh {price_key}", positive=True,
+    )
+    if is_short:
+        product = prepared.get("raw_product")
+        if not isinstance(product, dict):
+            raise RuntimeError(
+                "selected MOVE contract has no authoritative margin fields"
+            )
+        initial_margin_pct = _trend_score_auto_number(
+            product.get("initial_margin"), "MOVE initial margin", positive=True,
+        )
+        reference = max(
+            _trend_score_auto_number(
+                prepared.get("spot"), "BTC spot", positive=True,
+            ),
+            _trend_score_auto_number(
+                prepared.get("strike"), "MOVE strike", positive=True,
+            ),
+        )
+        notional = 2.0 * reference * cv * requested
+        ratio = initial_margin_pct / 100.0
+        max_leverage_notional = _trend_score_auto_number(
+            product.get("max_leverage_notional") or notional,
+            "MOVE maximum-leverage notional",
+            positive=True,
+        )
+        if notional > max_leverage_notional:
+            scaling = _trend_score_auto_number(
+                product.get("initial_margin_scaling_factor") or 0,
+                "MOVE initial-margin scaling factor",
+            )
+            if scaling < 0:
+                raise RuntimeError(
+                    "MOVE initial-margin scaling factor is invalid"
+                )
+            ratio += (notional - max_leverage_notional) * scaling
+        margin_or_premium = notional * ratio
+        fee_per_lot = _trend_score_auto_product_fee_per_lot(
+            prepared, price=touch, legs=2,
+        )
+        basis = "move_isolated_margin_plus_entry_charges"
+        funding_price = touch
+    else:
+        max_slippage = max(_as_float(
+            config.get("TREND_MAX_SLIPPAGE_PCT") or 1, 1,
+        ), 0)
+        funding_price = max(
+            _trend_score_auto_number(
+                prepared.get("entry_price"),
+                "selected option reference price", positive=True,
+            ),
+            touch,
+        ) * (1 + max_slippage / 100.0)
+        margin_or_premium = funding_price * cv * requested
+        fee_per_lot = _trend_score_auto_product_fee_per_lot(
+            prepared, price=funding_price,
+        )
+        basis = "long_option_premium_plus_entry_charges"
+    fees = fee_per_lot * requested
+    return {
+        "lots": requested,
+        "basis": basis,
+        "funding_price_usd": round(funding_price, 8),
+        "margin_or_premium_usd": round(margin_or_premium, 8),
+        "entry_fee_per_lot_usd": round(fee_per_lot, 12),
+        "estimated_entry_fees_usd": round(fees, 8),
+        "estimated_total_required_usd": round(
+            margin_or_premium + fees, 8,
+        ),
+    }
+
+
+def _trend_score_auto_live_affordability(
+    prepared: dict,
+    quote: dict,
+    *,
+    available_usd: float,
+    configured_lots: int | None = None,
+    cfg: dict | None = None,
+) -> dict:
+    """Find the maximum safe whole-lot LIVE size within wallet and book.
+
+    Two percent of available USD remains uncommitted for quote/margin drift.
+    The result never exceeds the user's configured size, the product limit or
+    executable top-of-book depth.
+    """
+    config = cfg if isinstance(cfg, dict) else _user_cfg()
+    configured = (
+        _trend_score_auto_configured_lots(config)
+        if configured_lots is None
+        else _trend_score_auto_exact_int(
+            configured_lots, "configured Trend Engine size", positive=True,
+        )
+    )
+    available = _trend_score_auto_number(
+        available_usd, "available USD balance",
+    )
+    if available < 0:
+        raise RuntimeError("available USD balance is invalid")
+    is_short = prepared.get("zone") == TREND_SCORE_MOVE_ZONE
+    depth_key = "bid_size" if is_short else "ask_size"
+    depth = int(math.floor(_trend_score_auto_number(
+        quote.get(depth_key), f"fresh {depth_key}", positive=True,
+    )))
+    product_limit = _trend_score_auto_exact_int(
+        prepared.get("max_order_lots"), "contract order limit", positive=True,
+    )
+    upper = min(configured, depth, product_limit)
+    usable = available * (1 - TREND_LIVE_BALANCE_RESERVE_PCT / 100.0)
+    low, high = 0, upper
+    while low < high:
+        candidate = (low + high + 1) // 2
+        required = _trend_score_auto_live_required_funds(
+            prepared, quote, candidate, cfg=config,
+        )["estimated_total_required_usd"]
+        if required <= usable + 1e-9:
+            low = candidate
+        else:
+            high = candidate - 1
+    affordable = low
+    if affordable < 1:
+        one_lot = _trend_score_auto_live_required_funds(
+            prepared, quote, 1, cfg=config,
+        )
+        raise RuntimeError(
+            "Available USD balance cannot fund one lot including estimated "
+            f"entry margin/premium and charges (needs approximately "
+            f"${one_lot['estimated_total_required_usd']:.4f})"
+        )
+    selected = _trend_score_auto_live_required_funds(
+        prepared, quote, affordable, cfg=config,
+    )
+    return {
+        **selected,
+        "configured_lots": configured,
+        "affordable_lots": affordable,
+        "selected_lots": affordable,
+        "book_depth_lots": depth,
+        "available_usd": round(available, 8),
+        "usable_balance_usd": round(usable, 8),
+        "balance_reserve_pct": TREND_LIVE_BALANCE_RESERVE_PCT,
+        "downsized": affordable < configured,
+    }
+
+
+def _trend_score_auto_live_affordable_entry(prepared: dict) -> dict:
+    """Attach wallet-backed sizing to one freshly selected LIVE contract."""
+    quote = prepared.get("quote_snapshot")
+    if not isinstance(quote, dict):
+        raise RuntimeError("selected LIVE contract has no executable quote")
+    configured = _trend_score_auto_configured_lots()
+    available = _trend_score_auto_live_available_usd()
+    sizing = _trend_score_auto_live_affordability(
+        prepared,
+        quote,
+        available_usd=available,
+        configured_lots=configured,
+    )
+    return {
+        **prepared,
+        "lots": sizing["selected_lots"],
+        "requested_lots": configured,
+        "configured_lots": configured,
+        "affordability_limited": bool(sizing["downsized"]),
+        "live_affordability": sizing,
+    }
+
+
 def _trend_score_auto_risk_snapshot(
     prepared: dict,
     quote: dict,
@@ -10154,10 +10416,33 @@ def _trend_score_auto_risk_snapshot(
     lots = _trend_score_auto_exact_int(
         prepared.get("lots"), "prepared order size", positive=True,
     )
-    if lots != _trend_score_auto_configured_lots(cfg):
+    configured_lots = _trend_score_auto_configured_lots(cfg)
+    if dry_run and lots != configured_lots:
         raise RuntimeError(
-            "Prepared order size differs from the configured Trend Engine size"
+            "Prepared paper order size differs from the configured Trend Engine size"
         )
+    if not dry_run:
+        sizing = prepared.get("live_affordability")
+        if not isinstance(sizing, dict):
+            raise RuntimeError(
+                "LIVE entry has no wallet-backed affordability calculation"
+            )
+        sizing_configured = _trend_score_auto_exact_int(
+            sizing.get("configured_lots"),
+            "affordability configured size", positive=True,
+        )
+        sizing_selected = _trend_score_auto_exact_int(
+            sizing.get("selected_lots"),
+            "affordability selected size", positive=True,
+        )
+        if (
+            sizing_configured != configured_lots
+            or sizing_selected != lots
+            or lots > configured_lots
+        ):
+            raise RuntimeError(
+                "LIVE affordability sizing does not match the prepared order"
+            )
     reference_price = _trend_score_auto_number(
         prepared.get("entry_price"),
         "selected option reference price", positive=True,
@@ -10269,7 +10554,12 @@ def _trend_score_auto_risk_snapshot(
             quoted_price if is_short else price, 8,
         ),
         "requested_lots": lots,
-        "fixed_size_policy": True,
+        "configured_lots": configured_lots,
+        "fixed_size_policy": dry_run,
+        "affordability_sized": not dry_run,
+        "live_affordability": copy.deepcopy(
+            prepared.get("live_affordability")
+        ) if not dry_run else None,
         "risk_mode": "dry_run" if dry_run else "live",
         "protection_policy_at_entry": copy.deepcopy(protection),
     }
@@ -10635,6 +10925,21 @@ def _trend_score_auto_live_final_preflight(
     max_slippage, max_spread, max_quote_age = (
         _trend_score_auto_live_execution_limits(prepared, cfg)
     )
+    refreshed_affordability = _trend_score_auto_live_affordability(
+        prepared,
+        final_quote,
+        available_usd=available_usd,
+        configured_lots=_trend_score_auto_configured_lots(cfg),
+        cfg=cfg,
+    )
+    prepared_lots = _trend_score_auto_exact_int(
+        prepared.get("lots"), "prepared order size", positive=True,
+    )
+    if prepared_lots > refreshed_affordability["affordable_lots"]:
+        raise RuntimeError(
+            "Available USD margin or executable depth changed before POST; "
+            "the affordable LIVE order will be rebuilt"
+        )
     rebuilt_payload, _ = build_trend_score_live_ioc_payload(
         prepared,
         final_quote,
