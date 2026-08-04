@@ -29,6 +29,8 @@ def test_today_page_contains_only_same_day_trade_content():
         "jget('/api/engine/live')",
         "function todayEngineScoreDials(snapshot, liveView, status)",
         "function todayTradeDecisionPill(status, snapshot)",
+        "WAIT — MOVE PREMIUM BELOW $300",
+        "entry_blocked_reason",
         "Live preview",
         "Committed decision",
         'aria-label="Live TP, SL and TSL monitor"',

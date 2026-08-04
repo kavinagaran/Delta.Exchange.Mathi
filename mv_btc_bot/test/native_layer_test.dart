@@ -133,6 +133,31 @@ void main() {
     });
   });
 
+  group('trade decision blockers', () {
+    test('premium blocker takes precedence over inferred ADX copy', () {
+      const controller = <String, dynamic>{
+        'entry_blocked_reason':
+            'SHORT MOVE premium must be above \$300 (currently \$272.00)',
+        'transition_target_zone': 'SHORT_MOVE',
+      };
+      final reason = controllerEntryBlock(controller, 'SHORT_MOVE');
+
+      expect(reason, contains('currently \$272.00'));
+      expect(
+        tradeDecisionLabel('SHORT_MOVE', actionAllowed: false, reason: reason),
+        'WAIT — MOVE PREMIUM BELOW \$300',
+      );
+    });
+
+    test('a blocker from a previous zone is ignored', () {
+      const controller = <String, dynamic>{
+        'entry_blocked_reason': 'old MOVE premium failure',
+        'transition_target_zone': 'SHORT_MOVE',
+      };
+      expect(controllerEntryBlock(controller, 'CE_2_ITM'), isNull);
+    });
+  });
+
   group('ApiResult', () {
     test('an error result is never ok and carries no data', () {
       const result = ApiResult<int>.failed('boom');

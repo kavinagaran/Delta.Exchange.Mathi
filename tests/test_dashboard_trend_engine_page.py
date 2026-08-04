@@ -298,6 +298,9 @@ def test_one_committed_trade_decision_is_centered_below_the_circles():
     assert "SELL ATM MOVE" in TEMPLATE
     assert "HOLD — NO NEW TRADE" in TEMPLATE
     assert "WAIT — 5M ADX NOT CALM" in TEMPLATE
+    assert "WAIT — MOVE PREMIUM BELOW $300" in TEMPLATE
+    assert "entry_blocked_reason" in TEMPLATE
+    assert "jget('/api/trend-engine/score-auto/status')" in TEMPLATE
     assert "WAIT — 30-MIN CONFIRMATION" not in TEMPLATE
     assert "six completed five-minute candles" not in TEMPLATE
     assert "g.label || formatCode(g.name)" in TEMPLATE
@@ -381,6 +384,14 @@ vm.runInThisContext(source.slice(start, end) + `
   if (calmBlock.label !== 'WAIT — 5M ADX NOT CALM' ||
       !calmBlock.detail.includes('ADX is above 20')) {
     throw new Error('ADX blocker is mislabeled: ' + JSON.stringify(calmBlock));
+  }
+  const premiumBlock = tradeDecisionMeta(
+    'SHORT_MOVE', false,
+    'SHORT MOVE premium must be above $300 (currently $272.00)',
+  );
+  if (premiumBlock.label !== 'WAIT — MOVE PREMIUM BELOW $300' ||
+      !premiumBlock.detail.includes('$272.00')) {
+    throw new Error('premium blocker is mislabeled: ' + JSON.stringify(premiumBlock));
   }
 `);
 """

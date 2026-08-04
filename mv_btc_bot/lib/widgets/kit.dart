@@ -713,6 +713,21 @@ String tradeDecisionLabel(
   if (key == 'HOLD') return 'HOLD — NO NEW TRADE';
   if (key.isEmpty) return 'NO DECISION';
   if (!actionAllowed) {
+    if (key == 'SHORT_MOVE' && blocker.toLowerCase().contains('premium')) {
+      return 'WAIT — MOVE PREMIUM BELOW \$300';
+    }
+    final lowerBlocker = blocker.toLowerCase();
+    if (key == 'SHORT_MOVE' &&
+        (lowerBlocker.contains('5:30 pm') ||
+            lowerBlocker.contains('midnight') ||
+            lowerBlocker.contains('entry window'))) {
+      return 'WAIT — WEEKDAY ENTRY WINDOW';
+    }
+    if (key == 'SHORT_MOVE' &&
+        (lowerBlocker.contains('90 minutes') ||
+            lowerBlocker.contains('expiry too close'))) {
+      return 'WAIT — EXPIRY TOO CLOSE';
+    }
     if (key == 'SHORT_MOVE' && blocker.toUpperCase().contains('ADX')) {
       return 'WAIT — 5M ADX NOT CALM';
     }
@@ -727,6 +742,17 @@ String tradeDecisionLabel(
     'SHORT_MOVE' => 'SELL ATM MOVE',
     _ => key.replaceAll('_', ' '),
   };
+}
+
+String? controllerEntryBlock(Map<String, dynamic>? controller, String? zone) {
+  final reason = '${controller?['entry_blocked_reason'] ?? ''}'.trim();
+  if (reason.isEmpty) return null;
+  final target = '${controller?['transition_target_zone'] ?? ''}'
+      .trim()
+      .toUpperCase();
+  final current = (zone ?? '').trim().toUpperCase();
+  if (target.isNotEmpty && current.isNotEmpty && target != current) return null;
+  return reason;
 }
 
 class ScoreDecisionPill extends StatelessWidget {

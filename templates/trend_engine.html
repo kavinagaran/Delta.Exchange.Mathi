@@ -379,6 +379,27 @@ function tradeDecisionMeta(zone, actionAllowed = true, reason = '') {
   }
   if (actionAllowed === false) {
     const blocker = String(reason || '').trim();
+    if (key === 'SHORT_MOVE' && /premium/i.test(blocker)) {
+      return {
+        label: 'WAIT — MOVE PREMIUM BELOW $300',
+        tone: 'is-blocked',
+        detail: blocker,
+      };
+    }
+    if (key === 'SHORT_MOVE' && /5:30\s*PM|midnight|entry window/i.test(blocker)) {
+      return {
+        label: 'WAIT — WEEKDAY ENTRY WINDOW',
+        tone: 'is-blocked',
+        detail: blocker,
+      };
+    }
+    if (key === 'SHORT_MOVE' && /90 minutes|expiry too close/i.test(blocker)) {
+      return {
+        label: 'WAIT — EXPIRY TOO CLOSE',
+        tone: 'is-blocked',
+        detail: blocker,
+      };
+    }
     if (key === 'SHORT_MOVE' && /\bADX\b/i.test(blocker)) {
       return {
         label: 'WAIT — 5M ADX NOT CALM',
@@ -443,7 +464,7 @@ function freshnessState(snapshot, now) {
   return { cls: 'is-stale', text: 'Expired' };
 }
 
-function renderHero(snapshot, liveView) {
+function renderHero(snapshot, liveView, controllerStatus = null) {
   const now = Date.now();
   const hero = document.getElementById('te-hero');
   hero.className = `te-hero ${heroTone(snapshot)}`;
@@ -469,13 +490,14 @@ function renderHero(snapshot, liveView) {
   const liveScore = liveAvailable ? Number(liveView.live_score) : null;
   const committedScore = finite(snapshot.trend_score)
     ? Number(snapshot.trend_score) : null;
+  const controllerReason = String(controllerStatus?.entry_blocked_reason || '').trim();
   document.getElementById('te-live-score').textContent = signedScore(liveScore);
   document.getElementById('te-committed-score').textContent = signedScore(committedScore);
   renderTradeDecision(
     'te-trade-decision',
     snapshot.zone,
-    snapshot.zone_action_allowed === true,
-    snapshot.zone_reason,
+    snapshot.zone_action_allowed === true && !controllerReason,
+    controllerReason || snapshot.zone_reason,
     committedScore,
     snapshot.data_quality,
   );
@@ -1502,14 +1524,15 @@ async function renderEngineHealth() {
 async function load() {
   document.getElementById('trend-engine-page').setAttribute('aria-busy', 'true');
   try {
-    const [snapshot, liveView, decisionHistory] = await Promise.all([
+    const [snapshot, liveView, decisionHistory, controllerStatus] = await Promise.all([
       jget('/api/engine/snapshot'),
       jget('/api/engine/live').catch(() => ({ available: false })),
       jget('/api/engine/decision-history')
         .catch(() => ({ available: false, decisions: [], trade_markers: [] })),
+      jget('/api/trend-engine/score-auto/status').catch(() => null),
     ]);
     renderError(snapshot);
-    renderHero(snapshot, liveView);
+    renderHero(snapshot, liveView, controllerStatus);
     renderCommittedDecisionChart(decisionHistory);
     renderComponents(snapshot.components);
     renderTimeframes(snapshot.timeframes);

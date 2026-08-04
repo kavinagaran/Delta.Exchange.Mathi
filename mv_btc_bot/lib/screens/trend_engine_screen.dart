@@ -27,6 +27,7 @@ class _TrendEngineScreenState extends State<TrendEngineScreen> {
   Map<String, dynamic>? _snapshot;
   Map<String, dynamic>? _live;
   Map<String, dynamic>? _status;
+  Map<String, dynamic>? _controller;
   Map<String, dynamic>? _history;
   String? _error;
   bool _loading = true;
@@ -55,6 +56,7 @@ class _TrendEngineScreenState extends State<TrendEngineScreen> {
       widget.api.engineLive(),
       widget.api.engineStatus(),
       widget.api.decisionHistory(),
+      widget.api.scoreAutoStatus(),
     ]);
     if (!mounted) return;
     if (results.any((result) => result.unauthorised)) {
@@ -67,6 +69,7 @@ class _TrendEngineScreenState extends State<TrendEngineScreen> {
       _live = results[1].data;
       _status = results[2].data;
       _history = results[3].data;
+      _controller = results[4].data;
       _error = results[0].ok ? null : results[0].error;
     });
   }
@@ -98,7 +101,11 @@ class _TrendEngineScreenState extends State<TrendEngineScreen> {
         physics: const AlwaysScrollableScrollPhysics(),
         padding: const EdgeInsets.fromLTRB(Gap.lg, Gap.md, Gap.lg, Gap.xxl),
         children: [
-          _DecisionHero(snapshot: snapshot, live: _live),
+          _DecisionHero(
+            snapshot: snapshot,
+            live: _live,
+            controller: _controller,
+          ),
           const SizedBox(height: Gap.md),
           _DecisionChart(history: _history),
           const SizedBox(height: Gap.md),
@@ -118,10 +125,15 @@ class _TrendEngineScreenState extends State<TrendEngineScreen> {
 }
 
 class _DecisionHero extends StatelessWidget {
-  const _DecisionHero({required this.snapshot, required this.live});
+  const _DecisionHero({
+    required this.snapshot,
+    required this.live,
+    required this.controller,
+  });
 
   final Map<String, dynamic> snapshot;
   final Map<String, dynamic>? live;
+  final Map<String, dynamic>? controller;
 
   @override
   Widget build(BuildContext context) {
@@ -134,10 +146,12 @@ class _DecisionHero extends StatelessWidget {
     final zone = '${snapshot['zone'] ?? 'HOLD'}';
     final quality = '${snapshot['data_quality'] ?? 'UNKNOWN'}';
     final regime = _regimeLabel('${snapshot['regime'] ?? 'DEGRADED'}');
+    final controllerReason = controllerEntryBlock(controller, zone);
     final decision = tradeDecisionLabel(
       zone,
-      actionAllowed: snapshot['zone_action_allowed'] == true,
-      reason: '${snapshot['zone_reason'] ?? ''}',
+      actionAllowed:
+          snapshot['zone_action_allowed'] == true && controllerReason == null,
+      reason: controllerReason ?? '${snapshot['zone_reason'] ?? ''}',
     );
     return AppCard(
       kicker: 'BTC Trend Engine',

@@ -36,6 +36,7 @@ class _TodayScreenState extends State<TodayScreen> {
   Map<String, dynamic>? _status;
   Map<String, dynamic>? _engine;
   Map<String, dynamic>? _engineLive;
+  Map<String, dynamic>? _controller;
   Map<String, dynamic>? _protection;
   List<dynamic> _todayTrades = const [];
   String? _error;
@@ -152,6 +153,7 @@ class _TodayScreenState extends State<TodayScreen> {
       widget.api.todayTrades(),
       widget.api.engineSnapshot(),
       widget.api.engineLive(),
+      widget.api.scoreAutoStatus(),
       widget.api.protectionStatus(),
     ]);
     if (!mounted) return;
@@ -169,7 +171,8 @@ class _TodayScreenState extends State<TodayScreen> {
       _todayTrades = (results[1].data as List<dynamic>?) ?? const [];
       _engine = results[2].data as Map<String, dynamic>?;
       _engineLive = results[3].data as Map<String, dynamic>?;
-      _protection = results[4].data as Map<String, dynamic>?;
+      _controller = results[4].data as Map<String, dynamic>?;
+      _protection = results[5].data as Map<String, dynamic>?;
       // Only the primary call's failure blanks the screen; the engine being
       // unreachable is itself information and gets its own card.
       _error = results[0].ok ? null : results[0].error;
@@ -270,7 +273,11 @@ class _TodayScreenState extends State<TodayScreen> {
               onClose: () => _close(current),
             ),
           const SizedBox(height: Gap.md),
-          _EngineCard(engine: _engine, live: _engineLive),
+          _EngineCard(
+            engine: _engine,
+            live: _engineLive,
+            controller: _controller,
+          ),
           const SizedBox(height: Gap.md),
           MetricWrap(
             children: [
@@ -456,10 +463,15 @@ class _ProtectionPanel extends StatelessWidget {
 
 /// Engine state: score, zone, and whether an entry is currently permitted.
 class _EngineCard extends StatelessWidget {
-  const _EngineCard({required this.engine, required this.live});
+  const _EngineCard({
+    required this.engine,
+    required this.live,
+    required this.controller,
+  });
 
   final Map<String, dynamic>? engine;
   final Map<String, dynamic>? live;
+  final Map<String, dynamic>? controller;
 
   @override
   Widget build(BuildContext context) {
@@ -485,10 +497,12 @@ class _EngineCard extends StatelessWidget {
     );
     final zone = engine!['zone'] as String?;
     final previewZone = _zoneFromScore(preview);
+    final controllerReason = controllerEntryBlock(controller, zone);
     final decision = tradeDecisionLabel(
       zone,
-      actionAllowed: engine!['zone_action_allowed'] == true,
-      reason: '${engine!['zone_reason'] ?? ''}',
+      actionAllowed:
+          engine!['zone_action_allowed'] == true && controllerReason == null,
+      reason: controllerReason ?? '${engine!['zone_reason'] ?? ''}',
     );
 
     return AppCard(

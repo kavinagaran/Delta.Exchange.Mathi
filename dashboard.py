@@ -13568,6 +13568,39 @@ def api_trend_engine_score_auto_status():
             _mode_data_dir(namespace_dry_run)
         )
         setup_lock = _trend_score_auto_setup_lock(status_ledger)
+        transition = status_ledger.get("current_transition")
+        if isinstance(transition, dict):
+            controller_phase = str(
+                transition.get("phase") or ""
+            ).strip().upper()
+            transition_zone = str(
+                transition.get("target_zone") or ""
+            ).strip().upper()
+            blocked_reason = str(
+                transition.get("entry_blocked_reason") or ""
+            ).strip()
+            payload["controller_phase"] = controller_phase or None
+            payload["transition_target_zone"] = transition_zone or None
+            # Only expose a durable entry blocker while the transition is
+            # actually waiting.  Completed/old journal entries must not make
+            # a later decision look blocked.  Zone matching prevents a prior
+            # zone's contract failure from leaking into the current signal.
+            blocking_phases = {
+                "FLAT_WAITING_CONTRACT",
+                "FLAT_WAITING_RECONCILIATION",
+                "REBUILD_REQUIRED",
+                "ENTRY_BLOCKED_RISK",
+            }
+            if (
+                blocked_reason
+                and controller_phase in blocking_phases
+                and (
+                    not engine_zone
+                    or not transition_zone
+                    or transition_zone == engine_zone
+                )
+            ):
+                payload["entry_blocked_reason"] = blocked_reason
         if mode == "live":
             no_fill_setup = _trend_score_auto_no_fill_setup(status_ledger)
         if no_fill_setup:
@@ -13630,6 +13663,10 @@ def api_trend_engine_score_auto_status():
         and state.get("entry_trigger") == TREND_SCORE_AUTO_TRIGGER
     )
     if controller_state and position_status in {"OPEN", "ENTRY_PENDING"}:
+        # A controller journal may briefly retain its prior waiting phase
+        # while the position state has already become authoritative.  Once a
+        # trade is open/pending there is no entry blocker to show.
+        payload.pop("entry_blocked_reason", None)
         payload.update({
             "current_zone": state.get("trend_score_zone"),
             "engine_zone": payload.get("engine_zone")
