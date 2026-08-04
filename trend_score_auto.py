@@ -15,7 +15,7 @@ two-step option into a different strike.
 from __future__ import annotations
 
 import math
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Collection, Mapping, Sequence
 
 from btc_trend_engine.signals.regime import CALM_ADX_MAX
@@ -30,6 +30,7 @@ SCORE_ZONES = frozenset({PE_3_ITM, PE_2_ITM, SHORT_MOVE, CE_2_ITM, HOLD})
 
 AUTO_TRADE_LOTS = 1_000
 MIN_TIME_TO_EXPIRY_SECONDS = 90 * 60
+IST_TIMEZONE = timezone(timedelta(hours=5, minutes=30))
 
 
 class TrendScoreAutoInputError(ValueError):
@@ -74,6 +75,21 @@ def _utc_time(value: Any, name: str) -> datetime:
 
 def _iso_utc(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def is_current_ist_expiry(expiry: Any, now: Any) -> bool:
+    """Return whether settlement belongs to today's IST calendar date.
+
+    Daily BTC automation must never roll to tomorrow merely because today's
+    contract is too close to settlement or temporarily unavailable.
+    """
+
+    settlement = _utc_time(expiry, "expiry")
+    current = _utc_time(now, "now")
+    return (
+        settlement.astimezone(IST_TIMEZONE).date()
+        == current.astimezone(IST_TIMEZONE).date()
+    )
 
 
 def score_zone(score: Any) -> str:
@@ -236,6 +252,8 @@ def _listed_vanilla_products(
             raise TrendScoreAutoInputError(
                 f"raw_products[{index}].strike_price must be positive"
             )
+        if not is_current_ist_expiry(expiry, now):
+            continue
         if (expiry - now).total_seconds() < MIN_TIME_TO_EXPIRY_SECONDS:
             continue
 
@@ -275,8 +293,8 @@ def select_directional_option(
 ) -> dict[str, Any] | None:
     """Select the exact policy strike or return ``None`` without substitution.
 
-    The earliest listed operational expiry with at least 90 minutes remaining
-    is authoritative.  CE selects ``ATM index - 2`` and PE selects
+    Only today's IST expiry is eligible, and it must retain at least 90
+    minutes. CE selects ``ATM index - 2`` and PE selects
     ``ATM index + 2`` (2026-07-26 spec; PE was ``+3`` before, making the
     policy asymmetric).  ``PE_3_ITM`` is still accepted so a position opened
     under the old policy can be selected and closed.  If that exact product
@@ -411,9 +429,9 @@ def select_move_contract(
     """Select the nearest-expiry ATM BTC MOVE contract for a short entry.
 
     Eligibility depends only on the authoritative listing, exact settlement
-    timestamp, and product limits.  There is deliberately no morning/evening
-    session argument. The current expiry is eligible only when more than 90
-    minutes remain; no maximum DTE is imposed.
+    timestamp, and product limits. There is deliberately no morning/evening
+    session argument. Only today's IST expiry is eligible, and it must retain
+    more than 90 minutes; tomorrow is never used as a fallback.
     """
 
     try:
@@ -459,6 +477,8 @@ def select_move_contract(
             raise TrendScoreAutoInputError(
                 f"raw_products[{index}].strike_price must be positive"
             )
+        if not is_current_ist_expiry(expiry, current):
+            continue
         if (expiry - current).total_seconds() <= MIN_TIME_TO_EXPIRY_SECONDS:
             continue
         by_expiry.setdefault(expiry, []).append({

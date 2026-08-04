@@ -393,6 +393,13 @@ function tradeDecisionMeta(zone, actionAllowed = true, reason = '') {
         detail: blocker,
       };
     }
+    if (/today(?:'s|-expiry).*expiry|today's-expiry/i.test(blocker)) {
+      return {
+        label: "WAIT — TODAY'S EXPIRY UNAVAILABLE",
+        tone: 'is-blocked',
+        detail: blocker,
+      };
+    }
     if (key === 'SHORT_MOVE' && /90 minutes|expiry too close/i.test(blocker)) {
       return {
         label: 'WAIT — EXPIRY TOO CLOSE',

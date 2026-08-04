@@ -30,6 +30,7 @@ def test_today_page_contains_only_same_day_trade_content():
         "function todayEngineScoreDials(snapshot, liveView, status)",
         "function todayTradeDecisionPill(status, snapshot)",
         "WAIT — MOVE PREMIUM BELOW $300",
+        "WAIT — TODAY'S EXPIRY UNAVAILABLE",
         "entry_blocked_reason",
         "Live preview",
         "Committed decision",

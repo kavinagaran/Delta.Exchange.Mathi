@@ -156,6 +156,18 @@ void main() {
       };
       expect(controllerEntryBlock(controller, 'CE_2_ITM'), isNull);
     });
+
+    test('today-only expiry failure is explicit', () {
+      expect(
+        tradeDecisionLabel(
+          'CE_2_ITM',
+          actionAllowed: false,
+          reason:
+              "No exact executable today's-expiry 2-step ITM CALL contract is available",
+        ),
+        "WAIT — TODAY'S EXPIRY UNAVAILABLE",
+      );
+    });
   });
 
   group('ApiResult', () {

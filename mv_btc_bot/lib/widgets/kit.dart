@@ -723,6 +723,11 @@ String tradeDecisionLabel(
             lowerBlocker.contains('entry window'))) {
       return 'WAIT — WEEKDAY ENTRY WINDOW';
     }
+    if (lowerBlocker.contains("today's expiry") ||
+        lowerBlocker.contains("today's-expiry") ||
+        lowerBlocker.contains("today's ist expiry")) {
+      return "WAIT — TODAY'S EXPIRY UNAVAILABLE";
+    }
     if (key == 'SHORT_MOVE' &&
         (lowerBlocker.contains('90 minutes') ||
             lowerBlocker.contains('expiry too close'))) {

@@ -463,6 +463,11 @@ def test_short_move_uses_premium_expiry_and_weekday_entry_window():
             {"expiry": (allowed + timedelta(minutes=89)).isoformat()},
             {"bid": 301}, now=allowed,
         )
+    with pytest.raises(RuntimeError, match="today's expiry"):
+        dashboard._trend_score_auto_short_move_eligibility(
+            {"expiry": (allowed + timedelta(days=1)).isoformat()},
+            {"bid": 301}, now=allowed,
+        )
 
     blocked = datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc)
     with pytest.raises(RuntimeError, match="5:30 PM to midnight IST"):
@@ -472,7 +477,7 @@ def test_short_move_uses_premium_expiry_and_weekday_entry_window():
         )
 
     midnight = datetime(2026, 8, 3, 18, 30, tzinfo=timezone.utc)
-    weekend = datetime(2026, 8, 8, 12, 30, tzinfo=timezone.utc)
+    weekend = datetime(2026, 8, 8, 8, 0, tzinfo=timezone.utc)
     for permitted in (midnight, weekend):
         result = dashboard._trend_score_auto_short_move_eligibility(
             {"expiry": (permitted + timedelta(hours=3)).isoformat()},

@@ -216,6 +216,10 @@ def live_account(tmp_path, monkeypatch):
     monkeypatch.setattr(dashboard, "_active_creds", lambda: ("key", "secret"))
     monkeypatch.setattr(dashboard, "_trend_audit", Mock())
     monkeypatch.setattr(dashboard, "_trend_score_auto_notify", Mock())
+    # Most controller tests use a deliberately far-future synthetic product
+    # and exercise later preflight seams. Expiry policy has focused unit tests
+    # below; do not let that synthetic date mask the seam under test.
+    monkeypatch.setattr(dashboard, "_trend_score_auto_live_require_tte", Mock())
     dashboard._basic_cache.clear()
     dashboard._trend_score_auto_health.clear()
     dashboard._trend_score_auto_cycle_locks.clear()
@@ -1748,26 +1752,23 @@ def test_live_signal_in_transition_blocks_follow_on_for_same_signal(
     assert dashboard._trend_score_auto_health["alice"]["status"] == "signal_consumed"
 
 
-def test_final_preflight_rechecks_daily_contract_tte_at_post_boundary(
-    live_account,
-):
-    pending = _pending_state()
-    _write(live_account / "trend_state.json", pending)
+def test_final_preflight_rechecks_daily_contract_tte_at_post_boundary():
     prepared = _prepared(dashboard.TREND_SCORE_CE_ZONE)
     prepared["settlement"] = (
         datetime.now(timezone.utc) + timedelta(minutes=89)
     ).isoformat()
 
     with pytest.raises(RuntimeError, match="less than 1.5 hours"):
-        dashboard._trend_score_auto_live_final_preflight(
-            pending,
-            initial_revision=dashboard._trading_mode_payload()[
-                "mode_revision"
-            ],
-            risk_snapshot={"proposed_risk_usd": 250.0},
-            prepared=prepared,
-            quote={"bid": 219, "ask": 220},
-        )
+        dashboard._trend_score_auto_live_require_tte(prepared)
+
+
+def test_live_post_boundary_never_accepts_tomorrows_expiry():
+    tomorrow = datetime.now(timezone.utc) + timedelta(days=1)
+
+    with pytest.raises(RuntimeError, match="not today's IST expiry"):
+        dashboard._trend_score_auto_live_require_tte({
+            "settlement": tomorrow.isoformat(),
+        })
 
 
 def test_final_preflight_blocks_realtime_target_position_if_aggregate_lags(

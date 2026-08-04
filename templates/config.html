@@ -116,7 +116,7 @@
           <label class="fld"><span>Maximum slippage %</span><input id="c-MAX_SLIPPAGE_PCT" type="number" min="0.01" max="20" step="0.1"></label>
           <label class="fld"><span>Maximum quote age seconds</span><input id="c-MAX_QUOTE_AGE_SEC" type="number" min="1" max="300" step="1"></label>
           <label class="fld"><span>Minimum quoted premium</span><div class="config-static-value"><strong>Above $300</strong><small>Uses the current ATM MOVE bid.</small></div></label>
-          <label class="fld"><span>Minimum time to expiry</span><div class="config-static-value"><strong>More than 90 minutes</strong><small>The current expiry is skipped at or below this limit.</small></div></label>
+          <label class="fld"><span>Expiry policy</span><div class="config-static-value"><strong>Today only · more than 90 minutes</strong><small>If today's expiry is unavailable or too close, the bot waits. Tomorrow is never selected.</small></div></label>
           <label class="fld"><span>Weekday entry window</span><div class="config-static-value"><strong>Blocked 5:30 PM–midnight IST</strong><small>Monday through Friday; existing positions remain protected.</small></div></label>
         </div>
       </section>
@@ -430,11 +430,11 @@ async function saveConfig() {
   }
   if (scoreMode === 'dry_run' && loadedScoreAutoMode !== 'dry_run' && !confirm(
       'Enable automatic DRY RUN Trend trading?\n\n' +
-      `Every eligible trade uses ${Number(document.getElementById('c-TREND_SCORE_AUTO_LOTS').value || 0).toLocaleString()} lots. A score above +40 buys a 2-step ITM Call and a score below −40 buys a 2-step ITM Put; directional entries do not require ADX confirmation. Scores from −30 through +30 sell ATM MOVE only when 5-minute ADX is 20 or below, the current bid is above $300, more than 90 minutes remain, and it is not between 5:30 PM and midnight IST on a weekday. Leaving that neutral score range or ADX rising above 20 exits an open MOVE. Exact +40 and −40 are HOLD.\n\n` +
+      `Every eligible trade uses ${Number(document.getElementById('c-TREND_SCORE_AUTO_LOTS').value || 0).toLocaleString()} lots. A score above +40 buys a 2-step ITM Call and a score below −40 buys a 2-step ITM Put; directional entries do not require ADX confirmation. CE, PE, and MOVE always use today's IST expiry—tomorrow is never selected. Scores from −30 through +30 sell ATM MOVE only when 5-minute ADX is 20 or below, the current bid is above $300, more than 90 minutes remain, and it is not between 5:30 PM and midnight IST on a weekday. Leaving that neutral score range or ADX rising above 20 exits an open MOVE. Exact +40 and −40 are HOLD.\n\n` +
       'No exchange order will be placed.')) return;
   if (scoreMode === 'live' && loadedScoreAutoMode !== 'live' && !confirm(
       'Enable LIVE automatic Trend trading?\n\n' +
-      'WARNING: the controller can place real exchange orders without manual confirmation. It holds at most one bot-owned position and fails closed when order, quote, position, risk, or protection evidence is incomplete.\n\n' +
+      'WARNING: the controller can place real exchange orders without manual confirmation. It holds at most one bot-owned position, uses only today\'s IST expiry for CE, PE, and MOVE, and never falls forward to tomorrow. It fails closed when order, quote, position, risk, or protection evidence is incomplete.\n\n' +
       'Enable LIVE only after reviewing the limits and protection settings on this page.')) return;
 
   const body = {};
