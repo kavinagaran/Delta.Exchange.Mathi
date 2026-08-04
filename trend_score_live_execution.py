@@ -393,7 +393,12 @@ def bounded_ioc_payload(
     max_spread_pct: float,
     max_quote_age_sec: float,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Build the one permitted configured-size, slippage-bounded IOC payload."""
+    """Build the one permitted affordable-size, slippage-bounded IOC payload.
+
+    The touch quantity is recorded but does not cap the request.  An IOC limit
+    order may execute against every book level priced within the bounded limit,
+    not only the quantity resting at the best bid or ask.
+    """
 
     entry = validate_fixed_entry(prepared)
     if not isinstance(quote, Mapping):
@@ -427,10 +432,6 @@ def bounded_ioc_payload(
     side = entry["exchange_side"]
     depth_key = "ask_size" if side == "buy" else "bid_size"
     depth = _finite(quote.get(depth_key), f"fresh {depth_key}", positive=True)
-    if depth < entry["lots"]:
-        raise LiveScoreExecutionError(
-            f"fresh {depth_key} cannot cover the requested IOC size"
-        )
 
     slippage = _finite(max_slippage_pct, "maximum slippage")
     if slippage < 0:

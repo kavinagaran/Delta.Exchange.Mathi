@@ -1196,7 +1196,9 @@ def test_short_move_affordability_downsizes_with_margin_and_charges(
     )
 
 
-def test_live_affordability_caps_size_by_executable_depth(live_account):
+def test_live_affordability_records_depth_without_capping_wallet_size(
+    live_account,
+):
     prepared = {
         **_prepared(dashboard.TREND_SCORE_CE_ZONE),
         "lots": 1_000,
@@ -1213,34 +1215,44 @@ def test_live_affordability_caps_size_by_executable_depth(live_account):
         configured_lots=1_000,
     )
 
-    assert sizing["selected_lots"] == 275
+    assert sizing["selected_lots"] == 1_000
     assert sizing["book_depth_lots"] == 275
-    assert sizing["downsized"] is True
+    assert sizing["top_of_book_depth_lots"] == 275
+    assert sizing["book_depth_limited"] is False
+    assert sizing["downsized"] is False
 
 
 def test_downsized_live_entry_builds_protection_for_actual_affordable_lots(
     live_account,
 ):
     prepared = _prepared(dashboard.TREND_SCORE_CE_ZONE)
-    quote = {**_execution_quote(prepared), "ask_size": 275}
-    _attach_live_affordability(prepared, quote)
+    quote = {**_execution_quote(prepared), "ask_size": 5_000}
+    prepared["entry_price"] = 1_000
+    prepared["quote_snapshot"]["ask"] = 1_000
+    quote["ask"] = 1_000
+    _attach_live_affordability(prepared, quote, available_usd=500)
 
-    assert prepared["lots"] == 275
+    assert prepared["lots"] < prepared["configured_lots"]
     policy = dashboard._trend_score_auto_premium_protection_policy(prepared)
 
     assert policy["entry_premium_usd"] == pytest.approx(
-        prepared["entry_price"] * prepared["contract_value"] * 275
+        prepared["entry_price"] * prepared["contract_value"]
+        * prepared["lots"]
     )
     assert policy["tp_target_pnl"] == pytest.approx(
-        prepared["entry_price"] * prepared["contract_value"] * 275
+        prepared["entry_price"] * prepared["contract_value"]
+        * prepared["lots"]
     )
 
 
 def test_downsized_live_protection_rejects_unverified_lot_mutation(live_account):
     prepared = _prepared(dashboard.TREND_SCORE_CE_ZONE)
-    quote = {**_execution_quote(prepared), "ask_size": 275}
-    _attach_live_affordability(prepared, quote)
-    prepared["lots"] = 274
+    quote = {**_execution_quote(prepared), "ask_size": 5_000}
+    prepared["entry_price"] = 1_000
+    prepared["quote_snapshot"]["ask"] = 1_000
+    quote["ask"] = 1_000
+    _attach_live_affordability(prepared, quote, available_usd=500)
+    prepared["lots"] -= 1
 
     with pytest.raises(RuntimeError, match="verified LIVE affordability"):
         dashboard._trend_score_auto_premium_protection_policy(prepared)

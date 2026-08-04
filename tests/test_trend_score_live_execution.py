@@ -406,6 +406,24 @@ def test_bounded_ioc_reanchors_to_fresh_executable_touch():
     assert snapshot["reference_price"] == 223.0
 
 
+def test_bounded_ioc_uses_affordable_size_beyond_top_of_book_depth():
+    prepared = _prepared()
+    prepared["lots"] = 750
+    quote = {**_quote(), "ask_size": 4}
+
+    payload, snapshot = bounded_ioc_payload(
+        prepared,
+        quote,
+        client_order_id=score_entry_client_id("alice", "transition"),
+        max_slippage_pct=1,
+        max_spread_pct=3,
+        max_quote_age_sec=20,
+    )
+
+    assert payload["size"] == 750
+    assert snapshot["entry_depth"] == 4
+
+
 def test_configured_order_size_survives_live_intent_fill_and_protection():
     prepared = _prepared()
     prepared["lots"] = 400
@@ -431,7 +449,6 @@ def test_configured_order_size_survives_live_intent_fill_and_protection():
     (
         ({"quote_age_secs": 21}, "stale"),
         ({"bid": 200, "ask": 220}, "spread"),
-        ({"ask_size": 999}, "requested IOC size"),
         ({"trading_status": "halted"}, "not operational"),
         ({"price_band": {"upper_limit": 221}}, "price band"),
     ),

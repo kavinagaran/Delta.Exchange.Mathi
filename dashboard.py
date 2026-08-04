@@ -10323,11 +10323,13 @@ def _trend_score_auto_live_affordability(
     configured_lots: int | None = None,
     cfg: dict | None = None,
 ) -> dict:
-    """Find the maximum safe whole-lot LIVE size within wallet and book.
+    """Find the maximum safe whole-lot LIVE size within the wallet.
 
     Two percent of available USD remains uncommitted for quote/margin drift.
-    The result never exceeds the user's configured size, the product limit or
-    executable top-of-book depth.
+    The result never exceeds the user's configured size or the product limit.
+    Top-of-book depth is deliberately observational: the bounded IOC can sweep
+    deeper price levels up to its slippage cap, so one volatile touch quantity
+    must not masquerade as the account's affordable order size.
     """
     config = cfg if isinstance(cfg, dict) else _user_cfg()
     configured = (
@@ -10350,7 +10352,7 @@ def _trend_score_auto_live_affordability(
     product_limit = _trend_score_auto_exact_int(
         prepared.get("max_order_lots"), "contract order limit", positive=True,
     )
-    upper = min(configured, depth, product_limit)
+    upper = min(configured, product_limit)
     usable = available * (1 - TREND_LIVE_BALANCE_RESERVE_PCT / 100.0)
     low, high = 0, upper
     while low < high:
@@ -10381,6 +10383,8 @@ def _trend_score_auto_live_affordability(
         "affordable_lots": affordable,
         "selected_lots": affordable,
         "book_depth_lots": depth,
+        "top_of_book_depth_lots": depth,
+        "book_depth_limited": False,
         "available_usd": round(available, 8),
         "usable_balance_usd": round(usable, 8),
         "balance_reserve_pct": TREND_LIVE_BALANCE_RESERVE_PCT,
