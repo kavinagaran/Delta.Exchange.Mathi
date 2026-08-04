@@ -464,7 +464,6 @@ class _ZoneBand extends StatelessWidget {
       ),
       StatusPill('HOLD', colour: kZoneHold, dot: false),
       StatusPill('PE < −40', colour: kZonePut, dot: false),
-      StatusPill('EXPIRY · TODAY ONLY · >90 MIN', colour: kWarning, dot: false),
     ],
   );
 }

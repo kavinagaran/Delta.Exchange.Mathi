@@ -299,7 +299,6 @@ def test_one_committed_trade_decision_is_centered_below_the_circles():
     assert "HOLD — NO NEW TRADE" in TEMPLATE
     assert "WAIT — 5M ADX NOT CALM" in TEMPLATE
     assert "WAIT — MOVE PREMIUM BELOW $300" in TEMPLATE
-    assert "WAIT — TODAY'S EXPIRY UNAVAILABLE" in TEMPLATE
     assert "entry_blocked_reason" in TEMPLATE
     assert "jget('/api/trend-engine/score-auto/status')" in TEMPLATE
     assert "WAIT — 30-MIN CONFIRMATION" not in TEMPLATE

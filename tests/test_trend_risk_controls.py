@@ -263,8 +263,7 @@ class TrendOptionQualityTests(unittest.TestCase):
         }
 
     def test_target_delta_wins_within_first_liquid_expiry(self):
-        now = datetime(2026, 8, 4, 8, 0, tzinfo=timezone.utc)
-        expiry = (now + timedelta(hours=6)).isoformat()
+        expiry = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
         products = [self._product(s, expiry) for s in (63000, 63500, 64000)]
         tickers = [self._ticker(63000, .80), self._ticker(63500, .66),
                    self._ticker(64000, .55)]
@@ -272,13 +271,12 @@ class TrendOptionQualityTests(unittest.TestCase):
                   "TREND_MAX_SPREAD_PCT": "5", "TREND_MIN_BOOK_DEPTH_LOTS": "10",
                   "TREND_QUOTE_MAX_AGE_SECS": "60"}
         product, quote, _ = dashboard._select_trend_option(
-            products, tickers, 64500, "CE", config, now=now)
+            products, tickers, 64500, "CE", config)
         self.assertEqual(product["strike_price"], "63500")
         self.assertAlmostEqual(quote["delta"], .66)
 
     def test_wide_spread_contract_is_rejected(self):
-        now = datetime(2026, 8, 4, 8, 0, tzinfo=timezone.utc)
-        expiry = (now + timedelta(hours=6)).isoformat()
+        expiry = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
         products = [self._product(63500, expiry), self._product(64000, expiry)]
         tickers = [self._ticker(63500, .65, bid=50, ask=100),
                    self._ticker(64000, .58, bid=99, ask=101)]
@@ -286,29 +284,9 @@ class TrendOptionQualityTests(unittest.TestCase):
                   "TREND_MAX_SPREAD_PCT": "5", "TREND_MIN_BOOK_DEPTH_LOTS": "10",
                   "TREND_QUOTE_MAX_AGE_SECS": "60"}
         product, _, notes = dashboard._select_trend_option(
-            products, tickers, 64500, "CE", config, now=now)
+            products, tickers, 64500, "CE", config)
         self.assertEqual(product["strike_price"], "64000")
         self.assertTrue(any("spread" in note for note in notes))
-
-    def test_legacy_selector_never_uses_tomorrows_expiry(self):
-        now = datetime(2026, 8, 4, 8, 0, tzinfo=timezone.utc)
-        tomorrow = (now + timedelta(days=1)).isoformat()
-        products = [self._product(63500, tomorrow)]
-        tickers = [self._ticker(63500, .65)]
-        config = {
-            "TREND_MIN_TTE_HOURS": "4",
-            "TREND_TARGET_DELTA": ".65",
-            "TREND_MAX_SPREAD_PCT": "5",
-            "TREND_MIN_BOOK_DEPTH_LOTS": "10",
-            "TREND_QUOTE_MAX_AGE_SECS": "60",
-        }
-
-        product, quote, _ = dashboard._select_trend_option(
-            products, tickers, 64500, "CE", config, now=now,
-        )
-
-        self.assertIsNone(product)
-        self.assertIsNone(quote)
 
 
 class TrendSizingAndReentryTests(unittest.TestCase):

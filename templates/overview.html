@@ -403,7 +403,6 @@ function todayTradeDecisionPill(status, snapshot) {
   if (zone === 'HOLD') label = 'HOLD — NO NEW TRADE';
   else if (!allowed && zone === 'SHORT_MOVE' && /premium/i.test(reason)) label = 'WAIT — MOVE PREMIUM BELOW $300';
   else if (!allowed && zone === 'SHORT_MOVE' && /5:30\s*PM|midnight|entry window/i.test(reason)) label = 'WAIT — WEEKDAY ENTRY WINDOW';
-  else if (!allowed && /today(?:'s|-expiry).*expiry|today's-expiry/i.test(reason)) label = "WAIT — TODAY'S EXPIRY UNAVAILABLE";
   else if (!allowed && zone === 'SHORT_MOVE' && /90 minutes|expiry too close/i.test(reason)) label = 'WAIT — EXPIRY TOO CLOSE';
   else if (!allowed && zone === 'SHORT_MOVE' && /ADX/i.test(reason)) label = 'WAIT — 5M ADX NOT CALM';
   else if (!allowed) label = 'WAIT — CHECKS BLOCKED';

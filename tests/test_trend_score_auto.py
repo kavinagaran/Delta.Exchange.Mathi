@@ -203,25 +203,22 @@ def test_exactly_ninety_minutes_is_eligible():
     assert selected["time_to_expiry_hours"] == 1.5
 
 
-def test_directional_never_falls_forward_to_tomorrows_expiry():
+def test_sub_ninety_minute_expiry_is_skipped_without_maximum_dte():
     soon = NOW + timedelta(minutes=89, seconds=59)
     distant = NOW + timedelta(days=30)
     products = (
         _products(soon, [64200, 64400, 64600, 64800, 65000, 65200])
         + _products(distant, [64200, 64400, 64600, 64800, 65000, 65200])
     )
-    distant_target = next(
+    target = next(
         row for row in products
         if row["symbol"].startswith("C-BTC-64400-")
         and row["settlement_time"] == distant.isoformat()
     )
-    assert select_directional_option(
-        products,
-        [_executable(distant_target)],
-        spot=64850,
-        zone=CE_2_ITM,
-        now=NOW,
-    ) is None
+    selected = select_directional_option(
+        products, [_executable(target)], spot=64850, zone=CE_2_ITM, now=NOW
+    )
+    assert selected["expiry"] == distant.isoformat().replace("+00:00", "Z")
 
 
 def test_missing_exact_target_does_not_substitute_a_strike_or_later_expiry():
@@ -312,27 +309,16 @@ def test_move_requires_more_than_ninety_minutes_without_a_session_window():
     assert select_move_contract([product], spot=64820, now=NOW) is None
 
 
-def test_move_never_falls_forward_to_tomorrows_expiry():
+def test_move_skips_sub_ninety_minutes_and_has_no_maximum_dte():
     soon = _move_product(
         NOW + timedelta(minutes=89, seconds=59), 64800, product_id=20_001
     )
     distant = _move_product(
         NOW + timedelta(days=30), 65000, product_id=20_002
     )
-    assert select_move_contract([soon, distant], spot=64900, now=NOW) is None
-
-
-@pytest.mark.parametrize("zone", [CE_2_ITM, PE_2_ITM])
-def test_directional_rejects_tomorrow_even_when_it_is_the_only_listing(zone):
-    tomorrow = NOW + timedelta(days=1)
-    products = _products(
-        tomorrow, [64200, 64400, 64600, 64800, 65000, 65200, 65400]
-    )
-    prefix = "C-BTC-64400-" if zone == CE_2_ITM else "P-BTC-65200-"
-    target = next(row for row in products if row["symbol"].startswith(prefix))
-    assert select_directional_option(
-        products, [_executable(target)], spot=64850, zone=zone, now=NOW
-    ) is None
+    selected = select_move_contract([soon, distant], spot=64900, now=NOW)
+    assert selected["symbol"] == distant["symbol"]
+    assert selected["time_to_expiry_hours"] == 30 * 24
 
 
 @pytest.mark.parametrize(

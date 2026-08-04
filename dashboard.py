@@ -43,7 +43,6 @@ from trend_score_auto import (
     SHORT_MOVE as TREND_SCORE_MOVE_ZONE,
     TrendScoreAutoInputError,
     completed_candle_signal_key,
-    is_current_ist_expiry,
     plan_score_transition,
     position_score_zone,
     score_zone,
@@ -7582,7 +7581,7 @@ def _trend_quote_reasons(quote: dict, config: dict | None = None) -> list[str]:
 def _select_trend_option(products: list, tickers: list, spot: float,
                          option_type: str, config: dict | None = None,
                          now: datetime | None = None) -> tuple[dict | None, dict | None, list]:
-    """Select a liquid ITM option from today's IST expiry only."""
+    """Select liquid ITM option nearest target delta in earliest usable expiry."""
     config = config or _user_cfg()
     now = now or datetime.now(timezone.utc)
     try:
@@ -7602,8 +7601,6 @@ def _select_trend_option(products: list, tickers: list, spot: float,
             expiry = datetime.fromisoformat(str(product.get("settlement_time", "")).replace("Z", "+00:00"))
             strike = float(product.get("strike_price") or 0)
         except (TypeError, ValueError):
-            continue
-        if not is_current_ist_expiry(expiry, now):
             continue
         if expiry <= now + timedelta(hours=min_tte):
             continue
@@ -9067,10 +9064,6 @@ def _trend_score_auto_short_move_eligibility(
     )
     if expiry.tzinfo is None:
         expiry = expiry.replace(tzinfo=timezone.utc)
-    if not is_current_ist_expiry(expiry, current):
-        raise RuntimeError(
-            "SHORT MOVE requires today's expiry; tomorrow is not allowed"
-        )
     tte_seconds = (expiry.astimezone(timezone.utc) - current).total_seconds()
     if tte_seconds <= MIN_TIME_TO_EXPIRY_SECONDS:
         raise RuntimeError("SHORT MOVE needs more than 90 minutes until expiry")
@@ -9118,8 +9111,7 @@ def _prepare_trend_score_auto_entry(signal: dict) -> dict:
             label = "2-step ITM CALL" if zone == TREND_SCORE_CE_ZONE \
                 else "2-step ITM PUT"
             raise RuntimeError(
-                "No exact executable today's-expiry "
-                f"{label} contract is available"
+                f"No exact executable {label} contract is available"
             )
         contract = selection["executable_contract"]
         max_age = max(_as_float(_cfg("TREND_QUOTE_MAX_AGE_SECS", "20"), 20), 1)
@@ -9159,8 +9151,7 @@ def _prepare_trend_score_auto_entry(signal: dict) -> dict:
     )
     if not selection:
         raise RuntimeError(
-            "No operational ATM MOVE contract for today's expiry with more "
-            "than 90 minutes remains"
+            "No operational ATM MOVE contract with more than 90 minutes remains"
         )
     # LIVE sizing needs the executable quote before it can turn the account's
     # available USD into an affordable whole-lot quantity.  Require at least
@@ -10160,12 +10151,7 @@ def _trend_score_auto_live_require_tte(prepared: dict) -> None:
         raise RuntimeError(
             "selected LIVE score contract has an invalid settlement time"
         ) from exc
-    current = datetime.now(timezone.utc)
-    if not is_current_ist_expiry(settlement, current):
-        raise RuntimeError(
-            "selected LIVE score contract is not today's IST expiry"
-        )
-    remaining = (settlement - current).total_seconds()
+    remaining = (settlement - datetime.now(timezone.utc)).total_seconds()
     if remaining < 90 * 60:
         raise RuntimeError(
             "selected LIVE score contract has less than 1.5 hours to expiry"
