@@ -210,10 +210,10 @@ Color scoreColour(num? value) {
   )!;
 }
 
-/// Position of a score on its full −100…+100 dial, from 0.0 to 1.0.
+/// Magnitude of a score on its −100…+100 dial, from 0.0 to 1.0.
 double scoreFillFraction(num? value) {
   if (value == null || !value.isFinite) return 0;
-  return (value.clamp(-100, 100).toDouble() + 100) / 200;
+  return value.clamp(-100, 100).toDouble().abs() / 100;
 }
 
 /// Colour for a decision zone name as the engine reports it.

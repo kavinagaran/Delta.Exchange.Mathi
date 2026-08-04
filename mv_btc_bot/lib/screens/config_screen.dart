@@ -458,7 +458,7 @@ class _ZoneBand extends StatelessWidget {
       StatusPill('CE > +40', colour: kZoneCall, dot: false),
       StatusPill('HOLD', colour: kZoneHold, dot: false),
       StatusPill(
-        'MV −30…+30 · ADX ≤ 20 · EXIT OUTSIDE / ADX > 20',
+        'MV −30…+30 · ADX ≤ 20 · NO WEEKDAY ENTRY 5:30 PM–MIDNIGHT',
         colour: kZoneMove,
         dot: false,
       ),

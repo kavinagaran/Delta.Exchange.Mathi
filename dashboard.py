@@ -155,6 +155,10 @@ TREND_SCORE_AUTO_NO_FILL_RETRY_MAX_SECONDS = 5 * 60
 # Fixed strategy rule: both DRY RUN and LIVE use the same quoted ATM MOVE
 # premium floor before a SHORT MOVE can be opened.
 SHORT_MOVE_MIN_PREMIUM_USD = 300.0
+# Weekday risk window: do not open a new SHORT MOVE from 5:30 PM IST through
+# the end of that IST calendar day. Existing positions keep their normal exit
+# and protection lifecycle; CE/PE entries are unaffected.
+SHORT_MOVE_WEEKDAY_BLACKOUT_START_IST = (17, 30)
 _external_options: dict[str, list] = {}
 TREND_SIGNAL_SNAPSHOT_FILE = "trend_signal_snapshot.json"
 
@@ -9031,6 +9035,8 @@ def _trend_score_auto_move_quote(symbol: str, lots: int) -> dict:
 def _trend_score_auto_short_move_eligibility(
     selection: dict,
     quote: dict,
+    *,
+    now: datetime | None = None,
 ) -> dict:
     """Validate the explicit SHORT MOVE contract-entry rules.
 
@@ -9039,13 +9045,26 @@ def _trend_score_auto_short_move_eligibility(
     90 minutes to expiry. Forecast-value and jump-probability filters are not
     part of this strategy.
     """
-    now = datetime.now(timezone.utc)
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    current = current.astimezone(timezone.utc)
+    current_ist = current.astimezone(_IST_TIMEZONE)
+    if (
+        current_ist.weekday() < 5
+        and (current_ist.hour, current_ist.minute)
+        >= SHORT_MOVE_WEEKDAY_BLACKOUT_START_IST
+    ):
+        raise RuntimeError(
+            "SHORT MOVE entries are disabled from 5:30 PM to midnight IST "
+            "on weekdays"
+        )
     expiry = datetime.fromisoformat(
         str(selection.get("expiry") or "").replace("Z", "+00:00")
     )
     if expiry.tzinfo is None:
         expiry = expiry.replace(tzinfo=timezone.utc)
-    tte_seconds = (expiry.astimezone(timezone.utc) - now).total_seconds()
+    tte_seconds = (expiry.astimezone(timezone.utc) - current).total_seconds()
     if tte_seconds <= MIN_TIME_TO_EXPIRY_SECONDS:
         raise RuntimeError("SHORT MOVE needs more than 90 minutes until expiry")
     bid = _trend_score_auto_number(quote.get("bid"), "MOVE bid", positive=True)
@@ -9059,6 +9078,7 @@ def _trend_score_auto_short_move_eligibility(
         "minimum_premium_usd": SHORT_MOVE_MIN_PREMIUM_USD,
         "time_to_expiry_seconds": round(tte_seconds, 3),
         "minimum_time_to_expiry_seconds": MIN_TIME_TO_EXPIRY_SECONDS,
+        "weekday_blackout_start_ist": "17:30",
     }
 
 

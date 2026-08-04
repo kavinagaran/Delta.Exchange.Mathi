@@ -49,7 +49,8 @@ def test_score_dials_are_smooth_circular_gauges_without_needles():
     assert 'class="te-score-limit' not in TEMPLATE
     assert "--te-needle-angle" not in TEMPLATE
     assert "--te-score-fill" in TEMPLATE
-    assert "(score + 100) * 1.8" in TEMPLATE
+    assert "Math.abs(score) * 3.6" in TEMPLATE
+    assert "(score + 100) * 1.8" not in TEMPLATE
     for required in (
         ".te-score-gauge::before",
         "conic-gradient(",

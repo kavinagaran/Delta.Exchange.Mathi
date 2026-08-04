@@ -15,6 +15,8 @@ def test_score_auto_selector_offers_explicit_live_mode_with_warning():
     assert '<option value="live">LIVE — place real orders automatically</option>' in source
     assert "place real exchange orders without manual confirmation" in source
     assert "Every eligible trade uses ${Number(" in source
+    assert "Blocked 5:30 PM–midnight IST" in source
+    assert "not between 5:30 PM and midnight IST on a weekday" in source
     assert "It holds at most one bot-owned position" in source
 
 

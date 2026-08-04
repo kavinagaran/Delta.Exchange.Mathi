@@ -45,6 +45,7 @@ def test_today_page_contains_only_same_day_trade_content():
         'Net P/L',
     ):
         assert required in source
+    assert 'Math.abs(score) * 3.6' in source
 
     for removed in (
         "Welcome Back",

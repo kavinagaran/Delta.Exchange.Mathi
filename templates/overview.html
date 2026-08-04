@@ -373,7 +373,7 @@ function todayScoreDial(label, value, quality) {
   const meterValue = available ? ` aria-valuenow="${esc(accessible)}"` : '';
   return `<div class="today-score-dial-item">
     <div class="today-score-dial" role="meter" aria-label="${esc(label)} score" aria-valuemin="-100" aria-valuemax="100"${meterValue}
-      style="--today-score-fill:${available ? (score + 100) * 1.8 : 0}deg;--today-score-tone:${color}">
+      style="--today-score-fill:${available ? Math.abs(score) * 3.6 : 0}deg;--today-score-tone:${color}">
       <div class="today-score-dial-core">
         <span>${esc(label)}</span>
         <strong aria-label="${esc(accessible)}">${available ? esc(`${score > 0 ? '+' : ''}${score.toFixed(1)}`) : '—'}</strong>

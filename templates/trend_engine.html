@@ -345,7 +345,7 @@ function updateScoreGauge(id, value, quality) {
   const available = finite(value);
   const score = available ? Math.max(-100, Math.min(100, Number(value))) : 0;
   gauge.setAttribute('aria-valuenow', String(score));
-  gauge.style.setProperty('--te-score-fill', `${available ? (score + 100) * 1.8 : 0}deg`);
+  gauge.style.setProperty('--te-score-fill', `${available ? Math.abs(score) * 3.6 : 0}deg`);
   gauge.style.setProperty('--te-score-tone', scoreColor(value, quality));
   const readout = gauge.querySelector('.te-score-core strong');
   if (readout) {

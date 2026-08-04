@@ -442,12 +442,13 @@ def test_contract_preparation_honours_engine_zone_action_gate():
         })
 
 
-def test_short_move_uses_only_quoted_premium_and_time_to_expiry():
+def test_short_move_uses_premium_expiry_and_weekday_entry_window():
+    allowed = datetime(2026, 8, 3, 11, 59, tzinfo=timezone.utc)
     valid_selection = {
-        "expiry": (datetime.now(timezone.utc) + timedelta(minutes=91)).isoformat(),
+        "expiry": (allowed + timedelta(minutes=91)).isoformat(),
     }
     approved = dashboard._trend_score_auto_short_move_eligibility(
-        valid_selection, {"bid": 300.01},
+        valid_selection, {"bid": 300.01}, now=allowed,
     )
     assert approved["quoted_premium_usd"] == pytest.approx(300.01)
     assert approved["minimum_premium_usd"] == 300.0
@@ -455,13 +456,29 @@ def test_short_move_uses_only_quoted_premium_and_time_to_expiry():
 
     with pytest.raises(RuntimeError, match=r"premium must be above \$300"):
         dashboard._trend_score_auto_short_move_eligibility(
-            valid_selection, {"bid": 300},
+            valid_selection, {"bid": 300}, now=allowed,
         )
     with pytest.raises(RuntimeError, match="more than 90 minutes"):
         dashboard._trend_score_auto_short_move_eligibility(
-            {"expiry": (datetime.now(timezone.utc) + timedelta(minutes=89)).isoformat()},
-            {"bid": 301},
+            {"expiry": (allowed + timedelta(minutes=89)).isoformat()},
+            {"bid": 301}, now=allowed,
         )
+
+    blocked = datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc)
+    with pytest.raises(RuntimeError, match="5:30 PM to midnight IST"):
+        dashboard._trend_score_auto_short_move_eligibility(
+            {"expiry": (blocked + timedelta(hours=3)).isoformat()},
+            {"bid": 301}, now=blocked,
+        )
+
+    midnight = datetime(2026, 8, 3, 18, 30, tzinfo=timezone.utc)
+    weekend = datetime(2026, 8, 8, 12, 30, tzinfo=timezone.utc)
+    for permitted in (midnight, weekend):
+        result = dashboard._trend_score_auto_short_move_eligibility(
+            {"expiry": (permitted + timedelta(hours=3)).isoformat()},
+            {"bid": 301}, now=permitted,
+        )
+        assert result["weekday_blackout_start_ist"] == "17:30"
 
 
 def test_failed_open_contract_preparation_is_rebuildable_for_same_signal(
