@@ -168,10 +168,10 @@ class _DecisionHero extends StatelessWidget {
               ),
             ],
           ),
-          const SizedBox(height: Gap.md),
-          ScoreMeter(score: committed ?? 0),
           const SizedBox(height: Gap.sm),
           ScoreDecisionPill(label: decision, score: committed),
+          const SizedBox(height: Gap.md),
+          ScoreMeter(score: committed ?? 0),
         ],
       ),
     );

@@ -550,11 +550,7 @@ class DecisionScoreDial extends StatelessWidget {
             child: SizedBox.square(
               dimension: dimension,
               child: CustomPaint(
-                painter: _DecisionGaugePainter(
-                  score: score,
-                  tone: colour,
-                  surface: scheme.surface,
-                ),
+                painter: _DecisionGaugePainter(score: score, tone: colour),
                 child: Center(
                   child: Padding(
                     padding: const EdgeInsets.all(22),
@@ -614,15 +610,10 @@ class _DialScore extends StatelessWidget {
 }
 
 class _DecisionGaugePainter extends CustomPainter {
-  const _DecisionGaugePainter({
-    required this.score,
-    required this.tone,
-    required this.surface,
-  });
+  const _DecisionGaugePainter({required this.score, required this.tone});
 
   final double? score;
   final Color tone;
-  final Color surface;
 
   static const _start = -math.pi / 2;
   static const _sweep = math.pi * 2;
@@ -631,17 +622,12 @@ class _DecisionGaugePainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     final centre = Offset(size.width / 2, size.height / 2);
     final radius = math.min(size.width, size.height) / 2 - 4;
-    final circle = Rect.fromCircle(center: centre, radius: radius);
-
     canvas.drawCircle(
       centre,
       radius,
       Paint()
         ..style = PaintingStyle.fill
-        ..shader = RadialGradient(
-          colors: [tone.withValues(alpha: .12), surface.withValues(alpha: .97)],
-          stops: const [.05, .74],
-        ).createShader(circle),
+        ..color = const Color(0xFF081A2E),
     );
     final bounded = score?.clamp(-100.0, 100.0).toDouble();
     final scoreTone = bounded == null ? tone : scoreColour(bounded);
@@ -676,7 +662,7 @@ class _DecisionGaugePainter extends CustomPainter {
         ..color = const Color(0xFF17314A),
     );
     if (bounded != null) {
-      final progress = ((bounded + 100) / 200) * _sweep;
+      final progress = scoreFillFraction(bounded) * _sweep;
       canvas.drawArc(
         arcRect,
         _start,
@@ -714,9 +700,7 @@ class _DecisionGaugePainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant _DecisionGaugePainter oldDelegate) =>
-      oldDelegate.score != score ||
-      oldDelegate.tone != tone ||
-      oldDelegate.surface != surface;
+      oldDelegate.score != score || oldDelegate.tone != tone;
 }
 
 String tradeDecisionLabel(

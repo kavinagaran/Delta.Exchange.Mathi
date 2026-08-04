@@ -64,6 +64,8 @@ def test_score_dials_are_smooth_circular_gauges_without_needles():
     gauge_styles = STYLE.split('.te-score-core strong {', 1)[1].split('}', 1)[0]
     assert 'color: var(--te-score-tone)' in gauge_styles
     assert 'font-size: 39px' in gauge_styles
+    core_styles = STYLE.split('.te-score-core {', 1)[1].split('}', 1)[0]
+    assert 'background: #081a2e' in core_styles
 
 
 def test_dials_have_one_score_coloured_committed_trade_decision_pill():
@@ -73,6 +75,8 @@ def test_dials_have_one_score_coloured_committed_trade_decision_pill():
     assert 'class="te-trade-decision-row"' in TEMPLATE
     assert "--te-decision-tone" in TEMPLATE
     assert ".te-trade-decision-row" in STYLE
+    assert TEMPLATE.index('class="te-score-pair"') < TEMPLATE.index(
+        'class="te-trade-decision-row"')
 
 
 def test_committed_score_chart_is_a_zone_colored_line_with_every_boundary():

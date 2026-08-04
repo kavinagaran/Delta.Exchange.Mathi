@@ -520,9 +520,11 @@ class _EngineCard extends StatelessWidget {
             ],
           ),
           const SizedBox(height: Gap.sm),
-          if (score != null) ScoreMeter(score: score),
-          const SizedBox(height: Gap.sm),
           ScoreDecisionPill(label: decision, score: score),
+          if (score != null) ...[
+            const SizedBox(height: Gap.md),
+            ScoreMeter(score: score),
+          ],
         ],
       ),
     );

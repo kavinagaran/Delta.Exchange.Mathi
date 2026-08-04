@@ -104,6 +104,8 @@ def test_today_page_uses_compact_responsive_terminal_layout():
     assert 'color: var(--today-score-tone)' in score_styles
     assert 'font: 900 32px/1' in score_styles
     assert '.today-trade-decision-pill' in styles
+    core_styles = styles.split('.today-score-dial-core {', 1)[1].split('}', 1)[0]
+    assert 'background: #081a2e' in core_styles
     assert '.today-score-needle' not in styles
     assert '.today-score-limit' not in styles
 

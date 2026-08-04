@@ -47,6 +47,13 @@ void main() {
       expect(zoneColour(null), kZoneHold);
     });
 
+    test('dial fill maps the complete minus-100 to plus-100 scale', () {
+      expect(scoreFillFraction(-100), 0);
+      expect(scoreFillFraction(0), .5);
+      expect(scoreFillFraction(32.4), closeTo(.662, .0001));
+      expect(scoreFillFraction(100), 1);
+    });
+
     test('the neon accent matches --neon in static/css/app.css', () {
       expect(kNeon, const Color(0xFF39FF14));
     });
