@@ -46,12 +46,9 @@
       <div class="te-score-pair">
         <div class="te-score-item">
           <div class="te-score-gauge" id="te-live-score-gauge" role="meter" aria-label="Live preview score" aria-valuemin="-100" aria-valuemax="100" aria-valuenow="0">
-            <span class="te-score-needle" aria-hidden="true"><i></i></span>
-            <span class="te-score-limit is-min" aria-hidden="true">−100</span>
-            <span class="te-score-limit is-max" aria-hidden="true">+100</span>
             <div class="te-score-core">
               <span>Live preview</span>
-              <strong class="te-odometer" id="te-live-score">—</strong>
+              <strong id="te-live-score">—</strong>
             </div>
           </div>
           <div class="te-decision-capsule is-waiting" id="te-live-decision">
@@ -62,12 +59,9 @@
         </div>
         <div class="te-score-item">
           <div class="te-score-gauge" id="te-committed-score-gauge" role="meter" aria-label="Committed decision score" aria-valuemin="-100" aria-valuemax="100" aria-valuenow="0">
-            <span class="te-score-needle" aria-hidden="true"><i></i></span>
-            <span class="te-score-limit is-min" aria-hidden="true">−100</span>
-            <span class="te-score-limit is-max" aria-hidden="true">+100</span>
             <div class="te-score-core">
               <span>Committed decision</span>
-              <strong class="te-odometer" id="te-committed-score">—</strong>
+              <strong id="te-committed-score">—</strong>
             </div>
           </div>
           <div class="te-decision-capsule is-waiting" id="te-committed-decision">
@@ -357,30 +351,14 @@ function updateScoreGauge(id, value, quality) {
   const available = finite(value);
   const score = available ? Math.max(-100, Math.min(100, Number(value))) : 0;
   gauge.setAttribute('aria-valuenow', String(score));
-  gauge.style.setProperty('--te-needle-angle', `${score * 1.35}deg`);
-  gauge.style.setProperty('--te-needle-opacity', available ? '1' : '0');
+  gauge.style.setProperty('--te-score-fill', `${available ? (score + 100) * 1.8 : 0}deg`);
   gauge.style.setProperty('--te-score-tone', scoreColor(value, quality));
-  const readout = gauge.querySelector('.te-odometer');
+  const readout = gauge.querySelector('.te-score-core strong');
   if (readout) {
-    readout.innerHTML = scoreOdometer(available ? score : null);
+    readout.textContent = available ? signedScore(score) : '—';
     readout.setAttribute(
       'aria-label', available ? signedScore(score) : 'unavailable');
   }
-}
-
-function scoreOdometer(value) {
-  const numeric = Number(value);
-  if (!Number.isFinite(numeric)) {
-    return '<span class="te-odometer-empty">—</span>';
-  }
-  const formatted = `${numeric > 0 ? '+' : numeric < 0 ? '−' : ''}${Math.abs(numeric).toFixed(1)}`;
-  return [...formatted].map(character => {
-    if (!/\d/.test(character)) {
-      return `<span class="te-odometer-symbol">${character}</span>`;
-    }
-    const digits = Array.from({length: 10}, (_, digit) => `<i>${digit}</i>`).join('');
-    return `<span class="te-odometer-window"><span class="te-odometer-strip" style="--te-odometer-digit:${character}">${digits}</span></span>`;
-  }).join('');
 }
 
 function signedScore(value) {

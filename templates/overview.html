@@ -365,21 +365,6 @@ function todayScoreColor(value, quality) {
   return `rgb(${red}, ${green}, ${blue})`;
 }
 
-function todayOdometerScore(value) {
-  const numeric = Number(value);
-  if (!Number.isFinite(numeric)) {
-    return '<span class="today-odometer-empty">—</span>';
-  }
-  const formatted = `${numeric > 0 ? '+' : numeric < 0 ? '−' : ''}${Math.abs(numeric).toFixed(1)}`;
-  return [...formatted].map(character => {
-    if (!/\d/.test(character)) {
-      return `<span class="today-odometer-symbol">${character}</span>`;
-    }
-    const digits = Array.from({length: 10}, (_, digit) => `<i>${digit}</i>`).join('');
-    return `<span class="today-odometer-window"><span class="today-odometer-strip" style="--odometer-digit:${character}">${digits}</span></span>`;
-  }).join('');
-}
-
 function todayScoreDial(label, value, quality) {
   const numeric = Number(value);
   const available = Number.isFinite(numeric);
@@ -389,13 +374,10 @@ function todayScoreDial(label, value, quality) {
   const meterValue = available ? ` aria-valuenow="${esc(accessible)}"` : '';
   return `<div class="today-score-dial-item">
     <div class="today-score-dial" role="meter" aria-label="${esc(label)} score" aria-valuemin="-100" aria-valuemax="100"${meterValue}
-      style="--today-needle-angle:${score * 1.35}deg;--today-needle-opacity:${available ? 1 : 0};--today-score-tone:${color}">
-      <span class="today-score-needle" aria-hidden="true"><i></i></span>
-      <span class="today-score-limit is-min" aria-hidden="true">−100</span>
-      <span class="today-score-limit is-max" aria-hidden="true">+100</span>
+      style="--today-score-fill:${available ? (score + 100) * 1.8 : 0}deg;--today-score-tone:${color}">
       <div class="today-score-dial-core">
         <span>${esc(label)}</span>
-        <strong class="today-odometer" aria-label="${esc(accessible)}">${todayOdometerScore(available ? score : null)}</strong>
+        <strong aria-label="${esc(accessible)}">${available ? esc(`${score > 0 ? '+' : ''}${score.toFixed(1)}`) : '—'}</strong>
       </div>
     </div>
   </div>`;

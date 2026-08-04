@@ -44,25 +44,26 @@ def test_trend_engine_page_is_registered_and_reads_only():
     assert "/api/trend-engine'" not in TEMPLATE  # the legacy endpoint, not this page's
 
 
-def test_score_dials_are_segmented_circular_gauges_with_needles():
-    assert TEMPLATE.count('class="te-score-needle"') == 2
-    assert TEMPLATE.count('class="te-score-limit is-min"') == 2
-    assert TEMPLATE.count('class="te-score-limit is-max"') == 2
-    assert "--te-needle-angle" in TEMPLATE
-    assert "score * 1.35" in TEMPLATE
+def test_score_dials_are_smooth_circular_gauges_without_needles():
+    assert 'class="te-score-needle"' not in TEMPLATE
+    assert 'class="te-score-limit' not in TEMPLATE
+    assert "--te-needle-angle" not in TEMPLATE
+    assert "--te-score-fill" in TEMPLATE
+    assert "(score + 100) * 1.8" in TEMPLATE
     for required in (
         ".te-score-gauge::before",
-        "repeating-conic-gradient",
-        "conic-gradient(from 225deg",
-        ".te-score-needle",
-        ".te-score-limit.is-min",
-        ".te-score-limit.is-max",
+        "conic-gradient(",
+        "var(--te-score-tone) 0deg var(--te-score-fill)",
         "aspect-ratio: 1",
         "border-radius: 50%",
     ):
         assert required in STYLE
+    assert "repeating-conic-gradient" not in STYLE
+    assert ".te-score-needle" not in STYLE
+    assert ".te-score-limit" not in STYLE
     gauge_styles = STYLE.split('.te-score-core strong {', 1)[1].split('}', 1)[0]
     assert 'color: var(--accent)' in gauge_styles
+    assert 'font-size: 39px' in gauge_styles
 
 
 def test_committed_score_chart_is_a_zone_colored_line_with_every_boundary():

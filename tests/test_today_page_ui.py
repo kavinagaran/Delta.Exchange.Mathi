@@ -27,7 +27,6 @@ def test_today_page_contains_only_same_day_trade_content():
         "jget('/api/tp-monitor')",
         "jget('/api/engine/snapshot')",
         "jget('/api/engine/live')",
-        "function todayOdometerScore(value)",
         "function todayEngineScoreDials(snapshot, liveView, status)",
         "Live preview",
         "Committed decision",
@@ -40,10 +39,7 @@ def test_today_page_contains_only_same_day_trade_content():
         'data-metric="pnl"',
         'class="wide decision-primary"',
         'class="today-score-dial"',
-        'class="today-score-needle"',
-        'class="today-score-limit is-min"',
-        'class="today-score-limit is-max"',
-        "--today-needle-angle",
+        "--today-score-fill",
         'Gross P/L',
         'Net P/L',
     ):
@@ -96,19 +92,18 @@ def test_today_page_uses_compact_responsive_terminal_layout():
         ".today-engine-score-dials",
         ".today-score-dial",
         ".today-score-dial::before",
-        ".today-score-needle",
-        ".today-score-limit.is-min",
-        ".today-score-limit.is-max",
+        ".today-score-dial-core > strong",
         "text-align: center",
-        ".today-odometer-window",
-        "@keyframes today-odometer-roll",
         "@media (max-width: 920px)",
         "@media (max-width: 560px)",
         "prefers-reduced-motion",
     ):
         assert required in styles
-    odometer_styles = styles.split('.today-odometer {', 1)[1].split('}', 1)[0]
-    assert 'color: var(--accent)' in odometer_styles
+    score_styles = styles.split('.today-score-dial-core > strong {', 1)[1].split('}', 1)[0]
+    assert 'color: var(--accent)' in score_styles
+    assert 'font: 900 32px/1' in score_styles
+    assert '.today-score-needle' not in styles
+    assert '.today-score-limit' not in styles
 
 
 def test_today_protection_footer_is_bold_colored_and_hides_local_fallback():

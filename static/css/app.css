@@ -1769,53 +1769,45 @@ body.login-body {
   font-variant-numeric: tabular-nums;
 }
 .te-score-gauge {
-  --te-needle-angle: 0deg;
-  --te-needle-opacity: 0;
+  --te-score-fill: 0deg;
   --te-score-tone: var(--muted);
   position: relative;
   display: grid; place-items: center;
   width: 170px;
   height: 170px;
   aspect-ratio: 1;
-  padding: 30px;
+  padding: 27px;
   border-radius: 50%;
   overflow: hidden;
   isolation: isolate;
-  background:
-    radial-gradient(circle at 50% 42%, color-mix(in srgb, var(--te-score-tone) 13%, transparent), transparent 51%),
-    radial-gradient(circle, #061425 0 58%, #020913 76% 100%);
-  border: 1px solid rgba(95, 194, 255, .68);
+  background: radial-gradient(circle, #0a1a2c 0 61%, #06111f 74% 100%);
+  border: 1px solid color-mix(in srgb, var(--te-score-tone) 42%, var(--border));
   box-shadow:
-    0 0 8px rgba(84, 199, 255, .88),
-    0 0 25px rgba(41, 137, 255, .42),
-    inset 0 0 20px rgba(55, 178, 255, .16);
+    0 0 12px color-mix(in srgb, var(--te-score-tone) 35%, transparent),
+    inset 0 0 18px rgba(0, 0, 0, .38);
 }
 .te-score-gauge::before {
   content: '';
   position: absolute; inset: 7px;
   z-index: 1;
   border-radius: 50%;
-  background:
-    repeating-conic-gradient(from 225deg, rgba(2, 7, 16, .96) 0deg 1.5deg, transparent 1.5deg 13.5deg),
-    conic-gradient(from 225deg,
-      #ff435f 0deg,
-      #d94d7d 50deg,
-      #864fb0 92deg,
-      #238dd8 145deg,
-      #22cfaa 207deg,
-      #58ed68 270deg,
-      transparent 270deg 360deg);
-  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 22px), #000 calc(100% - 21px));
-  mask: radial-gradient(farthest-side, transparent calc(100% - 22px), #000 calc(100% - 21px));
-  filter: drop-shadow(0 0 5px rgba(45, 172, 255, .72));
+  background: conic-gradient(
+    from -90deg,
+    var(--te-score-tone) 0deg var(--te-score-fill),
+    color-mix(in srgb, var(--muted) 20%, #071525) var(--te-score-fill) 360deg
+  );
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 15px), #000 calc(100% - 14px));
+  mask: radial-gradient(farthest-side, transparent calc(100% - 15px), #000 calc(100% - 14px));
+  filter: drop-shadow(0 0 5px color-mix(in srgb, var(--te-score-tone) 55%, transparent));
+  transition: background .45s ease, filter .45s ease;
 }
 .te-score-gauge::after {
   content: '';
   position: absolute; inset: 4px;
   z-index: 0;
-  border: 2px solid rgba(129, 221, 255, .82);
+  border: 1px solid color-mix(in srgb, var(--te-score-tone) 55%, rgba(129, 221, 255, .45));
   border-radius: 50%;
-  box-shadow: inset 0 0 10px rgba(80, 176, 255, .65), 0 0 9px rgba(61, 161, 255, .72);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--te-score-tone) 45%, transparent);
 }
 .te-score-core {
   position: relative; z-index: 3;
@@ -1825,7 +1817,7 @@ body.login-body {
   gap: 5px;
   width: 100%;
   height: 100%;
-  padding: 2px 6px 12px;
+  padding: 2px 6px;
   border: 0;
   border-radius: 50%;
   background: transparent;
@@ -1834,8 +1826,8 @@ body.login-body {
 }
 .te-score-core strong {
   color: var(--accent);
-  font-size: 34px;
-  font-weight: 850;
+  font-size: 39px;
+  font-weight: 900;
   line-height: 1;
   letter-spacing: -.025em;
   font-variant-numeric: tabular-nums;
@@ -1990,47 +1982,6 @@ body.login-body {
   background: currentColor;
   box-shadow: 0 0 9px currentColor;
 }
-.te-score-needle {
-  position: absolute;
-  left: calc(50% - 2px); top: 18px;
-  z-index: 2;
-  width: 4px; height: calc(50% - 18px);
-  opacity: var(--te-needle-opacity);
-  transform: rotate(var(--te-needle-angle));
-  transform-origin: 50% 100%;
-  transition: transform .7s cubic-bezier(.2,.8,.2,1), opacity .25s ease;
-  filter: drop-shadow(0 0 5px var(--te-score-tone));
-}
-.te-score-needle::after {
-  content: '';
-  position: absolute; left: 50%; bottom: -7px;
-  width: 14px; height: 14px;
-  border: 2px solid #e8f8ff;
-  border-radius: 50%;
-  background: #0a1b2e;
-  box-shadow: 0 0 8px var(--te-score-tone);
-  transform: translateX(-50%);
-}
-.te-score-needle i {
-  position: absolute; inset: 0;
-  clip-path: polygon(50% 0, 100% 100%, 0 100%);
-  background: linear-gradient(90deg, #aec8d8, #fff 48%, #78b5d5);
-}
-.te-score-limit {
-  position: absolute; z-index: 5; bottom: 21px;
-  min-width: 32px;
-  padding: 3px 5px;
-  border: 1px solid currentColor;
-  border-radius: 999px;
-  background: rgba(1, 8, 18, .9);
-  font-size: 9.5px; font-weight: 900;
-  line-height: 1; font-variant-numeric: tabular-nums;
-  text-align: center;
-  text-shadow: 0 1px 4px #000;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, .58);
-}
-.te-score-limit.is-min { left: 18px; color: #ff7189; }
-.te-score-limit.is-max { right: 18px; color: #5df282; }
 .te-preview-chart-legend b {
   display: inline-grid;
   width: 15px;
@@ -2070,6 +2021,7 @@ body.login-body {
   flex: 0 1 auto;
   color: #acdfff;
   font-variant-numeric: tabular-nums;
+  text-shadow: 0 0 10px color-mix(in srgb, var(--accent) 38%, transparent);
   text-align: right;
   white-space: nowrap;
 }
@@ -2481,13 +2433,9 @@ body.login-body {
   .te-hero { grid-template-columns: minmax(0, 1fr) minmax(290px, 310px); gap: 16px; }
   .te-score-pair { gap: 10px; }
   .te-score-gauge { width: 140px; height: 140px; padding: 25px; }
-  .te-score-gauge::before { inset: 6px; -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 18px), #000 calc(100% - 17px)); mask: radial-gradient(farthest-side, transparent calc(100% - 18px), #000 calc(100% - 17px)); }
-  .te-score-needle { top: 15px; height: calc(50% - 15px); }
-  .te-score-limit { bottom: 17px; min-width: 28px; padding: 2px 4px; font-size: 8px; }
-  .te-score-limit.is-min { left: 14px; }
-  .te-score-limit.is-max { right: 14px; }
-  .te-score-core { gap: 4px; padding: 2px 5px 10px; }
-  .te-score-core strong { font-size: 29px; }
+  .te-score-gauge::before { inset: 6px; -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 13px), #000 calc(100% - 12px)); mask: radial-gradient(farthest-side, transparent calc(100% - 13px), #000 calc(100% - 12px)); }
+  .te-score-core { gap: 4px; padding: 2px 5px; }
+  .te-score-core strong { font-size: 34px; }
   .te-score-core span { font-size: 7px; }
   .te-decision-capsule { min-width: 138px; padding-inline: 8px; }
   .te-decision-capsule strong { font-size: 8px; }
@@ -2534,12 +2482,8 @@ body.login-body {
 @media (max-width: 380px) {
   .te-score-pair { gap: 8px; }
   .te-score-gauge { width: 118px; height: 118px; padding: 21px; }
-  .te-score-gauge::before { inset: 5px; -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 15px), #000 calc(100% - 14px)); mask: radial-gradient(farthest-side, transparent calc(100% - 15px), #000 calc(100% - 14px)); }
-  .te-score-needle { top: 13px; height: calc(50% - 13px); width: 3px; left: calc(50% - 1.5px); }
-  .te-score-limit { bottom: 14px; min-width: 25px; padding: 2px 3px; font-size: 7.5px; }
-  .te-score-limit.is-min { left: 11px; }
-  .te-score-limit.is-max { right: 11px; }
-  .te-score-core strong { font-size: 24px; }
+  .te-score-gauge::before { inset: 5px; -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 11px), #000 calc(100% - 10px)); mask: radial-gradient(farthest-side, transparent calc(100% - 11px), #000 calc(100% - 10px)); }
+  .te-score-core strong { font-size: 29px; }
   .te-score-core span { font-size: 6.5px; }
   .te-decision-capsule { min-width: 116px; padding-inline: 6px; }
   .te-decision-capsule strong { font-size: 7px; }
@@ -2650,46 +2594,6 @@ body:has(.overview-page) .nav a.active {
   display: block; color: currentColor; font: 750 13px/1.2 ui-monospace, SFMono-Regular, Consolas, monospace;
   font-variant-numeric: tabular-nums;
 }
-.te-odometer {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  height: 38px;
-  color: var(--accent);
-  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-  letter-spacing: -.08em;
-  filter: drop-shadow(0 0 8px color-mix(in srgb, var(--accent) 50%, transparent));
-}
-.te-odometer-window {
-  display: inline-block;
-  width: .61em;
-  height: 1em;
-  overflow: hidden;
-  border-radius: 3px;
-  background: linear-gradient(180deg, rgba(255,255,255,.08), transparent 42%, rgba(0,0,0,.22));
-  box-shadow: inset 0 0 0 1px rgba(255,255,255,.055);
-}
-.te-odometer-strip {
-  display: flex;
-  flex-direction: column;
-  width: 100%;
-  transform: translateY(calc(var(--te-odometer-digit) * -1em));
-  animation: te-odometer-roll .72s cubic-bezier(.2,.75,.2,1) both;
-}
-.te-odometer-strip i {
-  display: block;
-  height: 1em;
-  font: inherit;
-  font-style: normal;
-  line-height: 1;
-  text-align: center;
-}
-.te-odometer-symbol { display: inline-grid; place-items: center; min-width: .42em; }
-.te-odometer-empty { letter-spacing: 0; }
-@keyframes te-odometer-roll {
-  from { transform: translateY(0); }
-  to { transform: translateY(calc(var(--te-odometer-digit) * -1em)); }
-}
 .today-protection-metric.tone-tp { color: var(--pos); }
 .today-protection-metric.tone-sl { color: #ff6172; }
 .today-protection-metric.tone-tsl-arm { color: #ffc267; }
@@ -2724,34 +2628,31 @@ body:has(.overview-page) .nav a.active {
 }
 .today-score-dial-item { display: grid; place-items: center; min-width: 0; }
 .today-score-dial {
-  --today-needle-angle: 0deg; --today-needle-opacity: 0; --today-score-tone: var(--muted);
+  --today-score-fill: 0deg; --today-score-tone: var(--muted);
   position: relative; display: grid; place-items: center;
   width: 154px; height: 154px; aspect-ratio: 1; padding: 28px;
   border-radius: 50%;
   overflow: hidden; isolation: isolate;
-  background:
-    radial-gradient(circle at 50% 42%, color-mix(in srgb, var(--today-score-tone) 13%, transparent), transparent 52%),
-    radial-gradient(circle, #061425 0 58%, #020913 76% 100%);
-  border: 1px solid rgba(95,194,255,.68);
-  box-shadow: 0 0 8px rgba(84,199,255,.88), 0 0 24px rgba(41,137,255,.4), inset 0 0 18px rgba(55,178,255,.16);
+  background: radial-gradient(circle, #0a1a2c 0 61%, #06111f 74% 100%);
+  border: 1px solid color-mix(in srgb, var(--today-score-tone) 42%, var(--border));
+  box-shadow: 0 0 11px color-mix(in srgb, var(--today-score-tone) 35%, transparent), inset 0 0 16px rgba(0,0,0,.38);
 }
 .today-score-dial::before {
   content: ''; position: absolute; inset: 6px; z-index: 1; border-radius: 50%;
-  background:
-    repeating-conic-gradient(from 225deg, rgba(2,7,16,.96) 0deg 1.5deg, transparent 1.5deg 13.5deg),
-    conic-gradient(from 225deg, #ff435f 0deg, #d94d7d 50deg, #864fb0 92deg, #238dd8 145deg, #22cfaa 207deg, #58ed68 270deg, transparent 270deg 360deg);
-  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 20px), #000 calc(100% - 19px));
-  mask: radial-gradient(farthest-side, transparent calc(100% - 20px), #000 calc(100% - 19px));
-  filter: drop-shadow(0 0 5px rgba(45,172,255,.72));
+  background: conic-gradient(from -90deg, var(--today-score-tone) 0deg var(--today-score-fill), color-mix(in srgb, var(--muted) 20%, #071525) var(--today-score-fill) 360deg);
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 14px), #000 calc(100% - 13px));
+  mask: radial-gradient(farthest-side, transparent calc(100% - 14px), #000 calc(100% - 13px));
+  filter: drop-shadow(0 0 5px color-mix(in srgb, var(--today-score-tone) 55%, transparent));
+  transition: background .45s ease, filter .45s ease;
 }
 .today-score-dial::after {
-  content: ''; position: absolute; inset: 3px; z-index: 0; border: 2px solid rgba(129,221,255,.82); border-radius: 50%;
-  box-shadow: inset 0 0 9px rgba(80,176,255,.65), 0 0 8px rgba(61,161,255,.72);
+  content: ''; position: absolute; inset: 3px; z-index: 0; border: 1px solid color-mix(in srgb, var(--today-score-tone) 55%, rgba(129,221,255,.45)); border-radius: 50%;
+  box-shadow: 0 0 8px color-mix(in srgb, var(--today-score-tone) 45%, transparent);
 }
 .today-score-dial-core {
   position: relative; z-index: 3;
   display: grid; place-items: center; align-content: center; gap: 8px;
-  width: 100%; height: 100%; padding: 3px 4px 12px;
+  width: 100%; height: 100%; padding: 3px 4px;
   border: 0; border-radius: 50%; background: transparent; box-shadow: none;
 }
 .today-score-dial-core > span {
@@ -2759,48 +2660,12 @@ body:has(.overview-page) .nav a.active {
   width: 100%; font-weight: 850; letter-spacing: .075em; line-height: 1.2;
   text-align: center; text-transform: uppercase;
 }
-.today-odometer {
-  display: inline-flex; align-items: center; justify-content: center; height: 31px;
-  color: var(--accent); font: 850 27px/1 ui-monospace, SFMono-Regular, Consolas, monospace;
-  letter-spacing: -.08em; filter: drop-shadow(0 0 7px color-mix(in srgb, var(--accent) 46%, transparent));
-}
-.today-odometer-window {
-  display: inline-block; width: .61em; height: 1em; overflow: hidden; border-radius: 3px;
-  background: linear-gradient(180deg, rgba(255,255,255,.06), transparent 42%, rgba(0,0,0,.2));
-  box-shadow: inset 0 0 0 1px rgba(255,255,255,.045);
-}
-.today-odometer-strip {
-  display: flex; flex-direction: column; width: 100%;
-  transform: translateY(calc(var(--odometer-digit) * -1em));
-  animation: today-odometer-roll .72s cubic-bezier(.2,.75,.2,1) both;
-}
-.today-odometer-strip i { display: block; height: 1em; font: inherit; font-style: normal; line-height: 1; text-align: center; }
-.today-odometer-symbol { display: inline-grid; place-items: center; min-width: .42em; }
-.today-odometer-empty { letter-spacing: 0; }
-.today-score-needle {
-  position: absolute; left: calc(50% - 2px); top: 16px; z-index: 2;
-  width: 4px; height: calc(50% - 16px); opacity: var(--today-needle-opacity);
-  transform: rotate(var(--today-needle-angle)); transform-origin: 50% 100%;
-  transition: transform .7s cubic-bezier(.2,.8,.2,1), opacity .25s ease;
-  filter: drop-shadow(0 0 5px var(--today-score-tone));
-}
-.today-score-needle::after {
-  content: ''; position: absolute; left: 50%; bottom: -6px; width: 12px; height: 12px;
-  border: 2px solid #e8f8ff; border-radius: 50%; background: #0a1b2e;
-  box-shadow: 0 0 7px var(--today-score-tone); transform: translateX(-50%);
-}
-.today-score-needle i { position: absolute; inset: 0; clip-path: polygon(50% 0, 100% 100%, 0 100%); background: linear-gradient(90deg,#aec8d8,#fff 48%,#78b5d5); }
-.today-score-limit {
-  position: absolute; z-index: 5; bottom: 18px; min-width: 29px; padding: 3px 4px;
-  border: 1px solid currentColor; border-radius: 999px; background: rgba(1,8,18,.9);
-  font-size: 8.5px; font-weight: 900; line-height: 1; font-variant-numeric: tabular-nums;
-  text-align: center; text-shadow: 0 1px 4px #000; box-shadow: 0 2px 7px rgba(0,0,0,.58);
-}
-.today-score-limit.is-min { left: 15px; color: #ff7189; }
-.today-score-limit.is-max { right: 15px; color: #5df282; }
-@keyframes today-odometer-roll {
-  from { transform: translateY(0); }
-  to { transform: translateY(calc(var(--odometer-digit) * -1em)); }
+.today-score-dial-core > strong {
+  color: var(--accent);
+  font: 900 32px/1 ui-monospace, SFMono-Regular, Consolas, monospace;
+  letter-spacing: -.03em;
+  font-variant-numeric: tabular-nums;
+  text-shadow: 0 0 9px color-mix(in srgb, var(--accent) 40%, transparent);
 }
 .today-decision-panel .dry-engine-metrics { gap: 6px; }
 .today-decision-panel .dry-engine-metrics > div {
@@ -2888,12 +2753,8 @@ body:has(.overview-page) .nav a.active {
   .today-decision-panel .dry-engine-metrics > .wide { grid-column: auto; }
   .today-engine-score-dials { gap: 8px; padding-inline: 0; }
   .today-score-dial { width: 120px; height: 120px; padding: 22px; }
-  .today-score-dial::before { inset: 5px; -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 16px), #000 calc(100% - 15px)); mask: radial-gradient(farthest-side, transparent calc(100% - 16px), #000 calc(100% - 15px)); }
-  .today-score-needle { top: 13px; height: calc(50% - 13px); width: 3px; left: calc(50% - 1.5px); }
-  .today-score-limit { bottom: 14px; min-width: 25px; padding: 2px 3px; font-size: 7.5px; }
-  .today-score-limit.is-min { left: 11px; }
-  .today-score-limit.is-max { right: 11px; }
-  .today-odometer { height: 26px; font-size: 22px; }
+  .today-score-dial::before { inset: 5px; -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 11px), #000 calc(100% - 10px)); mask: radial-gradient(farthest-side, transparent calc(100% - 11px), #000 calc(100% - 10px)); }
+  .today-score-dial-core > strong { font-size: 26px; }
   .today-summary { grid-template-columns: 1fr; }
   .overview-page .today-summary .performance-stat { min-height: 82px; }
   .today-current-actions .btn { flex: 1 1 auto; min-height: 38px; }

@@ -558,104 +558,40 @@ class DecisionScoreDial extends StatelessWidget {
                   tone: colour,
                   surface: scheme.surface,
                 ),
-                child: Stack(
-                  fit: StackFit.expand,
-                  children: [
-                    Center(
-                      child: Padding(
-                        padding: const EdgeInsets.fromLTRB(22, 27, 22, 31),
-                        child: FittedBox(
-                          fit: BoxFit.scaleDown,
-                          child: Column(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Text(
-                                label.toUpperCase(),
-                                style: AppText.kicker.copyWith(
-                                  color: scheme.onSurface,
-                                  fontSize: 7,
-                                  fontWeight: FontWeight.w800,
-                                  letterSpacing: .6,
-                                ),
-                              ),
-                              const SizedBox(height: 2),
-                              _OdometerScore(
-                                score: score,
-                                colour: scheme.primary,
-                              ),
-                              if (caption != null) ...[
-                                const SizedBox(height: 1),
-                                Text(
-                                  caption!.toUpperCase(),
-                                  style: AppText.kicker.copyWith(
-                                    color: scheme.onSurfaceVariant,
-                                    fontSize: 6.2,
-                                    letterSpacing: .4,
-                                  ),
-                                ),
-                              ],
-                            ],
-                          ),
-                        ),
-                      ),
-                    ),
-                    Positioned(
-                      left: 10,
-                      bottom: 17,
-                      child: DecoratedBox(
-                        decoration: BoxDecoration(
-                          color: const Color(0xE6010812),
-                          border: Border.all(color: const Color(0xFFFF7189)),
-                          borderRadius: BorderRadius.circular(99),
-                          boxShadow: const [
-                            BoxShadow(color: Color(0x88000000), blurRadius: 5),
-                          ],
-                        ),
-                        child: Padding(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 5,
-                            vertical: 3,
-                          ),
-                          child: Text(
-                            '−100',
+                child: Center(
+                  child: Padding(
+                    padding: const EdgeInsets.all(22),
+                    child: FittedBox(
+                      fit: BoxFit.scaleDown,
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            label.toUpperCase(),
                             style: AppText.kicker.copyWith(
-                              color: const Color(0xFFFF7189),
-                              fontSize: 8,
-                              fontWeight: FontWeight.w900,
+                              color: scheme.onSurface,
+                              fontSize: 7,
+                              fontWeight: FontWeight.w800,
+                              letterSpacing: .6,
                             ),
                           ),
-                        ),
-                      ),
-                    ),
-                    Positioned(
-                      right: 10,
-                      bottom: 17,
-                      child: DecoratedBox(
-                        decoration: BoxDecoration(
-                          color: const Color(0xE6010812),
-                          border: Border.all(color: const Color(0xFF5DF282)),
-                          borderRadius: BorderRadius.circular(99),
-                          boxShadow: const [
-                            BoxShadow(color: Color(0x88000000), blurRadius: 5),
-                          ],
-                        ),
-                        child: Padding(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 5,
-                            vertical: 3,
-                          ),
-                          child: Text(
-                            '+100',
-                            style: AppText.kicker.copyWith(
-                              color: const Color(0xFF5DF282),
-                              fontSize: 8,
-                              fontWeight: FontWeight.w900,
+                          const SizedBox(height: 3),
+                          _DialScore(score: score, colour: scheme.primary),
+                          if (caption != null) ...[
+                            const SizedBox(height: 3),
+                            Text(
+                              caption!.toUpperCase(),
+                              style: AppText.kicker.copyWith(
+                                color: scheme.onSurfaceVariant,
+                                fontSize: 6.2,
+                                letterSpacing: .4,
+                              ),
                             ),
-                          ),
-                        ),
+                          ],
+                        ],
                       ),
                     ),
-                  ],
+                  ),
                 ),
               ),
             ),
@@ -666,8 +602,8 @@ class DecisionScoreDial extends StatelessWidget {
   }
 }
 
-class _OdometerScore extends StatelessWidget {
-  const _OdometerScore({required this.score, required this.colour});
+class _DialScore extends StatelessWidget {
+  const _DialScore({required this.score, required this.colour});
 
   final double? score;
   final Color colour;
@@ -679,27 +615,15 @@ class _OdometerScore extends StatelessWidget {
     }
     final bounded = score!.clamp(-100.0, 100.0).toDouble();
     final value = '${bounded > 0 ? '+' : ''}${bounded.toStringAsFixed(1)}';
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 3, vertical: 1),
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(3),
-        gradient: const LinearGradient(
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-          colors: [Color(0x18FFFFFF), Color(0x08000000), Color(0x24000000)],
-        ),
-        border: Border.all(color: const Color(0x12FFFFFF)),
-      ),
-      child: Text(value, style: _style),
-    );
+    return Text(value, style: _style);
   }
 
   TextStyle get _style => AppText.metric.copyWith(
     color: colour,
-    fontSize: 22,
+    fontSize: 29,
     fontWeight: FontWeight.w900,
     fontFeatures: const [FontFeature.tabularFigures()],
-    shadows: [Shadow(color: colour.withValues(alpha: .62), blurRadius: 9)],
+    shadows: [Shadow(color: colour.withValues(alpha: .44), blurRadius: 8)],
   );
 }
 
@@ -714,9 +638,8 @@ class _DecisionGaugePainter extends CustomPainter {
   final Color tone;
   final Color surface;
 
-  static const _start = math.pi * .75;
-  static const _sweep = math.pi * 1.5;
-  static const _segments = 20;
+  static const _start = -math.pi / 2;
+  static const _sweep = math.pi * 2;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -734,14 +657,16 @@ class _DecisionGaugePainter extends CustomPainter {
           stops: const [.05, .74],
         ).createShader(circle),
     );
+    final bounded = score?.clamp(-100.0, 100.0).toDouble();
+    final scoreTone = bounded == null ? tone : _scoreColour(bounded);
     canvas.drawCircle(
       centre,
       radius,
       Paint()
         ..style = PaintingStyle.stroke
         ..strokeWidth = 2
-        ..color = const Color(0xFF7EDBFF)
-        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 5),
+        ..color = scoreTone.withValues(alpha: .55)
+        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 4),
     );
     canvas.drawCircle(
       centre,
@@ -749,24 +674,45 @@ class _DecisionGaugePainter extends CustomPainter {
       Paint()
         ..style = PaintingStyle.stroke
         ..strokeWidth = 1.1
-        ..color = const Color(0xFFC2F1FF),
+        ..color = scoreTone.withValues(alpha: .58),
     );
 
-    final arcRect = Rect.fromCircle(center: centre, radius: radius - 8);
-    final segmentSweep = _sweep / _segments;
-    const gap = .026;
-    for (var index = 0; index < _segments; index++) {
-      final fraction = index / (_segments - 1);
+    final arcRect = Rect.fromCircle(center: centre, radius: radius - 9);
+    canvas.drawArc(
+      arcRect,
+      _start,
+      _sweep,
+      false,
+      Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 10
+        ..strokeCap = StrokeCap.round
+        ..color = const Color(0xFF17314A),
+    );
+    if (bounded != null) {
+      final progress = ((bounded + 100) / 200) * _sweep;
       canvas.drawArc(
         arcRect,
-        _start + index * segmentSweep + gap / 2,
-        segmentSweep - gap,
+        _start,
+        progress,
+        false,
+        Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 12
+          ..strokeCap = StrokeCap.round
+          ..color = scoreTone.withValues(alpha: .38)
+          ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 5),
+      );
+      canvas.drawArc(
+        arcRect,
+        _start,
+        progress,
         false,
         Paint()
           ..style = PaintingStyle.stroke
           ..strokeWidth = 9
-          ..strokeCap = StrokeCap.butt
-          ..color = _scaleColour(fraction),
+          ..strokeCap = StrokeCap.round
+          ..color = scoreTone,
       );
     }
 
@@ -776,71 +722,15 @@ class _DecisionGaugePainter extends CustomPainter {
       Paint()
         ..style = PaintingStyle.stroke
         ..strokeWidth = 1
-        ..color = const Color(0xFF3D759A).withValues(alpha: .72),
-    );
-
-    final bounded = score?.clamp(-100.0, 100.0).toDouble();
-    if (bounded == null) return;
-    final angle = _start + ((bounded + 100) / 200) * _sweep;
-    final tip =
-        centre + Offset(math.cos(angle), math.sin(angle)) * (radius - 17);
-    canvas.drawLine(
-      centre,
-      tip,
-      Paint()
-        ..strokeWidth = 6
-        ..strokeCap = StrokeCap.round
-        ..color = tone.withValues(alpha: .34)
-        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 5),
-    );
-    canvas.drawLine(
-      centre,
-      tip,
-      Paint()
-        ..strokeWidth = 3
-        ..strokeCap = StrokeCap.round
-        ..shader = const LinearGradient(
-          colors: [Color(0xFFF8FEFF), Color(0xFF73B8D9)],
-        ).createShader(Rect.fromPoints(centre, tip)),
-    );
-    canvas.drawCircle(
-      centre,
-      5,
-      Paint()
-        ..color = const Color(0xFF071727)
-        ..style = PaintingStyle.fill,
-    );
-    canvas.drawCircle(
-      centre,
-      5,
-      Paint()
-        ..color = const Color(0xFFDDF8FF)
-        ..strokeWidth = 1.6
-        ..style = PaintingStyle.stroke,
+        ..color = scoreTone.withValues(alpha: .32),
     );
   }
 
-  Color _scaleColour(double value) {
-    if (value <= .34) {
-      return Color.lerp(
-        const Color(0xFFFF435F),
-        const Color(0xFF864FB0),
-        value / .34,
-      )!;
-    }
-    if (value <= .67) {
-      return Color.lerp(
-        const Color(0xFF864FB0),
-        const Color(0xFF238DD8),
-        (value - .34) / .33,
-      )!;
-    }
-    return Color.lerp(
-      const Color(0xFF22CFAA),
-      const Color(0xFF58ED68),
-      (value - .67) / .33,
-    )!;
-  }
+  Color _scoreColour(double value) => Color.lerp(
+    const Color(0xFFFF6178),
+    const Color(0xFF45E3A6),
+    (value + 100) / 200,
+  )!;
 
   @override
   bool shouldRepaint(covariant _DecisionGaugePainter oldDelegate) =>

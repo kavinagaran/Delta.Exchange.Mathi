@@ -95,8 +95,8 @@ void main() {
       expect(size.width, size.height);
       expect(size.width, 90);
       expect(find.text('+26.0'), findsOneWidget);
-      expect(find.text('−100'), findsOneWidget);
-      expect(find.text('+100'), findsOneWidget);
+      expect(find.text('−100'), findsNothing);
+      expect(find.text('+100'), findsNothing);
       final scoreText = tester.widget<Text>(find.text('+26.0'));
       expect(scoreText.style?.color, theme.colorScheme.primary);
     });
