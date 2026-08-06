@@ -48,17 +48,20 @@ def test_score_dials_are_smooth_circular_gauges_without_needles():
     assert 'class="te-score-needle"' not in TEMPLATE
     assert 'class="te-score-limit' not in TEMPLATE
     assert "--te-needle-angle" not in TEMPLATE
-    assert "--te-score-fill" in TEMPLATE
+    assert "--te-score-fill-start" in TEMPLATE
+    assert "--te-score-fill-end" in TEMPLATE
     assert "Math.abs(score) * 3.6" in TEMPLATE
     assert "(score + 100) * 1.8" not in TEMPLATE
     for required in (
         ".te-score-gauge::before",
         "conic-gradient(",
-        "var(--te-score-tone) 0deg var(--te-score-fill)",
+        "from 0deg",
+        "var(--te-score-tone) var(--te-score-fill-start) var(--te-score-fill-end)",
         "aspect-ratio: 1",
         "border-radius: 50%",
     ):
         assert required in STYLE
+    assert "from -90deg" not in STYLE
     assert "repeating-conic-gradient" not in STYLE
     assert ".te-score-needle" not in STYLE
     assert ".te-score-limit" not in STYLE
@@ -96,10 +99,19 @@ def test_committed_score_chart_is_a_zone_colored_line_with_every_boundary():
     assert "ctx.lineWidth = .6" in TEMPLATE
     assert "ctx.strokeStyle = 'rgba(168, 178, 190, .94)'" in TEMPLATE
     assert "ctx.lineWidth = 2" in TEMPLATE
-    # 75% of the previous 3x chart height (834px) is 626px.
-    assert "height: 626px" in STYLE
     assert "COMMITTED DECISION SCORE" in TEMPLATE
     assert ".te-preview-chart-stage canvas" in STYLE
+    # The chart scales with the card's width instead of staying a fixed
+    # pixel height, so it keeps a legible proportion on any viewport.
+    canvas_rule = STYLE[
+        STYLE.index(".te-preview-chart-stage canvas {"):
+        STYLE.index(".te-preview-chart-stage canvas[hidden]")
+    ]
+    assert "aspect-ratio:" in canvas_rule
+    assert "min-height:" in canvas_rule
+    assert "max-height:" in canvas_rule
+    assert "height: 626px" not in STYLE
+    assert "height: 536px" not in STYLE
 
 
 def test_committed_score_chart_supports_axis_drag_scaling_and_zone_label_lane():
@@ -379,10 +391,10 @@ vm.runInThisContext(source.slice(start, end) + `
   }
   const calmBlock = tradeDecisionMeta(
     'SHORT_MOVE', false,
-    'ADX is above 20; calm-market confirmation is required before selling MOVE',
+    'ADX is above 25; calm-market confirmation is required before selling MOVE',
   );
   if (calmBlock.label !== 'WAIT — 5M ADX NOT CALM' ||
-      !calmBlock.detail.includes('ADX is above 20')) {
+      !calmBlock.detail.includes('ADX is above 25')) {
     throw new Error('ADX blocker is mislabeled: ' + JSON.stringify(calmBlock));
   }
   const premiumBlock = tradeDecisionMeta(
@@ -392,6 +404,76 @@ vm.runInThisContext(source.slice(start, end) + `
   if (premiumBlock.label !== 'WAIT — MOVE PREMIUM BELOW $300' ||
       !premiumBlock.detail.includes('$272.00')) {
     throw new Error('premium blocker is mislabeled: ' + JSON.stringify(premiumBlock));
+  }
+`);
+"""
+    result = subprocess.run(
+        [NODE, "-e", script],
+        cwd=Path(dashboard.BASE),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.skipif(NODE is None, reason="Node.js is required for frontend tests")
+def test_score_dial_starts_at_12_oclock_and_shades_by_magnitude():
+    """A positive score must sweep clockwise from 12 o'clock (0deg); a
+    negative score must sweep anti-clockwise from 12 o'clock instead, by
+    the same angular distance for the same magnitude. Colour shading
+    strength (how far the tone sits from the neutral baseline) must scale
+    with |score|, independent of direction."""
+    script = r"""
+const fs = require('fs');
+const vm = require('vm');
+const source = fs.readFileSync('templates/trend_engine.html', 'utf8');
+const start = source.indexOf('const hasValue');
+const end = source.indexOf('function freshnessState', start);
+if (start < 0 || end <= start) throw new Error('display helpers not found');
+vm.runInThisContext(source.slice(start, end) + `
+  const pos = scoreFillAngles(40);
+  if (pos.start !== 0) throw new Error('positive fill must start at 0deg: ' + JSON.stringify(pos));
+  if (Math.abs(pos.end - 144) > 0.001) throw new Error('positive fill end is wrong: ' + JSON.stringify(pos));
+
+  const neg = scoreFillAngles(-40);
+  if (neg.end !== 360) throw new Error('negative fill must end at 360deg (12 oclock position): ' + JSON.stringify(neg));
+  if (Math.abs(neg.start - (360 - 144)) > 0.001) throw new Error('negative fill start is wrong: ' + JSON.stringify(neg));
+
+  const posSweep = pos.end - pos.start;
+  const negSweep = neg.end - neg.start;
+  if (Math.abs(posSweep - negSweep) > 0.001) {
+    throw new Error('equal-magnitude scores must sweep equal angular distance: ' + posSweep + ' vs ' + negSweep);
+  }
+
+  const zero = scoreFillAngles(0);
+  if (zero.start !== zero.end) throw new Error('zero score must have no fill: ' + JSON.stringify(zero));
+
+  function parseRgb(css) {
+    const m = css.match(/rgb\\((\\d+), (\\d+), (\\d+)\\)/);
+    if (!m) throw new Error('scoreColor did not return an rgb() triplet: ' + css);
+    return [Number(m[1]), Number(m[2]), Number(m[3])];
+  }
+  function dist(a, b) {
+    return Math.sqrt(a.reduce((sum, v, i) => sum + (v - b[i]) ** 2, 0));
+  }
+  const neutral = [143, 163, 188];
+  const weakPositive = parseRgb(scoreColor(5, 'OK'));
+  const strongPositive = parseRgb(scoreColor(95, 'OK'));
+  if (dist(weakPositive, neutral) >= dist(strongPositive, neutral)) {
+    throw new Error('a weak positive score must shade closer to neutral than a strong one');
+  }
+  const weakNegative = parseRgb(scoreColor(-5, 'OK'));
+  const strongNegative = parseRgb(scoreColor(-95, 'OK'));
+  if (dist(weakNegative, neutral) >= dist(strongNegative, neutral)) {
+    throw new Error('a weak negative score must shade closer to neutral than a strong one');
+  }
+  const zeroColor = parseRgb(scoreColor(0, 'OK'));
+  if (dist(zeroColor, neutral) > 0.5) {
+    throw new Error('a zero score must render at the neutral baseline: ' + zeroColor);
+  }
+  if (parseRgb(scoreColor(60, 'OK')).join(',') === parseRgb(scoreColor(-60, 'OK')).join(',')) {
+    throw new Error('positive and negative scores of equal magnitude must still differ in hue');
   }
 `);
 """

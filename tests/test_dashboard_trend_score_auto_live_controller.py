@@ -414,7 +414,7 @@ def test_non_calm_short_move_signal_does_not_close_or_replace_a_live_ce_position
         0.0,
         suffix="10:10:00Z",
         zone_action_allowed=False,
-        zone_reason="5m ADX 40.0 must be at or below 20 before selling MOVE",
+        zone_reason="5m ADX 40.0 must be at or below 25 before selling MOVE",
         trigger_adx=40.0,
     )
     prepare = Mock(side_effect=AssertionError("blocked MOVE must not prepare"))
@@ -446,8 +446,8 @@ def test_committed_non_calm_adx_closes_an_open_live_short_move(
         0.0,
         suffix="10:15:00Z",
         zone_action_allowed=False,
-        zone_reason="5m ADX 20.1 must be at or below 20 before selling MOVE",
-        trigger_adx=20.1,
+        zone_reason="5m ADX 25.1 must be at or below 25 before selling MOVE",
+        trigger_adx=25.1,
     )
     prepare = Mock(side_effect=AssertionError("ADX exit must not prepare an entry"))
     execute = Mock(side_effect=AssertionError("ADX exit must not submit an entry"))
@@ -483,7 +483,7 @@ def test_committed_non_calm_adx_closes_an_open_live_short_move(
         (live_account / dashboard.TREND_SCORE_AUTO_LEDGER_FILE).read_text("utf-8")
     )
     assert ledger["signals"][signal["signal_key"]]["action"] == "EXIT"
-    assert ledger["signals"][signal["signal_key"]]["trigger_adx"] == 20.1
+    assert ledger["signals"][signal["signal_key"]]["trigger_adx"] == 25.1
     assert "ADX" in dashboard._trend_score_auto_health["alice"]["last_action"]
 
 
@@ -501,6 +501,234 @@ def test_live_controller_rejects_corrupt_owned_state(updates, message):
     state.update(updates)
     with pytest.raises(RuntimeError, match=message):
         dashboard._trend_score_auto_live_owned_position(state)
+
+
+def test_live_controller_disowns_operator_protected_external_state():
+    """An adopted external position has no bot-fill provenance by design.
+
+    It must not be rejected as a corrupt controller state (it was never the
+    controller's state), but it also is not something the controller owns
+    or may act on -- see the paired "blocks a new entry" test below.
+    """
+    state = {
+        "status": "OPEN",
+        "entry_trigger": "exchange_sync",
+        "ownership": "external_protection_only",
+        "operator_authorized_protection_only": True,
+        "product_id": 42,
+    }
+    assert dashboard._trend_score_auto_live_owned_position(state) is None
+
+
+def test_live_controller_blocks_new_entry_over_operator_protected_external_state():
+    """The slot is occupied even though the controller does not own it."""
+    state = {
+        "status": "OPEN",
+        "entry_trigger": "exchange_sync",
+        "ownership": "external_protection_only",
+        "operator_authorized_protection_only": True,
+        "product_id": 42,
+    }
+    blocker = dashboard._trend_score_auto_live_previous_state_error(state)
+    assert blocker is not None
+    assert "protected" in blocker.lower()
+
+
+def test_live_controller_disowns_manual_cockpit_state():
+    """A Cockpit manual entry has full bot-grade provenance (a real fill
+    ledger, real execution_mode/dry_run fields) -- unlike an adopted
+    external position, it passes every provenance check except the
+    ownership match. It must still be disowned (not raised on) so the
+    controller never tries to manage or replace it.
+    """
+    state = {
+        "status": "OPEN",
+        "execution_mode": "live",
+        "dry_run": False,
+        "entry_trigger": "manual_cockpit_buy_ce",
+        "ownership": "manual_cockpit_live",
+        "product_id": 42,
+    }
+    assert dashboard._trend_score_auto_live_owned_position(state) is None
+
+
+def test_live_controller_blocks_new_entry_over_manual_cockpit_state():
+    """The slot is occupied even though the controller does not own it,
+    and the blocker text must not mislabel it as an external adoption."""
+    state = {
+        "status": "OPEN",
+        "execution_mode": "live",
+        "dry_run": False,
+        "entry_trigger": "manual_cockpit_sell_move",
+        "ownership": "manual_cockpit_live",
+        "product_id": 42,
+    }
+    blocker = dashboard._trend_score_auto_live_previous_state_error(state)
+    assert blocker is not None
+    assert "manually opened" in blocker.lower()
+    assert "external" not in blocker.lower()
+
+
+def test_pending_identity_recognises_both_bot_and_cockpit_ownership():
+    """Regression test for a real incident: a Cockpit entry whose durable
+    ENTRY_PENDING intent never reached the exchange (e.g. a failed final
+    preflight) must be just as recoverable as a bot-owned one -- otherwise
+    no lane (recovery-only supervisor or the main score cycle) is willing
+    to touch it, and the Trend slot stays wedged shut forever, blocking
+    every future entry, manual or automated.
+    """
+    base = {
+        "status": "ENTRY_PENDING",
+        "entry_trigger": dashboard.TREND_SCORE_AUTO_TRIGGER,
+    }
+    bot_pending = {**base, "ownership": dashboard.TREND_SCORE_AUTO_LIVE_OWNERSHIP}
+    manual_pending = {
+        **base, "ownership": dashboard.TREND_SCORE_MANUAL_LIVE_OWNERSHIP,
+    }
+    assert dashboard._trend_score_auto_live_pending_identity(bot_pending) is True
+    assert dashboard._trend_score_auto_live_pending_identity(manual_pending) is True
+    unowned = {**base, "ownership": "exchange_sync"}
+    assert dashboard._trend_score_auto_live_pending_identity(unowned) is False
+
+
+@pytest.mark.parametrize(
+    "zone",
+    (
+        dashboard.TREND_SCORE_CE_ZONE,
+        dashboard.TREND_SCORE_PE_ZONE,
+        dashboard.TREND_SCORE_LONG_MOVE_ZONE,
+        dashboard.TREND_SCORE_MOVE_ZONE,
+    ),
+)
+def test_signal_from_state_skips_score_zone_consistency_for_manual_entries(zone):
+    """A manual entry always persists direction_score_at_entry=0.0 (the
+    score never chose its zone -- the operator's button click did), so
+    score_zone(0.0) has no reason to agree with the zone the operator
+    actually picked. Regression test: this must not raise for any of the
+    4 Cockpit trade types, even though score_zone(0.0) only ever maps to
+    HOLD or SHORT_MOVE.
+    """
+    state = {
+        "direction_score_at_entry": 0.0,
+        "trend_score_zone": zone,
+        "engine_zone": zone,
+        "btc_at_entry": 65_000,
+        "score_auto_signal_key": "manual-cockpit|test|abc123",
+        "ownership": dashboard.TREND_SCORE_MANUAL_LIVE_OWNERSHIP,
+    }
+    signal = dashboard._trend_score_auto_live_signal_from_state(
+        state, dashboard._trading_mode_payload(),
+    )
+    assert signal["zone"] == zone
+    assert signal["score"] == 0.0
+
+
+def test_signal_from_state_still_enforces_score_zone_consistency_for_bot_entries():
+    """The consistency check stays fully intact for a bot-owned entry --
+    only the manual-ownership case is exempt."""
+    state = {
+        "direction_score_at_entry": 60.0,
+        "trend_score_zone": dashboard.TREND_SCORE_LONG_MOVE_ZONE,
+        "engine_zone": dashboard.TREND_SCORE_LONG_MOVE_ZONE,
+        "btc_at_entry": 65_000,
+        "score_auto_signal_key": "trend-score-auto|BTCUSD|5m|2026-08-05T10:00:00Z",
+        "ownership": dashboard.TREND_SCORE_AUTO_LIVE_OWNERSHIP,
+    }
+    with pytest.raises(RuntimeError, match="no longer matches its durable zone"):
+        dashboard._trend_score_auto_live_signal_from_state(
+            state, dashboard._trading_mode_payload(),
+        )
+
+
+def test_exchange_sync_does_not_detach_a_manually_owned_cockpit_ce_position(
+    live_account,
+    monkeypatch,
+):
+    """A Cockpit-opened CE/PE position must survive the periodic exchange
+    sync's legacy-repair sweep.
+
+    Regression test: that sweep detaches any OPEN C-BTC/P-BTC trend state
+    _is_owned_trend_state() does not recognise, resetting it to IDLE while
+    the position is still open and exposed on the exchange -- the dashboard
+    would lose its own record of what tp_monitor is protecting. A Cockpit
+    entry's client_order_id always starts with "trend-" (the same seam a
+    bot entry uses), which _is_owned_trend_state already recognises as its
+    very first check, independent of the ownership field -- this proves
+    that holds for a real manual-ownership state, not just in theory.
+    """
+    monkeypatch.setattr(dashboard, "_last_sync", {})
+    trend_state = {
+        "slot": "trend", "status": "OPEN",
+        "symbol": "C-BTC-63600-050826", "product_id": 42,
+        "side": "long", "lots": 10,
+        "client_order_id": "trend-alice-deadbeef1234567-e",
+        "ownership": "manual_cockpit_live",
+        "entry_trigger": "manual_cockpit_buy_ce",
+        "execution_mode": "live", "dry_run": False,
+    }
+    _write(live_account / "trend_state.json", trend_state)
+
+    def get(url, params=None, headers=None, timeout=None):
+        if url.endswith("/v2/positions/margined"):
+            return Mock(json=lambda: {"success": True, "result": [
+                {"size": "10", "product_id": 42,
+                 "product_symbol": "C-BTC-63600-050826"},
+            ]})
+        if url.endswith("/v2/orders/history"):
+            return Mock(json=lambda: {"success": True, "result": []})
+        raise AssertionError(f"unexpected GET {url}")
+
+    monkeypatch.setattr(dashboard.req, "get", get)
+    monkeypatch.setattr(dashboard, "_sign", lambda *a, **k: {})
+
+    dashboard._sync_states_from_exchange_unlocked()
+
+    state = dashboard._load_json(live_account / "trend_state.json", {})
+    assert state["status"] == "OPEN"
+    assert state["ownership"] == "manual_cockpit_live"
+    assert state.get("detached_external_product_id") is None
+
+
+def test_live_cycle_does_not_repeat_audit_entries_for_a_persistent_error(
+    live_account,
+    monkeypatch,
+):
+    """A recurring per-cycle failure must be audited once, not every cycle.
+
+    Regression test: the health record's ``last_error`` was reset to None
+    partway through the cycle (the "evaluating" status update) before the
+    end-of-cycle handler read it back as ``previous_error`` for its
+    log-only-on-change comparison, so the comparison always saw None and
+    logged an identical audit line every ~15s for as long as the underlying
+    condition persisted -- exactly the protection-only-external state
+    exercised here, which fails closed on every cycle by design.
+    """
+    _write(live_account / "trend_state.json", {
+        "status": "OPEN",
+        "entry_trigger": "exchange_sync",
+        "ownership": "external_protection_only",
+        "operator_authorized_protection_only": True,
+        "product_id": 42,
+    })
+    signal = _signal(dashboard._trading_mode_payload(), 75)
+    monkeypatch.setattr(
+        dashboard,
+        "_collect_trend_score_auto_signal",
+        Mock(return_value=copy.deepcopy(signal)),
+    )
+
+    assert dashboard._maybe_auto_trend_score_cycle() is False
+    assert dashboard._maybe_auto_trend_score_cycle() is False
+
+    error_calls = [
+        call for call in dashboard._trend_audit.call_args_list
+        if call.args and call.args[0] == "trend_score_auto_live_error"
+    ]
+    assert len(error_calls) == 1
+    assert "protected" in error_calls[0].args[1]["error"].lower()
+    state = json.loads((live_account / "trend_state.json").read_text("utf-8"))
+    assert state["status"] == "OPEN"
+    assert state["ownership"] == "external_protection_only"
 
 
 def test_same_completed_signal_is_consumed_once_even_without_state_rewrite(
@@ -1081,6 +1309,113 @@ def test_final_preflight_blocks_mode_revision_change_before_entry_post(
     creds.assert_not_called()
 
 
+def test_final_preflight_requires_live_bot_mode_by_default(
+    live_account, monkeypatch,
+):
+    """The automated controller's own entries must still require its Bot
+    ON/OFF toggle ("TREND_ENGINE_SCORE_AUTO_MODE") to be "live" -- that
+    toggle's entire reason to exist is gating automated entries."""
+    config = json.loads((live_account / "config.json").read_text("utf-8"))
+    config["TREND_ENGINE_SCORE_AUTO_MODE"] = "disabled"
+    _write(live_account / "config.json", config)
+    revision = dashboard._trading_mode_payload()["mode_revision"]
+    creds = Mock(
+        side_effect=AssertionError("disabled bot mode must block before credentials")
+    )
+    monkeypatch.setattr(dashboard, "_active_creds", creds)
+
+    with pytest.raises(RuntimeError, match="Controller mode changed"):
+        _run_preflight(live_account, initial_revision=revision)
+    creds.assert_not_called()
+
+
+def test_final_preflight_allows_disabled_bot_mode_for_cockpit_entries(
+    live_account, monkeypatch,
+):
+    """Regression test for a real incident: a Cockpit manual entry was
+    refused with "Controller mode changed before the LIVE entry POST"
+    whenever the automated Bot ON/OFF toggle was off -- even though the
+    account itself was in LIVE trading mode and the operator's click is
+    its own explicit authorization, independent of that toggle. Otherwise
+    identical to the fully-passing
+    test_final_preflight_accepts_fresh_identity_bound_book_and_flat_account
+    above, except the bot is off and both require_score_auto_mode and
+    require_min_tte are False -- the exact flag pair
+    _trend_score_auto_live_execute passes for a Cockpit-owned entry.
+    """
+    config = json.loads((live_account / "config.json").read_text("utf-8"))
+    config["TREND_ENGINE_SCORE_AUTO_MODE"] = "disabled"
+    _write(live_account / "config.json", config)
+    prepared = _prepared(dashboard.TREND_SCORE_CE_ZONE)
+    final_quote = _execution_quote(prepared)
+    pending, risk = _deep_preflight_state(live_account, prepared, final_quote)
+    _mock_flat_final_boundary(monkeypatch, final_quote)
+
+    dashboard._trend_score_auto_live_final_preflight(
+        pending,
+        initial_revision=dashboard._trading_mode_payload()["mode_revision"],
+        risk_snapshot=risk,
+        prepared=prepared,
+        quote=final_quote,
+        require_score_auto_mode=False,
+        require_min_tte=False,
+    )
+
+
+def test_execute_recovery_derives_ownership_from_the_pending_state_itself(
+    live_account,
+):
+    """Regression test: neither _maybe_recover_trend_score_live_pending nor
+    the auto-cycle's own ENTRY_PENDING branch passes an explicit
+    ownership= kwarg when resuming a durable ENTRY_PENDING generation --
+    they cannot know in advance whether the stuck intent they are
+    recovering was a bot or a Cockpit entry. If _trend_score_auto_live_execute
+    fell back to its bot-owned default ownership in that case, a stuck
+    Cockpit pending entry would be recovered under the wrong ownership,
+    incorrectly re-imposing the 90-minute TTE floor (and the Bot ON/OFF
+    requirement) that were already correctly bypassed on the original
+    attempt.
+    """
+    prepared = _prepared(dashboard.TREND_SCORE_CE_ZONE)
+    prepared["settlement"] = (
+        datetime.now(timezone.utc) + timedelta(minutes=1)
+    ).isoformat()
+    existing_state = {
+        "status": "ENTRY_PENDING",
+        "ownership": dashboard.TREND_SCORE_MANUAL_LIVE_OWNERSHIP,
+        "transition_id": "recovery-transition",
+        "pending_entry_client_order_id": "trend-alice-recovery-e",
+        "pending_entry_submission_state": "prepared",
+        "pending_entry_order_id": None,
+        "pending_entry_post_boundary": False,
+        "pending_entry_last_attempt_at_utc": None,
+        "pending_entry_attempts": 0,
+        "execution_snapshot": {
+            "order_submitted": False,
+            "exchange_api_called": False,
+        },
+        "pending_entry_payload": {
+            "product_id": prepared["product_id"], "size": 1,
+        },
+        "selected_contract_snapshot": prepared,
+    }
+
+    # dashboard.req.get is forbidden by the live_account fixture, so if
+    # execution correctly clears the TTE gate it fails *there* instead --
+    # proving the near-expiry (< 90 minutes) contract was not rejected.
+    # A RuntimeError about "less than 1.5 hours" here would mean ownership
+    # fell back to the bot-owned default instead of the pending state's own.
+    with pytest.raises(AssertionError, match="unmocked exchange seam"):
+        dashboard._trend_score_auto_live_execute(
+            user="alice",
+            signal={"signal_key": "manual-cockpit|buy_ce|deadbeef"},
+            prepared=None,
+            transition_id="recovery-transition",
+            initial_revision=dashboard._trading_mode_payload()["mode_revision"],
+            existing_state=existing_state,
+        )
+
+
 def _execution_quote(prepared: dict, *, quote_epoch: float | None = None) -> dict:
     price = prepared["entry_price"]
     return {
@@ -1194,6 +1529,30 @@ def test_short_move_affordability_downsizes_with_margin_and_charges(
         one_more["estimated_total_required_usd"]
         > sizing["usable_balance_usd"]
     )
+
+
+def test_long_move_commission_charges_both_straddle_legs(live_account):
+    """Regression test: a MOVE straddle is always two legs (call and put
+    together), regardless of direction. The long-premium sizing branch
+    previously omitted ``legs`` entirely (defaulting to 1), which would have
+    silently halved the estimated entry commission for a Buy MOVE trade.
+    """
+    prepared = {
+        **_prepared(dashboard.TREND_SCORE_MOVE_ZONE),
+        "zone": "LONG_MOVE",
+        "side": "long",
+        "entry_price": 353.5,
+    }
+    quote = _execution_quote(prepared)
+
+    funds = dashboard._trend_score_auto_live_required_funds(
+        prepared, quote, 10, cfg={"TREND_SCORE_AUTO_LOTS": "10"},
+    )
+    single_leg_fee = dashboard._trend_score_auto_product_fee_per_lot(
+        prepared, price=funds["funding_price_usd"],
+    )
+    assert funds["basis"] == "long_option_premium_plus_entry_charges"
+    assert funds["entry_fee_per_lot_usd"] == pytest.approx(2 * single_leg_fee)
 
 
 def test_live_affordability_records_depth_without_capping_wallet_size(
@@ -1767,6 +2126,44 @@ def test_final_preflight_rechecks_daily_contract_tte_at_post_boundary(
             risk_snapshot={"proposed_risk_usd": 250.0},
             prepared=prepared,
             quote={"bid": 219, "ask": 220},
+        )
+
+
+def test_require_tte_bypasses_the_90_minute_floor_when_not_required():
+    """require_min_tte=False is the Cockpit path: the operator's own
+    real-time judgement substitutes for the 90-minute liquidity floor."""
+    near_expiry = {
+        "settlement": (
+            datetime.now(timezone.utc) + timedelta(minutes=1)
+        ).isoformat(),
+    }
+    with pytest.raises(RuntimeError, match="less than 1.5 hours"):
+        dashboard._trend_score_auto_live_require_tte(near_expiry)
+    dashboard._trend_score_auto_live_require_tte(
+        near_expiry, require_min_tte=False,
+    )
+
+
+def test_require_tte_does_not_independently_re_reject_a_later_settlement():
+    """This function no longer independently re-validates "today vs
+    tomorrow" -- select_directional_option/select_move_contract's own
+    today_only=True already guarantees the selected contract is the
+    nearest listed expiry, and re-deriving that here from a single
+    already-selected contract (without the full listing) was not just
+    redundant but actively wrong: it used to compare the settlement's IST
+    calendar date against wall-clock "today", which is a real production
+    incident (see select_directional_option's docstring) -- Delta delists
+    each daily contract at its own settlement, so for the rest of that IST
+    calendar day the nearest listed contract is genuinely dated tomorrow.
+    """
+    tomorrow = {
+        "settlement": (
+            datetime.now(timezone.utc) + timedelta(days=1)
+        ).isoformat(),
+    }
+    for require_min_tte in (True, False):
+        dashboard._trend_score_auto_live_require_tte(
+            tomorrow, require_min_tte=require_min_tte,
         )
 
 

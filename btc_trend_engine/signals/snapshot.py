@@ -159,7 +159,7 @@ def _zone_entry_gates(
     """
     if zone in {zones.CE_2_ITM, zones.PE_2_ITM}:
         # The raw v1 ``regime_tradeable`` gate treats RANGE as untradeable.
-        # RANGE can be caused solely by ADX <= 20, so retaining that gate here
+        # RANGE can be caused solely by ADX <= 25, so retaining that gate here
         # would reintroduce the directional ADX requirement indirectly.  Keep
         # the genuinely unsafe regimes blocked and preserve all other shared
         # execution/data gates.

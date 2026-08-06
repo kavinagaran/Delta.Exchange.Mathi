@@ -61,6 +61,12 @@
           </div>
         </div>
       </div>
+      <div class="te-trade-decision-row te-hero-decision-row">
+        <div class="te-decision-capsule is-waiting" id="te-hero-trade-decision">
+          <strong>Waiting</strong>
+        </div>
+      </div>
+      <p class="te-hero-controller-warning" id="te-hero-controller-warning" hidden></p>
     </div>
   </section>
 
@@ -333,11 +339,29 @@ function formatIstTimestamp(value) {
 function scoreColor(value, quality) {
   if (!finite(value)) return 'var(--muted)';
   const score = Math.max(-100, Math.min(100, Number(value)));
-  const t = (score + 100) / 200;
-  const red = Math.round(255 * (1 - t));
-  const green = Math.round(97 * (1 - t) + 194 * t);
-  const blue = Math.round(114 * (1 - t) + 110 * t);
+  // Shading strength (how vivid vs. how washed-out the tone reads) scales
+  // with |score| -- a near-zero score blends toward a neutral slate, and
+  // only an extreme score reaches the fully saturated red/green endpoint.
+  const strength = Math.abs(score) / 100;
+  const pure = score < 0 ? [255, 97, 114] : [0, 194, 110];
+  const weak = [143, 163, 188];
+  const red = Math.round(weak[0] + (pure[0] - weak[0]) * strength);
+  const green = Math.round(weak[1] + (pure[1] - weak[1]) * strength);
+  const blue = Math.round(weak[2] + (pure[2] - weak[2]) * strength);
   return `rgb(${red}, ${green}, ${blue})`;
+}
+
+function scoreFillAngles(score) {
+  // The gauge always starts its fill at 12 o'clock (0deg in conic-gradient
+  // terms) and sweeps clockwise for a positive score. A negative score
+  // sweeps anti-clockwise from 12 instead -- expressed here as colouring
+  // the *last* `magnitude` degrees before completing the circle, which is
+  // the same visual arc as going backward from 12 (conic-gradient itself
+  // can only paint in the increasing/clockwise direction).
+  const magnitude = Math.abs(score) * 3.6;
+  return score < 0
+    ? { start: 360 - magnitude, end: 360 }
+    : { start: 0, end: magnitude };
 }
 
 function updateScoreGauge(id, value, quality) {
@@ -345,7 +369,9 @@ function updateScoreGauge(id, value, quality) {
   const available = finite(value);
   const score = available ? Math.max(-100, Math.min(100, Number(value))) : 0;
   gauge.setAttribute('aria-valuenow', String(score));
-  gauge.style.setProperty('--te-score-fill', `${available ? Math.abs(score) * 3.6 : 0}deg`);
+  const fill = scoreFillAngles(score);
+  gauge.style.setProperty('--te-score-fill-start', `${fill.start}deg`);
+  gauge.style.setProperty('--te-score-fill-end', `${fill.end}deg`);
   gauge.style.setProperty('--te-score-tone', scoreColor(value, quality));
   const readout = gauge.querySelector('.te-score-core strong');
   if (readout) {
@@ -389,6 +415,13 @@ function tradeDecisionMeta(zone, actionAllowed = true, reason = '') {
     if (key === 'SHORT_MOVE' && /5:30\s*PM|midnight|entry window/i.test(blocker)) {
       return {
         label: 'WAIT — WEEKDAY ENTRY WINDOW',
+        tone: 'is-blocked',
+        detail: blocker,
+      };
+    }
+    if (/today(?:'s|-expiry).*expiry|today's-expiry/i.test(blocker)) {
+      return {
+        label: "WAIT — TODAY'S EXPIRY UNAVAILABLE",
         tone: 'is-blocked',
         detail: blocker,
       };
@@ -501,6 +534,18 @@ function renderHero(snapshot, liveView, controllerStatus = null) {
     committedScore,
     snapshot.data_quality,
   );
+  renderTradeDecision(
+    'te-hero-trade-decision',
+    snapshot.zone,
+    snapshot.zone_action_allowed === true && !controllerReason,
+    controllerReason || snapshot.zone_reason,
+    committedScore,
+    snapshot.data_quality,
+  );
+  const heroWarning = document.getElementById('te-hero-controller-warning');
+  const heroLastError = String(controllerStatus?.last_error || '').trim();
+  heroWarning.textContent = heroLastError ? `Latest controller error: ${heroLastError}` : '';
+  heroWarning.hidden = !heroLastError;
   updateScoreGauge(
     'te-live-score-gauge',
     liveScore,

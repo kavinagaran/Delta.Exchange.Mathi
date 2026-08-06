@@ -1,7 +1,7 @@
 """Score -> action zone mapping against the operator spec (2026-07-29):
 
     score > +40 buys CE · score < -40 buys PE (both ADX-independent)
-    -30..+30 sells ATM MOVE with 5m ADX at or below 20 · all other gaps HOLD
+    -30..+30 sells ATM MOVE with 5m ADX at or below 25 · all other gaps HOLD
 """
 
 from __future__ import annotations
@@ -91,7 +91,7 @@ def test_selling_move_is_refused_when_adx_does_not_confirm_calm():
     decision = zones.decide(score=0.0, regime="RANGE", data_quality="OK",
                             gates_passed=True, short_move_calm=False)
     assert decision.action_allowed is False
-    assert "ADX is above 20" in decision.reason
+    assert "ADX is above 25" in decision.reason
 
 
 @pytest.mark.parametrize("score", [40.1, -40.1])
@@ -249,23 +249,23 @@ def test_drifting_into_the_hold_band_keeps_directional_positions():
 
 
 @pytest.mark.parametrize("score", [30.1, 40.0, -30.1, -40.0])
-def test_short_move_exits_as_soon_as_score_leaves_neutral_range(score):
-    exits, reason = zones.should_exit(
-        zones.SHORT_MOVE, zones.zone_for_score(score), score=score,
-    )
-    assert exits is True
-    assert "left the neutral range" in reason
+def test_short_move_stays_open_while_score_is_only_in_the_hold_band(score):
+    """Leaving the neutral range into HOLD (not a directional zone) must not
+    exit SHORT_MOVE — only a real zone change (to CE_2_ITM/PE_2_ITM) does."""
+    zone = zones.zone_for_score(score)
+    exits, reason = zones.should_exit(zones.SHORT_MOVE, zone, score=score)
+    if zone == zones.HOLD:
+        assert exits is False
+        assert "hold band" in reason
+    else:
+        assert exits is True
 
 
-def test_opposite_hold_band_invalidates_an_existing_directional_position():
-    """The dead band prevents churn, but cannot preserve a contradicted CE/PE.
-
-    A call at -35 (or put at +35) is in HOLD rather than the opposite entry
-    zone.  That must be an exit-only decision, not a stale position or a
-    premature reversal.
-    """
-    assert zones.should_exit("CE_2_ITM", "HOLD", score=-35.0)[0] is True
-    assert zones.should_exit("PE_2_ITM", "HOLD", score=35.0)[0] is True
+def test_hold_band_never_invalidates_an_existing_directional_position():
+    """HOLD means the score has no current opinion, not that the prior one
+    was invalidated — a CE/PE is kept through HOLD regardless of score."""
+    assert zones.should_exit("CE_2_ITM", "HOLD", score=-35.0)[0] is False
+    assert zones.should_exit("PE_2_ITM", "HOLD", score=35.0)[0] is False
     assert zones.should_exit("CE_2_ITM", "HOLD", score=35.0)[0] is False
     assert zones.should_exit("PE_2_ITM", "HOLD", score=-35.0)[0] is False
 

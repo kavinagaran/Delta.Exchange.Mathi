@@ -33,7 +33,7 @@ class _ConfigScreenState extends State<ConfigScreen> {
     ],
     'Risk limits': [
       _FieldSpec('TREND_RISK_BUDGET_USD', 'Risk per trade', prefix: '\$'),
-      _FieldSpec('TREND_DRY_RUN_CAPITAL_USD', 'Paper capital', prefix: '\$'),
+      _FieldSpec('TREND_DRY_RUN_CAPITAL_USD', 'Dry Run capital', prefix: '\$'),
       _FieldSpec('SHORT_MAX_RISK_USD', 'MOVE max loss', prefix: '\$'),
       _FieldSpec('MAX_TRADES_PER_DAY_GLOBAL', 'Trades per day'),
       _FieldSpec('MAX_DAILY_LOSS_USD', 'Daily loss', prefix: '\$'),

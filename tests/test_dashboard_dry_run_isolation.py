@@ -465,7 +465,7 @@ def test_dry_manual_exit_supports_every_strategy_and_appends_exactly_once(
     assert history[0]["simulation_id"] == f"sim-{slot}-test"
     assert not (account / "trade_history.json").exists()
     close_alert.assert_called_once()
-    assert "PAPER TRADE CLOSED" in close_alert.call_args.args[0]
+    assert "DRY RUN TRADE CLOSED" in close_alert.call_args.args[0]
     assert closed["telegram_close_alert_event_id"]
 
 
@@ -630,7 +630,7 @@ def test_dry_protection_tp_sl_tsl_close_locally_and_append_once(
     assert not (account / "trade_history.json").exists()
     raw_post.assert_not_called()
     close_alert.assert_called_once()
-    assert "PAPER TRADE CLOSED" in close_alert.call_args.args[0]
+    assert "DRY RUN TRADE CLOSED" in close_alert.call_args.args[0]
     assert closed["telegram_close_alert_event_id"]
 
 
@@ -897,7 +897,7 @@ def test_dry_run_has_one_score_zone_position_and_manual_exit():
     )
     assert "dryProtectionSaving.has('trend')" in template
     assert ".dry-protection-grid {" in styles
-    assert "Paper-only monitor · always active" in template
+    assert "Dry-run-only monitor · always active" in template
     assert "dryStatus.score_zone_position || dryStatus.trend || {}" in template
     assert "dryStatus.legacy_position_blockers || []" in template
     for legacy_slot in ("dry-slot-morning", "dry-slot-evening", "dry-slot-trend"):

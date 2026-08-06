@@ -32,7 +32,7 @@ function protectionValuesError(values) {
 }
 
 /* Read the six protection inputs for a slot, given an element-id prefix
- * (`tp` on Overview → tp-target-…; `dry` on Paper → dry-tp-…). */
+ * (`tp` on Overview → tp-target-…; `dry` on Dry Run → dry-tp-…). */
 function readProtectionInputs(idFor) {
   const read = id => Number(document.getElementById(id)?.value);
   return {

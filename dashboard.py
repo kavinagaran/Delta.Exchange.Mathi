@@ -18,6 +18,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from contextlib import ExitStack
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -38,6 +39,7 @@ from trend_score_auto import (
     AUTO_TRADE_LOTS as TREND_SCORE_AUTO_LOTS,
     CE_2_ITM as TREND_SCORE_CE_ZONE,
     HOLD as TREND_SCORE_HOLD_ZONE,
+    LONG_MOVE as TREND_SCORE_LONG_MOVE_ZONE,
     MIN_TIME_TO_EXPIRY_SECONDS,
     PE_2_ITM as TREND_SCORE_PE_ZONE,
     SHORT_MOVE as TREND_SCORE_MOVE_ZONE,
@@ -140,6 +142,21 @@ DRY_CLOSED_TRADE_OUTBOX_FILE = "dry_closed_trade_outbox.json"
 TREND_SCORE_AUTO_OWNERSHIP = "trend_score_auto_dry_run"
 TREND_SCORE_AUTO_LIVE_OWNERSHIP = "trend_score_auto_live"
 TREND_SCORE_AUTO_TRIGGER = "trend_engine_score_zone_auto"
+# The Cockpit's manual LIVE entries (Buy CE/PE/MOVE, Sell MOVE). A manual
+# trade has a real fill ledger -- it goes through the identical execution
+# seam as a bot entry -- so it is deliberately NOT treated like an adopted
+# external position (tp_monitor.py's fill-ledger-reconstruction exemptions
+# do not apply to it). It only differs from a bot entry in ownership: the
+# LIVE score-auto controller must never manage or replace it (see
+# _trend_score_auto_live_owned_position), only block new entries while it
+# is open.
+TREND_SCORE_MANUAL_LIVE_OWNERSHIP = "manual_cockpit_live"
+TREND_SCORE_MANUAL_TRIGGERS = {
+    "buy_ce": "manual_cockpit_buy_ce",
+    "buy_pe": "manual_cockpit_buy_pe",
+    "buy_move": "manual_cockpit_buy_move",
+    "sell_move": "manual_cockpit_sell_move",
+}
 TREND_SCORE_AUTO_LEDGER_SIGNAL_LIMIT = 576
 # A zero-fill IOC is a transient liquidity outcome, not a completed trading
 # setup.  Retry only on a later completed candle and back off aggressively so
@@ -1935,7 +1952,7 @@ def _pnl_stats(trades: list, *, dry_run: bool = False) -> dict:
 _PAGES = {
     "":          ("overview.html",  "Today"),
     "trend-engine": ("trend_engine.html", "Trend Engine"),
-    "dry-run":   ("dry_run.html",   "Paper"),
+    "dry-run":   ("dry_run.html",   "Dry Run"),
     "trades":    ("trades.html",    "Performance"),
     "positions": ("positions.html", "Exposure"),
     "config":    ("config.html",    "Bot Config"),
@@ -2038,6 +2055,25 @@ def _exchange_timestamp_iso(value) -> str:
         return ""
 
 
+def _is_operator_protection_only_state(state: dict) -> bool:
+    """Whether an operator explicitly marked this position protection-only.
+
+    Set only by deliberate operator action on an externally opened position;
+    never inferred from exchange data. It tells every consumer the same
+    thing: tp_monitor should keep protecting it, but nothing should manage,
+    replace, or require bot-fill provenance for it. ``_is_owned_trend_state``
+    uses this to keep it out of the "foreign duplicate" classification, and
+    the LIVE score-auto controller uses it to recognise the slot is occupied
+    by a position it does not own rather than treating the missing
+    provenance as a corrupt state.
+    """
+    return (
+        isinstance(state, dict)
+        and state.get("operator_authorized_protection_only") is True
+        and str(state.get("ownership") or "").lower() == "external_protection_only"
+    )
+
+
 def _is_owned_trend_state(state: dict) -> bool:
     """Recognise current, legacy, and explicitly managed Trend states.
 
@@ -2045,10 +2081,14 @@ def _is_owned_trend_state(state: dict) -> bool:
     explicit ``trend_alignment`` / ``trend_auto`` trigger remains accepted.
     An ``exchange_sync`` C/P position is deliberately *not* accepted: it may
     have been opened manually or by another strategy on the same account.
-    The sole exception is an operator-authorized protection-only record. That
-    marker is never inferred from exchange data; it exists so an already
-    monitored external position can retain TP/SL supervision across a rollout
-    without falsely relabelling its entry as a bot trade.
+    Two markers are recognised as owned despite not being the score-auto
+    controller's own entries: an operator-authorized protection-only record
+    (never inferred from exchange data -- it exists so an already monitored
+    external position can retain TP/SL supervision without falsely
+    relabelling its entry as a bot trade), and a Cockpit manual LIVE entry
+    (a real bot-placed order with its own ``trend-`` client-order-id, so the
+    first check below already covers it; the explicit ownership check here
+    is defense in depth, not the only path).
     """
     if not isinstance(state, dict):
         return False
@@ -2061,8 +2101,12 @@ def _is_owned_trend_state(state: dict) -> bool:
         == TREND_SCORE_AUTO_TRIGGER
     ):
         return True
-    if (state.get("operator_authorized_protection_only") is True
-            and str(state.get("ownership") or "").lower() == "external_protection_only"):
+    if (
+        str(state.get("ownership") or "").lower()
+        == TREND_SCORE_MANUAL_LIVE_OWNERSHIP
+    ):
+        return True
+    if _is_operator_protection_only_state(state):
         return True
     trigger = str(state.get("entry_trigger") or "").lower()
     return trigger in {
@@ -4362,7 +4406,7 @@ def api_logs():
         return jsonify({
             "lines": audit_rows,
             "source": "account_activity",
-            "message": "Score-zone decisions, paper-trade changes, and safety notices for this account.",
+            "message": "Score-zone decisions, dry-run trade changes, and safety notices for this account.",
         })
 
     # Never fall back to the shared straddle.log here: that historic file can
@@ -4470,6 +4514,10 @@ def _account_audit_log_line(record: dict) -> str:
             or "different completed 5-minute candles" in lowered
         ):
             prefix = "DATA WAIT"
+        elif "operator-protected external trend position" in lowered:
+            prefix = "PROTECTED"
+        elif "manually opened cockpit trend position" in lowered:
+            prefix = "INFO"
         else:
             prefix = "ERROR"
         return f"{at} · {prefix} · {message or 'Score-zone controller needs attention.'}"
@@ -8880,15 +8928,15 @@ def _trend_score_auto_engine_action_ready(
     """Do not mutate a position until the engine has approved this zone.
 
     A SHORT_MOVE entry is actionable only when the engine confirms the current
-    closed 5m score is neutral and its 5m ADX is at or below 20. A committed
-    ADX above 20 is nevertheless allowed through as an exit-only invalidation
-    so an already-open SHORT_MOVE can be flattened. The planner guarantees
-    that this exception cannot open or switch a position.
+    closed 5m score is neutral and its 5m ADX is at or below 25. A committed
+    ADX above 25 is nevertheless allowed through so an already-open SHORT_MOVE
+    can be flattened once it is no longer a calm-market trade. The planner
+    guarantees that this exception cannot open or switch a position.
     """
     if signal.get("zone") == TREND_SCORE_HOLD_ZONE:
-        # HOLD can still carry an exit-only invalidation for an existing CE/PE
-        # position. The planner decides that under the account lock; it never
-        # opens a position from this branch.
+        # A HOLD reading never closes or opens a position on its own -- see
+        # zones.should_exit. The planner decides that under the account
+        # lock; it never opens a position from this branch.
         return True
     if signal.get("zone_action_allowed") is True:
         return True
@@ -8998,8 +9046,16 @@ def _trend_score_auto_quote_age(timestamp, now: datetime) -> float:
     return max(age, 0)
 
 
-def _trend_score_auto_move_quote(symbol: str, lots: int) -> dict:
-    """Validate a public, executable MOVE sell quote for the configured size."""
+def _trend_score_auto_move_quote(
+    symbol: str, lots: int, *, side: str = "sell",
+) -> dict:
+    """Validate a public, executable MOVE quote for the configured size.
+
+    ``side="sell"`` (the default, and the only side the automated SHORT_MOVE
+    path ever requests) prices and depth-checks the bid, the side that
+    receives premium. ``side="buy"`` -- the Cockpit's manual Buy MOVE trade
+    only -- prices and depth-checks the ask, the side that pays it.
+    """
     payload = req.get(f"{API_BASE}/v2/tickers/{symbol}", timeout=8).json()
     ticker = payload.get("result") if isinstance(payload, dict) else None
     if not isinstance(ticker, dict) or not ticker:
@@ -9019,6 +9075,13 @@ def _trend_score_auto_move_quote(symbol: str, lots: int) -> dict:
         raise RuntimeError("MOVE spread exceeds the configured cap")
     if quote.get("trading_status") not in ("", "operational"):
         raise RuntimeError("MOVE contract is not operational")
+    if side == "buy":
+        depth = _trend_score_auto_number(
+            quote.get("ask_size"), "MOVE ask depth", positive=True,
+        )
+        if depth < lots:
+            raise RuntimeError("MOVE ask depth cannot fill the configured order size")
+        return {**quote, "entry_price": ask, "entry_depth": depth, "side": "buy"}
     depth = _trend_score_auto_number(
         quote.get("bid_size"), "MOVE bid depth", positive=True,
     )
@@ -9037,13 +9100,21 @@ def _trend_score_auto_short_move_eligibility(
     quote: dict,
     *,
     now: datetime | None = None,
+    enforce_min_tte: bool = True,
 ) -> dict:
     """Validate the explicit SHORT MOVE contract-entry rules.
 
     The Trend Engine supplies the calm-market signal. Contract selection then
-    requires only a quoted ATM MOVE premium above $300 and strictly more than
-    90 minutes to expiry. Forecast-value and jump-probability filters are not
-    part of this strategy.
+    requires only a quoted ATM MOVE premium above $300 and, for the
+    automated controller, strictly more than 90 minutes to expiry.
+    Forecast-value and jump-probability filters are not part of this
+    strategy. ``selection`` is trusted to already be the nearest listed
+    expiry -- that is ``select_move_contract``'s own ``today_only``
+    guarantee at selection time, not re-derivable here from a single
+    already-selected contract without re-fetching the whole listing. A
+    Cockpit manual entry passes ``enforce_min_tte=False``: the operator's
+    own real-time judgement substitutes for the 90-minute liquidity floor,
+    same as it already does for the ADX calm-market gate.
     """
     current = now or datetime.now(timezone.utc)
     if current.tzinfo is None:
@@ -9065,7 +9136,7 @@ def _trend_score_auto_short_move_eligibility(
     if expiry.tzinfo is None:
         expiry = expiry.replace(tzinfo=timezone.utc)
     tte_seconds = (expiry.astimezone(timezone.utc) - current).total_seconds()
-    if tte_seconds <= MIN_TIME_TO_EXPIRY_SECONDS:
+    if enforce_min_tte and tte_seconds <= MIN_TIME_TO_EXPIRY_SECONDS:
         raise RuntimeError("SHORT MOVE needs more than 90 minutes until expiry")
     bid = _trend_score_auto_number(quote.get("bid"), "MOVE bid", positive=True)
     if bid <= SHORT_MOVE_MIN_PREMIUM_USD:
@@ -9077,7 +9148,9 @@ def _trend_score_auto_short_move_eligibility(
         "quoted_premium_usd": round(bid, 8),
         "minimum_premium_usd": SHORT_MOVE_MIN_PREMIUM_USD,
         "time_to_expiry_seconds": round(tte_seconds, 3),
-        "minimum_time_to_expiry_seconds": MIN_TIME_TO_EXPIRY_SECONDS,
+        "minimum_time_to_expiry_seconds": (
+            MIN_TIME_TO_EXPIRY_SECONDS if enforce_min_tte else 0
+        ),
         "weekday_blackout_start_ist": "17:30",
     }
 
@@ -9106,12 +9179,14 @@ def _prepare_trend_score_auto_entry(signal: dict) -> dict:
             zone=zone,
             now=now,
             lots=lots,
+            today_only=True,
         )
         if not selection:
             label = "2-step ITM CALL" if zone == TREND_SCORE_CE_ZONE \
                 else "2-step ITM PUT"
             raise RuntimeError(
-                f"No exact executable {label} contract is available"
+                f"No exact executable today's-expiry {label} contract "
+                "is available"
             )
         contract = selection["executable_contract"]
         max_age = max(_as_float(_cfg("TREND_QUOTE_MAX_AGE_SECS", "20"), 20), 1)
@@ -9148,10 +9223,12 @@ def _prepare_trend_score_auto_entry(signal: dict) -> dict:
         raise RuntimeError("unsupported Trend score zone")
     selection = select_move_contract(
         _fetch_live_mv_products(), spot=spot, now=now, lots=lots,
+        today_only=True,
     )
     if not selection:
         raise RuntimeError(
-            "No operational ATM MOVE contract with more than 90 minutes remains"
+            "No operational ATM MOVE contract for today's expiry with more "
+            "than 90 minutes remains"
         )
     # LIVE sizing needs the executable quote before it can turn the account's
     # available USD into an affordable whole-lot quantity.  Require at least
@@ -9177,6 +9254,165 @@ def _prepare_trend_score_auto_entry(signal: dict) -> dict:
         _trend_score_auto_live_affordable_entry(prepared)
         if live_sizing else prepared
     )
+
+
+def _cockpit_market_snapshot() -> dict:
+    """Collect the same authenticated account/market snapshot the score-auto
+    controller uses for contract selection -- independent of whether the
+    automated controller itself is enabled. A manual Cockpit trade does not
+    depend on ``TREND_ENGINE_SCORE_AUTO_MODE``; it depends only on the
+    account being in LIVE trading mode, which the caller has already
+    checked.
+    """
+    mode = _trading_mode_payload()
+    strategy_config = _trend_engine_strategy_config()
+    return collect_delta_trend_snapshot(
+        http_get=req.get,
+        api_base=API_BASE,
+        sign=_sign,
+        user_dir=_user_dir(),
+        dry_run=False,
+        mode_revision=mode["mode_revision"],
+        strategy_config=strategy_config,
+    )
+
+
+def _cockpit_prepare_manual_entry(action: str, snapshot: dict) -> dict:
+    """Resolve and wallet-size the exact contract for one Cockpit trade type.
+
+    Mirrors ``_prepare_trend_score_auto_entry``'s contract-selection and
+    LIVE affordability logic, but intentionally skips every
+    automated-only precondition: there is no engine ``zone_action_allowed``
+    gate to satisfy and no ``plan_score_transition``/ADX calm-market check
+    to pass, because a manual trade substitutes the operator's own
+    real-time judgement for both. ``buy_ce``/``buy_pe`` still require a
+    fresh, non-stale executable quote; ``sell_move`` still enforces the
+    SHORT MOVE weekday blackout and minimum premium guards (data-quality/
+    liquidity checks, not automated-calmness checks); ``buy_move`` has no
+    automated precedent to mirror.
+
+    Every trade type is restricted to today's IST expiry, same as the
+    automated controller -- a Cockpit trade must never silently roll to
+    tomorrow's contract either. Unlike the automated controller, none of
+    these selections enforce the standard 90-minute-minimum-time-to-expiry
+    floor: the operator's own real-time judgement substitutes for it, same
+    as the ADX bypass above, so today's contract is always selectable up
+    to whenever the exchange itself stops listing it as operational (the
+    ``state``/``trading_status`` checks inside ``select_directional_option``/
+    ``select_move_contract`` remain the only backstop).
+    """
+    lots = _trend_score_auto_configured_lots()
+    now = datetime.now(timezone.utc)
+    spot = _trend_score_auto_number(
+        (snapshot.get("market") or {}).get("spot"), "BTC spot", positive=True,
+    )
+
+    if action in ("buy_ce", "buy_pe"):
+        zone = (
+            TREND_SCORE_CE_ZONE if action == "buy_ce" else TREND_SCORE_PE_ZONE
+        )
+        selection = select_directional_option(
+            _fetch_live_vanilla_products(),
+            snapshot.get("option_contracts") or [],
+            spot=spot, zone=zone, now=now, lots=lots,
+            today_only=True, min_time_to_expiry_seconds=0,
+        )
+        if not selection:
+            label = "2-step ITM CALL" if action == "buy_ce" else "2-step ITM PUT"
+            raise RuntimeError(
+                f"No exact executable today's-expiry {label} contract "
+                "is available"
+            )
+        contract = selection["executable_contract"]
+        max_age = max(_as_float(_cfg("TREND_QUOTE_MAX_AGE_SECS", "20"), 20), 1)
+        age = _trend_score_auto_quote_age(contract.get("quote_timestamp"), now)
+        if age > max_age:
+            raise RuntimeError("selected option quote is stale")
+        prepared = {
+            **selection,
+            "side": "long",
+            "instrument_kind": "BTC_OPTION",
+            "contract_value": _trend_score_auto_number(
+                contract.get("contract_value"), "option contract value",
+                positive=True,
+            ),
+            "settlement": selection["expiry"],
+            "quote_timestamp": contract.get("quote_timestamp"),
+            "entry_depth": _trend_score_auto_number(
+                contract.get("ask_size") or contract.get("ask_quantity"),
+                "option ask depth", positive=True,
+            ),
+            "quote_snapshot": copy.deepcopy(contract),
+        }
+        return _trend_score_auto_live_affordable_entry(prepared)
+
+    if action not in ("buy_move", "sell_move"):
+        raise RuntimeError(f"unsupported Cockpit trade type: {action}")
+    selection = select_move_contract(
+        _fetch_live_mv_products(), spot=spot, now=now, lots=lots,
+        today_only=True, min_time_to_expiry_seconds=0,
+    )
+    if not selection:
+        raise RuntimeError(
+            "No operational ATM MOVE contract is available for today's expiry"
+        )
+    if action == "sell_move":
+        quote = _trend_score_auto_move_quote(selection["symbol"], 1)
+        move_eligibility = _trend_score_auto_short_move_eligibility(
+            selection, quote, enforce_min_tte=False,
+        )
+        prepared = {
+            **selection,
+            "side": "short",
+            "option_type": "MOVE",
+            "instrument_kind": "BTC_MOVE",
+            "entry_price": quote["entry_price"],
+            "settlement": selection["expiry"],
+            "quote_timestamp": datetime.now(timezone.utc).isoformat(),
+            "entry_depth": quote["entry_depth"],
+            "quote_snapshot": quote,
+            "move_eligibility": move_eligibility,
+        }
+    else:
+        quote = _trend_score_auto_move_quote(
+            selection["symbol"], 1, side="buy",
+        )
+        prepared = {
+            **selection,
+            "zone": TREND_SCORE_LONG_MOVE_ZONE,
+            "side": "long",
+            "option_type": "MOVE",
+            "instrument_kind": "BTC_MOVE",
+            "entry_price": quote["entry_price"],
+            "settlement": selection["expiry"],
+            "quote_timestamp": datetime.now(timezone.utc).isoformat(),
+            "entry_depth": quote["entry_depth"],
+            "quote_snapshot": quote,
+        }
+    return _trend_score_auto_live_affordable_entry(prepared)
+
+
+def _cockpit_manual_signal(action: str, snapshot: dict) -> dict:
+    """Build the minimal synthetic ``signal`` a Cockpit entry hands to the
+    execution seam.
+
+    ``signal_key`` is namespaced with a ``manual-cockpit|`` prefix a real
+    completed-candle key (``trend-score-auto|BTCUSD|5m|...``) can never
+    collide with, and this key is never written into the score-auto
+    ledger's consumed-signals set -- a manual entry does not touch that
+    ledger at all (see the Cockpit route), so it can neither shadow a real
+    signal nor be shadowed by one.
+    """
+    return {
+        "signal_key": (
+            f"manual-cockpit|{action}|{uuid.uuid4().hex}"
+        ),
+        "score": 0.0,
+        "market_regime": "MANUAL",
+        "signal_bar_close_utc": None,
+        "decision": {"source": "cockpit", "action": action},
+        "snapshot": snapshot,
+    }
 
 
 def _trend_score_auto_transition_id(user: str, signal_key: str, zone: str) -> str:
@@ -9369,7 +9605,7 @@ def _trend_score_auto_owned_position(state: dict) -> dict | None:
         raise RuntimeError("The controller-owned Trend lot count is invalid") from exc
     if not 1 <= lots <= 5_000 or lots != requested:
         raise RuntimeError(
-            "The controller-owned paper position has an invalid order size"
+            "The controller-owned dry-run position has an invalid order size"
         )
     position_score_zone(state)
     return dict(state)
@@ -9886,7 +10122,7 @@ def _trend_score_auto_notify(text: str) -> None:
 
 
 def _notify_dry_run_close_once(slot: str, state: dict) -> bool:
-    """Alert one completed paper close once, including TP/SL/TSL exits.
+    """Alert one completed dry-run close once, including TP/SL/TSL exits.
 
     DRY RUN protection is executed locally, so it does not pass through the
     LIVE ``tp_monitor`` alert path.  Persisting the event id in the closed
@@ -9925,7 +10161,7 @@ def _notify_dry_run_close_once(slot: str, state: dict) -> bool:
     except (TypeError, ValueError):
         pnl_text = "—"
     _trend_score_auto_notify(
-        f"🤖 <b>PAPER TRADE CLOSED — {_active_user().upper()}</b>\n"
+        f"🤖 <b>DRY RUN TRADE CLOSED — {_active_user().upper()}</b>\n"
         f"{reason}\n"
         f"Symbol » <code>{state.get('symbol', '')}</code>\n"
         f"Lots » <code>{int(state.get('lots') or 0):,}</code>\n"
@@ -9987,6 +10223,12 @@ def _trend_score_auto_live_owned_position(state: dict) -> dict | None:
                 f"LIVE Trend state is unresolved ({status or 'unknown'})"
             )
         return None
+    if _is_operator_protection_only_state(state):
+        # Deliberately open without controller provenance -- an operator
+        # handed this position to tp_monitor for protection only. Not the
+        # controller's to manage, but the slot is not free either; see
+        # _trend_score_auto_live_previous_state_error for the OPEN case.
+        return None
     if _is_dry_record(state):
         raise RuntimeError("LIVE score automation will not manage a DRY state")
     if (
@@ -10000,6 +10242,13 @@ def _trend_score_auto_live_owned_position(state: dict) -> dict | None:
         state.get("ownership") != TREND_SCORE_AUTO_LIVE_OWNERSHIP
         or state.get("entry_trigger") != TREND_SCORE_AUTO_TRIGGER
     ):
+        if state.get("ownership") == TREND_SCORE_MANUAL_LIVE_OWNERSHIP:
+            # A Cockpit manual entry: full bot-grade provenance (a real
+            # fill ledger, unlike the protection-only-external case above),
+            # but the controller must never manage or replace it -- only
+            # block a new entry while it is open; see
+            # _trend_score_auto_live_previous_state_error for the OPEN case.
+            return None
         raise RuntimeError(
             "A non-controller LIVE Trend position is already open"
         )
@@ -10055,7 +10304,20 @@ def _trend_score_auto_live_previous_state_error(state: dict) -> str | None:
     if status == "ENTRY_PENDING":
         return "A LIVE Trend entry identity is still pending recovery"
     if status == "OPEN":
-        return None
+        # The only ways status can be OPEN here (owned position resolution
+        # already returned None) are the two exemptions in
+        # _trend_score_auto_live_owned_position -- the slot is occupied by
+        # a position the controller does not own, so it must not open a new
+        # one over it, whichever exemption applies.
+        if state.get("ownership") == TREND_SCORE_MANUAL_LIVE_OWNERSHIP:
+            return (
+                "A manually opened Cockpit Trend position is open; the "
+                "LIVE controller will not act on this slot until it closes"
+            )
+        return (
+            "An operator-protected external Trend position is open; the "
+            "LIVE controller will not act on this slot until it closes"
+        )
     if status not in {"", "IDLE", "CLOSED"}:
         return f"LIVE Trend state is unresolved ({status or 'unknown'})"
     if _trend_score_auto_pending_identity(state):
@@ -10135,8 +10397,21 @@ def _trend_score_auto_live_quote(prepared: dict) -> dict:
     return quote
 
 
-def _trend_score_auto_live_require_tte(prepared: dict) -> None:
-    """Require the selected daily BTC contract to retain 90 minutes at POST."""
+def _trend_score_auto_live_require_tte(
+    prepared: dict, *, require_min_tte: bool = True,
+) -> None:
+    """Require the selected daily BTC contract to, unless the caller
+    substitutes its own real-time judgement, still retain 90 minutes at
+    POST.
+
+    ``require_min_tte=False`` is for a Cockpit manual entry: the 90-minute
+    liquidity floor is bypassed the same way the SHORT MOVE ADX
+    calm-market gate already is. This does not separately re-check "today's
+    expiry" -- that the contract is the nearest listed one is
+    ``select_directional_option``/``select_move_contract``'s own
+    ``today_only`` guarantee at selection time, not re-derivable here from
+    a single already-selected contract.
+    """
     raw = prepared.get("settlement") or prepared.get("expiry")
     if raw in (None, ""):
         raise RuntimeError(
@@ -10151,11 +10426,13 @@ def _trend_score_auto_live_require_tte(prepared: dict) -> None:
         raise RuntimeError(
             "selected LIVE score contract has an invalid settlement time"
         ) from exc
-    remaining = (settlement - datetime.now(timezone.utc)).total_seconds()
-    if remaining < 90 * 60:
-        raise RuntimeError(
-            "selected LIVE score contract has less than 1.5 hours to expiry"
-        )
+    current = datetime.now(timezone.utc)
+    if require_min_tte:
+        remaining = (settlement - current).total_seconds()
+        if remaining < 90 * 60:
+            raise RuntimeError(
+                "selected LIVE score contract has less than 1.5 hours to expiry"
+            )
 
 
 def _trend_score_auto_live_available_usd(
@@ -10261,6 +10538,10 @@ def _trend_score_auto_live_required_funds(
         prepared.get("contract_value"), "contract value", positive=True,
     )
     is_short = prepared.get("zone") == TREND_SCORE_MOVE_ZONE
+    # A MOVE straddle is always two legs (call + put together) regardless of
+    # direction -- this must key off the instrument, not is_short, or a long
+    # MOVE entry silently halves its estimated commission.
+    legs = 2 if str(prepared.get("instrument_kind") or "").upper() == "BTC_MOVE" else 1
     price_key = "bid" if is_short else "ask"
     touch = _trend_score_auto_number(
         quote.get(price_key), f"fresh {price_key}", positive=True,
@@ -10301,7 +10582,7 @@ def _trend_score_auto_live_required_funds(
             ratio += (notional - max_leverage_notional) * scaling
         margin_or_premium = notional * ratio
         fee_per_lot = _trend_score_auto_product_fee_per_lot(
-            prepared, price=touch, legs=2,
+            prepared, price=touch, legs=legs,
         )
         basis = "move_isolated_margin_plus_entry_charges"
         funding_price = touch
@@ -10318,7 +10599,7 @@ def _trend_score_auto_live_required_funds(
         ) * (1 + max_slippage / 100.0)
         margin_or_premium = funding_price * cv * requested
         fee_per_lot = _trend_score_auto_product_fee_per_lot(
-            prepared, price=funding_price,
+            prepared, price=funding_price, legs=legs,
         )
         basis = "long_option_premium_plus_entry_charges"
     fees = fee_per_lot * requested
@@ -10467,7 +10748,7 @@ def _trend_score_auto_risk_snapshot(
     configured_lots = _trend_score_auto_configured_lots(cfg)
     if dry_run and lots != configured_lots:
         raise RuntimeError(
-            "Prepared paper order size differs from the configured Trend Engine size"
+            "Prepared dry-run order size differs from the configured Trend Engine size"
         )
     if not dry_run:
         sizing = prepared.get("live_affordability")
@@ -10890,16 +11171,31 @@ def _trend_score_auto_live_final_preflight(
     prepared: dict,
     quote: dict,
     expected_credentials: tuple[str, str] | None = None,
+    require_score_auto_mode: bool = True,
+    require_min_tte: bool = True,
 ) -> None:
-    """Last account/config/exposure proof immediately before the entry POST."""
-    _trend_score_auto_live_require_tte(prepared)
+    """Last account/config/exposure proof immediately before the entry POST.
+
+    ``require_score_auto_mode`` gates on ``TREND_ENGINE_SCORE_AUTO_MODE``
+    (the automated Bot ON/OFF toggle) being "live" -- correct for the
+    automated controller, whose entries are that toggle's entire reason to
+    exist, but wrong for a Cockpit manual entry: a human clicking a button
+    does not stop being a deliberate, authorized action just because the
+    automated loop is switched off. The Cockpit route passes False here.
+
+    ``require_min_tte`` gates the 90-minute-to-expiry floor inside
+    ``_trend_score_auto_live_require_tte``: required for the automated
+    controller, bypassed for a Cockpit manual entry (which still requires
+    today's IST expiry either way -- only the liquidity floor differs).
+    """
+    _trend_score_auto_live_require_tte(prepared, require_min_tte=require_min_tte)
     mode = _trading_mode_payload()
     cfg = _user_cfg()
     error = _trend_score_auto_config_error(cfg)
     if (
         mode.get("dry_run_mode")
         or mode.get("mode_revision") != initial_revision
-        or _trend_score_auto_mode(cfg) != "live"
+        or (require_score_auto_mode and _trend_score_auto_mode(cfg) != "live")
         or error
     ):
         raise RuntimeError(
@@ -11056,7 +11352,7 @@ def _trend_score_auto_live_final_preflight(
             "LIVE score risk changed before POST; entry will be rebuilt"
         )
     # Recheck all time-sensitive, local boundaries after the last network call.
-    _trend_score_auto_live_require_tte(prepared)
+    _trend_score_auto_live_require_tte(prepared, require_min_tte=require_min_tte)
     quote_epoch = _trend_score_auto_number(
         final_quote.get("quote_epoch"),
         "fresh LIVE score ticker timestamp",
@@ -11103,7 +11399,17 @@ def _trend_score_auto_live_signal_from_state(
     zone = str(
         state.get("trend_score_zone") or state.get("engine_zone") or ""
     ).strip().upper()
-    if score_zone(score) != zone:
+    # A Cockpit manual entry always persists score=0.0 (see
+    # _cockpit_manual_signal) regardless of which trade type the operator
+    # chose -- score never determined its zone, so score_zone(0.0) has no
+    # reason to agree with e.g. CE_2_ITM/LONG_MOVE. That mismatch is exactly
+    # what this check exists to catch for a bot-owned entry (score and zone
+    # are supposed to be mathematically linked there); for a manual entry
+    # it would reject every recovery of a never-submitted intent.
+    if (
+        state.get("ownership") != TREND_SCORE_MANUAL_LIVE_OWNERSHIP
+        and score_zone(score) != zone
+    ):
         raise RuntimeError(
             "pending LIVE entry score no longer matches its durable zone"
         )
@@ -11149,11 +11455,25 @@ def _trend_score_auto_live_pre_post_pending(state: dict) -> bool:
 
 
 def _trend_score_auto_live_pending_identity(state: dict) -> bool:
-    """Whether state is a controller-owned LIVE score entry generation."""
+    """Whether state is a controller- or Cockpit-owned LIVE entry generation.
+
+    ``entry_trigger`` is not parameterized by ``build_pending_entry_state``
+    (it always persists the automated controller's literal, a pre-existing,
+    accepted gap -- see ``_trend_score_auto_live_execute``), so it matches
+    for both owners and cannot distinguish them; ``ownership`` is the only
+    field that actually varies, and is therefore the only one checked here.
+    A Cockpit-owned pending entry must be recoverable by the same machinery
+    as a bot one -- e.g. a pre-POST intent left behind by a failed
+    preflight (see ``_trend_score_auto_live_cancel_stale_pre_post``) --
+    or a failed manual entry permanently wedges the Trend slot shut against
+    every future entry, manual or automated.
+    """
     return bool(
         str((state or {}).get("status") or "").strip().upper()
         == "ENTRY_PENDING"
-        and state.get("ownership") == TREND_SCORE_AUTO_LIVE_OWNERSHIP
+        and state.get("ownership") in (
+            TREND_SCORE_AUTO_LIVE_OWNERSHIP, TREND_SCORE_MANUAL_LIVE_OWNERSHIP,
+        )
         and state.get("entry_trigger") == TREND_SCORE_AUTO_TRIGGER
     )
 
@@ -11619,6 +11939,7 @@ def _trend_score_auto_live_execute(
     transition_id: str,
     initial_revision: str,
     existing_state: dict,
+    ownership: str = TREND_SCORE_AUTO_LIVE_OWNERSHIP,
 ) -> dict:
     """Bind the pure LIVE executor to strict dashboard exchange adapters."""
     pending = str(existing_state.get("status") or "").upper() == "ENTRY_PENDING"
@@ -11630,6 +11951,16 @@ def _trend_score_auto_live_execute(
         existing_state.get("selected_contract_snapshot")
         if pending else prepared
     )
+    # Recovering a durable ENTRY_PENDING generation must use *that*
+    # generation's own recorded ownership, not the caller's default --
+    # a recovery-lane caller does not always know in advance whether the
+    # stuck intent it is resuming was a bot or a Cockpit entry.  A fresh
+    # entry (no pending record to inherit from) always uses the caller's
+    # explicit ``ownership``.
+    effective_ownership = (
+        str(existing_state.get("ownership") or "").strip() or ownership
+        if pending else ownership
+    )
     bound_credentials = _active_creds()
     if not all(bound_credentials):
         raise RuntimeError(
@@ -11638,7 +11969,12 @@ def _trend_score_auto_live_execute(
     if pre_post and not isinstance(selected, dict):
         raise RuntimeError("LIVE score entry has no selected contract")
     if pre_post:
-        _trend_score_auto_live_require_tte(selected)
+        _trend_score_auto_live_require_tte(
+            selected,
+            require_min_tte=(
+                effective_ownership != TREND_SCORE_MANUAL_LIVE_OWNERSHIP
+            ),
+        )
         quote = _trend_score_auto_live_quote(selected)
         available_usd = _trend_score_auto_live_available_usd(
             credentials=bound_credentials,
@@ -11721,6 +12057,12 @@ def _trend_score_auto_live_execute(
             prepared=dict(selected),
             quote=dict(quote or {}),
             expected_credentials=bound_credentials,
+            require_score_auto_mode=(
+                effective_ownership != TREND_SCORE_MANUAL_LIVE_OWNERSHIP
+            ),
+            require_min_tte=(
+                effective_ownership != TREND_SCORE_MANUAL_LIVE_OWNERSHIP
+            ),
         ),
         submit_order=submit_with_verified_credentials,
         lookup_order=lookup_with_verified_credentials,
@@ -11734,7 +12076,7 @@ def _trend_score_auto_live_execute(
         max_slippage_pct=max_slippage,
         max_spread_pct=max_spread,
         max_quote_age_sec=max_quote_age,
-        ownership=TREND_SCORE_AUTO_LIVE_OWNERSHIP,
+        ownership=effective_ownership,
         audit=lambda event, details: _trend_audit(event, dict(details)),
     )
 
@@ -11969,6 +12311,12 @@ def _maybe_auto_trend_score_live_cycle(
         )
         return False
 
+    # Captured before any in-cycle health update can reset last_error to
+    # None, so the post-cycle dedup below compares against the *previous
+    # cycle's* outcome rather than a value this same cycle already cleared.
+    previous_error = _trend_score_auto_health.get(
+        user, {},
+    ).get("last_error")
     try:
         current_signal = _collect_trend_score_auto_signal()
         if not _trend_score_auto_engine_action_ready(
@@ -12727,7 +13075,7 @@ def _maybe_auto_trend_score_live_cycle(
                             + (
                                 f"because committed 5-minute ADX reached "
                                 f"<code>{current_signal.get('trigger_adx')}</code> "
-                                "(calm requires ADX at or below 20). "
+                                "(calm requires ADX at or below 25). "
                                 if plan.get("reason")
                                 == "SHORT_MOVE_ADX_NO_LONGER_CALM"
                                 else "after directional invalidation. "
@@ -12808,9 +13156,6 @@ def _maybe_auto_trend_score_live_cycle(
             execution_mode="LIVE",
         )
     except Exception as exc:
-        previous_error = _trend_score_auto_health.get(
-            user, {},
-        ).get("last_error")
         message = str(exc)[:500]
         _trend_score_auto_health_update(
             user,
@@ -12872,6 +13217,12 @@ def _maybe_auto_trend_score_cycle() -> bool:
         )
         return False
 
+    # Captured before any in-cycle health update can reset last_error to
+    # None, so the post-cycle dedup below compares against the *previous
+    # cycle's* outcome rather than a value this same cycle already cleared.
+    previous_error = _trend_score_auto_health.get(
+        user, {},
+    ).get("last_error")
     try:
         signal = _collect_trend_score_auto_signal()
         if not _trend_score_auto_engine_action_ready(
@@ -13119,7 +13470,7 @@ def _maybe_auto_trend_score_cycle() -> bool:
                         user,
                         status="setup_locked",
                         last_action=(
-                            "this score zone already opened one paper trade; "
+                            "this score zone already opened one dry-run trade; "
                             "waiting for a different zone or an explicit reset"
                         ),
                         last_error=None,
@@ -13253,7 +13604,7 @@ def _maybe_auto_trend_score_cycle() -> bool:
                             "is no longer calm"
                             if plan.get("reason")
                             == "SHORT_MOVE_ADX_NO_LONGER_CALM"
-                            else "exited the invalidated directional paper position"
+                            else "exited the invalidated directional dry-run position"
                         ),
                         last_error=None, current_zone=None, symbol=None, lots=0,
                         last_transition_id=transition_id,
@@ -13265,7 +13616,7 @@ def _maybe_auto_trend_score_cycle() -> bool:
                             + (
                                 f"committed 5-minute ADX reached "
                                 f"<code>{signal.get('trigger_adx')}</code> "
-                                "(calm requires ADX at or below 20). "
+                                "(calm requires ADX at or below 25). "
                                 if plan.get("reason")
                                 == "SHORT_MOVE_ADX_NO_LONGER_CALM"
                                 else "directional invalidation. "
@@ -13304,7 +13655,7 @@ def _maybe_auto_trend_score_cycle() -> bool:
                                 f"Exited <code>{closed.get('symbol', '')}</code> after the "
                                 f"score moved to <code>{signal['zone']}</code>.\n"
                                 "The configured-size contract is not executable yet; "
-                                "the paper account remains flat and will retry this signal."
+                                "the dry-run account remains flat and will retry this signal."
                             )
                         return True
                     # No position has changed. Mark this intent rebuildable so
@@ -13351,9 +13702,9 @@ def _maybe_auto_trend_score_cycle() -> bool:
                         user,
                         status="flat_waiting_risk" if plan["action"] == "CLOSE_THEN_OPEN" else "blocked",
                         last_action=(
-                            "previous score zone exited; paper replacement is blocked by risk"
+                            "previous score zone exited; dry-run replacement is blocked by risk"
                             if plan["action"] == "CLOSE_THEN_OPEN"
-                            else "paper score entry is blocked by the same risk policy used in LIVE"
+                            else "dry-run score entry is blocked by the same risk policy used in LIVE"
                         ),
                         last_error=str(exc)[:500], current_zone=None,
                         symbol=None, lots=0,
@@ -13382,7 +13733,7 @@ def _maybe_auto_trend_score_cycle() -> bool:
                     or final_mode.get("mode_revision") != initial_revision
                     or _trend_score_auto_mode() != "dry_run"
                 ):
-                    raise RuntimeError("Controller mode changed before paper entry")
+                    raise RuntimeError("Controller mode changed before dry-run entry")
                 opened = _trend_score_auto_open_state(
                     signal, prepared, transition_id, dry_risk_snapshot,
                 )
@@ -13441,9 +13792,9 @@ def _maybe_auto_trend_score_cycle() -> bool:
                 _trend_score_auto_health_update(
                     user, status="position_open",
                     last_action=(
-                        "switched the paper position to the new score zone"
+                        "switched the dry-run position to the new score zone"
                         if action == "SWITCH"
-                        else "opened the score-directed paper position"
+                        else "opened the score-directed dry-run position"
                     ),
                     last_error=None,
                     current_zone=signal["zone"],
@@ -13472,7 +13823,6 @@ def _maybe_auto_trend_score_cycle() -> bool:
             execution_mode="DRY RUN",
         )
     except Exception as exc:
-        previous_error = _trend_score_auto_health.get(user, {}).get("last_error")
         _trend_score_auto_health_update(
             user, status="error", last_cycle_utc=cycle_at,
             last_action="score cycle failed closed", last_error=str(exc)[:500],
@@ -13778,6 +14128,197 @@ def api_trend_engine_score_auto_setup_lock_reset():
         })
     except Exception as exc:
         return jsonify({"ok": False, "error": str(exc)[:300]}), 400
+
+
+@app.route("/api/cockpit/enter", methods=["POST"])
+def api_cockpit_enter():
+    """Place one manually chosen LIVE Trend trade: Buy CE, Buy PE, Buy MOVE,
+    or Sell MOVE.
+
+    Reuses the identical execution seam the automated LIVE score-auto
+    controller uses -- same risk gating, wallet-affordable sizing, IOC
+    submission, and protection spawn -- tagged with a distinct ownership
+    (``manual_cockpit_live``) so the controller never manages or replaces it
+    (see ``_trend_score_auto_live_owned_position``). Exclusivity is the same
+    non-blocking ``account_entry_lock`` the automated 15s cycle takes before
+    deciding: whichever side acquires it first proceeds, the other is
+    refused immediately -- first-come-first-served, with no new locking
+    primitive.
+    """
+    user = _active_user()
+    action = str(
+        (request.get_json(silent=True) or {}).get("action") or ""
+    ).strip().lower()
+    if action not in TREND_SCORE_MANUAL_TRIGGERS:
+        return jsonify({
+            "ok": False,
+            "error": "action must be buy_ce, buy_pe, buy_move, or sell_move",
+        }), 400
+
+    initial_mode = _trading_mode_payload()
+    if initial_mode.get("dry_run_mode"):
+        return jsonify({
+            "ok": False,
+            "error": "The Cockpit only places LIVE trades; switch to LIVE trading mode first",
+        }), 409
+    key, secret = _active_creds()
+    if not key or not secret:
+        return jsonify({
+            "ok": False, "error": "API credentials are not configured",
+        }), 409
+
+    root_dir = _user_dir()
+    owner = f"cockpit-manual:{user}:{os.getpid()}:{time.time_ns()}"
+    try:
+        with account_entry_lock(root_dir, owner) as exposure_lock:
+            if not exposure_lock:
+                return jsonify({
+                    "ok": False,
+                    "error": (
+                        "Another entry, exit, or recovery is in progress; "
+                        "retry shortly"
+                    ),
+                }), 409
+            boundary_mode = _trading_mode_payload()
+            if (
+                boundary_mode.get("dry_run_mode")
+                or boundary_mode.get("mode_revision")
+                != initial_mode.get("mode_revision")
+            ):
+                return jsonify({
+                    "ok": False,
+                    "error": "Trading mode changed; reload and retry",
+                }), 409
+
+            with account_file_lock(
+                root_dir, "close-trend", owner,
+                stale_after_sec=120, wait_sec=2,
+            ) as close_lock:
+                if not close_lock:
+                    return jsonify({
+                        "ok": False, "error": "The Trend slot is busy",
+                    }), 409
+                states = {
+                    slot: _trend_score_auto_strict_json(_slot_file(slot), {})
+                    for slot in SLOTS
+                }
+
+            for slot in MOVE_SLOTS:
+                blocker = _trend_score_auto_live_other_slot_error(
+                    slot, states[slot],
+                )
+                if blocker:
+                    return jsonify({"ok": False, "error": blocker}), 409
+            # A manual entry may never open over ANY existing occupant --
+            # bot-owned (owned truthy; the automated cycle is allowed to
+            # replace its own position via plan_score_transition, but a
+            # manual click never may) or blocked for any other reason
+            # (manual/adopted-external/pending/unresolved).
+            owned = _trend_score_auto_live_owned_position(states["trend"])
+            if owned:
+                return jsonify({
+                    "ok": False,
+                    "error": "A bot-managed Trend position is already open",
+                }), 409
+            blocker = _trend_score_auto_live_previous_state_error(
+                states["trend"],
+            )
+            if blocker:
+                return jsonify({"ok": False, "error": blocker}), 409
+
+            snapshot = _cockpit_market_snapshot()
+            prepared = _cockpit_prepare_manual_entry(action, snapshot)
+            signal = _cockpit_manual_signal(action, snapshot)
+            transition_id = _trend_score_auto_transition_id(
+                user, signal["signal_key"], prepared["zone"],
+            )
+            result = _trend_score_auto_live_execute(
+                user=user,
+                signal=signal,
+                prepared=prepared,
+                transition_id=transition_id,
+                initial_revision=initial_mode.get("mode_revision"),
+                existing_state=states["trend"],
+                ownership=TREND_SCORE_MANUAL_LIVE_OWNERSHIP,
+            )
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)[:300]}), 400
+
+    ok = bool(result.get("ok")) and str(result.get("status") or "").upper() == "OPEN"
+    _trend_audit("cockpit_manual_entry", {
+        "action": action,
+        "signal_key": signal["signal_key"],
+        "status": result.get("status"),
+        "order_submitted": bool(result.get("order_submitted")),
+        "filled_lots": result.get("filled_lots"),
+        "exchange_api_called": True,
+    })
+    if ok:
+        state = result.get("state") if isinstance(result.get("state"), dict) else {}
+        lots = state.get("lots")
+        lines = [
+            f"🕹️ <b>COCKPIT MANUAL ENTRY — {user.upper()}</b>",
+            f"Trade » <code>{action}</code>",
+            f"Symbol » <code>{state.get('symbol')}</code>",
+        ]
+        if isinstance(lots, int):
+            lines.append(f"Lots » <code>{lots:,}</code>")
+        _trend_score_auto_notify("\n".join(lines))
+    return jsonify({
+        "ok": ok,
+        "status": result.get("status"),
+        "error": result.get("error"),
+        "state": result.get("state"),
+    }), (200 if ok else 409)
+
+
+@app.route("/api/cockpit/preview", methods=["POST"])
+def api_cockpit_preview():
+    """Resolve the exact contract and price one Cockpit trade type would
+    use right now, without submitting anything.
+
+    Read-only: no entry lock, no state writes. Lets the confirmation prompt
+    show the operator what they are about to trade before
+    ``/api/cockpit/enter`` actually places it. Market conditions can move
+    between preview and the real entry -- which re-resolves and
+    re-validates everything fresh regardless, exactly as if this preview
+    had never been called.
+    """
+    action = str(
+        (request.get_json(silent=True) or {}).get("action") or ""
+    ).strip().lower()
+    if action not in TREND_SCORE_MANUAL_TRIGGERS:
+        return jsonify({
+            "ok": False,
+            "error": "action must be buy_ce, buy_pe, buy_move, or sell_move",
+        }), 400
+    if _trading_mode_payload().get("dry_run_mode"):
+        return jsonify({
+            "ok": False,
+            "error": "The Cockpit only places LIVE trades; switch to LIVE trading mode first",
+        }), 409
+    key, secret = _active_creds()
+    if not key or not secret:
+        return jsonify({
+            "ok": False, "error": "API credentials are not configured",
+        }), 409
+    try:
+        snapshot = _cockpit_market_snapshot()
+        prepared = _cockpit_prepare_manual_entry(action, snapshot)
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)[:300]}), 400
+    return jsonify({
+        "ok": True,
+        "action": action,
+        "symbol": prepared.get("symbol"),
+        "option_type": prepared.get("option_type"),
+        "side": prepared.get("side"),
+        "instrument_kind": prepared.get("instrument_kind"),
+        "strike": prepared.get("strike"),
+        "lots": prepared.get("lots"),
+        "entry_price": prepared.get("entry_price"),
+        "contract_value": prepared.get("contract_value"),
+    })
 
 
 def _trend_auto_loop() -> None:
@@ -14102,6 +14643,16 @@ def _validate_config_update(data: dict, current: dict) -> str | None:
             return (
                 "Trend Engine score mode cannot change while a LIVE score "
                 "entry identity is pending exact exchange recovery"
+            )
+        # Defense in depth for the Cockpit's Bot ON/OFF toggle: it disables
+        # itself client-side while a Trend position (bot or manual) is open,
+        # but a stale page or a direct API call must not be able to bypass
+        # that. Checked here, not only in the UI, so it holds regardless of
+        # which client makes the request.
+        if str(live_trend_state.get("status") or "").upper() == "OPEN":
+            return (
+                "Trend Engine score mode cannot change while a Trend "
+                "position is open"
             )
     for key in (
         "MOVE_ALLOW_LONG", "MOVE_REQUIRE_NO_OPEN_ORDERS", "MOVE_REQUIRE_FLAT",

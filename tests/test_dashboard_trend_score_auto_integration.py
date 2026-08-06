@@ -442,6 +442,68 @@ def test_contract_preparation_honours_engine_zone_action_gate():
         })
 
 
+def test_prepare_directional_entry_restricts_to_today_without_a_floor_override(
+        isolated_score_account, monkeypatch):
+    """The automated controller must never roll to tomorrow's contract, but
+    it also must keep the standard 90-minute liquidity floor -- unlike
+    Cockpit (see test_dashboard_cockpit.py), it never overrides it to zero.
+    """
+    _write(isolated_score_account / "config.json", _safe_score_config())
+    selection = {
+        "zone": dashboard.TREND_SCORE_CE_ZONE, "symbol": "C-BTC-1",
+        "product_id": 1, "strike": 65_000, "expiry": "2026-08-06T12:00:00Z",
+        "executable_contract": {
+            "contract_value": "0.001", "ask_size": 5000,
+            "quote_timestamp": dashboard.datetime.now(
+                dashboard.timezone.utc,
+            ).isoformat(),
+        },
+    }
+    select = Mock(return_value=selection)
+    monkeypatch.setattr(dashboard, "select_directional_option", select)
+    monkeypatch.setattr(dashboard, "_fetch_live_vanilla_products", lambda: [])
+
+    dashboard._prepare_trend_score_auto_entry({
+        "zone": dashboard.TREND_SCORE_CE_ZONE,
+        "zone_action_allowed": True,
+        "snapshot": {"market": {"spot": 65_000.0}, "option_contracts": []},
+    })
+
+    assert select.call_args.kwargs["today_only"] is True
+    assert "min_time_to_expiry_seconds" not in select.call_args.kwargs
+
+
+def test_prepare_move_entry_restricts_to_today_without_a_floor_override(
+        isolated_score_account, monkeypatch):
+    _write(isolated_score_account / "config.json", _safe_score_config())
+    selection = {
+        "zone": dashboard.TREND_SCORE_MOVE_ZONE, "symbol": "MV-BTC-1",
+        "product_id": 2, "expiry": "2026-08-06T12:00:00Z",
+    }
+    select = Mock(return_value=selection)
+    monkeypatch.setattr(dashboard, "select_move_contract", select)
+    monkeypatch.setattr(dashboard, "_fetch_live_mv_products", lambda: [])
+    monkeypatch.setattr(
+        dashboard, "_trend_score_auto_move_quote",
+        Mock(return_value={
+            "entry_price": 350.0, "entry_depth": 5000, "side": "sell",
+        }),
+    )
+    monkeypatch.setattr(
+        dashboard, "_trend_score_auto_short_move_eligibility",
+        lambda *a, **k: {"quoted_premium_usd": 350.0},
+    )
+
+    dashboard._prepare_trend_score_auto_entry({
+        "zone": dashboard.TREND_SCORE_MOVE_ZONE,
+        "zone_action_allowed": True,
+        "snapshot": {"market": {"spot": 65_000.0}, "option_contracts": []},
+    })
+
+    assert select.call_args.kwargs["today_only"] is True
+    assert "min_time_to_expiry_seconds" not in select.call_args.kwargs
+
+
 def test_short_move_uses_premium_expiry_and_weekday_entry_window():
     allowed = datetime(2026, 8, 3, 11, 59, tzinfo=timezone.utc)
     valid_selection = {
@@ -479,6 +541,37 @@ def test_short_move_uses_premium_expiry_and_weekday_entry_window():
             {"bid": 301}, now=permitted,
         )
         assert result["weekday_blackout_start_ist"] == "17:30"
+
+
+def test_short_move_enforce_min_tte_false_bypasses_only_the_90_minute_floor():
+    weekend = datetime(2026, 8, 8, 6, 0, tzinfo=timezone.utc)
+    near_expiry = {"expiry": (weekend + timedelta(minutes=1)).isoformat()}
+    with pytest.raises(RuntimeError, match="more than 90 minutes"):
+        dashboard._trend_score_auto_short_move_eligibility(
+            near_expiry, {"bid": 301}, now=weekend,
+        )
+    approved = dashboard._trend_score_auto_short_move_eligibility(
+        near_expiry, {"bid": 301}, now=weekend, enforce_min_tte=False,
+    )
+    assert approved["minimum_time_to_expiry_seconds"] == 0
+    assert approved["time_to_expiry_seconds"] == pytest.approx(60, abs=1)
+
+
+def test_short_move_eligibility_trusts_the_already_selected_expiry():
+    """This function no longer independently re-validates "today vs
+    tomorrow" -- select_move_contract's own today_only=True already
+    guarantees the selection is the nearest listed expiry, and re-deriving
+    that here from a single already-selected contract (without the full
+    listing) was not just redundant but actively wrong: it used to compare
+    the settlement's IST calendar date against wall-clock "today", which
+    is a real production incident (see select_move_contract's docstring).
+    """
+    weekend = datetime(2026, 8, 8, 6, 0, tzinfo=timezone.utc)
+    tomorrow = {"expiry": (weekend + timedelta(days=1)).isoformat()}
+    approved = dashboard._trend_score_auto_short_move_eligibility(
+        tomorrow, {"bid": 301}, now=weekend,
+    )
+    assert approved["quoted_premium_usd"] == pytest.approx(301.0)
 
 
 def test_failed_open_contract_preparation_is_rebuildable_for_same_signal(
@@ -954,14 +1047,16 @@ def test_score_cycle_closes_and_switches_on_the_same_new_signal_exactly_once(
         mock.assert_not_called()
 
 
-def test_score_cycle_exits_a_directional_trade_on_opposite_hold_without_reversal(
+def test_score_cycle_keeps_a_directional_trade_open_on_opposite_hold(
         score_cycle, monkeypatch):
+    """HOLD is never a zone change, even on the opposite side of the band --
+    a CE stays open at -35 rather than being flattened. Only a real zone
+    change (to PE_2_ITM or SHORT_MOVE) exits it."""
     state_path = score_cycle["dry"] / "trend_state.json"
     assert dashboard._maybe_auto_trend_score_cycle() is True
     opened = json.loads(state_path.read_text(encoding="utf-8"))
 
-    # -35 is deliberately inside the PE HOLD band rather than a PE entry. It
-    # invalidates the CE but must not manufacture a replacement trade.
+    # -35 is deliberately inside the PE HOLD band rather than a PE entry.
     score_cycle["holder"]["signal"] = _score_signal(
         score_cycle["mode"], score=-35,
         zone=dashboard.TREND_SCORE_HOLD_ZONE,
@@ -972,21 +1067,17 @@ def test_score_cycle_exits_a_directional_trade_on_opposite_hold_without_reversal
         lambda state: (210.0, -10.02, -10.0, 0.01),
     )
 
-    assert dashboard._maybe_auto_trend_score_cycle() is True
-    closed = json.loads(state_path.read_text(encoding="utf-8"))
-    history = json.loads((score_cycle["dry"] / "trade_history.json").read_text(
-        encoding="utf-8"
-    ))
+    assert dashboard._maybe_auto_trend_score_cycle() is False
+    still_open = json.loads(state_path.read_text(encoding="utf-8"))
     ledger = json.loads((
         score_cycle["dry"] / dashboard.TREND_SCORE_AUTO_LEDGER_FILE
     ).read_text(encoding="utf-8"))
 
-    assert closed["status"] == "CLOSED"
-    assert closed["simulation_id"] == opened["simulation_id"]
-    assert history[-1]["exit_trigger"] == "trend_engine_directional_invalidation"
-    assert ledger["current_transition"]["action"] == "EXIT"
+    assert still_open["status"] == "OPEN"
+    assert still_open["simulation_id"] == opened["simulation_id"]
+    assert ledger["current_transition"]["action"] != "EXIT"
     assert score_cycle["prepare"].call_count == 1
-    assert score_cycle["notify"].call_count == 2
+    assert score_cycle["notify"].call_count == 1
     for mock in score_cycle["forbidden"].values():
         mock.assert_not_called()
 
@@ -1238,14 +1329,14 @@ def test_setup_lock_reset_endpoint_clears_only_the_lock(score_cycle):
         mock.assert_not_called()
 
 
-def test_dry_cycle_closes_short_move_when_committed_5m_adx_rises_above_20(
+def test_dry_cycle_closes_short_move_when_committed_5m_adx_rises_above_25(
         score_cycle, monkeypatch):
     state_path = score_cycle["dry"] / "trend_state.json"
     score_cycle["holder"]["signal"] = _score_signal(
         score_cycle["mode"],
         score=0,
         zone=dashboard.TREND_SCORE_MOVE_ZONE,
-        trigger_adx=20.0,
+        trigger_adx=25.0,
     )
     assert dashboard._maybe_auto_trend_score_cycle() is True
     opened = json.loads(state_path.read_text(encoding="utf-8"))
@@ -1256,9 +1347,9 @@ def test_dry_cycle_closes_short_move_when_committed_5m_adx_rises_above_20(
         score=0,
         zone=dashboard.TREND_SCORE_MOVE_ZONE,
         suffix="10:05:00Z",
-        trigger_adx=20.1,
+        trigger_adx=25.1,
         zone_action_allowed=False,
-        zone_reason="5m ADX 20.1 must be at or below 20 before selling MOVE",
+        zone_reason="5m ADX 25.1 must be at or below 25 before selling MOVE",
     )
     monkeypatch.setattr(
         dashboard, "_dry_run_mark_and_pnl",

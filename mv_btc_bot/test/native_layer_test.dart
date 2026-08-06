@@ -55,6 +55,38 @@ void main() {
       expect(scoreFillFraction(100), 1);
     });
 
+    test(
+      'score colour blends toward neutral for a weak score, full strength '
+      'at the extremes',
+      () {
+        // Zero has no signal at all -- it must render at the fully neutral
+        // baseline, not partway along a smooth red/green blend.
+        expect(scoreColour(0), kNeutral);
+        // The extremes reach the fully saturated endpoint untouched.
+        expect(scoreColour(100), const Color(0xFF45E3A6));
+        expect(scoreColour(-100), const Color(0xFFFF6178));
+        // A weak score sits the same lerp fraction toward its sign's
+        // endpoint as its magnitude implies.
+        expect(
+          scoreColour(10),
+          Color.lerp(kNeutral, const Color(0xFF45E3A6), .1),
+        );
+        expect(
+          scoreColour(-10),
+          Color.lerp(kNeutral, const Color(0xFFFF6178), .1),
+        );
+      },
+    );
+
+    test(
+      'positive and negative scores of equal magnitude have distinct '
+      'colours',
+      () {
+        expect(scoreColour(70), isNot(scoreColour(-70)));
+        expect(scoreColour(5), isNot(scoreColour(-5)));
+      },
+    );
+
     test('the neon accent matches --neon in static/css/app.css', () {
       expect(kNeon, const Color(0xFF39FF14));
     });
@@ -221,13 +253,13 @@ void main() {
     });
 
     test('phone primary navigation is intentionally compact', () {
-      expect(primaryPageIndexes, [0, 1, 7, 4, 2]);
+      expect(primaryPageIndexes, [0, 1, 7, 3, 6]);
       expect(primaryPageIndexes.map((index) => appPages[index].label), [
         'Today',
         'Performance',
         'Trend Engine',
         'Bot Config',
-        'Paper',
+        'Dry Run',
       ]);
     });
   });

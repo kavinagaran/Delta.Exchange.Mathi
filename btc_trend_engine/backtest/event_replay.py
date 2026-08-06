@@ -346,7 +346,7 @@ def replay_score_zones(
         reference = next_candle.open
         fill_time = next_candle.start
 
-        # HOLD can carry an exit-only directional invalidation. Every other
+        # HOLD never exits a position (see zones.should_exit). Every other
         # zone must first be action-approved; an unconfirmed SHORT_MOVE is a
         # no-op in production and therefore a no-op here too.
         may_plan = zone == zones.HOLD or action_allowed

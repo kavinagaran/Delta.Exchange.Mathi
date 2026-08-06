@@ -63,6 +63,16 @@ def _prepared(zone: str = "CE_2_ITM") -> dict:
             "instrument_kind": "BTC_OPTION",
             "entry_price": 240.0,
         }
+    elif zone == "LONG_MOVE":
+        values = {
+            "symbol": "MV-BTC-65800-230726",
+            "product_id": 103,
+            "strike": 65_800,
+            "side": "long",
+            "option_type": "MOVE",
+            "instrument_kind": "BTC_MOVE",
+            "entry_price": 445.0,
+        }
     else:
         values = {
             "symbol": "MV-BTC-65800-230726",
@@ -159,6 +169,7 @@ def _run(
     audit=None,
     protection_config_override=_UNSET,
     terminal_timeout_sec: float = 0,
+    ownership: str = "trend_score_auto_live",
 ):
     transition = transition_override
     client_id = score_entry_client_id("alice", transition)
@@ -272,6 +283,7 @@ def _run(
         clock=lambda: clock_value,
         terminal_timeout_sec=terminal_timeout_sec,
         sleeper=lambda _: None,
+        ownership=ownership,
     )
     return result, saved, client_id, filled_order
 
@@ -289,6 +301,19 @@ def test_transition_client_ids_are_stable_scoped_and_delta_sized():
         "Alice Smith", "transition-1", sequence=1
     )
     assert len(close_zero) <= 32
+
+
+def test_custom_ownership_is_persisted_and_survives_to_open():
+    """The Cockpit's manual entries pass a distinct ownership literal so the
+    LIVE score-auto controller never mistakes a manual trade for its own
+    (see dashboard.py's _trend_score_auto_live_owned_position). This proves
+    the executor actually threads a non-default ownership value through to
+    the durable OPEN state, not just the ENTRY_PENDING journal entry.
+    """
+    result, saved, _client_id, _order = _run(ownership="manual_cockpit_live")
+    assert result["status"] == "OPEN"
+    assert result["state"]["ownership"] == "manual_cockpit_live"
+    assert saved[-1]["ownership"] == "manual_cockpit_live"
 
 
 def test_filled_premium_policy_uses_exact_percentages_and_actual_fill_basis():
@@ -324,7 +349,7 @@ def test_filled_premium_policy_uses_exact_percentages_and_actual_fill_basis():
 
 @pytest.mark.parametrize(
     "zone",
-    ("CE_2_ITM", "PE_3_ITM", "SHORT_MOVE"),
+    ("CE_2_ITM", "PE_3_ITM", "SHORT_MOVE", "LONG_MOVE"),
 )
 def test_entry_validation_accepts_configured_size_for_exact_policy_contract(zone):
     normalized = validate_fixed_entry(_prepared(zone))
@@ -340,7 +365,7 @@ def test_entry_validation_accepts_configured_size_for_exact_policy_contract(zone
     wrong_contract = _prepared(zone)
     wrong_contract["symbol"] = (
         "C-BTC-65400-230726"
-        if zone == "SHORT_MOVE"
+        if zone in ("SHORT_MOVE", "LONG_MOVE")
         else "MV-BTC-65800-230726"
     )
     with pytest.raises(LiveScoreExecutionError, match="score zone"):
@@ -1446,10 +1471,35 @@ def test_every_executable_zone_has_a_consistent_instrument_and_side():
         if zone == "SHORT_MOVE":
             assert (instrument, option_type, side) == ("BTC_MOVE", "MOVE", "short")
             assert prefix == "MV-BTC-"
+        elif zone == "LONG_MOVE":
+            assert (instrument, option_type, side) == ("BTC_MOVE", "MOVE", "long")
+            assert prefix == "MV-BTC-"
         else:
             assert instrument == "BTC_OPTION" and side == "long"
             assert option_type in ("CE", "PE")
             assert prefix == ("C-BTC-" if option_type == "CE" else "P-BTC-")
+
+
+def test_long_move_is_the_only_buy_move_zone_and_is_a_distinct_instrument_from_short_move():
+    """Regression guard for the Cockpit's manual Buy MOVE trade.
+
+    LONG_MOVE and SHORT_MOVE share a symbol prefix (MV-BTC-) but must never
+    share a side -- swapping them would book a bought straddle as sold, or
+    vice versa, in the durable order audit trail.
+    """
+    from trend_score_live_execution import ZONE_EXECUTION
+
+    buyers = [z for z, p in ZONE_EXECUTION.items() if p.policy_decision == "BUY_MOVE"]
+    assert buyers == ["LONG_MOVE"]
+    assert (
+        ZONE_EXECUTION["LONG_MOVE"].instrument_match[2]
+        != ZONE_EXECUTION["SHORT_MOVE"].instrument_match[2]
+    )
+
+    mismatched = _prepared("SHORT_MOVE")
+    mismatched["zone"] = "LONG_MOVE"
+    with pytest.raises(LiveScoreExecutionError, match="score zone"):
+        validate_fixed_entry(mismatched)
 
 
 def test_validate_fixed_entry_rejects_an_unsupported_zone():

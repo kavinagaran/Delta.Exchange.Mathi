@@ -224,7 +224,7 @@ def _adx_trend_strength(trigger: TimeframeFeatures,
                         direction_hint: float | None) -> float | None:
     """Signed ADX evidence from the 5m trigger timeframe.
 
-    ADX at or below 20 intentionally contributes a neutral score: that is the
+    ADX at or below 25 intentionally contributes a neutral score: that is the
     calm-zone threshold shared with the regime classifier.  Above 30, strength
     is signed only when RSI or higher-timeframe structure has an opinion;
     ADX itself never invents a direction.

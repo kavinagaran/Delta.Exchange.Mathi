@@ -4,7 +4,7 @@
  * depend on classic scripts. Requires app.js (utcToIst) to be loaded first. */
 
 /* IST calendar routing for MOVE positions: entries before 11:00 IST belong to
- * the Morning card, later ones to Evening. Identical rule for live and paper. */
+ * the Morning card, later ones to Evening. Identical rule for live and dry run. */
 function moveDisplaySlotFromUtc(entryTimeUtc, fallback = 'evening') {
   const raw = String(entryTimeUtc || '').trim();
   let hour;

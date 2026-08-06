@@ -13,7 +13,7 @@ import 'screens/performance_screen.dart';
 import 'screens/accounts_screen.dart';
 import 'screens/config_screen.dart';
 import 'screens/logs_screen.dart';
-import 'screens/paper_screen.dart';
+import 'screens/dry_run_screen.dart';
 import 'screens/today_screen.dart';
 import 'screens/trend_engine_screen.dart';
 
@@ -71,7 +71,7 @@ const kBlueBackgroundAsset = 'assets/sparkling-blue-dashboard-bg.png';
 
 final appTheme = AppThemeController();
 
-const kWebAssetRevision = '6.2.6+30-adx-exit';
+const kWebAssetRevision = '6.2.9+33-score-dial-shading';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -582,12 +582,6 @@ const appPages = <AppPageSpec>[
     icon: Icons.trending_up_rounded,
   ),
   AppPageSpec(
-    label: 'Paper',
-    navLabel: 'Paper',
-    path: '/dry-run',
-    icon: Icons.science_outlined,
-  ),
-  AppPageSpec(
     label: 'Exposure',
     navLabel: 'Exposure',
     path: '/positions',
@@ -612,6 +606,12 @@ const appPages = <AppPageSpec>[
     icon: Icons.receipt_long_outlined,
   ),
   AppPageSpec(
+    label: 'Dry Run',
+    navLabel: 'Dry Run',
+    path: '/dry-run',
+    icon: Icons.science_outlined,
+  ),
+  AppPageSpec(
     label: 'Trend Engine',
     navLabel: 'Trend',
     path: '/trend-engine',
@@ -621,7 +621,7 @@ const appPages = <AppPageSpec>[
 
 /// The five phone tabs, ordered for the trading workflow requested by the
 /// operator. Auxiliary pages remain available from the app-bar workspace menu.
-const primaryPageIndexes = <int>[0, 1, 7, 4, 2];
+const primaryPageIndexes = <int>[0, 1, 7, 3, 6];
 
 class SessionService {
   static const _defaultUrl = 'https://mathibot.duckdns.org';
@@ -828,7 +828,7 @@ class _HomeShellState extends State<HomeShell> {
       '/' => TodayScreen(api: api, onUnauthorised: _signOut),
       '/positions' => ExposureScreen(api: api, onUnauthorised: _signOut),
       '/trades' => PerformanceScreen(api: api, onUnauthorised: _signOut),
-      '/dry-run' => PaperScreen(api: api, onUnauthorised: _signOut),
+      '/dry-run' => DryRunScreen(api: api, onUnauthorised: _signOut),
       '/config' => ConfigScreen(
         api: api,
         onUnauthorised: _signOut,

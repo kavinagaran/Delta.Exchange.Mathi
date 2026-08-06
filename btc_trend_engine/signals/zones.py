@@ -2,7 +2,7 @@
 
     > +40         BULLISH    buy 2-step ITM CE (ADX-independent)
     < -40         BEARISH    buy 2-step ITM PE (ADX-independent)
-    -30 .. +30    SIDEWAYS   sell ATM MOVE when 5m ADX is at or below 20
+    -30 .. +30    SIDEWAYS   sell ATM MOVE when 5m ADX is at or below 25
     all other gaps HOLD      no new action
 
 **The gaps are deliberate, not an oversight in the spec.** The only neutral
@@ -138,7 +138,7 @@ def decide(
         if not short_move_calm:
             return ZoneDecision(
                 zone, False,
-                "ADX is above 20; calm-market confirmation is required "
+                "ADX is above 25; calm-market confirmation is required "
                 "before selling MOVE")
         if not stop_loss_configured:
             return ZoneDecision(
@@ -170,43 +170,25 @@ def should_exit(
     score: float | None = None,
     policy: ZonePolicy | None = None,
 ) -> tuple[bool, str]:
-    """Signal-driven exit rule (operator spec 2026-07-26).
+    """Signal-driven exit rule (operator spec 2026-08-06).
 
-    A position is normally closed on a **zone change only** — never part-way
-    through a zone because the score drifted within it.  The exception is a
-    directional invalidation: a CE is no longer defensible once the score has
-    crossed below the *opposite* neutral boundary, and a PE is no longer
-    defensible once it has crossed above it.  In that case the HOLD band closes
-    the old directional position but does not open a replacement.  This keeps
-    the anti-churn band while avoiding a long CE being held at (say) -30.
+    A position is closed on a **real zone change only**: the score's current
+    band is one of the other actionable zones (``CE_2_ITM``, ``PE_2_ITM``,
+    ``SHORT_MOVE``) and differs from the zone the position was opened in.
 
-    SHORT_MOVE has a stricter exception: it is valid only inside the inclusive
-    -30..+30 neutral band.  Crossing either boundary exits it immediately,
-    including when the new score is in a HOLD band rather than a directional
-    entry zone.
+    Landing in ``HOLD`` is never treated as a zone change and never closes an
+    open position, directional or SHORT_MOVE alike — a HOLD reading means the
+    score has no current opinion, not that the prior one was invalidated.
+    This avoids churning a position out on a transient dip into the dead band
+    when the score has not actually moved to a different tradeable zone.
 
     Protective exits (SL / TSL / TP) are handled by ``tp_monitor.py`` and are
     deliberately outside this function: they act on price, continuously, and
     must not be gated on a candle close or on the signal engine being healthy.
     """
-    if open_zone == current_zone:
-        return False, "still in the entry zone"
-    if current_zone == HOLD:
-        active_policy = policy or ZonePolicy()
-        if score is not None:
-            if (open_zone == SHORT_MOVE
-                    and abs(score) > active_policy.sideways_max_abs):
-                return True, (
-                    "SHORT_MOVE invalidated: score left the neutral range")
-            if open_zone == CE_2_ITM and score < -active_policy.sideways_max_abs:
-                return True, (
-                    "bullish position invalidated: score crossed below the "
-                    "opposite neutral boundary")
-            if open_zone == PE_2_ITM and score > active_policy.sideways_max_abs:
-                return True, (
-                    "bearish position invalidated: score crossed above the "
-                    "opposite neutral boundary")
-        return False, "hold band is not a zone change; position is kept"
+    if open_zone == current_zone or current_zone == HOLD:
+        return False, "still in the entry zone" if open_zone == current_zone else (
+            "hold band is not a zone change; position is kept")
     return True, f"zone changed {open_zone} -> {current_zone}"
 
 

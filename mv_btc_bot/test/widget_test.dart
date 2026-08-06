@@ -119,7 +119,7 @@ void main() {
 
     expect(tester.takeException(), isNull);
     expect(find.text('Trend'), findsOneWidget);
-    expect(find.text('Paper'), findsOneWidget);
+    expect(find.text('Dry Run'), findsOneWidget);
     expect(find.text('Config'), findsOneWidget);
     // The /trades tab is labelled by its route, not by the page title — the
     // full 'Performance' does not fit a seven-tab bar at 360dp.
@@ -204,11 +204,11 @@ void main() {
       equals([
         'Today',
         'Performance',
-        'Paper',
         'Exposure',
         'Bot Config',
         'API Accounts',
         'Logs',
+        'Dry Run',
         'Trend Engine',
       ]),
     );

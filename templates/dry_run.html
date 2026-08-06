@@ -7,9 +7,9 @@
 {% block content %}
 <section class="dry-run-hero" aria-labelledby="dry-run-title">
   <div class="dry-run-hero-copy">
-    <span class="strategy-kicker">PAPER TRADING SIMULATION WORKSPACE</span>
-    <h2 id="dry-run-title">Dry Run — Paper Trading</h2>
-    <p>The Trend Engine selects one paper trade at a time for this user: a 2-step ITM Call, 2-step ITM Put, or ATM MOVE straddle. All paper activity remains separate from real positions and P&amp;L.</p>
+    <span class="strategy-kicker">DRY RUN TRADING SIMULATION WORKSPACE</span>
+    <h2 id="dry-run-title">Dry Run Trading</h2>
+    <p>The Trend Engine selects one dry-run trade at a time for this user: a 2-step ITM Call, 2-step ITM Put, or ATM MOVE straddle. All dry-run activity remains separate from real positions and P&amp;L.</p>
   </div>
   <div class="dry-run-hero-actions">
     <span class="pill idle" id="dry-page-mode" role="status" aria-live="polite">
@@ -23,7 +23,7 @@
   <span class="dry-separation-icon" aria-hidden="true">◇</span>
   <div>
     <strong>Simulation only — no exchange orders are placed</strong>
-    <p>Values are paper outcomes calculated from market prices. They never affect real balances, positions, risk totals, or Trades &amp; P&amp;L.</p>
+    <p>Values are dry-run outcomes calculated from market prices. They never affect real balances, positions, risk totals, or Trades &amp; P&amp;L.</p>
   </div>
 </div>
 
@@ -34,14 +34,14 @@
 </div>
 
 <div class="section-title">
-  <span>Paper trade</span>
-  <small>One automated paper position per user — the Trend Engine controls entries, exits, and switches.</small>
+  <span>Dry Run trade</span>
+  <small>One automated dry-run position per user — the Trend Engine controls entries, exits, and switches.</small>
 </div>
 
 <article class="card score-zone-trade-card">
     <div class="card-hd slot-hd">
       <span aria-hidden="true">◉</span>
-      <span>Paper trade</span>
+      <span>Dry Run trade</span>
       <span class="spacer"></span>
       <span class="hint">One position at a time for this user</span>
     </div>
@@ -62,7 +62,7 @@
 </article>
 
 <div class="section-title">
-  <span>Paper performance</span>
+  <span>Dry Run performance</span>
   <small>Simulated values only</small>
 </div>
 <div class="stats" id="dry-stats" aria-live="polite">
@@ -73,7 +73,7 @@
   <div class="card-hd">
     Simulated P&amp;L — day-wise
     <span class="spacer"></span>
-    <span class="badge sim">PAPER ONLY</span>
+    <span class="badge sim">DRY RUN ONLY</span>
   </div>
   <div class="card-bd">
     <div class="chart-box dry-chart-box">
@@ -85,7 +85,7 @@
 
 <div class="card">
   <div class="card-hd">
-    Today's Paper Trades
+    Today's Dry Run Trades
     <span class="spacer"></span>
     <span class="hint" id="dry-today-count"></span>
   </div>
@@ -107,7 +107,7 @@
 
 <div class="card">
   <div class="card-hd">
-    Paper Trade History
+    Dry Run Trade History
     <span class="spacer"></span>
     <span class="hint" id="dry-trade-count"></span>
   </div>
@@ -217,8 +217,8 @@ function dryProtectionHtml(state, displaySlot, controlSlot = displaySlot) {
     ? `<div class="dry-protection-error">${esc(p.last_error)}</div>` : '';
   const automaticallySized = p.protection_source === 'automatic_filled_premium';
   const policyCopy = automaticallySized
-    ? 'Automatic from the filled premium: TP +100%, SL −50%, TSL arm +25% / trail 25%. Edit and Save to override this open paper trade.'
-    : 'Paper-only monitor · always active while this simulation is open. Zero disables SL or TSL.';
+    ? 'Automatic from the filled premium: TP +100%, SL −50%, TSL arm +25% / trail 25%. Edit and Save to override this open dry-run trade.'
+    : 'Dry-run-only monitor · always active while this simulation is open. Zero disables SL or TSL.';
   return `<section class="dry-protection-box" aria-label="Simulated TP, SL and TSL monitor">
     <div class="dry-protection-hd">
       <div>
@@ -272,13 +272,13 @@ function dryPositionDetails(state, legacyBlockers = []) {
   const controlSlot = 'trend';
   if (!dryStateIsVisible(state)) {
     const copy = dryModeActive
-      ? 'No paper trade is open'
-      : 'Paper trading is paused';
+      ? 'No dry-run trade is open'
+      : 'Dry-run trading is paused';
     const detail = dryModeActive
       ? 'Waiting for the next approved trading signal.'
       : 'Enable automatic score trading in Bot Config to begin.';
     const blockers = legacyBlockers.length
-      ? `<div class="dry-legacy-blocker"><strong>Legacy paper state detected</strong><span>${esc(legacyBlockers.join(' · '))}. It blocks a new paper entry until it is resolved.</span></div>`
+      ? `<div class="dry-legacy-blocker"><strong>Legacy dry-run state detected</strong><span>${esc(legacyBlockers.join(' · '))}. It blocks a new dry-run entry until it is resolved.</span></div>`
       : '';
     return `<div class="no-pos score-zone-empty"><span class="icon">◇</span><strong>${copy}</strong><small>${detail}</small>${blockers}</div>`;
   }
@@ -288,7 +288,7 @@ function dryPositionDetails(state, legacyBlockers = []) {
     const mark = state.current_mark ?? state.mark_price;
     return `<div class="dry-state-line">
         <span class="badge sim">SIMULATED OPEN</span>
-        <span>Paper position · no exchange exposure</span>
+        <span>Dry Run position · no exchange exposure</span>
       </div>
       <div class="big-pnl ${pnlCls(pnl)}">${f$(pnl)}<small>Simulated live P&amp;L</small></div>
       <dl class="kv">
@@ -302,7 +302,7 @@ function dryPositionDetails(state, legacyBlockers = []) {
       </dl>
       <div class="btn-row center">
         <button class="btn danger sm" type="button"
-                aria-label="Manual exit paper trade"
+                aria-label="Manual exit dry-run trade"
                 onclick="endDrySimulation('${controlSlot}')">
           Exit
         </button>
@@ -371,7 +371,7 @@ function dryTrendScoreAutoHtml() {
         <div><span>TREND SCORE AUTOMATION · DRY RUN</span><strong>Decision status is unavailable</strong></div>
         <span class="dry-engine-decision">WAITING</span>
       </div>
-      <p>Refresh the page after the Trend Engine controller becomes reachable. No new paper trade will be started until its status is available.</p>
+      <p>Refresh the page after the Trend Engine controller becomes reachable. No new dry-run trade will be started until its status is available.</p>
     </section>`;
   }
 
@@ -383,7 +383,7 @@ function dryTrendScoreAutoHtml() {
         <div><span>TREND SCORE AUTOMATION · DRY RUN</span><strong>Automatic score trading is off</strong></div>
         <span class="dry-engine-decision">DISABLED</span>
       </div>
-      <p>No paper simulation can start until automatic score trading is enabled for DRY RUN in Bot Config.</p>
+      <p>No dry-run simulation can start until automatic score trading is enabled for DRY RUN in Bot Config.</p>
       <div class="dry-engine-actions"><a href="/config" class="btn secondary sm">Open Bot Config</a></div>
     </section>`;
   }
@@ -429,7 +429,7 @@ function dryTrendScoreAutoHtml() {
       <div><dt>Last controller cycle</dt><dd>${esc(dryTrendScoreTimestamp(dryTrendScoreAutoStatus.last_cycle_utc))}</dd></div>
     </dl>
     ${reachability}${error}
-    <p class="dry-engine-action-copy">This is the only paper-trading workflow on this page. One user-owned paper position may be open at a time.</p>
+    <p class="dry-engine-action-copy">This is the only dry-run trading workflow on this page. One user-owned dry-run position may be open at a time.</p>
     <div class="dry-engine-actions">
       <a href="/trend-engine" class="btn secondary sm">View Trend Engine</a>
     </div>
@@ -451,7 +451,7 @@ function renderDryMode(status) {
     ? 'Simulation only — no exchange orders are placed'
     : 'Dry Run is currently off — no new simulations';
   notice.querySelector('p').textContent = dryModeActive
-    ? 'Values are paper outcomes calculated from market prices. They never affect real balances, positions, risk totals, or Trades & P&L.'
+    ? 'Values are dry-run outcomes calculated from market prices. They never affect real balances, positions, risk totals, or Trades & P&L.'
     : 'Historical results remain available, and an already-open simulation may still be ended here. Switch Trading Mode to DRY RUN to start new simulations.';
 }
 
@@ -483,7 +483,7 @@ async function loadDryStatus(refreshTrend = true) {
     status = await jget('/api/dry-run/status');
   } catch (error) {
     document.getElementById('dry-score-zone-position').innerHTML =
-      '<div class="no-pos c-neg">Paper-trading status is unavailable</div>';
+      '<div class="no-pos c-neg">Dry-run status is unavailable</div>';
     document.getElementById('dry-score-zone-decision').innerHTML =
       '<div class="no-pos c-neg">Automatic decision status is unavailable</div>';
     dryStatusRefreshPending = false;
@@ -512,12 +512,12 @@ async function loadDryStatus(refreshTrend = true) {
 }
 
 async function endDrySimulation(controlSlot) {
-  if (!confirm('Manually exit the paper trade at the current mark?\n\nNo exchange order will be placed.')) return;
+  if (!confirm('Manually exit the dry-run trade at the current mark?\n\nNo exchange order will be placed.')) return;
   const result = await jpost('/api/square-off?slot=' + encodeURIComponent(controlSlot), {
     target_mode: 'dry_run',
   });
   if (result.ok && result.dry_run) {
-    toast(`Manual exit completed — paper P&L ${f$(result.pnl)}`, 'ok');
+    toast(`Manual exit completed — dry-run P&L ${f$(result.pnl)}`, 'ok');
     await Promise.all([loadDryStatus(), loadDryResults(), loadDryToday()]);
   } else {
     toast('Manual exit failed: ' + (result.error || 'Trading Mode is no longer DRY RUN'), 'err');
@@ -560,7 +560,7 @@ async function saveDryProtection(displaySlot, controlSlot = displaySlot) {
       toast('Protection save failed: ' + (result.error || 'unknown error'), 'err');
       return;
     }
-    toast('Paper-trade simulated protection updated', 'ok');
+    toast('Dry-run trade simulated protection updated', 'ok');
   } catch (error) {
     toast('Protection save failed: ' + (error?.message || 'request error'), 'err');
   } finally {
@@ -573,18 +573,18 @@ function renderDryStats(summary) {
   const el = document.getElementById('dry-stats');
   if (!summary || !summary.total_days) {
     el.innerHTML = `<div class="stat dry-empty-stat">
-      <div class="lbl">Paper performance</div>
+      <div class="lbl">Dry Run performance</div>
       <div class="val">—</div>
       <div class="sub">No completed simulations yet</div>
     </div>`;
     return;
   }
   el.innerHTML = `
-    <div class="stat"><div class="lbl">Simulated P&amp;L</div><div class="val ${pnlCls(summary.total_pnl)}">${f$(summary.total_pnl)}</div><div class="sub">${summary.total_days} paper trades</div></div>
+    <div class="stat"><div class="lbl">Simulated P&amp;L</div><div class="val ${pnlCls(summary.total_pnl)}">${f$(summary.total_pnl)}</div><div class="sub">${summary.total_days} dry-run trades</div></div>
     <div class="stat"><div class="lbl">Simulated win rate</div><div class="val">${fN(summary.win_rate, 1)}%</div><div class="sub">${summary.wins} W / ${summary.losses} L</div></div>
     <div class="stat"><div class="lbl">Average win</div><div class="val c-pos">${f$(summary.avg_win)}</div><div class="sub">Average loss ${f$(summary.avg_loss)}</div></div>
-    <div class="stat"><div class="lbl">Paper risk / reward</div><div class="val">${fN(summary.rr, 2)}</div><div class="sub">Reward per $1 simulated risk</div></div>
-    <div class="stat"><div class="lbl">Simulated drawdown</div><div class="val c-neg">${f$(summary.max_dd)}</div><div class="sub">Paper peak to trough</div></div>`;
+    <div class="stat"><div class="lbl">Dry Run risk / reward</div><div class="val">${fN(summary.rr, 2)}</div><div class="sub">Reward per $1 simulated risk</div></div>
+    <div class="stat"><div class="lbl">Simulated drawdown</div><div class="val c-neg">${f$(summary.max_dd)}</div><div class="sub">Dry Run peak to trough</div></div>`;
 }
 
 function dryTradeTimestamp(trade) {

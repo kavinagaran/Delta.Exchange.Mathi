@@ -15,7 +15,7 @@ two-step option into a different strike.
 from __future__ import annotations
 
 import math
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Collection, Mapping, Sequence
 
 from btc_trend_engine.signals.regime import CALM_ADX_MAX
@@ -26,10 +26,18 @@ PE_2_ITM = "PE_2_ITM"   # 2026-07-26 spec
 SHORT_MOVE = "SHORT_MOVE"
 CE_2_ITM = "CE_2_ITM"
 HOLD = "HOLD"
-SCORE_ZONES = frozenset({PE_3_ITM, PE_2_ITM, SHORT_MOVE, CE_2_ITM, HOLD})
+# Manual-only zone: the Cockpit's Buy MOVE trade.  Never produced by the
+# score-band policy (score_zone() below never returns it) and never entered
+# by the automated controller -- it exists so a long MOVE position can be
+# validated, sized, and read back like any other owned position.
+LONG_MOVE = "LONG_MOVE"
+SCORE_ZONES = frozenset(
+    {PE_3_ITM, PE_2_ITM, SHORT_MOVE, CE_2_ITM, HOLD, LONG_MOVE}
+)
 
 AUTO_TRADE_LOTS = 1_000
 MIN_TIME_TO_EXPIRY_SECONDS = 90 * 60
+IST_TIMEZONE = timezone(timedelta(hours=5, minutes=30))
 
 
 class TrendScoreAutoInputError(ValueError):
@@ -76,6 +84,21 @@ def _iso_utc(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def is_current_ist_expiry(expiry: Any, now: Any) -> bool:
+    """Return whether settlement belongs to today's IST calendar date.
+
+    Daily BTC automation must never roll to tomorrow merely because today's
+    contract is too close to settlement or temporarily unavailable.
+    """
+
+    settlement = _utc_time(expiry, "expiry")
+    current = _utc_time(now, "now")
+    return (
+        settlement.astimezone(IST_TIMEZONE).date()
+        == current.astimezone(IST_TIMEZONE).date()
+    )
+
+
 def score_zone(score: Any) -> str:
     """Return the exact approved action zone for a validated engine score.
 
@@ -86,9 +109,9 @@ def score_zone(score: Any) -> str:
         |score| > 40    directional (CE_2_ITM / PE_2_ITM, both 2-step ITM),
                         independent of ADX
         |score| <= 30   SHORT_MOVE candidate (the engine must also confirm
-                        5m ADX is at or below 20)
-        otherwise       HOLD (no new action; keep a directional position,
-                        but exit SHORT_MOVE after it leaves +/-30)
+                        5m ADX is at or below 25)
+        otherwise       HOLD (no new action; any open position, directional
+                        or SHORT_MOVE, is kept until a real zone change)
 
     A missing/invalid score is never treated as neutral, because that would
     turn a feed failure into permission to short MOVE.
@@ -109,7 +132,7 @@ def short_move_adx_exit_required(adx: Any) -> bool:
 
     SHORT_MOVE entry requires a calm reading at or below ``CALM_ADX_MAX``.
     An open MOVE is therefore no longer a calm-market trade as soon as the
-    committed ADX is above 20. Missing
+    committed ADX is above 25. Missing
     or invalid ADX is rejected instead of being guessed into an exit.
     """
 
@@ -187,15 +210,31 @@ def _listed_vanilla_products(
     raw_products: Sequence[Mapping[str, Any]],
     *,
     now: datetime,
+    today_only: bool = False,
+    min_time_to_expiry_seconds: float = MIN_TIME_TO_EXPIRY_SECONDS,
 ) -> dict[datetime, dict[str, Any]]:
-    """Normalize the authoritative raw strike ladder by exact settlement."""
+    """Normalize the authoritative raw strike ladder by exact settlement.
+
+    ``today_only=True`` restricts the ladder to the single *nearest* listed
+    expiry -- never a later one -- rather than to settlements whose IST
+    calendar date happens to equal today's. Those are not the same thing:
+    Delta delists each daily contract at its own settlement (12:00 UTC /
+    17:30 IST), so for the rest of that IST calendar day the earliest
+    listed contract is dated *tomorrow*. Requiring a literal calendar-date
+    match made every selection fail closed from 17:30 IST until midnight
+    IST daily -- a real production incident, not a theoretical edge case.
+    Comparing against the nearest listed settlement instead preserves the
+    actual intent (never silently substitute a later expiry for one that's
+    merely inconvenient) without assuming any relationship between a
+    settlement's calendar date and the wall-clock date.
+    """
 
     if not isinstance(raw_products, Sequence) or isinstance(
         raw_products, (str, bytes)
     ):
         raise TrendScoreAutoInputError("raw_products must be a list")
 
-    by_expiry: dict[datetime, dict[str, Any]] = {}
+    rows: list[tuple[datetime, float, int, str, str, Mapping[str, Any]]] = []
     for index, product in enumerate(raw_products):
         if not isinstance(product, Mapping):
             raise TrendScoreAutoInputError(
@@ -236,7 +275,15 @@ def _listed_vanilla_products(
             raise TrendScoreAutoInputError(
                 f"raw_products[{index}].strike_price must be positive"
             )
-        if (expiry - now).total_seconds() < MIN_TIME_TO_EXPIRY_SECONDS:
+        rows.append((expiry, strike, product_id, symbol, option_type, product))
+
+    nearest_expiry = min((row[0] for row in rows), default=None)
+
+    by_expiry: dict[datetime, dict[str, Any]] = {}
+    for expiry, strike, product_id, symbol, option_type, product in rows:
+        if today_only and expiry != nearest_expiry:
+            continue
+        if (expiry - now).total_seconds() < min_time_to_expiry_seconds:
             continue
 
         expiry_group = by_expiry.setdefault(
@@ -272,16 +319,31 @@ def select_directional_option(
     zone: str,
     now: datetime,
     lots: int = AUTO_TRADE_LOTS,
+    today_only: bool = False,
+    min_time_to_expiry_seconds: float = MIN_TIME_TO_EXPIRY_SECONDS,
 ) -> dict[str, Any] | None:
     """Select the exact policy strike or return ``None`` without substitution.
 
-    The earliest listed operational expiry with at least 90 minutes remaining
+    The earliest listed operational expiry meeting ``min_time_to_expiry_seconds``
     is authoritative.  CE selects ``ATM index - 2`` and PE selects
     ``ATM index + 2`` (2026-07-26 spec; PE was ``+3`` before, making the
     policy asymmetric).  ``PE_3_ITM`` is still accepted so a position opened
     under the old policy can be selected and closed.  If that exact product
     is absent or not executable for the requested lot count, the function returns
     ``None``; it never shifts strike or tries a later expiry.
+
+    ``today_only=True`` additionally restricts the ladder to the single
+    *nearest* listed expiry -- never a later one -- used by the automated
+    controller so it never rolls forward to a more distant contract merely
+    because the near one is temporarily unavailable or too close to
+    settlement. This is deliberately not "settlement's IST calendar date
+    equals today's": Delta delists each daily contract at its own
+    settlement (12:00 UTC / 17:30 IST), so for the rest of that IST
+    calendar day the nearest listed contract is dated *tomorrow* -- a
+    literal calendar-date match would fail closed every single day from
+    17:30 IST to midnight IST. ``min_time_to_expiry_seconds`` can be
+    lowered (e.g. to ``0``) for a caller that substitutes its own
+    real-time judgement for the standard 90-minute liquidity floor.
     """
 
     try:
@@ -308,7 +370,12 @@ def select_directional_option(
     ):
         raise TrendScoreAutoInputError("executable_contracts must be a list")
 
-    by_expiry = _listed_vanilla_products(raw_products, now=current)
+    by_expiry = _listed_vanilla_products(
+        raw_products,
+        now=current,
+        today_only=today_only,
+        min_time_to_expiry_seconds=min_time_to_expiry_seconds,
+    )
     if not by_expiry:
         return None
     expiry = min(by_expiry)
@@ -407,13 +474,23 @@ def select_move_contract(
     spot: Any,
     now: datetime,
     lots: int = AUTO_TRADE_LOTS,
+    today_only: bool = False,
+    min_time_to_expiry_seconds: float = MIN_TIME_TO_EXPIRY_SECONDS,
 ) -> dict[str, Any] | None:
     """Select the nearest-expiry ATM BTC MOVE contract for a short entry.
 
     Eligibility depends only on the authoritative listing, exact settlement
     timestamp, and product limits.  There is deliberately no morning/evening
-    session argument. The current expiry is eligible only when more than 90
-    minutes remain; no maximum DTE is imposed.
+    session argument. The current expiry is eligible only when more than
+    ``min_time_to_expiry_seconds`` remains; no maximum DTE is imposed.
+
+    ``today_only=True`` additionally restricts eligibility to the single
+    *nearest* listed expiry -- never a later one -- rather than to
+    settlements whose IST calendar date happens to equal today's; see
+    ``select_directional_option`` for why those are not the same thing.
+    Lowering ``min_time_to_expiry_seconds`` (e.g. to ``0``) lets a caller
+    substitute its own real-time judgement for the standard 90-minute
+    liquidity floor.
     """
 
     try:
@@ -429,7 +506,7 @@ def select_move_contract(
     ):
         raise TrendScoreAutoInputError("raw_products must be a list")
 
-    by_expiry: dict[datetime, list[dict[str, Any]]] = {}
+    rows: list[tuple[datetime, float, Mapping[str, Any]]] = []
     for index, product in enumerate(raw_products):
         if not isinstance(product, Mapping):
             raise TrendScoreAutoInputError(
@@ -459,10 +536,18 @@ def select_move_contract(
             raise TrendScoreAutoInputError(
                 f"raw_products[{index}].strike_price must be positive"
             )
-        if (expiry - current).total_seconds() <= MIN_TIME_TO_EXPIRY_SECONDS:
+        rows.append((expiry, strike, product))
+
+    nearest_expiry = min((row[0] for row in rows), default=None)
+
+    by_expiry: dict[datetime, list[dict[str, Any]]] = {}
+    for expiry, strike, product in rows:
+        if today_only and expiry != nearest_expiry:
+            continue
+        if (expiry - current).total_seconds() <= min_time_to_expiry_seconds:
             continue
         by_expiry.setdefault(expiry, []).append({
-            "symbol": symbol,
+            "symbol": str(product.get("symbol") or "").strip(),
             "strike": strike,
             "raw": dict(product),
         })
@@ -545,6 +630,8 @@ def position_score_zone(position: Mapping[str, Any]) -> str:
         return PE_3_ITM
     if symbol.startswith("MV-BTC-") and side in {"short", "sell"}:
         return SHORT_MOVE
+    if symbol.startswith("MV-BTC-") and side in {"long", "buy"}:
+        return LONG_MOVE
     raise TrendScoreAutoInputError(
         "owned position cannot be mapped to an approved score zone"
     )
@@ -628,32 +715,14 @@ def plan_score_transition(
         }
 
     if target == HOLD:
-        # A HOLD band normally keeps the position.  There is one deliberate
-        # exception: an existing directional position is closed when the score
-        # crossed through the *opposite* neutral boundary.  That is an exit,
-        # never a guessed replacement, so a CE cannot remain open at -30 just
-        # because -30 is inside the PE hold band.
-        if current is not None:
-            from btc_trend_engine.signals import zones
-
-            exit_now, exit_reason = zones.should_exit(
-                current, target, score=value,
-            )
-            if exit_now:
-                return {
-                    "action": "CLOSE",
-                    "reason": exit_reason,
-                    "signal_key": key,
-                    "target_zone": target,
-                    "current_zone": current,
-                    "close_position": dict(owned_positions[0]),
-                    "open_zone": None,
-                    "consume_signal": True,
-                }
-
-        # This guard prevents an ordinary HOLD reading from falling through to
-        # CLOSE_THEN_OPEN below, where it would flatten a valid position and
-        # then fail to select a nonexistent HOLD contract.
+        # A HOLD band always keeps the position, directional or SHORT_MOVE
+        # alike: HOLD means the score has no current opinion, not that the
+        # prior one was invalidated.  Only a real zone change (to another
+        # actionable zone) closes a position — see zones.should_exit.
+        #
+        # This guard also prevents an ordinary HOLD reading from falling
+        # through to CLOSE_THEN_OPEN below, where it would flatten a valid
+        # position and then fail to select a nonexistent HOLD contract.
         return {
             "action": "NOOP",
             "reason": "SCORE_IN_HOLD_BAND",

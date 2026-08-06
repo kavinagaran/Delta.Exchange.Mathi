@@ -9,8 +9,8 @@ import '../theme/design.dart';
 import '../widgets/kit.dart';
 import '../widgets/trade_controls.dart';
 
-class PaperScreen extends StatefulWidget {
-  const PaperScreen({
+class DryRunScreen extends StatefulWidget {
+  const DryRunScreen({
     super.key,
     required this.api,
     required this.onUnauthorised,
@@ -20,10 +20,10 @@ class PaperScreen extends StatefulWidget {
   final VoidCallback onUnauthorised;
 
   @override
-  State<PaperScreen> createState() => _PaperScreenState();
+  State<DryRunScreen> createState() => _DryRunScreenState();
 }
 
-class _PaperScreenState extends State<PaperScreen> {
+class _DryRunScreenState extends State<DryRunScreen> {
   Map<String, dynamic>? _status;
   Map<String, dynamic>? _summary;
   Map<String, dynamic>? _controller;
@@ -93,7 +93,7 @@ class _PaperScreenState extends State<PaperScreen> {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Close paper trade?'),
+        title: const Text('Close dry-run trade?'),
         content: Text(
           '${trade['symbol'] ?? 'Current position'} · simulation only',
         ),
@@ -119,7 +119,7 @@ class _PaperScreenState extends State<PaperScreen> {
     if (!mounted) return;
     setState(() => _closing = false);
     _message(
-      result.ok ? 'Paper trade closed' : result.error ?? 'Close failed',
+      result.ok ? 'Dry-run trade closed' : result.error ?? 'Close failed',
       result.ok,
     );
     if (result.ok) await _refresh(quiet: true);
@@ -142,7 +142,7 @@ class _PaperScreenState extends State<PaperScreen> {
     if (_error != null && _status == null) {
       return StatePlaceholder(
         icon: Icons.cloud_off_rounded,
-        message: 'Paper workspace unavailable',
+        message: 'Dry Run workspace unavailable',
         detail: _error,
         onRetry: _refresh,
         tone: kNegative,
@@ -155,7 +155,7 @@ class _PaperScreenState extends State<PaperScreen> {
         physics: const AlwaysScrollableScrollPhysics(),
         padding: const EdgeInsets.fromLTRB(Gap.lg, Gap.md, Gap.lg, Gap.xxl),
         children: [
-          _PaperHero(summary: _summary, today: _today, controller: _controller),
+          _DryRunHero(summary: _summary, today: _today, controller: _controller),
           const SizedBox(height: Gap.md),
           if (position == null)
             const AppCard(
@@ -164,7 +164,7 @@ class _PaperScreenState extends State<PaperScreen> {
               child: Text('Waiting for an eligible zone.', style: AppText.body),
             )
           else
-            _PaperPositionCard(
+            _DryRunPositionCard(
               trade: position,
               busy: _closing,
               onClose: () => _close(position),
@@ -182,17 +182,17 @@ class _PaperScreenState extends State<PaperScreen> {
               onPayoff: () => showPayoffSheet(context, position),
             ),
           const SizedBox(height: Gap.md),
-          _PaperTradesCard(title: "Today's trades", rows: _today, limit: 12),
+          _DryRunTradesCard(title: "Today's trades", rows: _today, limit: 12),
           const SizedBox(height: Gap.md),
-          _PaperTradesCard(title: 'History', rows: _history, limit: 60),
+          _DryRunTradesCard(title: 'History', rows: _history, limit: 60),
         ],
       ),
     );
   }
 }
 
-class _PaperHero extends StatelessWidget {
-  const _PaperHero({
+class _DryRunHero extends StatelessWidget {
+  const _DryRunHero({
     required this.summary,
     required this.today,
     required this.controller,
@@ -214,7 +214,7 @@ class _PaperHero extends StatelessWidget {
         .replaceAll('_', ' ')
         .toUpperCase();
     return AppCard(
-      kicker: 'Paper trading',
+      kicker: 'Dry Run trading',
       title: 'Simulation workspace',
       accent: kWarning,
       trailing: StatusPill(
@@ -250,8 +250,8 @@ class _PaperHero extends StatelessWidget {
   }
 }
 
-class _PaperPositionCard extends StatelessWidget {
-  const _PaperPositionCard({
+class _DryRunPositionCard extends StatelessWidget {
+  const _DryRunPositionCard({
     required this.trade,
     required this.busy,
     required this.onClose,
@@ -313,8 +313,8 @@ class _PaperPositionCard extends StatelessWidget {
   }
 }
 
-class _PaperTradesCard extends StatelessWidget {
-  const _PaperTradesCard({
+class _DryRunTradesCard extends StatelessWidget {
+  const _DryRunTradesCard({
     required this.title,
     required this.rows,
     required this.limit,
@@ -328,11 +328,11 @@ class _PaperTradesCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final shown = rows.take(limit).toList();
     return AppCard(
-      kicker: 'Paper',
+      kicker: 'Dry Run',
       title: '$title · ${rows.length}',
       child: shown.isEmpty
           ? Text(
-              'No paper trades.',
+              'No dry-run trades.',
               style: AppText.body.copyWith(
                 color: Theme.of(context).colorScheme.onSurfaceVariant,
               ),

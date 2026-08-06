@@ -12,11 +12,11 @@ NODE = shutil.which("node")
 def test_dry_run_ui_has_one_score_zone_workspace_and_no_legacy_trade_frames():
     template = (ROOT / "templates" / "dry_run.html").read_text(encoding="utf-8")
 
-    assert "Paper trade" in template
+    assert "Dry Run trade" in template
     assert "Score-zone paper trade" not in template
     assert "Current position" in template
     assert "Latest engine decision" in template
-    assert "One automated paper position per user" in template
+    assert "One automated dry-run position per user" in template
     for obsolete in (
         "Morning MOVE",
         "Evening MOVE",
@@ -86,7 +86,7 @@ const tradeTime = html.indexOf('<dt>Time of trade</dt>');
     const tradeType = html.indexOf('<dt>Trade type</dt>');
     const contract = html.indexOf('<dt>Contract</dt>');
 if (tradeTime < 0 || tradeType < 0 || contract < 0 || tradeTime > tradeType || tradeType > contract) {
-  throw new Error(`paper-trade fields are not ordered correctly: ${html}`);
+  throw new Error(`dry-run trade fields are not ordered correctly: ${html}`);
 }
 if (!html.includes('7:20 AM IST')) {
   throw new Error(`actual IST trade time is missing: ${html}`);
@@ -162,9 +162,9 @@ global.dryTrendScoreAutoStatus = {
 global.dryTrendScoreAutoReachable = true;
 const html = dryTrendScoreAutoHtml();
 if (!html.includes('Sell ATM MOVE straddle') ||
-    !html.includes('One user-owned paper position may be open at a time.') ||
+    !html.includes('One user-owned dry-run position may be open at a time.') ||
     !html.includes('<dt>Trade type</dt><dd>MV</dd>')) {
-  throw new Error(`paper-trade decision copy is incomplete: ${html}`);
+  throw new Error(`dry-run trade decision copy is incomplete: ${html}`);
 }
 """
     result = subprocess.run(
