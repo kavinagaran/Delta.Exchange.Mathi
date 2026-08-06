@@ -1997,6 +1997,22 @@ def _trend_cycle_continuity(state, position, fills=None):
     }
 
 
+def _is_protection_only_external(state):
+    """Whether an operator explicitly marked this position protection-only.
+
+    Set only by deliberate operator action on an externally opened position;
+    never inferred from an exchange position snapshot. It has no bot fill
+    ledger to reconstruct at any stage of its lifecycle -- neither while
+    open (continuity proof) nor at close (fill-ledger P&L reconstruction).
+    """
+    return (
+        isinstance(state, dict)
+        and state.get("operator_authorized_protection_only") is True
+        and str(state.get("ownership") or "").lower()
+        == "external_protection_only"
+    )
+
+
 def _owned_close_lots(state):
     # ``protection_lots`` is the complete aggregate explicitly adopted by this
     # monitor. ``owned_entry_lots`` remains the immutable bot-entry audit count.
@@ -2723,9 +2739,18 @@ def _finalize_external_flat_close_locked(state):
         # in this product can then never be pulled backward into this close.
         state["exit_detected_at_utc"] = now.isoformat(timespec="seconds")
         _atomic_write_json(STATE_FILE, state)
-    ledger_attempted, ledger_complete, ledger_error = (
-        _finalize_trend_flat_fill_ledger(state, now)
-    )
+    # An operator-authorized protection-only position has no bot-placed
+    # entry order, so a "reconstructed fill ledger" starting from its
+    # adopted entry time is reconstructing fills that were never the bot's
+    # -- it is the wrong source of truth here, not merely an unverified one.
+    # The authenticated order-history lookup below is: this state's actual
+    # entry/side/lots matched against Delta's own terminal order record.
+    if _is_protection_only_external(state):
+        ledger_attempted, ledger_complete, ledger_error = False, False, ""
+    else:
+        ledger_attempted, ledger_complete, ledger_error = (
+            _finalize_trend_flat_fill_ledger(state, now)
+        )
     if ledger_complete:
         return True
     if ledger_attempted:
@@ -2835,11 +2860,15 @@ def _finalize_confirmed_market_close_locked(state, order, mark, lots, reason):
     latest = load_state()
     if isinstance(latest, dict):
         state = {**state, **latest}
-    if _trend_fill_ledger_required(state):
+    if _trend_fill_ledger_required(state) and not _is_protection_only_external(state):
         # A terminal market order proves only its own fill.  An adopted Trend
         # aggregate may also contain manual additions and earlier reductions,
         # so its complete cycle must be reconstructed from fills before any
-        # realised row is declared final.
+        # realised row is declared final.  A protection-only hand-off has no
+        # such aggregate to reconstruct, and this order *is* its one and only
+        # fill -- redirecting it through fill-ledger reconstruction anyway
+        # would only route it into a fresh, page-size-limited order-history
+        # search for an order this call already holds proof of.
         ledger_state = dict(state)
         ledger_state["exit_trigger"] = (
             state.get("exit_trigger") or f"{reason}_{SLOT}"
@@ -4185,11 +4214,13 @@ def main():
         exit_trigger = {"tp": f"take_profit_{SLOT}",
                         "tsl": f"trailing_stop_{SLOT}"}.get(
                             kind, f"stop_loss_{SLOT}")
-        if _trend_fill_ledger_required(closed_state):
+        if (_trend_fill_ledger_required(closed_state)
+                and not _is_protection_only_external(closed_state)):
             # The protection order is one segment of a potentially mixed,
             # partially reduced Trend cycle.  Do not finalize the cycle from
             # this one terminal order even when it filled the currently stored
-            # remainder.
+            # remainder.  A protection-only hand-off has no such cycle -- this
+            # stop order is its one and only fill, already proven here.
             ledger_state = dict(closed_state)
             ledger_state["exit_trigger"] = (
                 closed_state.get("exit_trigger") or exit_trigger
@@ -4808,7 +4839,16 @@ def main():
                 # net-size property.  A sell/buy round trip or full
                 # close/reopen can finish at the same lot count, so every open
                 # Trend poll must prove the complete fill-ledger continuity.
-                continuity_required = SLOT == "trend"
+                # A manually opened option may be deliberately handed to the
+                # monitor for protection only.  Such a hand-off is explicit
+                # (never inferred from an exchange position) and has no bot
+                # fill ledger to reconstruct, so requiring Trend-cycle
+                # continuity would leave it unprotected forever.  Normal
+                # controller-owned Trend positions keep the strict ledger
+                # proof, including same-product adoption safeguards.
+                continuity_required = (
+                    SLOT == "trend" and not _is_protection_only_external(state)
+                )
                 continuity = ({"verified": True, "status": "not_required",
                                "signed_size": live}
                               if not continuity_required else

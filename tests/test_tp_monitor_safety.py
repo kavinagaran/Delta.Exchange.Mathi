@@ -1231,6 +1231,87 @@ class TpMonitorSafetyTests(unittest.TestCase):
         )
         telegram.assert_not_called()
 
+    def test_protection_only_external_terminal_protection_skips_fill_ledger_redirect(
+        self,
+    ):
+        """A protection-only hand-off's own confirmed stop fill is authoritative.
+
+        Companion to the anchored-Trend test above, which proves an ordinary
+        controller-owned position *does* redirect through fill-ledger
+        reconstruction here. A protection-only hand-off has no bot fill
+        ledger at any stage of its life, and this terminal order is already
+        proof of its one and only fill -- it must finalize directly rather
+        than being routed into a fresh, page-size-limited order-history
+        search for an order this call already holds proof of.
+        """
+        self.write_state(
+            lots=3, owned_entry_lots=3, original_owned_entry_lots=3,
+            original_bot_entry_mark=1.0,
+            continuity_anchor_utc="2026-07-15T01:02:03+00:00",
+            tp_stop_order_id="tp-terminal",
+            ownership="external_protection_only",
+            operator_authorized_protection_only=True,
+            entry_trigger="operator_authorized_external_protection",
+        )
+        terminal = {
+            **self.protection_order("tp-terminal", 3, "tp"),
+            "state": "closed", "unfilled_size": 0,
+            "filled_size": 3, "average_fill_price": "2.0",
+            "commission": "0.02",
+        }
+        with patch.object(tp_monitor, "SLOT", "trend"), \
+             patch.object(tp_monitor, "REMOVE_PROTECTION", False), \
+             patch.object(tp_monitor, "install_signal_handlers"), \
+             patch.object(tp_monitor, "get_exchange_size", return_value=0), \
+             patch.object(tp_monitor, "get_order", return_value=terminal), \
+             patch.object(
+                 tp_monitor, "_finalize_external_flat_close_locked",
+             ) as ledger, \
+             patch.object(
+                 tp_monitor, "remove_exchange_protection", return_value=True,
+             ), \
+             patch.object(tp_monitor, "send_telegram"):
+            self.assertEqual(tp_monitor.main(), 0)
+
+        ledger.assert_not_called()
+        persisted = self.read_state()
+        self.assertEqual(persisted["status"], "CLOSED")
+        self.assertEqual(persisted["exit_mark"], 2.0)
+        self.assertAlmostEqual(persisted["gross_pnl_usd"], 3.0)
+
+    def test_protection_only_external_confirmed_close_skips_fill_ledger_redirect(
+        self,
+    ):
+        """Same principle as above, for the confirmed-market-close entry point."""
+        state = self.write_state(
+            ownership="external_protection_only",
+            operator_authorized_protection_only=True,
+            entry_trigger="operator_authorized_external_protection",
+            continuity_anchor_utc="2026-07-15T01:02:03+00:00",
+            entry_mark=1.0, contract_value=1.0, lots=10, side="long",
+            pending_close_order_id="close-1",
+            pending_close_client_order_id="close-1-client",
+        )
+        order = {
+            "id": "close-1", "client_order_id": "close-1-client",
+            "average_fill_price": "2.0", "size": 10,
+            "filled_size": 10, "unfilled_size": 0, "commission": "0.12",
+        }
+        with patch.object(tp_monitor, "SLOT", "trend"), \
+             patch.object(
+                 tp_monitor, "_finalize_external_flat_close_locked",
+             ) as redirect:
+            closed = tp_monitor._finalize_confirmed_market_close_locked(
+                state, order, mark=2.0, lots=10, reason="take_profit",
+            )
+
+        redirect.assert_not_called()
+        self.assertTrue(closed)
+        persisted = self.read_state()
+        self.assertEqual(persisted["status"], "CLOSED")
+        self.assertEqual(persisted["exit_mark"], 2.0)
+        self.assertAlmostEqual(persisted["gross_pnl_usd"], 10.0)
+
     def test_complete_trend_fill_ledger_clears_consumed_close_journal(self):
         state = self.write_state(
             original_bot_entry_fee_usd=0.10,
@@ -1279,6 +1360,51 @@ class TpMonitorSafetyTests(unittest.TestCase):
         self.assertIsNone(closed["pending_close_client_order_id"])
         self.assertIsNone(closed["pending_close_order_id"])
         self.assertFalse(closed["pending_close_post_boundary"])
+
+    def test_protection_only_external_close_skips_fill_ledger_and_uses_order_history(
+        self,
+    ):
+        """A hand-off position has no bot fill ledger at any point in its life.
+
+        Regression test: ``_finalize_trend_flat_fill_ledger`` was attempted
+        for every SLOT=="trend" state with a resolvable entry timestamp,
+        including an operator-authorized protection-only hand-off -- and its
+        failure then suppressed the fallback to the real Delta order-history
+        lookup entirely, leaving such a position's accounting permanently
+        "pending". The authenticated close order must be used instead.
+        """
+        state = self.write_state(
+            ownership="external_protection_only",
+            operator_authorized_protection_only=True,
+            entry_trigger="operator_authorized_external_protection",
+            continuity_anchor_utc="2026-07-15T01:02:03+00:00",
+            entry_mark=1.0, contract_value=1.0, lots=10, side="long",
+        )
+        order = {
+            "id": "close-1", "average_fill_price": "1.5",
+            "size": 10, "filled_size": 10, "unfilled_size": 0,
+            "updated_at": "2026-07-15T02:00:00Z",
+        }
+        with patch.object(tp_monitor, "SLOT", "trend"), \
+             patch.object(
+                 tp_monitor, "_finalize_trend_flat_fill_ledger",
+             ) as ledger, \
+             patch.object(
+                 tp_monitor, "_resolve_external_close_order",
+                 return_value=(order, True, ""),
+             ):
+            closed = tp_monitor._finalize_external_flat_close_locked(state)
+
+        ledger.assert_not_called()
+        self.assertTrue(closed)
+        persisted = self.read_state()
+        self.assertEqual(persisted["status"], "CLOSED")
+        self.assertEqual(persisted["exit_mark"], 1.5)
+        self.assertAlmostEqual(persisted["gross_pnl_usd"], 5.0)
+        self.assertEqual(
+            persisted["exit_reconciliation_status"], "resolved_order_history",
+        )
+        self.assertIsNotNone(persisted["pnl_usd"])
 
     def test_closed_pending_worker_retries_once_then_repairs_on_later_run(self):
         self.write_state(

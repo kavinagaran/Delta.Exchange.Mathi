@@ -374,8 +374,12 @@ vm.runInThisContext(source.slice(start, end));
   if (decisionCard.includes('View Trend Engine')) {
     throw new Error('obsolete Trend Engine link is still present');
   }
-  if (!decisionCard.includes('This completed LIVE signal was already handled; waiting for the next one')) {
-    throw new Error('last automatic action is not sentence-cased');
+  // The automation text block (current action / regime / trade type /
+  // contract / last action / signal bar closed / last cycle) was retired
+  // with the Cockpit redesign -- the dials and decision pill remain, the
+  // per-field automation prose does not.
+  if (decisionCard.includes('Current automatic action')) {
+    throw new Error('retired automation detail block is still present');
   }
   await closeTodayLiveTrade(0);
   if (!posted || posted.url !== '/api/square-off?slot=trend' ||

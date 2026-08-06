@@ -36,6 +36,14 @@ def test_logs_use_the_active_accounts_audit_feed(tmp_path, monkeypatch):
                 "event": "trend_score_auto_live_error",
                 "error": "Connection reset by peer",
             }),
+            json.dumps({
+                "at_utc": "2026-07-26T14:20:00Z",
+                "event": "trend_score_auto_live_error",
+                "error": (
+                    "A manually opened Cockpit Trend position is open; the "
+                    "LIVE controller will not act on this slot until it closes"
+                ),
+            }),
             "not-json",
         ]) + "\n",
         encoding="utf-8",
@@ -55,6 +63,9 @@ def test_logs_use_the_active_accounts_audit_feed(tmp_path, monkeypatch):
         "2026-07-26 07:40:00 PM IST · DATA WAIT · trend engine and contract "
         "snapshot are on different completed 5-minute candles",
         "2026-07-26 07:45:00 PM IST · ERROR · Connection reset by peer",
+        "2026-07-26 07:50:00 PM IST · INFO · A manually opened Cockpit Trend "
+        "position is open; the LIVE controller will not act on this slot "
+        "until it closes",
     ]
 
 

@@ -296,6 +296,12 @@ ZONE_EXECUTION: dict[str, ZoneExecutionPolicy] = {
         ("BTC_OPTION", "PE", "long", "P-BTC-"), "down", "BUY_PE"),
     "SHORT_MOVE": ZoneExecutionPolicy(
         ("BTC_MOVE", "MOVE", "short", "MV-BTC-"), "neutral", "SELL_MOVE"),
+    # Manual-only: the Cockpit's Buy MOVE trade. Never produced by the score
+    # policy, never entered by the automated controller -- it exists so a
+    # long MOVE position has the same zone/instrument/side/prefix proof
+    # every other executable zone has.
+    "LONG_MOVE": ZoneExecutionPolicy(
+        ("BTC_MOVE", "MOVE", "long", "MV-BTC-"), "neutral", "BUY_MOVE"),
 }
 
 

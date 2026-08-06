@@ -568,7 +568,23 @@ def _risk_history(data_dir: Path, now: datetime, offset_minutes: int) -> tuple[f
             )
         pnl = _finite(row.get("pnl_usd"))
         stamp = _row_timestamp(row)
-        if pnl is None or stamp is None or stamp > now:
+        if pnl is None:
+            # An operator-authorized external-protection-only position that
+            # closed without the bot observing the closing fill has no
+            # reconstructable exit price -- its realized P&L is genuinely
+            # unknown, not corrupt data. Excluding it here is the only way
+            # such a row does not block every subsequent risk evaluation
+            # (and every score cycle with it) indefinitely.
+            if (
+                row.get("operator_authorized_protection_only") is True
+                and str(row.get("ownership") or "").lower()
+                == "external_protection_only"
+            ):
+                continue
+            raise SnapshotCollectionError(
+                f"trade_history.json row {index} has unknown P&L or time"
+            )
+        if stamp is None or stamp > now:
             raise SnapshotCollectionError(
                 f"trade_history.json row {index} has unknown P&L or time"
             )

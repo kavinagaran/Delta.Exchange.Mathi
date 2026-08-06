@@ -493,6 +493,62 @@ def test_recovery_only_lane_discards_pre_post_without_submitting(
     assert "score-bar-old" not in ledger["signals"]
 
 
+def test_recovery_only_lane_discards_a_stuck_manual_cockpit_pre_post_intent(
+        live_recovery_account, monkeypatch):
+    """Regression test for a real production incident: a Cockpit Buy MOVE
+    entry whose final preflight raised (a residual exchange position from
+    an earlier trade had not yet cleared) left a durable
+    ENTRY_PENDING/"prepared" record that was never submitted -- safe to
+    discard, since nothing reached the exchange -- but two things stopped
+    every recovery lane from touching it: ownership="manual_cockpit_live"
+    made _trend_score_auto_live_pending_identity refuse to recognise it as
+    recoverable at all, and even past that, a manual entry's durable
+    direction_score_at_entry is always 0.0 (score never chose its zone --
+    the operator's button did), which score_zone(0.0) never maps to
+    LONG_MOVE, tripping _trend_score_auto_live_signal_from_state's
+    score-matches-zone consistency check. With no lane willing to touch it,
+    the Trend slot stayed wedged shut against every future entry, manual or
+    automated, until the process was restarted with both fixes.
+    """
+    config = _live_config()
+    config["TREND_ENGINE_SCORE_AUTO_MODE"] = "disabled"
+    _write(live_recovery_account / "config.json", config)
+    pending = {
+        **_pending_state(submission_state="prepared"),
+        "ownership": dashboard.TREND_SCORE_MANUAL_LIVE_OWNERSHIP,
+        "trend_score_zone": dashboard.TREND_SCORE_LONG_MOVE_ZONE,
+        "engine_zone": dashboard.TREND_SCORE_LONG_MOVE_ZONE,
+        "direction_score_at_entry": 0.0,
+        "market_regime_at_entry": "MANUAL",
+        "score_auto_signal_key": "manual-cockpit|buy_move|deadbeef",
+        "selected_contract_snapshot": {
+            "zone": dashboard.TREND_SCORE_LONG_MOVE_ZONE,
+            "symbol": "MV-BTC-64200-050826",
+        },
+    }
+    _write(live_recovery_account / "trend_state.json", pending)
+    execute = Mock(side_effect=AssertionError(
+        "recovery-only lane submitted a prepared intent"
+    ))
+    monkeypatch.setattr(dashboard, "_trend_score_auto_live_execute", execute)
+    monkeypatch.setattr(dashboard, "_trend_audit", Mock())
+
+    claimed = dashboard._maybe_recover_trend_score_live_pending(
+        "alice", "2026-07-23T10:05:01Z",
+    )
+
+    assert claimed is True
+    execute.assert_not_called()
+    state = json.loads(
+        (live_recovery_account / "trend_state.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert state["status"] == "IDLE"
+    assert state["last_entry_outcome"] == "STALE_PRE_POST_REBUILD"
+    assert state["last_entry_order_submitted"] is False
+
+
 @pytest.mark.parametrize(
     ("invalid_key", "invalid_value", "expected_error"),
     (
@@ -563,6 +619,63 @@ def test_config_api_blocks_score_mode_change_while_live_entry_is_pending(
         (live_recovery_account / "config.json").read_text(encoding="utf-8")
     )
     assert saved["TREND_ENGINE_SCORE_AUTO_MODE"] == "live"
+
+
+def test_config_api_blocks_score_mode_change_while_a_trend_position_is_open(
+        live_recovery_account):
+    """The Cockpit's Bot ON/OFF toggle disables itself client-side while a
+    Trend position (bot or manual) is open, but a stale page or a direct
+    API call must not be able to bypass that -- this is the server-side
+    half of that guard."""
+    _write(live_recovery_account / "trend_state.json", {
+        "status": "OPEN", "execution_mode": "live", "dry_run": False,
+        "ownership": "manual_cockpit_live",
+        "entry_trigger": "manual_cockpit_buy_ce",
+        "product_id": 1,
+    })
+
+    with dashboard.app.test_request_context(
+        "/api/config",
+        method="POST",
+        json={"TREND_ENGINE_SCORE_AUTO_MODE": "disabled"},
+    ):
+        response = dashboard.set_config()
+    body, status = response if isinstance(response, tuple) else (
+        response, response.status_code,
+    )
+
+    assert status == 400
+    payload = body.get_json()
+    assert payload["ok"] is False
+    assert "Trend position is open" in payload["error"]
+    saved = json.loads(
+        (live_recovery_account / "config.json").read_text(encoding="utf-8")
+    )
+    assert saved["TREND_ENGINE_SCORE_AUTO_MODE"] == "live"
+
+
+def test_config_api_allows_score_mode_change_while_trend_is_flat(
+        live_recovery_account):
+    """The guard is scoped to an OPEN position -- it must not block turning
+    the bot back on (or off) once the slot is flat again."""
+    _write(live_recovery_account / "trend_state.json", {"status": "CLOSED"})
+
+    with dashboard.app.test_request_context(
+        "/api/config",
+        method="POST",
+        json={"TREND_ENGINE_SCORE_AUTO_MODE": "disabled"},
+    ):
+        response = dashboard.set_config()
+    body, status = response if isinstance(response, tuple) else (
+        response, response.status_code,
+    )
+
+    assert status == 200
+    assert body.get_json()["ok"] is True
+    saved = json.loads(
+        (live_recovery_account / "config.json").read_text(encoding="utf-8")
+    )
+    assert saved["TREND_ENGINE_SCORE_AUTO_MODE"] == "disabled"
 
 
 def test_legacy_trend_enabled_alias_is_forced_off_without_blocking_score_mode(
