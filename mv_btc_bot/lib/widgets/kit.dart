@@ -662,7 +662,13 @@ class _DecisionGaugePainter extends CustomPainter {
         ..color = const Color(0xFF17314A),
     );
     if (bounded != null) {
-      final progress = scoreFillFraction(bounded) * _sweep;
+      // _start already sits at 12 o'clock. A positive score sweeps
+      // clockwise from there (positive sweepAngle); a negative score
+      // sweeps anti-clockwise instead (negative sweepAngle) -- Canvas.
+      // drawArc supports a signed sweep directly, unlike the web's
+      // conic-gradient which can only paint in one direction.
+      final magnitude = scoreFillFraction(bounded) * _sweep;
+      final progress = bounded < 0 ? -magnitude : magnitude;
       canvas.drawArc(
         arcRect,
         _start,
@@ -722,6 +728,11 @@ String tradeDecisionLabel(
             lowerBlocker.contains('midnight') ||
             lowerBlocker.contains('entry window'))) {
       return 'WAIT — WEEKDAY ENTRY WINDOW';
+    }
+    if (lowerBlocker.contains("today's expiry") ||
+        lowerBlocker.contains("today's-expiry") ||
+        lowerBlocker.contains("today's ist expiry")) {
+      return "WAIT — TODAY'S EXPIRY UNAVAILABLE";
     }
     if (key == 'SHORT_MOVE' &&
         (lowerBlocker.contains('90 minutes') ||

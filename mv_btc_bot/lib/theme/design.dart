@@ -199,15 +199,19 @@ Color signedColour(num? value) {
   return value > 0 ? kPositive : kNegative;
 }
 
-/// Continuous red-to-green tone for the engine's bounded −100…+100 score.
+/// Red (negative) or green (positive) tone for the engine's bounded
+/// −100…+100 score, blended toward neutral for a weak score. Shading
+/// strength -- how vivid vs. how washed-out the tone reads -- scales with
+/// |score|: a near-zero score blends toward [kNeutral], and only an
+/// extreme score reaches the fully saturated endpoint.
 Color scoreColour(num? value) {
   if (value == null || !value.isFinite) return kNeutral;
   final bounded = value.clamp(-100, 100).toDouble();
-  return Color.lerp(
-    const Color(0xFFFF6178),
-    const Color(0xFF45E3A6),
-    (bounded + 100) / 200,
-  )!;
+  final strength = bounded.abs() / 100;
+  final pure = bounded < 0
+      ? const Color(0xFFFF6178)
+      : const Color(0xFF45E3A6);
+  return Color.lerp(kNeutral, pure, strength)!;
 }
 
 /// Magnitude of a score on its −100…+100 dial, from 0.0 to 1.0.
