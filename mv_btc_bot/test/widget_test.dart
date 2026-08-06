@@ -56,7 +56,13 @@ void main() {
     await tester.pumpWidget(
       MaterialApp(
         theme: buildAppTheme(blue: true),
-        home: TodayScreen(api: _TodayApi(), onUnauthorised: () {}),
+        // Scaffold, not TodayScreen directly, as `home` -- the real app
+        // always hosts a tab body inside a Scaffold, and Material widgets
+        // like the Cockpit's bot-toggle Switch need that Material ancestor
+        // to find (Switch does not self-wrap in one the way buttons do).
+        home: Scaffold(
+          body: TodayScreen(api: _TodayApi(), onUnauthorised: () {}),
+        ),
       ),
     );
     await tester.pumpAndSettle();
@@ -75,11 +81,18 @@ void main() {
     expect(find.text('P-BTC-63000-020826'), findsOneWidget);
     expect(find.text(r'-$65.90'), findsWidgets);
     expect(find.textContaining('7:41 AM IST'), findsOneWidget);
+    // scrollUntilVisible stops as soon as any part of the target overlaps
+    // the viewport, which used to be enough when this row sat near the top
+    // of the list. The Cockpit card now pushes it further down, so the row
+    // can land only partially onscreen (its centre -- what tap() targets --
+    // still below the fold). ensureVisible aligns it fully into view instead.
     await tester.scrollUntilVisible(
       find.text('P-BTC-63000-020826'),
       300,
       scrollable: find.byType(Scrollable).first,
     );
+    await tester.ensureVisible(find.text('P-BTC-63000-020826'));
+    await tester.pumpAndSettle();
     await tester.tap(find.text('P-BTC-63000-020826'));
     await tester.pumpAndSettle();
     expect(find.textContaining('8:01 AM IST'), findsOneWidget);

@@ -202,6 +202,7 @@ class _DecisionChart extends StatefulWidget {
 
 class _DecisionChartState extends State<_DecisionChart> {
   final TransformationController _viewport = TransformationController();
+  int? _hoverIndex;
 
   @override
   void dispose() {
@@ -211,11 +212,33 @@ class _DecisionChartState extends State<_DecisionChart> {
 
   void _resetViewport() => _viewport.value = Matrix4.identity();
 
+  void _updateHover(Offset local, Size size, int pointCount) {
+    if (pointCount < 2) return;
+    final index = _ChartGeometry.indexAt(
+      _ChartGeometry.plotRect(size),
+      local.dx,
+      pointCount,
+    );
+    if (index == _hoverIndex) return;
+    setState(() => _hoverIndex = index);
+  }
+
+  void _clearHover() {
+    if (_hoverIndex == null) return;
+    setState(() => _hoverIndex = null);
+  }
+
   @override
   Widget build(BuildContext context) {
-    final points = _mapList(widget.history?['decisions'])
-        .map((item) => _number(item['committed_score']))
-        .whereType<double>()
+    // decisions and points must stay index-aligned 1:1 -- the crosshair looks
+    // up decisions[hoverIndex] for the point at points[hoverIndex], so any
+    // entry without a usable score is dropped from both together rather than
+    // filtered independently, which would let the two lists drift apart.
+    final decisions = _mapList(widget.history?['decisions'])
+        .where((item) => _number(item['committed_score']) != null)
+        .toList();
+    final points = decisions
+        .map((item) => _number(item['committed_score'])!)
         .toList();
     final markers = _mapList(widget.history?['trade_markers']);
     return AppCard(
@@ -233,7 +256,8 @@ class _DecisionChartState extends State<_DecisionChart> {
                   children: [
                     Expanded(
                       child: Text(
-                        'Pinch to zoom · drag to inspect · double-tap to reset',
+                        'Pinch to zoom · long-press and drag for a '
+                        'crosshair · double-tap to reset',
                         style: AppText.caption.copyWith(
                           color: Theme.of(context).colorScheme.onSurfaceVariant,
                         ),
@@ -254,6 +278,11 @@ class _DecisionChartState extends State<_DecisionChart> {
                       220.0,
                       310.0,
                     );
+                    final scheme = Theme.of(context).colorScheme;
+                    final hoverDecision =
+                        _hoverIndex != null && _hoverIndex! < decisions.length
+                        ? decisions[_hoverIndex!]
+                        : null;
                     return SizedBox(
                       height: height,
                       child: ClipRRect(
@@ -273,16 +302,40 @@ class _DecisionChartState extends State<_DecisionChart> {
                             child: SizedBox(
                               width: constraints.maxWidth,
                               height: height,
-                              child: CustomPaint(
-                                painter: _ScoreChartPainter(
-                                  values: points,
-                                  markerCount: markers.length,
-                                  grid: Theme.of(context).colorScheme.outline,
-                                  label: Theme.of(
-                                    context,
-                                  ).colorScheme.onSurfaceVariant,
+                              child: GestureDetector(
+                                behavior: HitTestBehavior.opaque,
+                                onLongPressStart: (details) => _updateHover(
+                                  details.localPosition,
+                                  Size(constraints.maxWidth, height),
+                                  points.length,
                                 ),
-                                size: Size.infinite,
+                                onLongPressMoveUpdate: (details) =>
+                                    _updateHover(
+                                      details.localPosition,
+                                      Size(constraints.maxWidth, height),
+                                      points.length,
+                                    ),
+                                onLongPressEnd: (_) => _clearHover(),
+                                onLongPressCancel: _clearHover,
+                                child: CustomPaint(
+                                  painter: _ScoreChartPainter(
+                                    values: points,
+                                    markerCount: markers.length,
+                                    grid: scheme.outline,
+                                    label: scheme.onSurfaceVariant,
+                                  ),
+                                  foregroundPainter: hoverDecision == null
+                                      ? null
+                                      : _CrosshairPainter(
+                                          values: points,
+                                          index: _hoverIndex!,
+                                          decision: hoverDecision,
+                                          grid: scheme.outline,
+                                          surface: scheme.surface,
+                                          text: scheme.onSurface,
+                                        ),
+                                  size: Size.infinite,
+                                ),
                               ),
                             ),
                           ),
@@ -294,6 +347,51 @@ class _DecisionChartState extends State<_DecisionChart> {
               ],
             ),
     );
+  }
+}
+
+/// Score-domain -> pixel mapping shared by the background painter, the
+/// crosshair overlay, and the long-press hit test, so all three agree on
+/// exactly where a given index sits -- computing this once and threading it
+/// through avoids the crosshair drifting from the line it is pointing at.
+class _ChartGeometry {
+  const _ChartGeometry({required this.plot, required this.low, required this.high});
+
+  final Rect plot;
+  final double low;
+  final double high;
+
+  static const _left = 30.0;
+  static const _top = 8.0;
+  static const _bottom = 20.0;
+
+  static Rect plotRect(Size size) =>
+      Rect.fromLTRB(_left, _top, size.width, size.height - _bottom);
+
+  static _ChartGeometry compute({
+    required List<double> values,
+    required Size size,
+  }) {
+    final plot = plotRect(size);
+    if (values.isEmpty) return _ChartGeometry(plot: plot, low: -100, high: 100);
+    final minValue = values.reduce(math.min);
+    final maxValue = values.reduce(math.max);
+    final low = math.max(-100.0, math.min(minValue - 10, -30.0)).toDouble();
+    final high = math.min(100.0, math.max(maxValue + 10, 30.0)).toDouble();
+    return _ChartGeometry(plot: plot, low: low, high: high);
+  }
+
+  double y(double value) =>
+      plot.bottom - (value - low) / (high - low) * plot.height;
+
+  double x(int index, int pointCount) =>
+      plot.left + index / (pointCount - 1) * plot.width;
+
+  /// Nearest data index for a pixel x-position, clamped to the series.
+  static int indexAt(Rect plot, double dx, int pointCount) {
+    if (pointCount < 2) return 0;
+    final fraction = ((dx - plot.left) / plot.width).clamp(0.0, 1.0);
+    return (fraction * (pointCount - 1)).round().clamp(0, pointCount - 1);
   }
 }
 
@@ -311,17 +409,12 @@ class _ScoreChartPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    const left = 30.0;
-    const top = 8.0;
-    const bottom = 20.0;
-    final plot = Rect.fromLTRB(left, top, size.width, size.height - bottom);
-    final minValue = values.reduce(math.min);
-    final maxValue = values.reduce(math.max);
-    final low = math.max(-100.0, math.min(minValue - 10, -30.0)).toDouble();
-    final high = math.min(100.0, math.max(maxValue + 10, 30.0)).toDouble();
-    double y(double value) =>
-        plot.bottom - (value - low) / (high - low) * plot.height;
-    double x(int index) => plot.left + index / (values.length - 1) * plot.width;
+    final geometry = _ChartGeometry.compute(values: values, size: size);
+    final plot = geometry.plot;
+    final low = geometry.low;
+    final high = geometry.high;
+    double y(double value) => geometry.y(value);
+    double x(int index) => geometry.x(index, values.length);
 
     final zones = <(double, double, Color)>[
       (math.max(40.0, low).toDouble(), high, kZoneCall),
@@ -409,6 +502,143 @@ class _ScoreChartPainter extends CustomPainter {
   @override
   bool shouldRepaint(covariant _ScoreChartPainter oldDelegate) =>
       oldDelegate.values != values || oldDelegate.markerCount != markerCount;
+}
+
+/// Long-press-and-drag crosshair: a vertical + horizontal guide through the
+/// touched point plus a label box with its score, zone, and time -- the
+/// touch equivalent of the web chart's mouse-hover crosshair, since a phone
+/// has no hover event to key off.
+class _CrosshairPainter extends CustomPainter {
+  const _CrosshairPainter({
+    required this.values,
+    required this.index,
+    required this.decision,
+    required this.grid,
+    required this.surface,
+    required this.text,
+  });
+
+  final List<double> values;
+  final int index;
+  final Map<String, dynamic> decision;
+  final Color grid;
+  final Color surface;
+  final Color text;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final geometry = _ChartGeometry.compute(values: values, size: size);
+    final plot = geometry.plot;
+    final value = values[index];
+    final px = geometry.x(index, values.length);
+    final py = geometry.y(value);
+    final tone = zoneColour(_zoneForScore(value));
+
+    void dashedLine(Offset from, Offset to) {
+      const dash = 4.0, gap = 3.0;
+      final total = (to - from).distance;
+      final direction = (to - from) / total;
+      var travelled = 0.0;
+      final paint = Paint()
+        ..color = grid
+        ..strokeWidth = 1;
+      while (travelled < total) {
+        final segmentEnd = math.min(travelled + dash, total);
+        canvas.drawLine(
+          from + direction * travelled,
+          from + direction * segmentEnd,
+          paint,
+        );
+        travelled += dash + gap;
+      }
+    }
+
+    dashedLine(Offset(px, plot.top), Offset(px, plot.bottom));
+    dashedLine(Offset(plot.left, py), Offset(plot.right, py));
+    canvas.drawCircle(Offset(px, py), 5, Paint()..color = surface);
+    canvas.drawCircle(
+      Offset(px, py),
+      5,
+      Paint()
+        ..color = tone
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2,
+    );
+    canvas.drawCircle(Offset(px, py), 2.5, Paint()..color = tone);
+
+    final zone = '${decision['zone'] ?? ''}';
+    final time = _hoverTimeLabel('${decision['time_utc'] ?? ''}');
+    final scoreLabel = '${value > 0 ? '+' : ''}${value.toStringAsFixed(1)}';
+    final lines = [
+      TextSpan(
+        text: scoreLabel,
+        style: TextStyle(color: tone, fontSize: 12, fontWeight: FontWeight.w900),
+      ),
+      TextSpan(
+        text: '  ${_shortZone(zone)}',
+        style: TextStyle(color: text, fontSize: 9, fontWeight: FontWeight.w700),
+      ),
+    ];
+    final scorePainter = TextPainter(
+      text: TextSpan(children: lines),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    final timePainter = TextPainter(
+      text: TextSpan(
+        text: time,
+        style: TextStyle(color: text.withValues(alpha: .72), fontSize: 8),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout();
+
+    const padding = 6.0;
+    final boxWidth =
+        math.max(scorePainter.width, timePainter.width) + padding * 2;
+    final boxHeight = scorePainter.height + timePainter.height + padding * 2 + 2;
+    var boxLeft = px - boxWidth / 2;
+    boxLeft = boxLeft.clamp(plot.left, plot.right - boxWidth);
+    final boxTop = py - boxHeight - 10 < plot.top
+        ? py + 10
+        : py - boxHeight - 10;
+    final box = RRect.fromRectAndRadius(
+      Rect.fromLTWH(boxLeft, boxTop, boxWidth, boxHeight),
+      const Radius.circular(6),
+    );
+    canvas.drawRRect(box, Paint()..color = surface.withValues(alpha: .96));
+    canvas.drawRRect(
+      box,
+      Paint()
+        ..color = tone.withValues(alpha: .55)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1,
+    );
+    scorePainter.paint(canvas, Offset(boxLeft + padding, boxTop + padding));
+    timePainter.paint(
+      canvas,
+      Offset(boxLeft + padding, boxTop + padding + scorePainter.height + 2),
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant _CrosshairPainter oldDelegate) =>
+      oldDelegate.index != index || oldDelegate.values != values;
+}
+
+String _hoverTimeLabel(String iso) {
+  final parsed = DateTime.tryParse(iso);
+  if (parsed == null) return '—';
+  final ist = parsed.toUtc().add(const Duration(hours: 5, minutes: 30));
+  final hour = ist.hour % 12 == 0 ? 12 : ist.hour % 12;
+  final minute = ist.minute.toString().padLeft(2, '0');
+  return '$hour:$minute ${ist.hour < 12 ? 'AM' : 'PM'} IST';
+}
+
+String _shortZone(String zone) {
+  final upper = zone.toUpperCase();
+  if (upper.startsWith('CE')) return 'CE';
+  if (upper.startsWith('PE')) return 'PE';
+  if (upper.contains('MOVE')) return 'MV';
+  return 'HOLD';
 }
 
 class _ComponentsCard extends StatelessWidget {

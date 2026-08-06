@@ -499,7 +499,7 @@ class CommittedAdxPill extends StatelessWidget {
     if (value == null || !value.isFinite) {
       return const StatusPill('5M ADX —', colour: kNeutral, dot: false);
     }
-    final calm = value <= 20;
+    final calm = value <= 25;
     final invalidatesMove = !calm && zone == 'SHORT_MOVE';
     final label = invalidatesMove
         ? '5M ADX ${value.toStringAsFixed(1)} · EXIT MOVE'

@@ -150,8 +150,8 @@ void main() {
           home: const Scaffold(
             body: Column(
               children: [
-                CommittedAdxPill(adx: 20.0, zone: 'SHORT_MOVE'),
-                CommittedAdxPill(adx: 20.1, zone: 'SHORT_MOVE'),
+                CommittedAdxPill(adx: 25.0, zone: 'SHORT_MOVE'),
+                CommittedAdxPill(adx: 25.1, zone: 'SHORT_MOVE'),
                 CommittedAdxPill(adx: 35.0, zone: 'CE_2_ITM'),
               ],
             ),
@@ -159,8 +159,8 @@ void main() {
         ),
       );
 
-      expect(find.text('5M ADX 20.0 · CALM'), findsOneWidget);
-      expect(find.text('5M ADX 20.1 · EXIT MOVE'), findsOneWidget);
+      expect(find.text('5M ADX 25.0 · CALM'), findsOneWidget);
+      expect(find.text('5M ADX 25.1 · EXIT MOVE'), findsOneWidget);
       expect(find.text('5M ADX 35.0 · TREND'), findsOneWidget);
     });
   });

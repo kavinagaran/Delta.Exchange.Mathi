@@ -116,6 +116,19 @@ class DashboardApi {
     return const ApiResult.failed('Unexpected response shape');
   }
 
+  Future<ApiResult<Map<String, dynamic>>> postMap(
+    String path, [
+    Map<String, dynamic>? body,
+  ]) async {
+    final result = await post(path, body);
+    if (!result.ok) {
+      return ApiResult.failed(result.error, unauthorised: result.unauthorised);
+    }
+    final data = result.data;
+    if (data is Map<String, dynamic>) return ApiResult.ok(data);
+    return const ApiResult.failed('Unexpected response shape');
+  }
+
   Future<ApiResult<List<dynamic>>> getList(String path) async {
     final result = await get(path);
     if (!result.ok) {
@@ -247,6 +260,18 @@ class DashboardApi {
   Future<ApiResult<dynamic>> setBotActive(String username, bool active) => post(
     '/api/bots/${Uri.encodeComponent(username)}/${active ? 'start' : 'stop'}',
   );
+
+  /// Resolve the exact contract/price a Cockpit trade would use right now,
+  /// without submitting anything (read-only preview).
+  Future<ApiResult<Map<String, dynamic>>> cockpitPreview(String action) =>
+      postMap('/api/cockpit/preview', {'action': action});
+
+  /// Place one manual LIVE Cockpit trade: buy_ce, buy_pe, buy_move, or
+  /// sell_move. Reuses the same execution seam and exclusivity as the
+  /// automated controller, tagged with manual ownership so the controller
+  /// never manages or replaces it.
+  Future<ApiResult<Map<String, dynamic>>> cockpitEnter(String action) =>
+      postMap('/api/cockpit/enter', {'action': action});
 
   Future<ApiResult<dynamic>> squareOff({
     required String slot,

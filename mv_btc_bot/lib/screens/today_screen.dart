@@ -253,47 +253,63 @@ class _TodayScreenState extends State<TodayScreen> {
           total +
           (_number(row['pnl_usd'] ?? row['net_pnl'] ?? row['live_pnl']) ?? 0),
     );
-    return RefreshIndicator(
-      onRefresh: _refresh,
-      child: ListView(
-        physics: const AlwaysScrollableScrollPhysics(),
-        padding: const EdgeInsets.fromLTRB(Gap.lg, Gap.md, Gap.lg, Gap.xxl),
-        children: [
-          if (current == null)
-            const AppCard(
-              kicker: 'Current trade',
-              title: 'Flat',
-              child: Text('No live position.', style: AppText.body),
-            )
-          else
-            _CurrentTradeCard(
-              trade: current,
-              protection: _protectionFor(current),
-              busy: _closing,
-              onClose: () => _close(current),
-            ),
-          const SizedBox(height: Gap.md),
-          _EngineCard(
-            engine: _engine,
-            live: _engineLive,
-            controller: _controller,
-          ),
-          const SizedBox(height: Gap.md),
-          MetricWrap(
-            children: [
-              MetricTile(label: 'Trades', value: '${trades.length}'),
-              MetricTile(label: 'Open', value: current == null ? '0' : '1'),
-              MetricTile(label: 'Closed', value: '$closed'),
-              MetricTile(
-                label: 'Day P&L',
-                value: _money(dayPnl),
-                colour: signedColour(dayPnl),
+    // A denser, "pro-level" type scale for this screen only -- Today is the
+    // one view opened in a hurry, so more fits above the fold without any
+    // shared design-system size changing for every other screen.
+    final media = MediaQuery.of(context);
+    return MediaQuery(
+      data: media.copyWith(
+        textScaler: TextScaler.linear(media.textScaler.scale(1) * .86),
+      ),
+      child: RefreshIndicator(
+        onRefresh: _refresh,
+        child: ListView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          padding: const EdgeInsets.fromLTRB(Gap.lg, Gap.md, Gap.lg, Gap.xxl),
+          children: [
+            if (current == null)
+              const AppCard(
+                kicker: 'Current trade',
+                title: 'Flat',
+                child: Text('No live position.', style: AppText.body),
+              )
+            else
+              _CurrentTradeCard(
+                trade: current,
+                protection: _protectionFor(current),
+                busy: _closing,
+                onClose: () => _close(current),
               ),
-            ],
-          ),
-          const SizedBox(height: Gap.md),
-          _TodayTradesCard(trades: trades),
-        ],
+            const SizedBox(height: Gap.md),
+            _EngineCard(
+              engine: _engine,
+              live: _engineLive,
+              controller: _controller,
+            ),
+            const SizedBox(height: Gap.md),
+            _CockpitCard(
+              api: widget.api,
+              todayTrades: trades,
+              controller: _controller,
+              onChanged: () => _refresh(quiet: true),
+            ),
+            const SizedBox(height: Gap.md),
+            MetricWrap(
+              children: [
+                MetricTile(label: 'Trades', value: '${trades.length}'),
+                MetricTile(label: 'Open', value: current == null ? '0' : '1'),
+                MetricTile(label: 'Closed', value: '$closed'),
+                MetricTile(
+                  label: 'Day P&L',
+                  value: _money(dayPnl),
+                  colour: signedColour(dayPnl),
+                ),
+              ],
+            ),
+            const SizedBox(height: Gap.md),
+            _TodayTradesCard(trades: trades),
+          ],
+        ),
       ),
     );
   }
@@ -455,6 +471,62 @@ class _ProtectionPanel extends StatelessWidget {
               ),
             ],
           ),
+          const SizedBox(height: Gap.md),
+          _TslArmedLine(protection: protection, armed: armed),
+        ],
+      ),
+    );
+  }
+}
+
+/// Trailing-stop telemetry, called out on its own line at the bottom of the
+/// monitor rather than folded into the metric grid above -- whether the
+/// trail has actually armed (and at what floor) is the one fact that changes
+/// the risk on an open position without the operator touching anything.
+class _TslArmedLine extends StatelessWidget {
+  const _TslArmedLine({required this.protection, required this.armed});
+
+  final Map<String, dynamic> protection;
+  final bool armed;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final floor = _number(
+      protection['stream_tsl_floor'] ?? protection['tsl_floor'],
+    );
+    final peak = _number(protection['stream_tsl_peak']);
+    final floorText = armed && floor != null
+        ? 'floor \$${floor.toStringAsFixed(2)}'
+        : 'not armed';
+    final peakText = peak == null
+        ? 'peak pending'
+        : 'peak \$${peak.toStringAsFixed(2)}';
+    final tone = armed ? kWarning : scheme.onSurfaceVariant;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: Gap.sm, vertical: 7),
+      decoration: BoxDecoration(
+        color: tone.withValues(alpha: .09),
+        borderRadius: BorderRadius.circular(Radii.sm),
+        border: Border(left: BorderSide(color: tone, width: 2)),
+      ),
+      child: Row(
+        children: [
+          Icon(
+            armed ? Icons.gpp_good_rounded : Icons.gpp_maybe_outlined,
+            size: 14,
+            color: tone,
+          ),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Text(
+              'TSL ${armed ? 'Armed' : 'Not Armed'} · $floorText · $peakText',
+              style: AppText.caption.copyWith(
+                color: tone,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ),
         ],
       ),
     );
@@ -558,6 +630,345 @@ class _EngineCard extends StatelessWidget {
     if (score < -40) return 'PE_2_ITM';
     if (score >= -30 && score <= 30) return 'SHORT_MOVE';
     return 'HOLD';
+  }
+}
+
+/// Manual LIVE trade panel: Buy CE, Buy PE, Buy MOVE, Sell MOVE. Mirrors the
+/// web Cockpit card exactly -- same preview-then-confirm flow, same
+/// /api/cockpit/preview and /api/cockpit/enter seam the automated controller
+/// uses, and the same "one active trend-slot position at a time" exclusivity.
+/// A manual trade is protection-only once open: the automated controller
+/// never manages or replaces it, only TP/SL/TSL or an explicit Exit ends it.
+class _CockpitCard extends StatefulWidget {
+  const _CockpitCard({
+    required this.api,
+    required this.todayTrades,
+    required this.controller,
+    required this.onChanged,
+  });
+
+  final DashboardApi api;
+  final List<Map<String, dynamic>> todayTrades;
+  final Map<String, dynamic>? controller;
+  final VoidCallback onChanged;
+
+  @override
+  State<_CockpitCard> createState() => _CockpitCardState();
+}
+
+const _kCockpitLabels = {
+  'buy_ce': 'Buy CE (2-step ITM call)',
+  'buy_pe': 'Buy PE (2-step ITM put)',
+  'buy_move': 'Buy MOVE (nearest ATM straddle)',
+  'sell_move': 'Sell MOVE (nearest ATM straddle)',
+};
+
+class _CockpitCardState extends State<_CockpitCard> {
+  bool _busy = false;
+  bool _resettingLock = false;
+  bool _togglingBot = false;
+  String? _status;
+  bool _statusIsError = false;
+
+  bool get _hasOpenPosition => widget.todayTrades.any((row) {
+    if (row['_live'] != true) return false;
+    final slot = '${row['control_slot'] ?? row['slot'] ?? ''}'.toLowerCase();
+    return slot == 'trend';
+  });
+
+  void _notify(String message, {required bool ok}) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: ok ? kPositive : kNegative,
+      ),
+    );
+  }
+
+  Future<void> _enter(String action) async {
+    if (_busy || _hasOpenPosition) return;
+    final label = _kCockpitLabels[action] ?? action;
+    setState(() {
+      _busy = true;
+      _statusIsError = false;
+      _status = 'Resolving $label contract…';
+    });
+    final preview = await widget.api.cockpitPreview(action);
+    if (!mounted) return;
+    final previewData = preview.data;
+    if (!preview.ok || previewData == null) {
+      setState(() {
+        _busy = false;
+        _statusIsError = true;
+        _status = preview.error ?? 'Could not resolve a $label contract';
+      });
+      return;
+    }
+    setState(() => _status = null);
+    final isMove = '${previewData['instrument_kind']}' == 'BTC_MOVE';
+    final strike = _number(previewData['strike']);
+    final price = _number(previewData['entry_price']);
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('$label?'),
+        content: Text(
+          'Contract » ${previewData['symbol']}\n'
+          '${isMove ? '' : 'Strike » ${strike == null ? '—' : strike.toStringAsFixed(0)}   '}'
+          'Price » \$${price == null ? '—' : price.toStringAsFixed(2)}\n'
+          'Lots » ${previewData['lots'] ?? '—'}\n\n'
+          'This submits a real LIVE order at the current market price and '
+          'starts TP/SL/TSL protection per your Position protection '
+          'settings. The automated bot will not manage or replace this '
+          'trade.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Place trade'),
+          ),
+        ],
+      ),
+    );
+    if (!mounted) return;
+    if (confirmed != true) {
+      setState(() => _busy = false);
+      return;
+    }
+    setState(() => _status = 'Placing $label…');
+    final result = await widget.api.cockpitEnter(action);
+    if (!mounted) return;
+    final data = result.data;
+    final ok = result.ok && data != null;
+    final state = ok ? data['state'] as Map<String, dynamic>? : null;
+    final message = ok
+        ? '$label filled — ${state?['symbol'] ?? ''} '
+              '(${state?['lots'] ?? '—'} lots).'
+        : (result.error ?? '$label failed');
+    setState(() {
+      _busy = false;
+      _statusIsError = !ok;
+      _status = message;
+    });
+    _notify(ok ? '$label placed' : message, ok: ok);
+    widget.onChanged();
+  }
+
+  Future<void> _resetZoneLock() async {
+    final lock = widget.controller?['setup_lock'];
+    final active = lock is Map && lock['active'] == true;
+    if (!active) {
+      _notify('No active zone lock to reset', ok: false);
+      return;
+    }
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Reset the current zone lock?'),
+        content: const Text(
+          'This allows one new entry if the current zone is still eligible. '
+          'It does not close any position or submit an order.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Reset'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    setState(() => _resettingLock = true);
+    final result = await widget.api.resetZoneLock();
+    if (!mounted) return;
+    setState(() => _resettingLock = false);
+    final data = result.data;
+    final released = data is Map && data['released'] == true;
+    final zone = data is Map ? '${data['zone'] ?? ''}' : '';
+    final message = !result.ok
+        ? (result.error ?? 'Setup-lock reset failed')
+        : released
+        ? 'Setup lock for ${zone.replaceAll('_', ' ')} reset — the next '
+              'eligible candle may enter once.'
+        : (data is Map ? '${data['message'] ?? 'No zone lock is active'}' : 'No zone lock is active');
+    _notify(message, ok: result.ok);
+    widget.onChanged();
+  }
+
+  Future<void> _toggleBot(bool checked) async {
+    setState(() => _togglingBot = true);
+    final result = await widget.api.saveConfig({
+      'TREND_ENGINE_SCORE_AUTO_MODE': checked ? 'live' : 'disabled',
+    });
+    if (!mounted) return;
+    setState(() => _togglingBot = false);
+    if (!result.ok) {
+      _notify(result.error ?? 'Could not change the bot toggle', ok: false);
+      return;
+    }
+    _notify(
+      checked ? 'Automated trading enabled' : 'Automated trading disabled',
+      ok: true,
+    );
+    widget.onChanged();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final hasOpen = _hasOpenPosition;
+    final lock = widget.controller?['setup_lock'];
+    final lockActive = lock is Map && lock['active'] == true;
+    final lockZone = lock is Map
+        ? '${lock['target_zone'] ?? 'current zone'}'
+        : '';
+    final mode = '${widget.controller?['mode'] ?? ''}'.toLowerCase();
+    final botLabel = mode == 'live'
+        ? 'Bot ON'
+        : mode == 'dry_run'
+        ? 'Bot ON (dry run)'
+        : 'Bot OFF';
+
+    return AppCard(
+      kicker: 'Cockpit',
+      title: 'Manual LIVE trade',
+      trailing: const Icon(Icons.sports_esports_rounded, size: 18),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'One active position at a time',
+            style: AppText.caption.copyWith(color: scheme.onSurfaceVariant),
+          ),
+          const SizedBox(height: Gap.md),
+          Row(
+            children: [
+              Expanded(
+                child: _CockpitButton(
+                  label: 'Buy CE',
+                  colour: kZoneCall,
+                  enabled: !hasOpen && !_busy,
+                  onPressed: () => _enter('buy_ce'),
+                ),
+              ),
+              const SizedBox(width: Gap.sm),
+              Expanded(
+                child: _CockpitButton(
+                  label: 'Buy PE',
+                  colour: kZonePut,
+                  enabled: !hasOpen && !_busy,
+                  onPressed: () => _enter('buy_pe'),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: Gap.sm),
+          Row(
+            children: [
+              Expanded(
+                child: _CockpitButton(
+                  label: 'Buy MOVE',
+                  colour: kPositive,
+                  enabled: !hasOpen && !_busy,
+                  onPressed: () => _enter('buy_move'),
+                ),
+              ),
+              const SizedBox(width: Gap.sm),
+              Expanded(
+                child: _CockpitButton(
+                  label: 'Sell MOVE',
+                  colour: kWarning,
+                  enabled: !hasOpen && !_busy,
+                  onPressed: () => _enter('sell_move'),
+                ),
+              ),
+            ],
+          ),
+          if (_status != null) ...[
+            const SizedBox(height: Gap.sm),
+            Text(
+              _status!,
+              style: AppText.caption.copyWith(
+                color: _statusIsError ? kNegative : scheme.onSurfaceVariant,
+              ),
+            ),
+          ] else if (hasOpen) ...[
+            const SizedBox(height: Gap.sm),
+            Text(
+              'A position is already open — Cockpit trades resume once it '
+              'closes.',
+              style: AppText.caption.copyWith(color: scheme.onSurfaceVariant),
+            ),
+          ],
+          const SizedBox(height: Gap.md),
+          CompactAction(
+            label: _resettingLock ? 'Resetting…' : 'Reset Zone Lock',
+            icon: Icons.lock_open_rounded,
+            onPressed: (lockActive && !_resettingLock) ? _resetZoneLock : null,
+          ),
+          const SizedBox(height: 5),
+          Text(
+            lockActive
+                ? 'Zone lock active: ${lockZone.replaceAll('_', ' ')}.'
+                : 'Zone lock: none.',
+            style: AppText.caption.copyWith(color: scheme.onSurfaceVariant),
+          ),
+          const SizedBox(height: Gap.md),
+          Row(
+            children: [
+              Text(botLabel, style: AppText.body),
+              const Spacer(),
+              Switch(
+                value: mode == 'live',
+                onChanged: (hasOpen || _togglingBot) ? null : _toggleBot,
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _CockpitButton extends StatelessWidget {
+  const _CockpitButton({
+    required this.label,
+    required this.colour,
+    required this.enabled,
+    required this.onPressed,
+  });
+
+  final String label;
+  final Color colour;
+  final bool enabled;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return FilledButton(
+      onPressed: enabled ? onPressed : null,
+      style: FilledButton.styleFrom(
+        backgroundColor: colour.withValues(alpha: enabled ? .16 : .05),
+        foregroundColor: colour,
+        disabledForegroundColor: colour.withValues(alpha: .35),
+        side: BorderSide(color: colour.withValues(alpha: enabled ? .55 : .16)),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(Radii.md),
+        ),
+        padding: const EdgeInsets.symmetric(vertical: 11),
+        textStyle: const TextStyle(fontSize: 11.5, fontWeight: FontWeight.w800),
+      ),
+      child: Text(label),
+    );
   }
 }
 
