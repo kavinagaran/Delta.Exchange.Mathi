@@ -9423,6 +9423,45 @@ def _cockpit_manual_signal(action: str, snapshot: dict) -> dict:
     }
 
 
+def _cockpit_disable_score_automation_after_open(
+    *,
+    root_dir: Path,
+    owner: str,
+) -> str:
+    """Persist Bot OFF after a confirmed Cockpit fill.
+
+    This is intentionally not routed through ``/api/config``: that public
+    endpoint correctly refuses mode changes while a position is open, while
+    the Cockpit entry itself must atomically finish by turning automation off.
+    The account-entry lock is already held by the caller; the config-file lock
+    also serializes this mutation against ordinary non-mode Bot Config saves.
+    Protection remains attached to the open position and is not restarted.
+    """
+    with account_file_lock(
+        root_dir,
+        "config",
+        owner,
+        stale_after_sec=30,
+        wait_sec=5,
+    ) as config_acquired:
+        if not config_acquired:
+            raise RuntimeError(
+                "Cockpit position opened but Bot OFF could not be persisted"
+            )
+        saved, _ = _saved_user_cfg()
+        previous = str(
+            saved.get("TREND_ENGINE_SCORE_AUTO_MODE") or "disabled"
+        ).strip().lower()
+        saved["TREND_ENGINE_SCORE_AUTO_MODE"] = "disabled"
+        saved.update({
+            key: str(value)
+            for key, value in SCORE_ZONE_LEGACY_DISABLED_SETTINGS.items()
+        })
+        _atomic_write_json(_cfg_file(), saved)
+    _trend_cache.pop(_active_user(), None)
+    return previous
+
+
 def _trend_score_auto_transition_id(user: str, signal_key: str, zone: str) -> str:
     digest = hashlib.sha256(
         f"{user}|{signal_key}|{zone}".encode("utf-8")
@@ -14293,6 +14332,12 @@ def api_cockpit_enter():
                     action=f"COCKPIT_{action.upper()}",
                 )
                 _trend_score_auto_write_ledger(data_dir, ledger)
+                automation_mode_before = (
+                    _cockpit_disable_score_automation_after_open(
+                        root_dir=root_dir,
+                        owner=owner,
+                    )
+                )
     except Exception as exc:
         return jsonify({"ok": False, "error": str(exc)[:300]}), 400
 
@@ -14303,6 +14348,8 @@ def api_cockpit_enter():
         "status": result.get("status"),
         "order_submitted": bool(result.get("order_submitted")),
         "filled_lots": result.get("filled_lots"),
+        "bot_automation_disabled": ok,
+        "automation_mode_before": automation_mode_before if ok else None,
         "exchange_api_called": True,
     })
     if ok:
@@ -14315,12 +14362,14 @@ def api_cockpit_enter():
         ]
         if isinstance(lots, int):
             lines.append(f"Lots » <code>{lots:,}</code>")
+        lines.append("Bot » <b>OFF — manual re-enable required</b>")
         _trend_score_auto_notify("\n".join(lines))
     return jsonify({
         "ok": ok,
         "status": result.get("status"),
         "error": result.get("error"),
         "state": result.get("state"),
+        "bot_automation_mode": "disabled" if ok else None,
     }), (200 if ok else 409)
 
 
