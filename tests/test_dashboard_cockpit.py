@@ -3,8 +3,9 @@
 Reuses the identical LIVE execution seam as the automated score-auto
 controller (see test_dashboard_trend_score_auto_live_controller.py), so
 these tests focus on what is genuinely new: exclusivity (FCFS with both the
-bot and other manual trades), ownership tagging, ledger non-pollution, and
-the manual Sell MOVE ADX bypass -- not the execution seam's own fill/risk
+bot and other manual trades), ownership tagging, setup locking without
+signal consumption, and the manual Sell MOVE ADX/premium bypass -- not the
+execution seam's own fill/risk
 mechanics, which have their own dedicated coverage.
 """
 from __future__ import annotations
@@ -269,12 +270,11 @@ def test_cockpit_enter_tags_manual_ownership_for_every_trade_type(
     dashboard._trend_score_auto_notify.assert_called_once()
 
 
-def test_cockpit_enter_never_writes_to_the_score_auto_ledger(
+def test_cockpit_enter_records_setup_lock_without_consuming_engine_signal(
     live_account, monkeypatch,
 ):
-    """A manual entry's synthetic signal_key must never enter the ledger the
-    automated cycle reads to decide whether a real signal is consumed --
-    see _cockpit_manual_signal's docstring for why."""
+    """A confirmed manual fill activates Reset Zone Lock without adding its
+    synthetic key to the completed engine-signal ledger."""
     monkeypatch.setattr(
         dashboard, "_cockpit_market_snapshot", lambda: {"market": {"spot": 65_000}},
     )
@@ -289,15 +289,17 @@ def test_cockpit_enter_never_writes_to_the_score_auto_ledger(
         dashboard, "_trend_score_auto_live_execute",
         Mock(return_value=_mock_execution_result()),
     )
-    write_ledger = Mock()
-    monkeypatch.setattr(dashboard, "_trend_score_auto_write_ledger", write_ledger)
-
     response, status = _post_cockpit_enter("buy_ce")
 
     assert status == 200
-    write_ledger.assert_not_called()
     ledger_path = live_account / dashboard.TREND_SCORE_AUTO_LEDGER_FILE
-    assert not ledger_path.exists()
+    ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+    assert ledger["signals"] == {}
+    assert ledger["setup_lock"]["target_zone"] == dashboard.TREND_SCORE_CE_ZONE
+    assert ledger["setup_lock"]["source_action"] == "COCKPIT_BUY_CE"
+    assert ledger["setup_lock"]["source_signal_key"].startswith(
+        "manual-cockpit|buy_ce|"
+    )
 
 
 def test_cockpit_sell_move_never_evaluates_the_automated_adx_gate(
@@ -359,6 +361,8 @@ def test_cockpit_enter_surfaces_a_failed_execution_without_a_500(
     assert payload["ok"] is False
     assert payload["status"] == "NO_FILL"
     dashboard._trend_score_auto_notify.assert_not_called()
+    ledger_path = live_account / dashboard.TREND_SCORE_AUTO_LEDGER_FILE
+    assert not ledger_path.exists()
 
 
 def test_cockpit_enter_refuses_when_a_contract_cannot_be_selected(
@@ -593,8 +597,40 @@ def test_prepare_sell_move_keeps_short_zone_and_checks_short_move_eligibility(
     assert select.call_args.kwargs["min_time_to_expiry_seconds"] == 0
     eligibility.assert_called_once()
     # The 90-minute liquidity floor is bypassed for a Cockpit entry --
-    # only the automated ADX/weekday/premium checks stay in effect.
+    # the automated ADX, 90-minute, and $300-premium checks are bypassed.
+    # The strategy-wide weekday blackout remains in effect.
     assert eligibility.call_args.kwargs["enforce_min_tte"] is False
+    assert eligibility.call_args.kwargs["enforce_min_premium"] is False
+
+
+def test_cockpit_sell_move_allows_premium_below_300(live_account):
+    selection = {"expiry": "2026-08-08T18:00:00+00:00"}
+    quote = {"bid": 250.0}
+    now = dashboard.datetime.fromisoformat("2026-08-08T12:00:00+00:00")
+
+    result = dashboard._trend_score_auto_short_move_eligibility(
+        selection,
+        quote,
+        now=now,
+        enforce_min_tte=False,
+        enforce_min_premium=False,
+    )
+
+    assert result["quoted_premium_usd"] == 250.0
+    assert result["minimum_premium_usd"] == 0
+
+
+def test_automated_sell_move_still_enforces_premium_above_300(live_account):
+    selection = {"expiry": "2026-08-08T18:00:00+00:00"}
+    quote = {"bid": 250.0}
+    now = dashboard.datetime.fromisoformat("2026-08-08T12:00:00+00:00")
+
+    with pytest.raises(RuntimeError, match="premium must be above"):
+        dashboard._trend_score_auto_short_move_eligibility(
+            selection,
+            quote,
+            now=now,
+        )
 
 
 def test_prepare_buy_move_overrides_zone_and_side_and_skips_short_eligibility(

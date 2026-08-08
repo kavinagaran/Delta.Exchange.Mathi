@@ -9101,6 +9101,7 @@ def _trend_score_auto_short_move_eligibility(
     *,
     now: datetime | None = None,
     enforce_min_tte: bool = True,
+    enforce_min_premium: bool = True,
 ) -> dict:
     """Validate the explicit SHORT MOVE contract-entry rules.
 
@@ -9112,9 +9113,10 @@ def _trend_score_auto_short_move_eligibility(
     expiry -- that is ``select_move_contract``'s own ``today_only``
     guarantee at selection time, not re-derivable here from a single
     already-selected contract without re-fetching the whole listing. A
-    Cockpit manual entry passes ``enforce_min_tte=False``: the operator's
-    own real-time judgement substitutes for the 90-minute liquidity floor,
-    same as it already does for the ADX calm-market gate.
+    A Cockpit manual entry passes both enforcement flags as ``False``: the
+    operator's own real-time judgement substitutes for the automated
+    90-minute and $300 entry floors, same as it already does for the ADX
+    calm-market gate. The weekday blackout remains a strategy-wide rule.
     """
     current = now or datetime.now(timezone.utc)
     if current.tzinfo is None:
@@ -9139,14 +9141,16 @@ def _trend_score_auto_short_move_eligibility(
     if enforce_min_tte and tte_seconds <= MIN_TIME_TO_EXPIRY_SECONDS:
         raise RuntimeError("SHORT MOVE needs more than 90 minutes until expiry")
     bid = _trend_score_auto_number(quote.get("bid"), "MOVE bid", positive=True)
-    if bid <= SHORT_MOVE_MIN_PREMIUM_USD:
+    if enforce_min_premium and bid <= SHORT_MOVE_MIN_PREMIUM_USD:
         raise RuntimeError(
             "SHORT MOVE premium must be above "
             f"${SHORT_MOVE_MIN_PREMIUM_USD:,.0f} (currently ${bid:,.2f})"
         )
     return {
         "quoted_premium_usd": round(bid, 8),
-        "minimum_premium_usd": SHORT_MOVE_MIN_PREMIUM_USD,
+        "minimum_premium_usd": (
+            SHORT_MOVE_MIN_PREMIUM_USD if enforce_min_premium else 0
+        ),
         "time_to_expiry_seconds": round(tte_seconds, 3),
         "minimum_time_to_expiry_seconds": (
             MIN_TIME_TO_EXPIRY_SECONDS if enforce_min_tte else 0
@@ -9287,9 +9291,9 @@ def _cockpit_prepare_manual_entry(action: str, snapshot: dict) -> dict:
     to pass, because a manual trade substitutes the operator's own
     real-time judgement for both. ``buy_ce``/``buy_pe`` still require a
     fresh, non-stale executable quote; ``sell_move`` still enforces the
-    SHORT MOVE weekday blackout and minimum premium guards (data-quality/
-    liquidity checks, not automated-calmness checks); ``buy_move`` has no
-    automated precedent to mirror.
+    strategy-wide weekday-blackout guard but skips the automated $300
+    premium floor;
+    ``buy_move`` has no automated precedent to mirror.
 
     Every trade type is restricted to today's IST expiry, same as the
     automated controller -- a Cockpit trade must never silently roll to
@@ -9359,7 +9363,10 @@ def _cockpit_prepare_manual_entry(action: str, snapshot: dict) -> dict:
     if action == "sell_move":
         quote = _trend_score_auto_move_quote(selection["symbol"], 1)
         move_eligibility = _trend_score_auto_short_move_eligibility(
-            selection, quote, enforce_min_tte=False,
+            selection,
+            quote,
+            enforce_min_tte=False,
+            enforce_min_premium=False,
         )
         prepared = {
             **selection,
@@ -9399,9 +9406,10 @@ def _cockpit_manual_signal(action: str, snapshot: dict) -> dict:
     ``signal_key`` is namespaced with a ``manual-cockpit|`` prefix a real
     completed-candle key (``trend-score-auto|BTCUSD|5m|...``) can never
     collide with, and this key is never written into the score-auto
-    ledger's consumed-signals set -- a manual entry does not touch that
-    ledger at all (see the Cockpit route), so it can neither shadow a real
-    signal nor be shadowed by one.
+    ledger's consumed-signals set. A confirmed Cockpit fill records only the
+    durable setup lock, so it cannot consume or shadow a completed engine
+    signal while still requiring an explicit Reset Zone Lock for another
+    entry in the same setup.
     """
     return {
         "signal_key": (
@@ -14229,6 +14237,8 @@ def api_cockpit_enter():
             snapshot = _cockpit_market_snapshot()
             prepared = _cockpit_prepare_manual_entry(action, snapshot)
             signal = _cockpit_manual_signal(action, snapshot)
+            signal["zone"] = prepared["zone"]
+            signal["mode"] = dict(initial_mode)
             transition_id = _trend_score_auto_transition_id(
                 user, signal["signal_key"], prepared["zone"],
             )
@@ -14241,6 +14251,27 @@ def api_cockpit_enter():
                 existing_state=states["trend"],
                 ownership=TREND_SCORE_MANUAL_LIVE_OWNERSHIP,
             )
+            cockpit_opened = (
+                bool(result.get("ok"))
+                and str(result.get("status") or "").upper() == "OPEN"
+            )
+            if cockpit_opened:
+                # Cockpit entries use the same one-trade-per-setup safety as
+                # automated entries, but deliberately do not add their
+                # synthetic signal key to ``ledger["signals"]``. This makes
+                # Reset Zone Lock available after every confirmed manual
+                # fill without consuming a real completed-candle signal.
+                data_dir = _mode_data_dir(False)
+                # ``account_entry_lock`` is the controller/reset mutation
+                # boundary, so this read-modify-write cannot race either.
+                ledger = _trend_score_auto_ledger(data_dir)
+                _trend_score_auto_lock_setup(
+                    ledger,
+                    signal,
+                    transition_id=transition_id,
+                    action=f"COCKPIT_{action.upper()}",
+                )
+                _trend_score_auto_write_ledger(data_dir, ledger)
     except Exception as exc:
         return jsonify({"ok": False, "error": str(exc)[:300]}), 400
 
