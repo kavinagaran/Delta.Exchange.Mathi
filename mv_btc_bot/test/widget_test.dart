@@ -79,6 +79,7 @@ void main() {
     expect(find.text('ENTRY READY'), findsNothing);
     expect(find.text('SIGNAL CONSUMED'), findsNothing);
     expect(find.text('P-BTC-63000-020826'), findsOneWidget);
+    expect(find.text(r'-$53.30 (-11.22%)'), findsOneWidget);
     expect(find.text(r'-$65.90'), findsWidgets);
     expect(find.textContaining('7:41 AM IST'), findsOneWidget);
     // scrollUntilVisible stops as soon as any part of the target overlaps
@@ -333,6 +334,7 @@ class _TodayApi extends DashboardApi {
       'side': 'long',
       'lots': 1000,
       'entry_mark': 475.0,
+      'contract_value': 0.001,
       'current_mark': 421.7,
       'live_pnl': -53.3,
     },

@@ -342,6 +342,7 @@ class _CurrentTradeCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final pnl = (trade['live_pnl'] as num?)?.toDouble();
+    final pnlPercent = _positionPnlPercent(trade, protection, pnl);
     return AppCard(
       kicker: 'Current trade',
       title: '${trade['symbol'] ?? '—'}',
@@ -352,7 +353,9 @@ class _CurrentTradeCard extends StatelessWidget {
         children: [
           MetricTile(
             label: 'Live P&L',
-            value: pnl == null ? '—' : '\$${_signed(pnl, 2)}',
+            value: pnl == null
+                ? '—'
+                : '${_money(pnl)}${pnlPercent == null ? '' : ' (${_signed(pnlPercent, 2)}%)'}',
             colour: signedColour(pnl),
             big: true,
           ),
@@ -1245,6 +1248,26 @@ String _money(double value) =>
 String _tradePrice(Object? value) {
   final number = _number(value);
   return number == null ? '—' : '\$${number.toStringAsFixed(2)}';
+}
+
+double? _positionPnlPercent(
+  Map<String, dynamic> trade,
+  Map<String, dynamic>? protection,
+  double? pnl,
+) {
+  if (pnl == null || !pnl.isFinite) return null;
+  var premium = _number(
+    protection?['entry_premium_usd'] ?? trade['entry_premium_usd'],
+  );
+  if (premium == null || !premium.isFinite || premium <= 0) {
+    final entry = _number(trade['entry_mark']);
+    final lots = _number(trade['lots']);
+    final contractValue = _number(trade['contract_value']) ?? 0.001;
+    if (entry == null || lots == null || contractValue <= 0) return null;
+    premium = entry * lots * contractValue;
+  }
+  if (!premium.isFinite || premium <= 0) return null;
+  return pnl / premium * 100;
 }
 
 double? _number(Object? value) =>

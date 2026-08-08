@@ -150,6 +150,29 @@ function todayTradePnl(trade) {
   return +(trade?._live ? trade.live_pnl : trade?.pnl_usd) || 0;
 }
 
+function todayTradePnlPercent(trade, protection, pnl = todayTradePnl(trade)) {
+  const reportedPremium = Number(
+    protection?.entry_premium_usd ?? trade?.entry_premium_usd,
+  );
+  let entryPremium = Number.isFinite(reportedPremium) && reportedPremium > 0
+    ? reportedPremium : null;
+  if (entryPremium == null) {
+    const entry = Number(trade?.entry_mark);
+    const lots = Number(trade?.lots);
+    const contractValue = Number(trade?.contract_value ?? 0.001);
+    const calculated = entry * lots * contractValue;
+    if (Number.isFinite(calculated) && calculated > 0) entryPremium = calculated;
+  }
+  const value = Number(pnl);
+  return entryPremium != null && Number.isFinite(value)
+    ? value / entryPremium * 100 : null;
+}
+
+function todaySignedPercent(value) {
+  if (!Number.isFinite(value)) return '—';
+  return `${value > 0 ? '+' : ''}${fN(value, 2)}%`;
+}
+
 function todayControlSlot(trade) {
   for (const value of [trade?.control_slot, trade?.slot]) {
     const slot = String(value || '').toLowerCase();
@@ -312,6 +335,7 @@ function renderTodayCurrentTrade(trade, index, protection = null) {
     return;
   }
   const pnl = todayTradePnl(trade);
+  const pnlPercent = todayTradePnlPercent(trade, protection, pnl);
   const direction = String(trade.side || '—').toUpperCase();
   const directionClass = direction === 'SHORT' ? 'short' : 'long';
   const slot = todayControlSlot(trade);
@@ -321,7 +345,8 @@ function renderTodayCurrentTrade(trade, index, protection = null) {
       <span class="badge ${simulated ? 'sim' : 'live'}">${simulated ? 'SIMULATED OPEN' : 'LIVE OPEN'}</span>
       <span>${simulated ? 'Dry Run position · no exchange exposure' : 'Exchange position'}</span>
     </div>
-    <div class="big-pnl ${pnlCls(pnl)}">${f$(pnl)}<small>Live P&amp;L</small></div>
+    <div class="big-pnl ${pnlCls(pnl)}">${f$(pnl)}${pnlPercent == null ? '' :
+      `<span class="pnl-percent">(${todaySignedPercent(pnlPercent)})</span>`}<small>Live P&amp;L</small></div>
     <dl class="kv">
       <dt>Time of trade</dt><dd>${esc(todayTradeTimeIst(trade))}</dd>
       <dt>Trade type</dt><dd>${esc(todayTradeType(trade))}</dd>
