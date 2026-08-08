@@ -10843,18 +10843,39 @@ def _trend_score_auto_risk_snapshot(
             protection.get("sl_target_pnl"), "Trend stop loss", positive=True,
         )
         fee_per_lot = 2 * _option_fee_per_lot(price, cv, strike)
-        premium_per_lot = price * cv
         slippage_per_lot = 0.0
-        premium_at_risk = premium_per_lot * lots
+        premium_at_risk = price * cv * lots
+        if not dry_run:
+            # Wallet affordability is authoritative for the cash needed to
+            # open a LIVE option. Reuse its product-aware entry-premium and
+            # commission model here instead of comparing the already-
+            # downsized order against a second, legacy round-trip-fee
+            # estimate. The latter could reject a valid Cockpit order even
+            # though its entry premium, entry charge, and 2% reserve fit.
+            opening_funds = _trend_score_auto_live_required_funds(
+                prepared,
+                quote,
+                lots,
+                cfg=cfg,
+            )
+            premium_at_risk = _trend_score_auto_number(
+                opening_funds.get("margin_or_premium_usd"),
+                "wallet-funded option premium",
+                positive=True,
+            )
         proposed_risk = max(
             sl_target,
-            lots * (premium_per_lot + fee_per_lot + slippage_per_lot),
+            premium_at_risk
+            + lots * (fee_per_lot + slippage_per_lot),
         )
-        if available_usd * 0.98 < (
-            premium_at_risk + fee_per_lot * lots
+        if not dry_run and available_usd * 0.98 < _trend_score_auto_number(
+                opening_funds.get("estimated_total_required_usd"),
+                "estimated option opening funds",
+                positive=True,
         ):
             raise RuntimeError(
-                "Available USD balance cannot fund the configured option order"
+                "Available USD balance changed and cannot fund the affordable "
+                "option order including entry charges"
             )
         premium_cap = _trend_score_auto_number(
             cfg.get("MAX_ACCOUNT_PREMIUM_AT_RISK_USD") or 500,

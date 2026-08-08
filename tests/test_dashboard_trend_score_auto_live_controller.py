@@ -1604,6 +1604,33 @@ def test_downsized_live_entry_builds_protection_for_actual_affordable_lots(
     )
 
 
+def test_downsized_live_option_passes_wallet_risk_recheck(live_account):
+    """The risk layer must not reject the affordable quantity by charging
+    an exit fee against cash that is needed only for the opening order."""
+    prepared = _prepared(dashboard.TREND_SCORE_CE_ZONE)
+    prepared["entry_price"] = 419.0
+    prepared["quote_snapshot"]["ask"] = 419.0
+    quote = {**_execution_quote(prepared), "ask": 419.0}
+    available_usd = 56.33480372
+    _attach_live_affordability(
+        prepared,
+        quote,
+        available_usd=available_usd,
+    )
+
+    assert 0 < prepared["lots"] < prepared["configured_lots"]
+    risk = dashboard._trend_score_auto_live_risk_snapshot(
+        prepared,
+        quote,
+        available_usd=available_usd,
+    )
+
+    assert risk["allowed"] is True
+    assert risk["premium_at_risk_usd"] == pytest.approx(
+        prepared["live_affordability"]["margin_or_premium_usd"]
+    )
+
+
 def test_downsized_live_protection_rejects_unverified_lot_mutation(live_account):
     prepared = _prepared(dashboard.TREND_SCORE_CE_ZONE)
     quote = {**_execution_quote(prepared), "ask_size": 5_000}
