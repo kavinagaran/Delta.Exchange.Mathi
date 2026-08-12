@@ -1,6 +1,6 @@
-# Nithi Bot Android
+# BTC BOT Android
 
-Native Android companion for the Nithi Bot trading dashboard. The app uses the
+Native Android companion for the BTC BOT trading dashboard. The app uses the
 same authenticated server APIs as the web dashboard and includes Today,
 Performance, Paper, Exposure, Bot Config, API Accounts, Logs and Trend Engine.
 

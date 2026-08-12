@@ -23,10 +23,12 @@ class TodayScreen extends StatefulWidget {
     super.key,
     required this.api,
     required this.onUnauthorised,
+    this.onBtcPrice,
   });
 
   final DashboardApi api;
   final VoidCallback onUnauthorised;
+  final ValueChanged<double?>? onBtcPrice;
 
   @override
   State<TodayScreen> createState() => _TodayScreenState();
@@ -53,11 +55,10 @@ class _TodayScreenState extends State<TodayScreen> {
     super.initState();
     _refresh();
     _connectProtectionStream();
-    // 20s: fast enough that a fill shows up while you are looking at the
-    // screen, slow enough not to hammer a dashboard that also runs the
-    // trading loop in-process.
+    // Match the web dashboard's 10-second status cadence so the BTC header
+    // pill and any new fill move promptly without hammering the trading loop.
     _poll = Timer.periodic(
-      const Duration(seconds: 20),
+      const Duration(seconds: 10),
       (_) => _refresh(quiet: true),
     );
     // The forming-candle preview is display-only and cheap to refresh. Keep it
@@ -165,9 +166,10 @@ class _TodayScreenState extends State<TodayScreen> {
       return;
     }
 
+    final nextStatus = results[0].data as Map<String, dynamic>?;
     setState(() {
       _loading = false;
-      _status = results[0].data as Map<String, dynamic>?;
+      _status = nextStatus;
       _todayTrades = (results[1].data as List<dynamic>?) ?? const [];
       _engine = results[2].data as Map<String, dynamic>?;
       _engineLive = results[3].data as Map<String, dynamic>?;
@@ -177,6 +179,7 @@ class _TodayScreenState extends State<TodayScreen> {
       // unreachable is itself information and gets its own card.
       _error = results[0].ok ? null : results[0].error;
     });
+    widget.onBtcPrice?.call(_number(nextStatus?['btc_futures_price']));
   }
 
   Map<String, dynamic>? get _currentTrade {
@@ -351,14 +354,7 @@ class _CurrentTradeCard extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          MetricTile(
-            label: 'Live P&L',
-            value: pnl == null
-                ? '—'
-                : '${_money(pnl)}${pnlPercent == null ? '' : ' (${_signed(pnlPercent, 2)}%)'}',
-            colour: signedColour(pnl),
-            big: true,
-          ),
+          _LivePnlMetric(pnl: pnl, percent: pnlPercent),
           const SizedBox(height: Gap.md),
           MetricWrap(
             children: [
@@ -393,6 +389,48 @@ class _CurrentTradeCard extends StatelessWidget {
           ],
         ],
       ),
+    );
+  }
+}
+
+class _LivePnlMetric extends StatelessWidget {
+  const _LivePnlMetric({required this.pnl, required this.percent});
+
+  final double? pnl;
+  final double? percent;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final colour = signedColour(pnl);
+    final valueStyle = AppText.display.copyWith(color: colour);
+    final percentStyle = valueStyle.copyWith(
+      fontSize: (valueStyle.fontSize ?? 25) * .5,
+      letterSpacing: -.2,
+    );
+    final amount = pnl == null ? '—' : _money(pnl!);
+    final percentage = percent == null ? '' : ' (${_signed(percent!, 2)}%)';
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(
+          'LIVE P&L',
+          style: AppText.kicker.copyWith(color: scheme.onSurfaceVariant),
+        ),
+        const SizedBox(height: Gap.xs),
+        RichText(
+          text: TextSpan(
+            style: valueStyle,
+            children: [
+              TextSpan(text: amount),
+              if (percentage.isNotEmpty)
+                TextSpan(text: percentage, style: percentStyle),
+            ],
+          ),
+        ),
+      ],
     );
   }
 }

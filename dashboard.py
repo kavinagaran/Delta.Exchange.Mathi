@@ -1,5 +1,5 @@
 """
-dashboard.py — NITHI-BOT · MV-BTC Straddle Web Dashboard
+dashboard.py — BTC BOT · MV-BTC Straddle Web Dashboard
 Run  : python dashboard.py
 Open : http://localhost:5001
 """
@@ -4382,7 +4382,7 @@ def download_apk():
     apk = BASE / "mv_btc_bot" / "build" / "app" / "outputs" / "flutter-apk" / "app-release.apk"
     if not apk.exists():
         abort(404)
-    return send_file(str(apk), as_attachment=True, download_name="nithi-bot.apk")
+    return send_file(str(apk), as_attachment=True, download_name="btc-bot.apk")
 
 
 @app.route("/api/logs")
@@ -15070,7 +15070,7 @@ def test_telegram():
             f"https://api.telegram.org/bot{token}/sendMessage",
             json={
                 "chat_id":    chat_id,
-                "text":       "✅ <b>NITHI-BOT</b> — Telegram alerts are connected!\n<code>Test message from dashboard.</code>",
+                "text":       "✅ <b>BTC BOT</b> — Telegram alerts are connected!\n<code>Test message from dashboard.</code>",
                 "parse_mode": "HTML",
             },
             timeout=8,
@@ -15322,7 +15322,7 @@ def _dry_run_protection_loop() -> None:
 # ─────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     print("=" * 50)
-    print("  NITHI-BOT — MV-BTC Straddle Dashboard")
+    print("  BTC BOT — MV-BTC Straddle Dashboard")
     print("  http://localhost:5001")
     print("=" * 50)
     _revive_tp_monitors()

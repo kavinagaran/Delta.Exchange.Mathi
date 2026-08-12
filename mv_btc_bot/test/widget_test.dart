@@ -48,6 +48,7 @@ void main() {
   testWidgets('Today shows one Exit action and every trade today', (
     WidgetTester tester,
   ) async {
+    double? observedBtcPrice;
     tester.view.physicalSize = const Size(390, 1000);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
@@ -61,7 +62,11 @@ void main() {
         // like the Cockpit's bot-toggle Switch need that Material ancestor
         // to find (Switch does not self-wrap in one the way buttons do).
         home: Scaffold(
-          body: TodayScreen(api: _TodayApi(), onUnauthorised: () {}),
+          body: TodayScreen(
+            api: _TodayApi(),
+            onUnauthorised: () {},
+            onBtcPrice: (price) => observedBtcPrice = price,
+          ),
         ),
       ),
     );
@@ -73,13 +78,17 @@ void main() {
     );
 
     expect(find.text('2 trades'), findsOneWidget);
+    expect(observedBtcPrice, 64763);
     expect(find.text('+42.4'), findsOneWidget);
     expect(find.text('+46.8'), findsOneWidget);
     expect(find.text('BUY 2-STEP ITM CE'), findsOneWidget);
     expect(find.text('ENTRY READY'), findsNothing);
     expect(find.text('SIGNAL CONSUMED'), findsNothing);
     expect(find.text('P-BTC-63000-020826'), findsOneWidget);
-    expect(find.text(r'-$53.30 (-11.22%)'), findsOneWidget);
+    expect(
+      find.text(r'-$53.30 (-11.22%)', findRichText: true),
+      findsOneWidget,
+    );
     expect(find.text(r'-$65.90'), findsWidgets);
     expect(find.textContaining('7:41 AM IST'), findsOneWidget);
     // scrollUntilVisible stops as soon as any part of the target overlaps
@@ -260,12 +269,12 @@ void main() {
     await tester.pumpWidget(
       MaterialApp(
         home: Scaffold(
-          body: Text('Nithi Bot', style: neonBrandTextStyle(fontSize: 16)),
+          body: Text('BTC BOT', style: neonBrandTextStyle(fontSize: 16)),
         ),
       ),
     );
 
-    final style = tester.widget<Text>(find.text('Nithi Bot')).style!;
+    final style = tester.widget<Text>(find.text('BTC BOT')).style!;
     expect(style.color, kNeonTitle);
     expect(style.shadows, kNeonTextGlow);
   });
@@ -297,7 +306,7 @@ class _TodayApi extends DashboardApi {
 
   @override
   Future<ApiResult<Map<String, dynamic>>> status() async =>
-      const ApiResult.ok(<String, dynamic>{});
+      const ApiResult.ok(<String, dynamic>{'btc_futures_price': 64763.0});
 
   @override
   Future<ApiResult<Map<String, dynamic>>> engineSnapshot() async =>

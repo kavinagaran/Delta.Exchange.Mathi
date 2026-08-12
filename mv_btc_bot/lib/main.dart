@@ -503,7 +503,7 @@ class NeonLogo extends StatelessWidget {
         ),
         child: ClipRRect(
           borderRadius: corner,
-          child: Image.asset('assets/logo.png', fit: BoxFit.cover),
+          child: Image.asset('assets/logo.png', fit: BoxFit.contain),
         ),
       ),
     );
@@ -528,7 +528,7 @@ class MathiBotApp extends StatelessWidget {
     return AnimatedBuilder(
       animation: appTheme,
       builder: (context, _) => MaterialApp(
-        title: 'Nithi Bot',
+        title: 'BTC BOT',
         debugShowCheckedModeBanner: false,
         theme: buildAppTheme(blue: appTheme.isBlue),
         themeAnimationDuration: const Duration(milliseconds: 220),
@@ -773,6 +773,61 @@ class WebAssetCache {
   }
 }
 
+class _BtcPricePill extends StatelessWidget {
+  const _BtcPricePill({required this.price, required this.direction});
+
+  final double? price;
+  final int direction;
+
+  String _formattedPrice() {
+    if (price == null) return '—';
+    final digits = price!.round().toString();
+    final grouped = StringBuffer();
+    for (var index = 0; index < digits.length; index++) {
+      if (index > 0 && (digits.length - index) % 3 == 0) grouped.write(',');
+      grouped.write(digits[index]);
+    }
+    return '\$${grouped.toString()}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final rising = direction >= 0;
+    final edge = rising ? kPositive : const Color(0xFFFF6172);
+    final gradient = rising
+        ? const [Color(0xFF07543F), Color(0xFF18C98A)]
+        : const [Color(0xFF65162A), Color(0xFFFF526C)];
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 280),
+      curve: Curves.easeOutCubic,
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(colors: gradient),
+        borderRadius: BorderRadius.circular(99),
+        border: Border.all(color: edge.withValues(alpha: .85), width: .7),
+        boxShadow: [
+          BoxShadow(
+            color: edge.withValues(alpha: .30),
+            blurRadius: 8,
+            spreadRadius: .4,
+          ),
+        ],
+      ),
+      child: Text(
+        'BTC - ${_formattedPrice()}',
+        style: const TextStyle(
+          color: Colors.white,
+          fontSize: 8.5,
+          height: 1.05,
+          fontWeight: FontWeight.w800,
+          letterSpacing: .15,
+          fontFeatures: [FontFeature.tabularFigures()],
+        ),
+      ),
+    );
+  }
+}
+
 class HomeShell extends StatefulWidget {
   const HomeShell({super.key});
 
@@ -783,6 +838,8 @@ class HomeShell extends StatefulWidget {
 class _HomeShellState extends State<HomeShell> {
   final Set<int> _visitedTabs = {0};
   int _tab = 0;
+  double? _btcPrice;
+  int _btcDirection = 1;
   bool _ready = false;
   bool _authenticated = false;
   String? _startupError;
@@ -816,6 +873,16 @@ class _HomeShellState extends State<HomeShell> {
     });
   }
 
+  void _updateBtcPrice(double? price) {
+    if (price == null || !price.isFinite || price <= 0 || !mounted) return;
+    setState(() {
+      if (_btcPrice != null && price != _btcPrice) {
+        _btcDirection = price > _btcPrice! ? 1 : -1;
+      }
+      _btcPrice = price;
+    });
+  }
+
   /// Every page is native. The web dashboard remains the server/API surface,
   /// not a visual dependency of the Android app.
   Widget _pageBody(int index, bool blue) {
@@ -825,7 +892,11 @@ class _HomeShellState extends State<HomeShell> {
       sessionCookie: SessionService.sessionCookie,
     );
     return switch (page.path) {
-      '/' => TodayScreen(api: api, onUnauthorised: _signOut),
+      '/' => TodayScreen(
+        api: api,
+        onUnauthorised: _signOut,
+        onBtcPrice: _updateBtcPrice,
+      ),
       '/positions' => ExposureScreen(api: api, onUnauthorised: _signOut),
       '/trades' => PerformanceScreen(api: api, onUnauthorised: _signOut),
       '/dry-run' => DryRunScreen(api: api, onUnauthorised: _signOut),
@@ -1023,21 +1094,7 @@ class _HomeShellState extends State<HomeShell> {
               ),
             ),
             const SizedBox(height: 2),
-            Text(
-              'NITHI BOT  ·  ${SessionService.displayName.isEmpty ? SessionService.username : SessionService.displayName}',
-              style: const TextStyle(
-                color: kNeonSubtle,
-                fontSize: 8.5,
-                fontWeight: FontWeight.w700,
-                letterSpacing: .45,
-                // Tighter than the title on purpose: at this size a wide halo
-                // bleeds across the letterforms, same as `.brand .sub`.
-                shadows: [
-                  Shadow(color: Color(0x8C39FF14), blurRadius: 4),
-                  Shadow(color: Color(0x4739FF14), blurRadius: 10),
-                ],
-              ),
-            ),
+            _BtcPricePill(price: _btcPrice, direction: _btcDirection),
           ],
         ),
         actions: [
@@ -1195,7 +1252,7 @@ class _StartupScreen extends StatelessWidget {
             ),
             const SizedBox(height: 12),
             Text(
-              'Preparing Nithi Bot…',
+              'Preparing BTC BOT…',
               style: TextStyle(
                 color: Theme.of(context).colorScheme.onSurfaceVariant,
                 fontSize: 12,
@@ -1283,7 +1340,7 @@ class _LoginScreenState extends State<LoginScreen> {
                             const Align(child: NeonLogo(size: 76, radius: 16)),
                             const SizedBox(height: 18),
                             Text(
-                              'Nithi Bot',
+                              'BTC BOT',
                               textAlign: TextAlign.center,
                               style: neonBrandTextStyle(fontSize: 24),
                             ),
