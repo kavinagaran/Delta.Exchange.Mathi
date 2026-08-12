@@ -820,6 +820,126 @@ class TpMonitorSafetyTests(unittest.TestCase):
             "pending-tp-order",
         )
 
+    def test_cleanup_clears_conclusively_absent_protection_journal(self):
+        """A POST intent that never became an order must not block tomorrow."""
+        intent = {
+            "client_order_id": "pending-stop-never-created",
+            "product_id": 101,
+            "side": "sell",
+            "lots": 3,
+            "stop_price": 0.1,
+            "stop_order_type": "stop_loss_order",
+        }
+        self.write_state(pending_stop_protection=intent)
+        with patch.object(
+                tp_monitor, "get_order_by_client_id",
+                return_value=({}, True)), \
+             patch.object(tp_monitor, "cancel_order") as cancel:
+            ok = tp_monitor.remove_exchange_protection(
+                self.read_state(), confirmed_closed=True,
+                reason="unit-test settled flat cleanup",
+            )
+
+        self.assertTrue(ok)
+        cancel.assert_not_called()
+        state = self.read_state()
+        self.assertIsNone(state["pending_stop_protection"])
+        self.assertEqual(
+            state["last_pending_stop_protection_client_order_id"],
+            "pending-stop-never-created",
+        )
+
+    def test_settled_trend_flat_fallback_requires_aggregate_and_fill_proof(self):
+        state = self.write_state(
+            settlement="2026-07-15T12:00:00Z",
+            original_owned_entry_lots=10,
+        )
+        response = Mock()
+        response.json.return_value = {
+            "success": True,
+            "result": [{"product_id": 202, "size": "4"}],
+        }
+        continuity = {
+            "verified": True,
+            "status": "closed",
+            "signed_size": 0,
+        }
+        with patch.object(tp_monitor, "SLOT", "trend"), \
+             patch.object(tp_monitor.requests, "get", return_value=response) as get, \
+             patch.object(tp_monitor, "_sign", return_value={"x": "signed"}), \
+             patch.object(
+                 tp_monitor, "_trend_cycle_continuity",
+                 return_value=continuity,
+             ) as cycle:
+            accepted, reason, proof = tp_monitor._settled_trend_flat_evidence(
+                state, datetime(2026, 7, 15, 12, 1, tzinfo=timezone.utc),
+            )
+
+        self.assertTrue(accepted, reason)
+        self.assertIs(proof, continuity)
+        get.assert_called_once_with(
+            f"{tp_monitor.BASE_URL}/v2/positions/margined",
+            headers={"x": "signed"}, timeout=8,
+        )
+        cycle.assert_called_once_with(
+            state, {"product_id": 101, "size": 0},
+        )
+
+    def test_settled_trend_flat_fallback_rejects_live_aggregate_position(self):
+        state = self.write_state(settlement="2026-07-15T12:00:00Z")
+        response = Mock()
+        response.json.return_value = {
+            "success": True,
+            "result": [{"product_id": 101, "size": "10"}],
+        }
+        with patch.object(tp_monitor, "SLOT", "trend"), \
+             patch.object(tp_monitor.requests, "get", return_value=response), \
+             patch.object(tp_monitor, "_sign", return_value={}), \
+             patch.object(tp_monitor, "_trend_cycle_continuity") as cycle:
+            accepted, reason, proof = tp_monitor._settled_trend_flat_evidence(
+                state, datetime(2026, 7, 15, 12, 1, tzinfo=timezone.utc),
+            )
+
+        self.assertFalse(accepted)
+        self.assertIsNone(proof)
+        self.assertIn("still report", reason)
+        cycle.assert_not_called()
+
+    def test_settled_trend_flat_fallback_rejects_incomplete_fill_ledger(self):
+        state = self.write_state(settlement="2026-07-15T12:00:00Z")
+        response = Mock()
+        response.json.return_value = {"success": True, "result": []}
+        with patch.object(tp_monitor, "SLOT", "trend"), \
+             patch.object(tp_monitor.requests, "get", return_value=response), \
+             patch.object(tp_monitor, "_sign", return_value={}), \
+             patch.object(tp_monitor, "_trend_cycle_continuity", return_value={
+                 "verified": False,
+                 "status": "history_unavailable",
+                 "reason": "fill history timed out",
+             }):
+            accepted, reason, proof = tp_monitor._settled_trend_flat_evidence(
+                state, datetime(2026, 7, 15, 12, 1, tzinfo=timezone.utc),
+            )
+
+        self.assertFalse(accepted)
+        self.assertIsNone(proof)
+        self.assertIn("fill history timed out", reason)
+
+    def test_settled_trend_flat_fallback_never_runs_before_settlement(self):
+        state = self.write_state(settlement="2026-07-15T12:00:00Z")
+        with patch.object(tp_monitor, "SLOT", "trend"), \
+             patch.object(tp_monitor.requests, "get") as get, \
+             patch.object(tp_monitor, "_trend_cycle_continuity") as cycle:
+            accepted, reason, proof = tp_monitor._settled_trend_flat_evidence(
+                state, datetime(2026, 7, 15, 11, 59, tzinfo=timezone.utc),
+            )
+
+        self.assertFalse(accepted)
+        self.assertIsNone(proof)
+        self.assertIn("not settled", reason)
+        get.assert_not_called()
+        cycle.assert_not_called()
+
     def test_cleanup_retains_inconclusive_protection_journal(self):
         intent = {
             "client_order_id": "pending-stop-client",

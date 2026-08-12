@@ -1997,6 +1997,71 @@ def _trend_cycle_continuity(state, position, fills=None):
     }
 
 
+def _settled_trend_flat_evidence(state, now=None):
+    """Prove a delisted Trend contract flat after settlement.
+
+    Delta can stop serving the product-specific ``/v2/positions`` response as
+    soon as an option settles.  That response is intentionally authoritative
+    while a contract is live, so this fallback is restricted to post-settlement
+    Trend states.  An authenticated account-wide snapshot must contain no
+    non-zero row for the product *and* the complete fill ledger must reconstruct
+    the original position cycle to exactly zero.  Anything less fails closed.
+    """
+    if SLOT != "trend" or not isinstance(state, dict):
+        return False, "post-settlement fallback applies only to Trend positions", None
+    settlement = _parse_utc_datetime(state.get("settlement"))
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    else:
+        current = current.astimezone(timezone.utc)
+    if settlement is None:
+        return False, "authoritative settlement time is unavailable", None
+    if current < settlement:
+        return False, "contract has not settled", None
+    try:
+        product_id = int(state.get("product_id"))
+    except (TypeError, ValueError, OverflowError):
+        return False, "product identity is invalid", None
+
+    path = "/v2/positions/margined"
+    try:
+        data = requests.get(
+            f"{BASE_URL}{path}", headers=_sign("GET", path), timeout=8,
+        ).json()
+    except Exception as exc:
+        return False, f"account-wide positions are unavailable: {exc}", None
+    result = data.get("result") if isinstance(data, dict) else None
+    if (not isinstance(data, dict) or not data.get("success")
+            or not isinstance(result, list)):
+        error = data.get("error") if isinstance(data, dict) else data
+        return False, f"account-wide positions could not be verified: {error or data}", None
+
+    for row in result:
+        if not isinstance(row, dict):
+            return False, "account-wide positions contain a malformed row", None
+        try:
+            row_product = int(row.get("product_id"))
+            row_size = Decimal(str(row.get("size")))
+        except (InvalidOperation, TypeError, ValueError, OverflowError):
+            return False, "account-wide positions contain an invalid identity or size", None
+        if not row_size.is_finite() or row_size != row_size.to_integral_value():
+            return False, "account-wide positions contain a non-integral size", None
+        if row_product == product_id and row_size != 0:
+            return False, "account-wide positions still report this product open", None
+
+    continuity = _trend_cycle_continuity(
+        state, {"product_id": product_id, "size": 0},
+    )
+    if (continuity.get("verified") is not True
+            or continuity.get("status") != "closed"
+            or _nonnegative_integral_lots(continuity.get("signed_size")) != 0):
+        reason = continuity.get("reason") or continuity.get("status") or "unknown"
+        return False, f"fill ledger does not prove a closed position cycle: {reason}", None
+    return (True, "settlement, aggregate position, and fill ledger all prove flat",
+            continuity)
+
+
 def _is_protection_only_external(state):
     """Whether an operator explicitly marked this position protection-only.
 
@@ -2583,7 +2648,8 @@ def _hydrate_complete_history(state):
     return hydrated
 
 
-def _finalize_trend_flat_fill_ledger(state, now):
+def _finalize_trend_flat_fill_ledger(state, now, *, verified_position=None,
+                                     verified_continuity=None):
     """Resolve a flat Trend cycle from all fills, including partial exits.
 
     Returns ``(attempted, complete, error)``.  Once a state has a usable cycle
@@ -2594,7 +2660,7 @@ def _finalize_trend_flat_fill_ledger(state, now):
     if SLOT != "trend" or _trend_cycle_anchor_us(state) is None:
         return False, False, ""
     product_id = state.get("product_id")
-    position = get_exchange_position(product_id)
+    position = verified_position or get_exchange_position(product_id)
     if position is None:
         return True, False, "real-time flat position could not be reverified"
     try:
@@ -2603,7 +2669,7 @@ def _finalize_trend_flat_fill_ledger(state, now):
             return True, False, "Trend fill-ledger finalization requires a zero position"
     except (InvalidOperation, TypeError, ValueError, OverflowError):
         return True, False, "real-time flat position size is malformed"
-    continuity = _trend_cycle_continuity(state, position)
+    continuity = verified_continuity or _trend_cycle_continuity(state, position)
     if not continuity.get("verified") or continuity.get("status") != "closed":
         return True, False, str(
             continuity.get("reason") or continuity.get("status")
@@ -2713,7 +2779,8 @@ def _finalize_trend_flat_fill_ledger(state, now):
     return True, True, ""
 
 
-def _finalize_external_flat_close_locked(state):
+def _finalize_external_flat_close_locked(state, *, verified_position=None,
+                                         verified_continuity=None):
     """Persist an externally-flat close with proven history accounting.
 
     Exchange size zero proves exposure is gone, but it does not prove a fill
@@ -2749,7 +2816,11 @@ def _finalize_external_flat_close_locked(state):
         ledger_attempted, ledger_complete, ledger_error = False, False, ""
     else:
         ledger_attempted, ledger_complete, ledger_error = (
-            _finalize_trend_flat_fill_ledger(state, now)
+            _finalize_trend_flat_fill_ledger(
+                state, now,
+                verified_position=verified_position,
+                verified_continuity=verified_continuity,
+            )
         )
     if ledger_complete:
         return True
@@ -2846,13 +2917,18 @@ def _finalize_external_flat_close_locked(state):
     return True
 
 
-def _finalize_external_flat_close(state):
+def _finalize_external_flat_close(state, *, verified_position=None,
+                                  verified_continuity=None):
     """Serialize external-close reconciliation across monitor/dashboard actions."""
     with _close_state_lock(f"tp-external-close-{os.getpid()}") as acquired:
         if not acquired:
             log.warning("Another %s close reconciliation is in progress.", SLOT)
             return False
-        return _finalize_external_flat_close_locked(state)
+        return _finalize_external_flat_close_locked(
+            state,
+            verified_position=verified_position,
+            verified_continuity=verified_continuity,
+        )
 
 
 def _finalize_confirmed_market_close_locked(state, order, mark, lots, reason):
@@ -4618,7 +4694,24 @@ def main():
             tp_id = state.get("tp_stop_order_id")
             stop_lots = int(state.get("stop_lots") or stop_lots or 0)
             tp_lots = int(state.get("tp_lots") or tp_lots or 0)
+            settled_continuity = None
             live = get_exchange_size(product_id)
+            if live is None:
+                settled_flat, settled_reason, settled_continuity = (
+                    _settled_trend_flat_evidence(state)
+                )
+                if settled_flat:
+                    log.warning(
+                        "Product-specific position is unavailable after settlement; "
+                        "authoritative aggregate and fill-ledger evidence prove %s flat.",
+                        symbol,
+                    )
+                    live = 0
+                else:
+                    log.info(
+                        "Post-settlement flat fallback not accepted for %s: %s",
+                        symbol, settled_reason,
+                    )
             if live is None:
                 consecutive_errors += 1
                 message = "exchange position could not be verified; protection orders retained"
@@ -4680,7 +4773,14 @@ def main():
                                 "resolving it through order history.", order_id,
                             )
                 if state.get("status") == "OPEN" and not done_kind:
-                    _finalize_external_flat_close(state)
+                    _finalize_external_flat_close(
+                        state,
+                        verified_position=(
+                            {"product_id": product_id, "size": 0}
+                            if settled_continuity is not None else None
+                        ),
+                        verified_continuity=settled_continuity,
+                    )
                 cleaned = remove_exchange_protection(
                     load_state(), confirmed_closed=True, reason="exchange position confirmed zero"
                 )
