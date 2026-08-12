@@ -1,4 +1,4 @@
-/* NITHI-BOT dashboard — shared helpers + topbar live data */
+/* BTC BOT dashboard — shared helpers + topbar live data */
 
 async function jget(url) {
   const r = await fetch(url, { cache: 'no-store' });
