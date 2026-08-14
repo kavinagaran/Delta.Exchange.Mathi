@@ -18,16 +18,17 @@ def test_cockpit_page_contains_every_supported_manual_strategy():
 
     for required in (
         'aria-label="Manual option strategy cockpit"',
-        'id="directional-strategies-title"',
-        'id="volatility-strategies-title"',
-        'id="cockpit-buy-ce"',
-        'id="cockpit-buy-pe"',
-        'id="cockpit-buy-move"',
-        'id="cockpit-sell-move"',
-        "cockpitEnter('buy_ce')",
-        "cockpitEnter('buy_pe')",
-        "cockpitEnter('buy_move')",
-        "cockpitEnter('sell_move')",
+        'class="cockpit-workbench"',
+        'id="cockpit-setup-groups"',
+        'id="cockpit-option-panel"',
+        'data-action="buy_ce"',
+        'data-action="buy_pe"',
+        'data-action="buy_move"',
+        'data-action="sell_move"',
+        "buy_ce: 'Buy 2-Step ITM Call'",
+        "buy_pe: 'Buy 2-Step ITM Put'",
+        "buy_move: 'Buy ATM MOVE'",
+        "sell_move: 'Sell ATM MOVE Straddle'",
         "'/api/cockpit/preview'",
         "'/api/cockpit/enter'",
         'id="cockpit-preview-dialog"',
@@ -37,8 +38,30 @@ def test_cockpit_page_contains_every_supported_manual_strategy():
         'id="cockpit-bot-toggle"',
         "function cockpitToggleBot(checked)",
         "TREND_ENGINE_SCORE_AUTO_MODE: checked ? 'live' : 'disabled'",
-        "A confirmed fill turns the automated bot off",
+        "Manual fills leave automation OFF",
         "Wallet-affordable lots",
+    ):
+        assert required in source
+
+
+def test_cockpit_requires_an_eligible_setup_before_enabling_a_trade():
+    source = (ROOT / "templates" / "cockpit.html").read_text(encoding="utf-8")
+
+    for required in (
+        "const COCKPIT_SETUP_GROUPS",
+        "function cockpitDeriveSetups(snapshot)",
+        "function cockpitSelectSetup(id)",
+        "function cockpitClearSetup()",
+        "setup?.eligible",
+        "setup.actions.includes(action)",
+        "Order-flow feed unavailable",
+        "No fresh flip confirmation",
+        "calm_range",
+        "volatility_expansion",
+        "rsi_bullish",
+        "rsi_bearish",
+        "support_bounce",
+        "resistance_rejection",
     ):
         assert required in source
 
@@ -50,11 +73,14 @@ def test_cockpit_page_has_responsive_strategy_terminal_styles():
         ".cockpit-page",
         ".cockpit-command-bar",
         ".cockpit-state-grid",
-        ".cockpit-strategy-grid",
-        ".cockpit-strategy-card.is-ce",
-        ".cockpit-strategy-card.is-pe",
-        ".cockpit-strategy-card.is-move-buy",
-        ".cockpit-strategy-card.is-move-sell",
+        ".cockpit-workbench",
+        ".cockpit-setup-panel",
+        ".cockpit-option-panel",
+        ".cockpit-setup-choice.is-eligible",
+        ".cockpit-setup-choice.is-ineligible",
+        ".cockpit-option-group.is-buy",
+        ".cockpit-option-group.is-sell",
+        ".cockpit-option-choice.is-enabled",
         ".cockpit-preview-dialog",
         ".cockpit-safety-strip",
         "@media (max-width: 920px)",
