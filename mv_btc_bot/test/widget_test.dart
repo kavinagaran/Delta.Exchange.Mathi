@@ -227,6 +227,59 @@ void main() {
     },
   );
 
+  testWidgets('Cockpit opens DRY RUN simulations in manual mode', (
+    WidgetTester tester,
+  ) async {
+    tester.view.physicalSize = const Size(390, 1200);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final api = _CockpitApi(dryRun: true);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: buildAppTheme(blue: true),
+        home: Scaffold(
+          body: CockpitScreen(api: api, onUnauthorised: () {}),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('DRY RUN COCKPIT'), findsOneWidget);
+    expect(find.text('DRY RUN READY'), findsOneWidget);
+    expect(find.text('Orders go to the DRY RUN dashboard'), findsOneWidget);
+    await tester.tap(find.text('Bullish trend score'));
+    await tester.pumpAndSettle();
+    await tester.scrollUntilVisible(
+      find.text('2-Step ITM Call'),
+      300,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.ensureVisible(find.text('2-Step ITM Call'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('2-Step ITM Call'));
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.text('Preview Order'));
+    await tester.tap(find.text('Preview Order'));
+    await tester.pump(const Duration(milliseconds: 500));
+
+    expect(find.text('Confirm DRY RUN trade'), findsOneWidget);
+    expect(find.text('Open DRY RUN Trade'), findsOneWidget);
+    expect(
+      find.text(
+        'This opens a DRY RUN simulation. No order is sent to Delta Exchange.',
+      ),
+      findsOneWidget,
+    );
+    await tester.tap(find.text('Open DRY RUN Trade'));
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(api.enterAction, 'buy_ce');
+    expect(api.enterSetup, 'trend_bullish');
+
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
   testWidgets('Trend preview reads live_score and chart supports touch zoom', (
     WidgetTester tester,
   ) async {
@@ -424,8 +477,10 @@ class _TodayApi extends DashboardApi {
 }
 
 class _CockpitApi extends DashboardApi {
-  _CockpitApi()
+  _CockpitApi({this.dryRun = false})
     : super(baseUrl: 'https://example.invalid', sessionCookie: null);
+
+  final bool dryRun;
 
   String? previewAction;
   String? previewSetup;
@@ -454,12 +509,15 @@ class _CockpitApi extends DashboardApi {
 
   @override
   Future<ApiResult<Map<String, dynamic>>> scoreAutoStatus() async =>
-      const ApiResult.ok(<String, dynamic>{
+      ApiResult.ok(<String, dynamic>{
         'mode': 'disabled',
-        'account_live': true,
-        'account_trading_mode': 'LIVE',
+        'account_live': !dryRun,
+        'account_trading_mode': dryRun ? 'DRY RUN' : 'LIVE',
         'position_status': 'NONE',
-        'setup_lock': <String, dynamic>{'active': true, 'zone': 'CE_2_ITM'},
+        'setup_lock': const <String, dynamic>{
+          'active': true,
+          'zone': 'CE_2_ITM',
+        },
       });
 
   @override
@@ -473,13 +531,15 @@ class _CockpitApi extends DashboardApi {
   ) async {
     previewAction = action;
     previewSetup = setup;
-    return const ApiResult.ok(<String, dynamic>{
+    return ApiResult.ok(<String, dynamic>{
       'side': 'short',
       'instrument_kind': 'BTC_OPTION',
       'symbol': 'P-BTC-64000-140826',
       'strike': 64000,
       'entry_price': 325.0,
       'lots': 500,
+      'dry_run': dryRun,
+      'execution_mode': dryRun ? 'dry_run' : 'live',
     });
   }
 
@@ -490,8 +550,12 @@ class _CockpitApi extends DashboardApi {
   ) async {
     enterAction = action;
     enterSetup = setup;
-    return const ApiResult.ok(<String, dynamic>{
-      'state': <String, dynamic>{'symbol': 'P-BTC-64000-140826', 'lots': 500},
+    return ApiResult.ok(<String, dynamic>{
+      'dry_run': dryRun,
+      'state': const <String, dynamic>{
+        'symbol': 'P-BTC-64000-140826',
+        'lots': 500,
+      },
     });
   }
 }

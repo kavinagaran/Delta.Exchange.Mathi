@@ -1,12 +1,10 @@
 """Tests for the Cockpit manual-trade panel (POST /api/cockpit/enter).
 
-Reuses the identical LIVE execution seam as the automated score-auto
-controller (see test_dashboard_trend_score_auto_live_controller.py), so
-these tests focus on what is genuinely new: exclusivity (FCFS with both the
-bot and other manual trades), ownership tagging, setup locking without
-signal consumption, and the manual Sell MOVE ADX/premium bypass -- not the
-execution seam's own fill/risk
-mechanics, which have their own dedicated coverage.
+LIVE reuses the automated score controller's exchange seam; DRY RUN writes
+only an isolated paper position. These tests focus on Cockpit-specific mode
+routing, exclusivity, ownership, setup locking without signal consumption,
+and the manual Sell MOVE ADX/premium bypass. The underlying fill and risk
+mechanics retain their dedicated coverage.
 """
 from __future__ import annotations
 
@@ -195,14 +193,66 @@ def test_cockpit_enter_rejects_an_unknown_action(live_account):
     assert "action" in response.get_json()["error"]
 
 
-def test_cockpit_enter_refuses_outside_live_trading_mode(live_account, monkeypatch):
+def test_cockpit_enter_in_dry_run_opens_only_an_isolated_simulation(
+    live_account, monkeypatch,
+):
+    _write(live_account / "config.json", _live_config(DRY_RUN="true"))
+    now = dashboard.datetime.now(dashboard.timezone.utc)
+    prepared = {
+        "zone": dashboard.TREND_SCORE_CE_ZONE,
+        "side": "long",
+        "option_type": "CE",
+        "instrument_kind": "BTC_OPTION",
+        "symbol": "C-BTC-65400-140826",
+        "product_id": 101,
+        "strike": 65_400.0,
+        "settlement": "2026-08-14T12:00:00Z",
+        "contract_value": 0.001,
+        "lots": 1_000,
+        "entry_price": 220.5,
+        "entry_depth": 2_000,
+        "quote_timestamp": now.isoformat(),
+        "quote_snapshot": {"ask": 220.5, "ask_size": 2_000},
+    }
+    snapshot = {"market": {"spot": 65_850}}
+    market = Mock(return_value=snapshot)
+    prepare = Mock(return_value=copy.deepcopy(prepared))
+    execute = Mock(side_effect=AssertionError("DRY RUN reached LIVE execution"))
+    monkeypatch.setattr(dashboard, "_cockpit_market_snapshot", market)
+    monkeypatch.setattr(dashboard, "_cockpit_prepare_manual_entry", prepare)
     monkeypatch.setattr(
-        dashboard, "_trading_mode_payload",
-        lambda: {"dry_run_mode": True, "mode_revision": "rev-1"},
+        dashboard, "_trend_score_auto_dry_risk_snapshot", lambda *_: {},
     )
+    monkeypatch.setattr(dashboard, "_trend_score_auto_live_execute", execute)
+
     response, status = _post_cockpit_enter("buy_ce")
-    assert status == 409
-    assert "LIVE" in response.get_json()["error"]
+
+    assert status == 200
+    body = response.get_json()
+    assert body["ok"] is True
+    assert body["dry_run"] is True
+    assert body["destination"] == "dry_run_dashboard"
+    assert body["order_submitted"] is False
+    execute.assert_not_called()
+    market.assert_called_once_with(dry_run=True)
+    prepare.assert_called_once_with("buy_ce", snapshot, dry_run=True)
+    state_path = live_account / "dry_run" / "trend_state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["status"] == "OPEN"
+    assert state["dry_run"] is True
+    assert state["ownership"] == dashboard.TREND_SCORE_MANUAL_DRY_OWNERSHIP
+    assert state["entry_trigger"] == "manual_cockpit_buy_ce"
+    assert state["cockpit_destination"] == "dry_run_dashboard"
+    monkeypatch.setattr(dashboard, "_enrich_dry_state", lambda value: value)
+    with dashboard.app.test_request_context("/api/today-trades"):
+        dashboard_response, dashboard_status = _response_tuple(
+            dashboard.api_today_trades()
+        )
+    assert dashboard_status == 200
+    dashboard_rows = dashboard_response.get_json()
+    assert len(dashboard_rows) == 1
+    assert dashboard_rows[0]["simulation_id"] == state["simulation_id"]
+    assert dashboard_rows[0]["symbol"] == state["symbol"]
 
 
 def test_cockpit_enter_requires_bot_off(live_account):
@@ -596,16 +646,37 @@ def test_cockpit_preview_rejects_an_unknown_action(live_account):
     assert "action" in response.get_json()["error"]
 
 
-def test_cockpit_preview_refuses_outside_live_trading_mode(
+def test_cockpit_preview_in_dry_run_needs_no_credentials(
     live_account, monkeypatch,
 ):
+    _write(live_account / "config.json", _live_config(DRY_RUN="true"))
+    monkeypatch.setattr(dashboard, "_active_creds", lambda: (None, None))
+    snapshot = {"market": {"spot": 65_000}}
     monkeypatch.setattr(
-        dashboard, "_trading_mode_payload",
-        lambda: {"dry_run_mode": True, "mode_revision": "rev-1"},
+        dashboard, "_cockpit_market_snapshot", Mock(return_value=snapshot),
+    )
+    monkeypatch.setattr(
+        dashboard,
+        "_cockpit_prepare_manual_entry",
+        Mock(return_value={
+            "zone": dashboard.TREND_SCORE_CE_ZONE,
+            "side": "long",
+            "option_type": "CE",
+            "instrument_kind": "BTC_OPTION",
+            "symbol": "C-BTC-65000-140826",
+            "strike": 65_000.0,
+            "lots": 1_000,
+            "entry_price": 200.0,
+            "contract_value": 0.001,
+        }),
     )
     response, status = _post_cockpit_preview("buy_ce")
-    assert status == 409
-    assert "LIVE" in response.get_json()["error"]
+    assert status == 200
+    body = response.get_json()
+    assert body["ok"] is True
+    assert body["dry_run"] is True
+    assert body["execution_mode"] == "dry_run"
+    assert body["destination"] == "dry_run_dashboard"
 
 
 def test_cockpit_preview_refuses_without_credentials(live_account, monkeypatch):

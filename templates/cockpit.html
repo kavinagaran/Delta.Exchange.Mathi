@@ -4,7 +4,7 @@
 <div class="cockpit-page" aria-label="Manual option strategy cockpit">
   <section class="cockpit-command-bar" aria-label="Cockpit operating state">
     <div class="cockpit-command-copy">
-      <span class="cockpit-live-flag"><i></i> LIVE COCKPIT</span>
+      <span class="cockpit-live-flag" id="cockpit-execution-flag"><i></i> COCKPIT</span>
       <strong>Confirm the setup. Then choose the matching option trade.</strong>
       <small>Green setups are live candidates; red setups are visible but cannot be selected.</small>
     </div>
@@ -14,7 +14,7 @@
   <section class="cockpit-state-grid" aria-label="Cockpit readiness">
     <article class="cockpit-state-card">
       <span>Trading mode</span><strong id="cockpit-mode-status">Checking…</strong>
-      <small id="cockpit-mode-note">LIVE mode is required</small>
+      <small id="cockpit-mode-note">Checking execution destination</small>
     </article>
     <article class="cockpit-state-card">
       <span>Position</span><strong id="cockpit-position-status">Checking…</strong>
@@ -103,11 +103,11 @@
 
   <section class="cockpit-safety-strip" aria-label="Execution safeguards">
     <span><i>1</i> Nearest operational expiry</span><span><i>2</i> Fresh executable quote</span>
-    <span><i>3</i> Wallet-affordable lots</span><span><i>4</i> Protection starts after fill</span>
+    <span id="cockpit-sizing-safety"><i>3</i> Mode-aware order size</span><span id="cockpit-protection-safety"><i>4</i> Protection starts after entry</span>
   </section>
 
   <dialog class="cockpit-preview-dialog" id="cockpit-preview-dialog" aria-labelledby="cockpit-preview-title">
-    <div class="cockpit-preview-head"><span>LIVE ORDER PREVIEW</span><h2 id="cockpit-preview-title">Confirm strategy</h2>
+    <div class="cockpit-preview-head"><span id="cockpit-preview-mode">ORDER PREVIEW</span><h2 id="cockpit-preview-title">Confirm strategy</h2>
       <button type="button" class="cockpit-dialog-close" onclick="cockpitCancelPreview()" aria-label="Close">×</button></div>
     <div class="cockpit-preview-grid">
       <div class="is-wide"><span>Setup</span><strong id="cockpit-preview-setup">—</strong></div>
@@ -116,12 +116,12 @@
       <div class="is-wide"><span>Contract</span><strong id="cockpit-preview-symbol">—</strong></div>
       <div><span>Strike</span><strong id="cockpit-preview-strike">—</strong></div>
       <div><span>Entry price</span><strong id="cockpit-preview-price">—</strong></div>
-      <div><span>Affordable lots</span><strong id="cockpit-preview-lots">—</strong></div>
+      <div><span id="cockpit-preview-lots-label">Order lots</span><strong id="cockpit-preview-lots">—</strong></div>
       <div><span>Protection</span><strong>Automatic</strong></div>
     </div>
-    <p class="cockpit-preview-warning">This submits a real marketable LIVE order. Verify the contract and size before confirming.</p>
+    <p class="cockpit-preview-warning" id="cockpit-preview-warning">Verify the contract and size before confirming.</p>
     <div class="cockpit-dialog-actions"><button class="btn" type="button" onclick="cockpitCancelPreview()">Cancel</button>
-      <button class="btn cockpit-confirm-btn" id="cockpit-confirm-entry" type="button" onclick="cockpitConfirmEntry()">Place LIVE Order</button></div>
+      <button class="btn cockpit-confirm-btn" id="cockpit-confirm-entry" type="button" onclick="cockpitConfirmEntry()">Confirm Order</button></div>
   </dialog>
 </div>
 {% endblock %}
@@ -159,7 +159,7 @@ const COCKPIT_SETUP_GROUPS = [
 ];
 const COCKPIT_BUTTON_IDS = ['cockpit-preview-order'];
 let cockpitBusy = false, cockpitHasOpenPosition = false;
-let cockpitAccountLive = false, cockpitBotMode = 'disabled';
+let cockpitAccountLive = false, cockpitAccountMode = '', cockpitBotMode = 'disabled';
 let cockpitSetupLockStatusBusy = false, cockpitPending = null, cockpitSelectedSetup = null;
 let cockpitSetupState = new Map();
 
@@ -271,7 +271,7 @@ function cockpitClearSetup() {
 }
 function cockpitCanTrade() {
   return !cockpitBusy && !cockpitHasOpenPosition
-    && cockpitAccountLive && cockpitBotMode === 'disabled';
+    && ['LIVE', 'DRY RUN'].includes(cockpitAccountMode) && cockpitBotMode === 'disabled';
 }
 function cockpitSelectedAction() { return document.querySelector('input[name="cockpit-trade"]:checked')?.value || ''; }
 function cockpitUpdateOrderBar() {
@@ -287,22 +287,29 @@ function cockpitSetTradeButtonsDisabled() {
 function cockpitSetStatus(message = '', tone = '') { const status = document.getElementById('cockpit-status'); status.textContent = message; status.className = `cockpit-status${tone ? ` ${tone}` : ''}`; }
 function cockpitTradeSlot(trade) { return String(trade?.control_slot || trade?.slot || '').toLowerCase(); }
 function cockpitRenderState(trades, engineStatus) {
-  const liveTrade = (Array.isArray(trades) ? trades : []).find(trade => trade?._live && cockpitTradeSlot(trade) === 'trend');
+  const activeTrade = (Array.isArray(trades) ? trades : []).find(trade => (trade?._live || String(trade?.status || '').toUpperCase() === 'OPEN') && cockpitTradeSlot(trade) === 'trend');
   const durable = String(engineStatus?.position_status || '').toUpperCase();
-  cockpitHasOpenPosition = !!liveTrade || ['OPEN', 'ENTRY_PENDING'].includes(durable);
+  cockpitHasOpenPosition = !!activeTrade || ['OPEN', 'ENTRY_PENDING'].includes(durable);
   const mode = String(engineStatus?.mode || '').toLowerCase(); cockpitBotMode = mode;
-  cockpitAccountLive = engineStatus?.account_live === true || String(engineStatus?.account_trading_mode || '').toUpperCase() === 'LIVE';
+  cockpitAccountMode = String(engineStatus?.account_trading_mode || '').toUpperCase();
+  cockpitAccountLive = engineStatus?.account_live === true || cockpitAccountMode === 'LIVE';
+  if (!cockpitAccountMode) cockpitAccountMode = cockpitAccountLive ? 'LIVE' : 'DRY RUN';
+  const isDryRun = cockpitAccountMode === 'DRY RUN';
+  const botMode = cockpitAccountLive ? 'live' : 'dry_run';
   const modeStatus = document.getElementById('cockpit-mode-status'), modeNote = document.getElementById('cockpit-mode-note');
-  modeStatus.textContent = cockpitAccountLive ? 'LIVE READY' : 'DRY RUN'; modeStatus.className = cockpitAccountLive ? 'is-ready' : 'is-blocked';
-  modeNote.textContent = cockpitAccountLive ? 'Delta execution is available' : 'Switch Account Trading Mode to LIVE';
+  modeStatus.textContent = cockpitAccountLive ? 'LIVE READY' : isDryRun ? 'DRY RUN READY' : 'UNAVAILABLE'; modeStatus.className = ['LIVE', 'DRY RUN'].includes(cockpitAccountMode) ? 'is-ready' : 'is-blocked';
+  modeNote.textContent = cockpitAccountLive ? 'Orders go to Delta Exchange' : isDryRun ? 'Orders go to the DRY RUN dashboard' : 'Select an Account Trading Mode';
+  document.getElementById('cockpit-execution-flag').lastChild.textContent = ` ${isDryRun ? 'DRY RUN' : 'LIVE'} COCKPIT`;
+  document.getElementById('cockpit-sizing-safety').innerHTML = isDryRun ? '<i>3</i> Configured simulation lots' : '<i>3</i> Wallet-affordable lots';
+  document.getElementById('cockpit-protection-safety').innerHTML = isDryRun ? '<i>4</i> DRY RUN protection starts at entry' : '<i>4</i> LIVE protection starts after fill';
   const positionStatus = document.getElementById('cockpit-position-status'), positionNote = document.getElementById('cockpit-position-note');
   positionStatus.textContent = cockpitHasOpenPosition ? 'OCCUPIED' : 'CLEAR'; positionStatus.className = cockpitHasOpenPosition ? 'is-blocked' : 'is-ready';
-  positionNote.textContent = cockpitHasOpenPosition ? (liveTrade ? `${liveTrade.symbol || 'Trend position'} · ${fN(liveTrade.lots)} lots` : `Trend slot is ${durable || 'occupied'}`) : 'No active Trend position';
+  positionNote.textContent = cockpitHasOpenPosition ? (activeTrade ? `${activeTrade.symbol || 'Trend position'} · ${fN(activeTrade.lots)} lots` : `Trend slot is ${durable || 'occupied'}`) : 'No active Trend position';
   const toggle = document.getElementById('cockpit-bot-toggle'), label = document.getElementById('cockpit-bot-toggle-label');
-  if (document.activeElement !== toggle) toggle.checked = mode === 'live'; toggle.disabled = cockpitHasOpenPosition || !cockpitAccountLive;
-  label.textContent = mode === 'live' ? 'BOT' : mode === 'dry_run' ? 'DRY RUN' : 'COCKPIT'; label.className = mode === 'disabled' ? 'is-ready' : 'is-blocked';
+  if (document.activeElement !== toggle) toggle.checked = mode === botMode; toggle.disabled = cockpitHasOpenPosition || !['LIVE', 'DRY RUN'].includes(cockpitAccountMode);
+  label.textContent = mode === botMode ? 'BOT' : 'COCKPIT'; label.className = mode === 'disabled' ? 'is-ready' : 'is-blocked';
   applyCockpitSetupLockStatus(engineStatus); cockpitSetTradeButtonsDisabled();
-  if (!cockpitBusy) cockpitSetStatus(!cockpitAccountLive ? 'Cockpit locked · account is not in LIVE mode.' : mode !== 'disabled' ? 'BOT mode is active · orders are automatic. Select COCKPIT for manual orders.' : cockpitHasOpenPosition ? 'Cockpit locked · an active position is already open.' : 'COCKPIT mode · select any green setup for a manual order.', !cockpitCanTrade() ? 'warn' : 'ok');
+  if (!cockpitBusy) cockpitSetStatus(!['LIVE', 'DRY RUN'].includes(cockpitAccountMode) ? 'Cockpit locked · account execution mode is unavailable.' : mode !== 'disabled' ? 'BOT mode is active · orders are automatic. Select COCKPIT for manual orders.' : cockpitHasOpenPosition ? 'Cockpit locked · an active position is already open.' : `${isDryRun ? 'DRY RUN' : 'LIVE'} COCKPIT · select any green setup for a manual order.`, !cockpitCanTrade() ? 'warn' : 'ok');
 }
 async function loadCockpit() {
   try {
@@ -314,6 +321,11 @@ async function loadCockpit() {
 function cockpitPreviewSelected() { const action = cockpitSelectedAction(); if (action) cockpitEnter(action); }
 function cockpitShowPreview(action, preview) {
   cockpitPending = { action, preview, setup: cockpitSelectedSetup };
+  const dryRun = preview?.dry_run === true || preview?.execution_mode === 'dry_run';
+  document.getElementById('cockpit-preview-mode').textContent = dryRun ? 'DRY RUN PREVIEW' : 'LIVE ORDER PREVIEW';
+  document.getElementById('cockpit-preview-lots-label').textContent = dryRun ? 'Simulation lots' : 'Affordable lots';
+  document.getElementById('cockpit-preview-warning').textContent = dryRun ? 'This opens a DRY RUN simulation and sends no order to Delta Exchange.' : 'This submits a real marketable LIVE order. Verify the contract and size before confirming.';
+  document.getElementById('cockpit-confirm-entry').textContent = dryRun ? 'Open DRY RUN Trade' : 'Place LIVE Order';
   document.getElementById('cockpit-preview-setup').textContent = cockpitSelectedSetup?.label || '—';
   document.getElementById('cockpit-preview-strategy').textContent = COCKPIT_TRADE_LABELS[action] || action;
   document.getElementById('cockpit-preview-side').textContent = String(preview.side || '—').toUpperCase();
@@ -327,21 +339,21 @@ function cockpitShowPreview(action, preview) {
 async function cockpitEnter(action) {
   if (!cockpitSelectedSetup?.eligible || !cockpitSelectedSetup.actions.includes(action) || !cockpitCanTrade()) return;
   cockpitBusy = true; cockpitSetTradeButtonsDisabled(); cockpitSetStatus(`Resolving ${COCKPIT_TRADE_LABELS[action]}…`);
-  try { const preview = await jpost('/api/cockpit/preview', { action, setup: cockpitSelectedSetup.id }); if (!preview?.ok) throw new Error(preview?.error || 'Could not resolve strategy'); cockpitSetStatus('Contract resolved · verify the LIVE order.', 'ok'); cockpitShowPreview(action, preview); }
+  try { const preview = await jpost('/api/cockpit/preview', { action, setup: cockpitSelectedSetup.id }); if (!preview?.ok) throw new Error(preview?.error || 'Could not resolve strategy'); cockpitSetStatus(`Contract resolved · verify the ${preview.dry_run ? 'DRY RUN simulation' : 'LIVE order'}.`, 'ok'); cockpitShowPreview(action, preview); }
   catch (error) { cockpitBusy = false; cockpitSetTradeButtonsDisabled(); cockpitSetStatus(error?.message || 'Contract preview failed.', 'err'); toast(error?.message || 'Contract preview failed', 'err'); }
 }
 function cockpitCancelPreview() { const dialog = document.getElementById('cockpit-preview-dialog'); if (dialog.open) dialog.close(); cockpitPending = null; cockpitBusy = false; cockpitSetTradeButtonsDisabled(); cockpitSetStatus('COCKPIT mode · select any green setup for a manual order.', 'ok'); }
 async function cockpitConfirmEntry() {
   if (!cockpitPending || !cockpitBusy) return; const { action, setup } = cockpitPending; const button = document.getElementById('cockpit-confirm-entry');
   button.disabled = true; document.getElementById('cockpit-preview-dialog').close(); cockpitSetStatus(`Placing ${COCKPIT_TRADE_LABELS[action]}…`);
-  try { const result = await jpost('/api/cockpit/enter', { action, setup: setup?.id }); if (!result?.ok) throw new Error(result?.error || 'Cockpit order failed'); cockpitSetStatus(`${COCKPIT_TRADE_LABELS[action]} filled · ${result.state?.symbol || ''} · ${fN(result.state?.lots)} lots. Order mode: COCKPIT.`, 'ok'); toast('Cockpit order placed', 'ok'); }
+  try { const result = await jpost('/api/cockpit/enter', { action, setup: setup?.id }); if (!result?.ok) throw new Error(result?.error || 'Cockpit order failed'); const dryRun = result.dry_run === true; cockpitSetStatus(`${COCKPIT_TRADE_LABELS[action]} ${dryRun ? 'simulation opened' : 'filled'} · ${result.state?.symbol || ''} · ${fN(result.state?.lots)} lots. ${dryRun ? 'View it in DRY RUN.' : 'Order mode: COCKPIT.'}`, 'ok'); toast(dryRun ? 'DRY RUN Cockpit trade opened' : 'Cockpit order placed', 'ok'); }
   catch (error) { cockpitSetStatus(error?.message || 'Cockpit entry failed.', 'err'); toast(error?.message || 'Cockpit entry failed', 'err'); }
   finally { button.disabled = false; cockpitPending = null; cockpitBusy = false; await loadCockpit(); }
 }
 function applyCockpitSetupLockStatus(payload) { const button = document.getElementById('cockpit-setup-lock-reset'), hint = document.getElementById('cockpit-setup-lock-hint'); const lock = payload && typeof payload.setup_lock === 'object' ? payload.setup_lock : {}; const active = lock.active === true; button.disabled = !active; hint.textContent = active ? String(lock.zone || lock.target_zone || 'ACTIVE').replaceAll('_', ' ') : 'NONE'; hint.className = active ? 'is-blocked' : 'is-ready'; }
 async function refreshCockpitSetupLockStatus() { if (cockpitSetupLockStatusBusy) return; cockpitSetupLockStatusBusy = true; try { applyCockpitSetupLockStatus(await jget('/api/trend-engine/score-auto/status')); } catch (_) { applyCockpitSetupLockStatus(null); } finally { cockpitSetupLockStatusBusy = false; } }
 async function cockpitResetZoneLock() { await refreshCockpitSetupLockStatus(); if (document.getElementById('cockpit-setup-lock-reset').disabled) return toast('No active zone lock to reset', 'err'); if (!confirm('Reset the current zone lock? This does not close a position or place an order.')) return; try { const result = await jpost('/api/trend-engine/score-auto/setup-lock/reset'); if (!result.ok) throw new Error(result.error || 'Reset failed'); toast(result.message || 'Zone lock reset', 'ok'); } catch (error) { toast(`Zone-lock reset failed: ${error?.message || 'network error'}`, 'err'); } finally { await refreshCockpitSetupLockStatus(); } }
-async function cockpitToggleBot(checked) { const toggle = document.getElementById('cockpit-bot-toggle'); toggle.disabled = true; try { const result = await jpost('/api/config', { TREND_ENGINE_SCORE_AUTO_MODE: checked ? 'live' : 'disabled' }); if (!result.ok) throw new Error(result.error || 'Could not change order mode'); toast(checked ? 'BOT mode selected · automatic trading enabled' : 'COCKPIT mode selected · manual orders enabled', 'ok'); } catch (error) { toggle.checked = !checked; toast(error?.message || 'Could not change order mode', 'err'); } finally { await loadCockpit(); } }
+async function cockpitToggleBot(checked) { const toggle = document.getElementById('cockpit-bot-toggle'); toggle.disabled = true; const automaticMode = cockpitAccountLive ? 'live' : 'dry_run'; try { const result = await jpost('/api/config', { TREND_ENGINE_SCORE_AUTO_MODE: checked ? automaticMode : 'disabled' }); if (!result.ok) throw new Error(result.error || 'Could not change order mode'); toast(checked ? 'BOT mode selected · automatic trading enabled' : 'COCKPIT mode selected · manual orders enabled', 'ok'); } catch (error) { toggle.checked = !checked; toast(error?.message || 'Could not change order mode', 'err'); } finally { await loadCockpit(); } }
 document.getElementById('cockpit-preview-dialog').addEventListener('cancel', event => { event.preventDefault(); cockpitCancelPreview(); });
 loadCockpit(); setInterval(loadCockpit, 12_000);
 </script>

@@ -260,12 +260,20 @@ class _CockpitScreenState extends State<CockpitScreen> {
   }
 
   String get _mode => '${_controller?['mode'] ?? ''}'.toLowerCase();
+  String get _accountTradingMode {
+    final value = '${_controller?['account_trading_mode'] ?? ''}'.toUpperCase();
+    if (value.isNotEmpty) return value;
+    return _controller?['account_live'] == true ? 'LIVE' : 'DRY RUN';
+  }
+
   bool get _accountLive =>
-      _controller?['account_live'] == true ||
-      '${_controller?['account_trading_mode'] ?? ''}'.toUpperCase() == 'LIVE';
+      _controller?['account_live'] == true || _accountTradingMode == 'LIVE';
+  bool get _accountDryRun => _accountTradingMode == 'DRY RUN';
+  bool get _accountModeReady => _accountLive || _accountDryRun;
+  String get _automaticMode => _accountLive ? 'live' : 'dry_run';
   bool get _cockpitMode => _mode == 'disabled';
   bool get _canTrade =>
-      _accountLive && _cockpitMode && !_hasOpenPosition && !_busy;
+      _accountModeReady && _cockpitMode && !_hasOpenPosition && !_busy;
 
   Map<String, dynamic>? get _lock {
     final value = _controller?['setup_lock'];
@@ -332,9 +340,11 @@ class _CockpitScreenState extends State<CockpitScreen> {
     final state = ok && resultData['state'] is Map
         ? Map<String, dynamic>.from(resultData['state'] as Map)
         : null;
+    final dryRun = resultData?['dry_run'] == true;
     final message = ok
-        ? '${_strategy(action).title} filled · ${state?['symbol'] ?? ''} · '
-              '${state?['lots'] ?? '—'} lots. Order mode: COCKPIT.'
+        ? '${_strategy(action).title} ${dryRun ? 'simulation opened' : 'filled'} · '
+              '${state?['symbol'] ?? ''} · ${state?['lots'] ?? '—'} lots. '
+              '${dryRun ? 'View it in DRY RUN.' : 'Order mode: COCKPIT.'}'
         : (result.error ?? 'Cockpit order failed');
     setState(() {
       _busy = false;
@@ -355,12 +365,14 @@ class _CockpitScreenState extends State<CockpitScreen> {
     final price = _number(preview['entry_price']);
     final strike = _number(preview['strike']);
     final move = '${preview['instrument_kind']}' == 'BTC_MOVE';
+    final dryRun =
+        preview['dry_run'] == true || preview['execution_mode'] == 'dry_run';
     return showDialog<bool>(
       context: context,
       useSafeArea: true,
       builder: (context) => Center(
         child: AlertDialog(
-          title: const Text('Confirm LIVE order'),
+          title: Text(dryRun ? 'Confirm DRY RUN trade' : 'Confirm LIVE order'),
           content: SingleChildScrollView(
             child: Column(
               mainAxisSize: MainAxisSize.min,
@@ -382,12 +394,18 @@ class _CockpitScreenState extends State<CockpitScreen> {
                   'Entry price',
                   price == null ? '—' : '\$${price.toStringAsFixed(4)}',
                 ),
-                _PreviewLine('Affordable lots', '${preview['lots'] ?? '—'}'),
+                _PreviewLine(
+                  dryRun ? 'Simulation lots' : 'Affordable lots',
+                  '${preview['lots'] ?? '—'}',
+                ),
                 const _PreviewLine('Protection', 'Automatic TP / SL / TSL'),
                 const SizedBox(height: Gap.md),
                 Text(
-                  'This submits a real marketable LIVE order. Verify the '
-                  'contract and affordable size before confirming.',
+                  dryRun
+                      ? 'This opens a DRY RUN simulation. No order is sent '
+                            'to Delta Exchange.'
+                      : 'This submits a real marketable LIVE order. Verify '
+                            'the contract and affordable size before confirming.',
                   style: AppText.caption.copyWith(color: kWarning),
                 ),
               ],
@@ -400,7 +418,7 @@ class _CockpitScreenState extends State<CockpitScreen> {
             ),
             FilledButton(
               onPressed: () => Navigator.pop(context, true),
-              child: const Text('Place LIVE Order'),
+              child: Text(dryRun ? 'Open DRY RUN Trade' : 'Place LIVE Order'),
             ),
           ],
         ),
@@ -450,7 +468,7 @@ class _CockpitScreenState extends State<CockpitScreen> {
     if (_hasOpenPosition || _togglingBot) return;
     setState(() => _togglingBot = true);
     final result = await widget.api.saveConfig({
-      'TREND_ENGINE_SCORE_AUTO_MODE': enabled ? 'live' : 'disabled',
+      'TREND_ENGINE_SCORE_AUTO_MODE': enabled ? _automaticMode : 'disabled',
     });
     if (!mounted) return;
     setState(() => _togglingBot = false);
@@ -496,15 +514,17 @@ class _CockpitScreenState extends State<CockpitScreen> {
         padding: const EdgeInsets.fromLTRB(Gap.lg, Gap.md, Gap.lg, Gap.xxl),
         children: [
           _CommandStrip(
-            message: !_accountLive
-                ? 'Cockpit locked · switch the account to LIVE mode.'
+            modeLabel: '${_accountDryRun ? 'DRY RUN' : 'LIVE'} COCKPIT',
+            message: !_accountModeReady
+                ? 'Cockpit locked · account execution mode is unavailable.'
                 : !_cockpitMode
                 ? 'BOT mode is active · orders are automatic. Select '
                       'COCKPIT for manual orders.'
                 : _hasOpenPosition
                 ? 'Cockpit locked · an active position is already open.'
                 : _status ??
-                      'COCKPIT mode · select any green setup for a manual order.',
+                      '${_accountDryRun ? 'DRY RUN' : 'LIVE'} COCKPIT · '
+                          'select any green setup for a manual order.',
             error: _statusError,
             ready: _canTrade && !_statusError,
           ),
@@ -515,7 +535,7 @@ class _CockpitScreenState extends State<CockpitScreen> {
           const SizedBox(height: Gap.md),
           _strategyPanel(),
           const SizedBox(height: Gap.md),
-          const _SafetyStrip(),
+          _SafetyStrip(dryRun: _accountDryRun),
         ],
       ),
     );
@@ -536,11 +556,11 @@ class _CockpitScreenState extends State<CockpitScreen> {
               width: width,
               child: _StateTile(
                 label: 'Trading mode',
-                value: _accountLive ? 'LIVE READY' : 'DRY RUN',
+                value: _accountLive ? 'LIVE READY' : 'DRY RUN READY',
                 detail: _accountLive
-                    ? 'Delta execution is available'
-                    : 'LIVE Account Trading Mode required',
-                tone: _accountLive ? kPositive : kWarning,
+                    ? 'Orders go to Delta Exchange'
+                    : 'Orders go to the DRY RUN dashboard',
+                tone: _accountModeReady ? kPositive : kWarning,
               ),
             ),
             SizedBox(
@@ -558,16 +578,13 @@ class _CockpitScreenState extends State<CockpitScreen> {
               width: width,
               child: _StateTile(
                 label: 'Order mode',
-                value: _mode == 'live'
-                    ? 'BOT'
-                    : _mode == 'dry_run'
-                    ? 'DRY RUN'
-                    : 'COCKPIT',
+                value: _mode == _automaticMode ? 'BOT' : 'COCKPIT',
                 detail: 'BOT = automatic · COCKPIT = manual',
                 tone: _cockpitMode ? kPositive : kWarning,
                 trailing: Switch.adaptive(
-                  value: _mode == 'live',
-                  onChanged: (_hasOpenPosition || _togglingBot || !_accountLive)
+                  value: _mode == _automaticMode,
+                  onChanged:
+                      (_hasOpenPosition || _togglingBot || !_accountModeReady)
                       ? null
                       : _toggleBot,
                 ),
@@ -767,11 +784,13 @@ class _CockpitScreenState extends State<CockpitScreen> {
 
 class _CommandStrip extends StatelessWidget {
   const _CommandStrip({
+    required this.modeLabel,
     required this.message,
     required this.error,
     required this.ready,
   });
 
+  final String modeLabel;
   final String message;
   final bool error;
   final bool ready;
@@ -802,7 +821,7 @@ class _CommandStrip extends StatelessWidget {
             ),
           ),
           const SizedBox(width: Gap.sm),
-          const Text('LIVE COCKPIT', style: AppText.kicker),
+          Text(modeLabel, style: AppText.kicker),
           const SizedBox(width: Gap.md),
           Expanded(
             child: Text(
@@ -1171,15 +1190,25 @@ class _StrategyTile extends StatelessWidget {
 }
 
 class _SafetyStrip extends StatelessWidget {
-  const _SafetyStrip();
+  const _SafetyStrip({required this.dryRun});
+
+  final bool dryRun;
 
   @override
   Widget build(BuildContext context) {
-    const items = [
-      (Icons.event_available_rounded, 'Nearest operational expiry'),
-      (Icons.bolt_rounded, 'Fresh executable quote'),
-      (Icons.account_balance_wallet_outlined, 'Wallet-affordable lots'),
-      (Icons.shield_outlined, 'Protection starts after fill'),
+    final items = [
+      const (Icons.event_available_rounded, 'Nearest operational expiry'),
+      const (Icons.bolt_rounded, 'Fresh executable quote'),
+      (
+        Icons.account_balance_wallet_outlined,
+        dryRun ? 'Configured simulation lots' : 'Wallet-affordable lots',
+      ),
+      (
+        Icons.shield_outlined,
+        dryRun
+            ? 'DRY RUN protection starts at entry'
+            : 'LIVE protection starts after fill',
+      ),
     ];
     return Wrap(
       spacing: Gap.sm,

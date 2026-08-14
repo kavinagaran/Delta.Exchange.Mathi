@@ -151,6 +151,7 @@ TREND_SCORE_AUTO_TRIGGER = "trend_engine_score_zone_auto"
 # _trend_score_auto_live_owned_position), only block new entries while it
 # is open.
 TREND_SCORE_MANUAL_LIVE_OWNERSHIP = "manual_cockpit_live"
+TREND_SCORE_MANUAL_DRY_OWNERSHIP = "manual_cockpit_dry_run"
 TREND_SCORE_SHORT_CE_ZONE = "SHORT_CE"
 TREND_SCORE_SHORT_PE_ZONE = "SHORT_PE"
 TREND_SCORE_MANUAL_TRIGGERS = {
@@ -9283,13 +9284,14 @@ def _prepare_trend_score_auto_entry(signal: dict) -> dict:
     )
 
 
-def _cockpit_market_snapshot() -> dict:
+def _cockpit_market_snapshot(*, dry_run: bool = False) -> dict:
     """Collect the same authenticated account/market snapshot the score-auto
     controller uses for contract selection -- independent of whether the
     automated controller itself is enabled. A manual Cockpit trade does not
     depend on ``TREND_ENGINE_SCORE_AUTO_MODE``; it depends only on the
-    account being in LIVE trading mode, which the caller has already
-    checked.
+    selected account execution mode, which the caller has already checked.
+    DRY RUN collection uses only public market data and isolated simulation
+    state; it never requires or signs with Delta credentials.
     """
     mode = _trading_mode_payload()
     strategy_config = _trend_engine_strategy_config()
@@ -9298,7 +9300,7 @@ def _cockpit_market_snapshot() -> dict:
         api_base=API_BASE,
         sign=_sign,
         user_dir=_user_dir(),
-        dry_run=False,
+        dry_run=dry_run,
         mode_revision=mode["mode_revision"],
         strategy_config=strategy_config,
     )
@@ -9422,11 +9424,18 @@ def _cockpit_require_eligible_setup(setup_id: str, action: str) -> dict:
     return snapshot
 
 
-def _cockpit_prepare_manual_entry(action: str, snapshot: dict) -> dict:
+def _cockpit_prepare_manual_entry(
+    action: str,
+    snapshot: dict,
+    *,
+    dry_run: bool = False,
+) -> dict:
     """Resolve and wallet-size the exact contract for one Cockpit trade type.
 
-    Mirrors ``_prepare_trend_score_auto_entry``'s contract-selection and
-    LIVE affordability logic, but intentionally skips every
+    Mirrors ``_prepare_trend_score_auto_entry``'s contract selection. LIVE
+    entries use wallet-affordable sizing; DRY RUN entries retain the configured
+    lot size and create only an isolated simulation. Both intentionally skip
+    every
     automated-only precondition: there is no engine ``zone_action_allowed``
     gate to satisfy and no ``plan_score_transition``/ADX calm-market check
     to pass, because a manual trade substitutes the operator's own
@@ -9509,6 +9518,12 @@ def _cockpit_prepare_manual_entry(action: str, snapshot: dict) -> dict:
             ),
             "quote_snapshot": copy.deepcopy(contract),
         }
+        if dry_run:
+            if prepared["entry_depth"] < lots:
+                raise RuntimeError(
+                    "option quote depth cannot simulate the configured order size"
+                )
+            return prepared
         return _trend_score_auto_live_affordable_entry(prepared)
 
     if action not in ("buy_move", "sell_move"):
@@ -9522,7 +9537,9 @@ def _cockpit_prepare_manual_entry(action: str, snapshot: dict) -> dict:
             "No operational ATM MOVE contract is available for today's expiry"
         )
     if action == "sell_move":
-        quote = _trend_score_auto_move_quote(selection["symbol"], 1)
+        quote = _trend_score_auto_move_quote(
+            selection["symbol"], lots if dry_run else 1,
+        )
         move_eligibility = _trend_score_auto_short_move_eligibility(
             selection,
             quote,
@@ -9543,7 +9560,7 @@ def _cockpit_prepare_manual_entry(action: str, snapshot: dict) -> dict:
         }
     else:
         quote = _trend_score_auto_move_quote(
-            selection["symbol"], 1, side="buy",
+            selection["symbol"], lots if dry_run else 1, side="buy",
         )
         prepared = {
             **selection,
@@ -9557,7 +9574,11 @@ def _cockpit_prepare_manual_entry(action: str, snapshot: dict) -> dict:
             "entry_depth": quote["entry_depth"],
             "quote_snapshot": quote,
         }
-    return _trend_score_auto_live_affordable_entry(prepared)
+    return (
+        prepared
+        if dry_run
+        else _trend_score_auto_live_affordable_entry(prepared)
+    )
 
 
 def _cockpit_manual_signal(action: str, snapshot: dict) -> dict:
@@ -9681,6 +9702,211 @@ def _cockpit_disable_score_automation_after_open(
         _atomic_write_json(_cfg_file(), saved)
     _trend_cache.pop(_active_user(), None)
     return previous
+
+
+def _cockpit_enter_dry_run(
+    *,
+    user: str,
+    action: str,
+    setup_id: str,
+    initial_mode: dict,
+):
+    """Open one manual Cockpit simulation in the isolated DRY RUN slot.
+
+    This is the paper counterpart of ``_trend_score_auto_live_execute``. It
+    resolves a fresh public quote, applies the same configured risk policy,
+    writes only ``users/<user>/dry_run/trend_state.json``, and never signs or
+    submits an exchange request.
+    """
+    root_dir = _user_dir()
+    data_dir = _mode_data_dir(True)
+    owner = f"cockpit-dry-run:{user}:{os.getpid()}:{time.time_ns()}"
+    try:
+        with account_entry_lock(root_dir, owner) as exposure_lock:
+            if not exposure_lock:
+                return jsonify({
+                    "ok": False,
+                    "error": (
+                        "Another entry, exit, or recovery is in progress; "
+                        "retry shortly"
+                    ),
+                }), 409
+
+            boundary_mode = _trading_mode_payload()
+            if (
+                not boundary_mode.get("dry_run_mode")
+                or boundary_mode.get("mode_revision")
+                != initial_mode.get("mode_revision")
+            ):
+                return jsonify({
+                    "ok": False,
+                    "error": "Trading mode changed; reload and retry",
+                }), 409
+            _cockpit_require_manual_mode()
+            _cockpit_require_eligible_setup(setup_id, action)
+            snapshot = _cockpit_market_snapshot(dry_run=True)
+            prepared = _cockpit_prepare_manual_entry(
+                action, snapshot, dry_run=True,
+            )
+            signal = _cockpit_manual_signal(action, snapshot)
+            signal["zone"] = prepared["zone"]
+            signal["mode"] = dict(initial_mode)
+            transition_id = _trend_score_auto_transition_id(
+                user, signal["signal_key"], prepared["zone"],
+            )
+
+            with ExitStack() as locks:
+                for slot in SLOTS:
+                    acquired = locks.enter_context(account_file_lock(
+                        data_dir,
+                        f"close-{slot}",
+                        owner,
+                        stale_after_sec=30,
+                        wait_sec=2,
+                    ))
+                    if not acquired:
+                        return jsonify({
+                            "ok": False,
+                            "error": f"The DRY RUN {slot.title()} slot is busy",
+                        }), 409
+                config_lock = locks.enter_context(account_file_lock(
+                    root_dir,
+                    "config",
+                    owner,
+                    stale_after_sec=30,
+                    wait_sec=5,
+                ))
+                if not config_lock:
+                    return jsonify({
+                        "ok": False,
+                        "error": "Account configuration is busy; retry shortly",
+                    }), 409
+
+                final_mode = _trading_mode_payload()
+                if (
+                    not final_mode.get("dry_run_mode")
+                    or final_mode.get("mode_revision")
+                    != initial_mode.get("mode_revision")
+                ):
+                    return jsonify({
+                        "ok": False,
+                        "error": "Trading mode changed before the simulation opened",
+                    }), 409
+                _cockpit_require_manual_mode()
+                if not _recover_closed_dry_trade_outbox(owner=owner):
+                    raise RuntimeError(
+                        "A closed DRY RUN trade is awaiting durable history; "
+                        "new entries are blocked"
+                    )
+
+                states = {
+                    slot: _trend_score_auto_strict_json(
+                        _slot_file(slot, dry_run=True), {},
+                    )
+                    for slot in SLOTS
+                }
+                for slot in MOVE_SLOTS:
+                    blocker = _trend_score_auto_other_slot_blocker(
+                        slot, states[slot],
+                    )
+                    if blocker:
+                        return jsonify({"ok": False, "error": blocker}), 409
+                states["trend"] = _trend_score_auto_repair_closed_history(
+                    states["trend"], owner=owner,
+                )
+                blocker = _trend_engine_dry_state_blocker(
+                    states["trend"], data_dir,
+                )
+                if blocker:
+                    return jsonify({"ok": False, "error": blocker}), 409
+
+                quote_age = _trend_score_auto_quote_age(
+                    prepared.get("quote_timestamp"),
+                    datetime.now(timezone.utc),
+                )
+                quote_limit = max(_as_float(
+                    _cfg(
+                        "MAX_QUOTE_AGE_SEC"
+                        if prepared.get("instrument_kind") == "BTC_MOVE"
+                        else "TREND_QUOTE_MAX_AGE_SECS",
+                        "20",
+                    ),
+                    20,
+                ), 1)
+                if quote_age > quote_limit:
+                    raise RuntimeError(
+                        "Cockpit quote became stale before the simulation opened"
+                    )
+                risk_snapshot = _trend_score_auto_dry_risk_snapshot(
+                    prepared,
+                    dict(prepared.get("quote_snapshot") or {}),
+                )
+                opened = _trend_score_auto_open_state(
+                    signal, prepared, transition_id, risk_snapshot,
+                )
+                opened.update({
+                    "ownership": TREND_SCORE_MANUAL_DRY_OWNERSHIP,
+                    "entry_trigger": TREND_SCORE_MANUAL_TRIGGERS[action],
+                    "entry_classification": "manual_cockpit",
+                    "strategy": "manual_cockpit",
+                    "manual_cockpit_action": action,
+                    "engine_policy_decision": f"COCKPIT_{action.upper()}",
+                    "engine_entry_decision": f"COCKPIT_{action.upper()}",
+                    "execution_mode": "dry_run",
+                    "dry_run": True,
+                    "cockpit_destination": "dry_run_dashboard",
+                })
+                _atomic_write_json(
+                    _slot_file("trend", dry_run=True), opened,
+                )
+                ledger = _trend_score_auto_ledger(data_dir)
+                _trend_score_auto_lock_setup(
+                    ledger,
+                    signal,
+                    transition_id=transition_id,
+                    action=f"COCKPIT_{action.upper()}",
+                )
+                _trend_score_auto_write_ledger(data_dir, ledger)
+
+        _trend_audit("cockpit_manual_dry_run_entry", {
+            "action": action,
+            "signal_key": signal["signal_key"],
+            "symbol": opened["symbol"],
+            "lots": opened["lots"],
+            "simulation_id": opened["simulation_id"],
+            "order_submitted": False,
+            "exchange_api_called": False,
+        })
+        _trend_score_auto_notify(
+            f"🕹️ <b>COCKPIT DRY RUN — {user.upper()}</b>\n"
+            f"Trade » <code>{action}</code>\n"
+            f"Symbol » <code>{opened['symbol']}</code>\n"
+            f"Lots » <code>{opened['lots']:,}</code>\n"
+            "Simulation opened in the DRY RUN dashboard. No exchange order "
+            "was submitted."
+        )
+        return jsonify({
+            "ok": True,
+            "status": "OPEN",
+            "dry_run": True,
+            "execution_mode": "dry_run",
+            "destination": "dry_run_dashboard",
+            "order_submitted": False,
+            "state": opened,
+            "bot_automation_mode": "disabled",
+        })
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)[:300]}), 400
+    except RuntimeError as exc:
+        return jsonify({"ok": False, "error": str(exc)[:300]}), 409
+    except Exception as exc:
+        _trend_audit("cockpit_manual_dry_run_error", {
+            "action": action,
+            "error": str(exc)[:500],
+            "order_submitted": False,
+            "exchange_api_called": False,
+        })
+        return jsonify({"ok": False, "error": str(exc)[:300]}), 400
 
 
 def _trend_score_auto_transition_id(user: str, signal_key: str, zone: str) -> str:
@@ -14446,10 +14672,13 @@ def api_cockpit_setups():
 
 @app.route("/api/cockpit/enter", methods=["POST"])
 def api_cockpit_enter():
-    """Place one manually chosen LIVE Trend trade: Buy CE/PE/MOVE or sell
-    ATM CE/PE/MOVE.
+    """Place one manually chosen Cockpit trade in the account's active mode.
 
-    Reuses the identical execution seam the automated LIVE score-auto
+    LIVE sends the order through the exchange execution seam. DRY RUN writes
+    an isolated simulation that is displayed and protected by the Paper/DRY
+    RUN dashboard; it never calls a private exchange endpoint.
+
+    LIVE reuses the identical execution seam the automated score-auto
     controller uses -- same risk gating, wallet-affordable sizing, IOC
     submission, and protection spawn -- tagged with a distinct ownership
     (``manual_cockpit_live``) so the controller never manages or replaces it
@@ -14473,15 +14702,17 @@ def api_cockpit_enter():
         }), 400
 
     initial_mode = _trading_mode_payload()
-    if initial_mode.get("dry_run_mode"):
-        return jsonify({
-            "ok": False,
-            "error": "The Cockpit only places LIVE trades; switch to LIVE trading mode first",
-        }), 409
     try:
         _cockpit_require_manual_mode()
     except RuntimeError as exc:
         return jsonify({"ok": False, "error": str(exc)}), 409
+    if initial_mode.get("dry_run_mode"):
+        return _cockpit_enter_dry_run(
+            user=user,
+            action=action,
+            setup_id=setup_id,
+            initial_mode=initial_mode,
+        )
     key, secret = _active_creds()
     if not key or not secret:
         return jsonify({
@@ -14690,24 +14921,27 @@ def api_cockpit_preview():
                 "or sell_move"
             ),
         }), 400
-    if _trading_mode_payload().get("dry_run_mode"):
-        return jsonify({
-            "ok": False,
-            "error": "The Cockpit only places LIVE trades; switch to LIVE trading mode first",
-        }), 409
+    mode = _trading_mode_payload()
+    dry_run = bool(mode.get("dry_run_mode"))
     try:
         _cockpit_require_manual_mode()
     except RuntimeError as exc:
         return jsonify({"ok": False, "error": str(exc)}), 409
     key, secret = _active_creds()
-    if not key or not secret:
+    if not dry_run and (not key or not secret):
         return jsonify({
             "ok": False, "error": "API credentials are not configured",
         }), 409
     try:
         _cockpit_require_eligible_setup(setup_id, action)
-        snapshot = _cockpit_market_snapshot()
-        prepared = _cockpit_prepare_manual_entry(action, snapshot)
+        if dry_run:
+            snapshot = _cockpit_market_snapshot(dry_run=True)
+            prepared = _cockpit_prepare_manual_entry(
+                action, snapshot, dry_run=True,
+            )
+        else:
+            snapshot = _cockpit_market_snapshot()
+            prepared = _cockpit_prepare_manual_entry(action, snapshot)
     except ValueError as exc:
         return jsonify({"ok": False, "error": str(exc)}), 400
     except Exception as exc:
@@ -14723,6 +14957,9 @@ def api_cockpit_preview():
         "lots": prepared.get("lots"),
         "entry_price": prepared.get("entry_price"),
         "contract_value": prepared.get("contract_value"),
+        "dry_run": dry_run,
+        "execution_mode": "dry_run" if dry_run else "live",
+        "destination": "dry_run_dashboard" if dry_run else "delta_exchange",
     })
 
 
