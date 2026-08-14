@@ -1951,6 +1951,7 @@ def _pnl_stats(trades: list, *, dry_run: bool = False) -> dict:
 # ─────────────────────────────────────────────────────────────
 _PAGES = {
     "":          ("overview.html",  "Today"),
+    "cockpit":   ("cockpit.html",   "Cockpit"),
     "trend-engine": ("trend_engine.html", "Trend Engine"),
     "dry-run":   ("dry_run.html",   "Dry Run"),
     "trades":    ("trades.html",    "Performance"),

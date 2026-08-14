@@ -52,21 +52,6 @@ def test_today_page_contains_only_same_day_trade_content():
         "--today-score-fill",
         'Gross P/L',
         'Net P/L',
-        'cockpit-card',
-        'id="cockpit-buy-ce"',
-        'id="cockpit-buy-pe"',
-        'id="cockpit-buy-move"',
-        'id="cockpit-sell-move"',
-        "function cockpitEnter(action)",
-        "'/api/cockpit/preview'",
-        "'/api/cockpit/enter'",
-        'id="cockpit-setup-lock-reset"',
-        "function cockpitResetZoneLock()",
-        "'/api/trend-engine/score-auto/setup-lock/reset'",
-        'id="cockpit-bot-toggle"',
-        "function cockpitToggleBot(checked)",
-        "TREND_ENGINE_SCORE_AUTO_MODE: checked ? 'live' : 'disabled'",
-        "function updateCockpitState(hasOpenPosition, engineStatus)",
     ):
         assert required in source
     assert 'Math.abs(score) * 3.6' in source
@@ -94,6 +79,10 @@ def test_today_page_contains_only_same_day_trade_content():
         "squareOff",
         "/api/engine/health",
         "View Trend Engine",
+        'cockpit-card',
+        'id="cockpit-buy-ce"',
+        "function cockpitEnter(action)",
+        "'/api/cockpit/preview'",
         # Retired with the Cockpit redesign: the automation text block that
         # used to sit under the decision pill (score dials + pill remain).
         'class="dry-engine-metrics"',

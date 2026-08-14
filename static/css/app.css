@@ -2536,14 +2536,12 @@ body:has(.overview-page) .nav a.active {
   border-color: color-mix(in srgb, var(--border) 76%, transparent);
   box-shadow: 0 12px 34px rgba(0, 0, 0, .2), inset 0 1px rgba(255,255,255,.025);
 }
-/* ── Today layout: Current Trade at the side, Decision + Cockpit stacked
-   in the remaining column at matching height ─────────────────────────── */
+/* ── Today layout: Current Trade beside the latest engine decision ───── */
 .today-layout {
   display: grid; grid-template-columns: minmax(300px, .74fr) minmax(420px, 1.26fr);
   gap: 18px; align-items: stretch;
 }
 .today-right-col { display: flex; flex-direction: column; gap: 18px; min-width: 0; }
-.today-right-col > .cockpit-card { flex: 0 0 auto; }
 
 .today-current-trade-card,
 .today-engine-decision-card {
@@ -2551,14 +2549,12 @@ body:has(.overview-page) .nav a.active {
 }
 .today-right-col > .today-engine-decision-card { flex: 1 1 auto; }
 .today-current-trade-card > .card-hd,
-.today-engine-decision-card > .card-hd,
-.cockpit-card > .card-hd {
+.today-engine-decision-card > .card-hd {
   min-height: 46px; padding: 12px 16px; font-size: 13px;
   background: color-mix(in srgb, var(--surface-subtle) 78%, transparent);
 }
 .today-current-trade-card > .card-hd .hint,
-.today-engine-decision-card > .card-hd .hint,
-.cockpit-card > .card-hd .hint { font-size: 10.5px; font-weight: 550; }
+.today-engine-decision-card > .card-hd .hint { font-size: 10.5px; font-weight: 550; }
 .today-current-trade-body,
 .today-engine-decision-card > .card-bd {
   flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0; padding: 16px;
@@ -2595,38 +2591,148 @@ body:has(.overview-page) .nav a.active {
   box-shadow: 0 8px 20px color-mix(in srgb, var(--neg) 24%, transparent), inset 0 1px rgba(255,255,255,.2);
 }
 
-/* ── Cockpit (manual LIVE trade panel) ─────────────────────
-   Deliberately amber-accented rather than reusing --accent (the current
-   Red/Blue theme color used by every other card) or --pos/--neg (reserved
-   for P&L), so this card reads as distinct in both themes. */
-.cockpit-card {
-  border-color: color-mix(in srgb, var(--warn) 55%, var(--border));
-  box-shadow: var(--shadow), 0 0 0 1px color-mix(in srgb, var(--warn) 30%, transparent),
-    0 0 26px color-mix(in srgb, var(--warn) 16%, transparent);
+/* ── Cockpit: dedicated manual strategy terminal ────────────────────── */
+.cockpit-page { display: grid; gap: 16px; max-width: 1440px; margin: 0 auto; }
+.cockpit-command-bar {
+  display: flex; align-items: center; justify-content: space-between; gap: 24px;
+  padding: 16px 18px; border: 1px solid color-mix(in srgb, var(--warn) 48%, var(--border));
+  border-radius: 12px;
+  background:
+    radial-gradient(circle at 8% 50%, color-mix(in srgb, var(--warn) 17%, transparent), transparent 34%),
+    linear-gradient(110deg, color-mix(in srgb, var(--surface-subtle) 96%, transparent), var(--surface));
+  box-shadow: 0 14px 38px rgba(0,0,0,.22), inset 0 1px rgba(255,255,255,.04);
 }
-.cockpit-card > .card-hd {
-  background: linear-gradient(120deg, color-mix(in srgb, var(--warn) 16%, var(--surface-subtle)), var(--surface-subtle));
-  border-bottom-color: color-mix(in srgb, var(--warn) 40%, var(--border));
+.cockpit-command-copy { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; align-items: center; }
+.cockpit-command-copy strong { font-size: 13px; color: var(--text); }
+.cockpit-command-copy small { grid-column: 2; color: var(--muted); font-size: 10.5px; }
+.cockpit-live-flag {
+  grid-row: 1 / span 2; display: inline-flex; align-items: center; gap: 7px;
+  padding: 7px 10px; border-radius: 999px; border: 1px solid color-mix(in srgb, var(--neg) 50%, var(--border));
+  color: var(--neg); background: color-mix(in srgb, var(--neg) 10%, var(--surface));
+  font-size: 10px; font-weight: 850; letter-spacing: .08em;
 }
-.cockpit-body { display: flex; flex-direction: column; gap: 14px; }
-.cockpit-trades {
-  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px;
-}
-.cockpit-trade-btn { min-height: 44px; font-size: 13.5px; border-radius: 10px; }
-.cockpit-trade-btn.is-ce { background: var(--pos); }
-.cockpit-trade-btn.is-pe { background: var(--neg); }
-.cockpit-trade-btn.is-move-sell { background: var(--warn); color: #241a05; }
-.cockpit-trade-btn.is-move-buy { background: var(--accent); }
+.cockpit-live-flag i { width: 7px; height: 7px; border-radius: 50%; background: currentColor; box-shadow: 0 0 9px currentColor; }
 .cockpit-status {
-  min-height: 18px; font-size: 12px; font-weight: 600; color: var(--muted);
+  min-height: 18px; max-width: 430px; font-size: 11px; font-weight: 750; color: var(--muted); text-align: right;
 }
 .cockpit-status.ok { color: var(--pos); }
 .cockpit-status.err { color: var(--neg); }
-.cockpit-controls {
-  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
-  padding-top: 12px; border-top: 1px solid color-mix(in srgb, var(--border) 72%, transparent);
+.cockpit-status.warn { color: var(--warn); }
+.cockpit-state-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+.cockpit-state-card {
+  min-width: 0; min-height: 94px; display: flex; flex-direction: column; justify-content: center; gap: 6px;
+  padding: 14px 16px; border: 1px solid var(--border); border-radius: 12px;
+  background: linear-gradient(145deg, color-mix(in srgb, var(--accent) 8%, var(--surface-subtle)), var(--surface));
+  box-shadow: 0 10px 26px rgba(0,0,0,.18), inset 0 1px rgba(255,255,255,.035);
 }
-.cockpit-controls .hint { font-size: 11px; margin-right: auto; }
+.cockpit-state-card > span { color: var(--muted); font-size: 9px; font-weight: 800; letter-spacing: .09em; text-transform: uppercase; }
+.cockpit-state-card > strong,
+.cockpit-state-card .cockpit-bot-toggle > strong { color: var(--text); font-size: 14px; font-weight: 850; }
+.cockpit-state-card > small { overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.cockpit-state-card .is-ready { color: var(--pos) !important; }
+.cockpit-state-card .is-blocked { color: var(--warn) !important; }
+.cockpit-bot-state .cockpit-bot-toggle { justify-content: space-between; width: 100%; }
+.cockpit-lock-state { display: grid; grid-template-columns: 1fr auto; align-content: center; }
+.cockpit-lock-state > span { grid-column: 1 / -1; }
+.cockpit-lock-state > strong { align-self: center; }
+.cockpit-reset-btn {
+  min-height: 30px; padding: 6px 11px; border-radius: 999px;
+  color: #fff; background: linear-gradient(135deg, var(--accent), var(--accent-dark));
+  box-shadow: 0 7px 18px color-mix(in srgb, var(--accent) 22%, transparent), inset 0 1px rgba(255,255,255,.18);
+}
+.cockpit-strategy-section {
+  overflow: hidden; border: 1px solid var(--border); border-radius: 14px;
+  background: color-mix(in srgb, var(--surface) 94%, transparent);
+  box-shadow: 0 16px 40px rgba(0,0,0,.2), inset 0 1px rgba(255,255,255,.03);
+}
+.cockpit-section-heading {
+  display: flex; align-items: end; justify-content: space-between; gap: 18px;
+  padding: 14px 18px; border-bottom: 1px solid var(--border);
+  background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 13%, var(--surface-subtle)), var(--surface-subtle));
+}
+.cockpit-section-heading span { color: var(--accent-dark); font-size: 8.5px; font-weight: 900; letter-spacing: .13em; }
+.cockpit-section-heading h2 { margin: 3px 0 0; color: var(--text); font-size: 15px; line-height: 1.2; }
+.cockpit-section-heading p { margin: 0; color: var(--muted); font-size: 10px; }
+.cockpit-strategy-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; padding: 16px; }
+.cockpit-strategy-card {
+  --strategy-tone: var(--accent);
+  position: relative; min-width: 0; min-height: 142px; display: grid;
+  grid-template-columns: auto 1fr auto; grid-template-rows: 1fr auto; gap: 8px 14px;
+  align-items: center; padding: 18px; overflow: hidden; text-align: left; cursor: pointer;
+  color: var(--text); border: 1px solid color-mix(in srgb, var(--strategy-tone) 50%, var(--border)); border-radius: 13px;
+  background:
+    radial-gradient(circle at 88% 18%, color-mix(in srgb, var(--strategy-tone) 24%, transparent), transparent 33%),
+    linear-gradient(145deg, color-mix(in srgb, var(--strategy-tone) 9%, var(--surface-subtle)), var(--surface));
+  box-shadow: 0 11px 28px rgba(0,0,0,.2), inset 0 1px rgba(255,255,255,.04);
+  transition: transform .18s ease, border-color .18s ease, box-shadow .18s ease;
+}
+.cockpit-strategy-card::before {
+  content: ''; position: absolute; inset: 0 auto 0 0; width: 4px; background: var(--strategy-tone);
+  box-shadow: 0 0 16px var(--strategy-tone);
+}
+.cockpit-strategy-card:hover:not(:disabled) {
+  transform: translateY(-3px); border-color: var(--strategy-tone);
+  box-shadow: 0 16px 34px rgba(0,0,0,.28), 0 0 22px color-mix(in srgb, var(--strategy-tone) 14%, transparent);
+}
+.cockpit-strategy-card:focus-visible { outline: 2px solid var(--strategy-tone); outline-offset: 3px; }
+.cockpit-strategy-card:disabled { cursor: not-allowed; filter: grayscale(.38); opacity: .48; }
+.cockpit-strategy-card.is-ce { --strategy-tone: #34d399; }
+.cockpit-strategy-card.is-pe { --strategy-tone: #ff6172; }
+.cockpit-strategy-card.is-move-buy { --strategy-tone: #55aaff; }
+.cockpit-strategy-card.is-move-sell { --strategy-tone: #ffc267; }
+.cockpit-strategy-icon {
+  grid-row: 1; width: 48px; height: 48px; display: grid; place-items: center;
+  border: 1px solid color-mix(in srgb, var(--strategy-tone) 55%, var(--border)); border-radius: 12px;
+  color: var(--strategy-tone); background: color-mix(in srgb, var(--strategy-tone) 11%, var(--surface));
+  font-size: 26px; font-weight: 800; box-shadow: inset 0 1px rgba(255,255,255,.06), 0 0 18px color-mix(in srgb, var(--strategy-tone) 13%, transparent);
+}
+.cockpit-strategy-copy { display: grid; gap: 3px; min-width: 0; }
+.cockpit-strategy-copy small { color: var(--strategy-tone); font-size: 8.5px; font-weight: 900; letter-spacing: .12em; }
+.cockpit-strategy-copy strong { color: var(--text); font-size: 18px; font-weight: 850; }
+.cockpit-strategy-copy span { color: var(--muted); font-size: 10.5px; }
+.cockpit-risk-chip {
+  align-self: start; padding: 5px 8px; border-radius: 999px;
+  color: var(--strategy-tone); border: 1px solid color-mix(in srgb, var(--strategy-tone) 42%, var(--border));
+  background: color-mix(in srgb, var(--strategy-tone) 8%, var(--surface));
+  font-size: 8.5px; font-weight: 800; white-space: nowrap;
+}
+.cockpit-risk-chip.is-protected { color: var(--warn); }
+.cockpit-action {
+  grid-column: 1 / -1; display: flex; justify-content: center; padding: 9px 12px; border-radius: 9px;
+  color: #fff; background: linear-gradient(135deg, color-mix(in srgb, var(--strategy-tone) 85%, #111), var(--strategy-tone));
+  font-size: 10.5px; font-weight: 850; letter-spacing: .02em; box-shadow: inset 0 1px rgba(255,255,255,.2);
+}
+.cockpit-safety-strip {
+  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px;
+  overflow: hidden; border: 1px solid var(--border); border-radius: 11px; background: var(--border);
+}
+.cockpit-safety-strip span {
+  display: flex; align-items: center; gap: 9px; padding: 12px 14px;
+  color: var(--muted); background: var(--surface-subtle); font-size: 10px; font-weight: 700;
+}
+.cockpit-safety-strip i {
+  width: 20px; height: 20px; display: grid; place-items: center; flex: 0 0 auto;
+  color: var(--accent-dark); border: 1px solid color-mix(in srgb, var(--accent) 38%, var(--border)); border-radius: 50%;
+  background: color-mix(in srgb, var(--accent) 8%, var(--surface)); font-style: normal; font-size: 9px; font-weight: 900;
+}
+.cockpit-preview-dialog {
+  width: min(580px, calc(100vw - 28px)); padding: 0; overflow: hidden;
+  color: var(--text); border: 1px solid color-mix(in srgb, var(--accent) 52%, var(--border)); border-radius: 15px;
+  background: var(--surface); box-shadow: 0 30px 90px rgba(0,0,0,.68), 0 0 28px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+.cockpit-preview-dialog::backdrop { background: rgba(0,8,18,.78); backdrop-filter: blur(5px); }
+.cockpit-preview-head { position: relative; padding: 18px 20px 14px; border-bottom: 1px solid var(--border); background: var(--surface-subtle); }
+.cockpit-preview-head > span { color: var(--accent-dark); font-size: 9px; font-weight: 900; letter-spacing: .12em; }
+.cockpit-preview-head h2 { margin: 4px 0 0; font-size: 18px; }
+.cockpit-dialog-close { position: absolute; top: 13px; right: 14px; width: 31px; height: 31px; color: var(--muted); border: 1px solid var(--border); border-radius: 50%; background: var(--surface); font-size: 21px; cursor: pointer; }
+.cockpit-preview-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; padding: 18px 20px 10px; }
+.cockpit-preview-grid > div { min-width: 0; padding: 10px 11px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface-subtle); }
+.cockpit-preview-grid .is-wide { grid-column: 1 / -1; }
+.cockpit-preview-grid span { display: block; margin-bottom: 4px; color: var(--muted); font-size: 8.5px; font-weight: 800; text-transform: uppercase; letter-spacing: .07em; }
+.cockpit-preview-grid strong { display: block; overflow: hidden; color: var(--text); font: 750 12px/1.3 ui-monospace, SFMono-Regular, Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.cockpit-preview-warning { margin: 6px 20px 0; padding: 10px 12px; color: var(--warn); border: 1px solid color-mix(in srgb, var(--warn) 38%, var(--border)); border-radius: 8px; background: color-mix(in srgb, var(--warn) 7%, var(--surface)); font-size: 10px; font-weight: 700; }
+.cockpit-dialog-actions { display: flex; justify-content: flex-end; gap: 9px; padding: 16px 20px 20px; }
+.cockpit-confirm-btn { color: #fff; background: linear-gradient(135deg, var(--accent), var(--accent-dark)); }
 .cockpit-bot-toggle {
   display: inline-flex; align-items: center; gap: 9px; cursor: pointer;
   font-size: 12.5px; font-weight: 650; color: var(--muted);
@@ -2657,8 +2763,18 @@ body:has(.overview-page) .nav a.active {
 .lever-switch input:disabled ~ .lever-track { opacity: .5; }
 .lever-switch input:disabled { cursor: not-allowed; }
 .lever-switch input:focus-visible ~ .lever-track { outline: 2px solid var(--accent); outline-offset: 2px; }
+@media (max-width: 920px) {
+  .cockpit-state-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .cockpit-safety-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
 @media (max-width: 640px) {
-  .cockpit-trades { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .cockpit-command-bar, .cockpit-section-heading { align-items: flex-start; flex-direction: column; }
+  .cockpit-command-copy { grid-template-columns: 1fr; }
+  .cockpit-live-flag { grid-row: auto; }
+  .cockpit-command-copy small { grid-column: 1; }
+  .cockpit-status { max-width: none; text-align: left; }
+  .cockpit-state-grid, .cockpit-strategy-grid, .cockpit-safety-strip { grid-template-columns: 1fr; }
+  .cockpit-strategy-card { min-height: 132px; }
 }
 .today-inline-protection {
   margin-top: 18px; border-color: color-mix(in srgb, var(--accent) 30%, var(--border));
@@ -2841,7 +2957,6 @@ body:has(.overview-page) .nav a.active {
   .today-engine-decision-card > .card-bd { padding: 13px; }
   .today-current-trade-card > .card-hd .hint,
   .today-engine-decision-card > .card-hd .hint,
-  .cockpit-card > .card-hd .hint { display: none; }
   .today-engine-score-dials { gap: 8px; padding-inline: 0; }
   .today-score-dial { width: 120px; height: 120px; padding: 22px; }
   .today-score-dial::before { inset: 5px; -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 11px), #000 calc(100% - 10px)); mask: radial-gradient(farthest-side, transparent calc(100% - 11px), #000 calc(100% - 10px)); }
