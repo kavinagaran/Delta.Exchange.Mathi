@@ -92,3 +92,21 @@ def test_cockpit_page_has_responsive_strategy_terminal_styles():
         "@media (max-width: 640px)",
     ):
         assert required in styles
+
+
+def test_cockpit_typography_stays_legible_at_desktop_density():
+    styles = (ROOT / "static" / "css" / "app.css").read_text(encoding="utf-8")
+
+    # Regression guard: this terminal previously compressed important setup
+    # and strategy copy into 6.7--10 px text, which was unreadable at normal
+    # dashboard scale.
+    for required in (
+        '--cockpit-secondary: color-mix(in srgb, var(--muted) 72%, var(--text))',
+        '.cockpit-setup-choice strong { overflow: hidden; color: var(--text); font-size: 12.5px',
+        '.cockpit-setup-choice small { overflow: hidden; color: var(--cockpit-secondary); font-size: 11px',
+        '.cockpit-setup-choice > b { color: var(--setup-tone); font-size: 9.5px',
+        '.cockpit-option-choice strong { color: var(--text); font-size: 13px',
+        '.cockpit-option-choice small { overflow: hidden; color: var(--cockpit-secondary); font-size: 11px',
+        '.cockpit-option-choice.is-disabled { cursor: not-allowed; filter: grayscale(.6); opacity: .58; }',
+    ):
+        assert required in styles
