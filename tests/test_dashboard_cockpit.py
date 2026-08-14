@@ -29,7 +29,7 @@ def _write(path: Path, value) -> None:
 def _live_config(**updates) -> dict:
     config = {
         "DRY_RUN": "false",
-        "TREND_ENGINE_SCORE_AUTO_MODE": "live",
+        "TREND_ENGINE_SCORE_AUTO_MODE": "disabled",
         "TREND_AUTO_ENTRY_MODE": "disabled",
         "MOVE_AUTO_ENTRY_MODE": "disabled",
         "MORNING_ENABLED": "false",
@@ -203,6 +203,26 @@ def test_cockpit_enter_refuses_outside_live_trading_mode(live_account, monkeypat
     response, status = _post_cockpit_enter("buy_ce")
     assert status == 409
     assert "LIVE" in response.get_json()["error"]
+
+
+def test_cockpit_enter_requires_bot_off(live_account):
+    config = _live_config(TREND_ENGINE_SCORE_AUTO_MODE="live")
+    _write(live_account / "config.json", config)
+
+    response, status = _post_cockpit_enter("buy_ce")
+
+    assert status == 409
+    assert "COCKPIT mode" in response.get_json()["error"]
+
+
+def test_cockpit_preview_requires_bot_off(live_account):
+    config = _live_config(TREND_ENGINE_SCORE_AUTO_MODE="live")
+    _write(live_account / "config.json", config)
+
+    response, status = _post_cockpit_preview("buy_ce")
+
+    assert status == 409
+    assert "COCKPIT mode" in response.get_json()["error"]
 
 
 # ---------------------------------------------------------------------------
@@ -465,9 +485,80 @@ def test_cockpit_enter_surfaces_a_failed_execution_without_a_500(
     saved = json.loads(
         (live_account / "config.json").read_text(encoding="utf-8")
     )
-    assert saved["TREND_ENGINE_SCORE_AUTO_MODE"] == "live"
+    assert saved["TREND_ENGINE_SCORE_AUTO_MODE"] == "disabled"
     ledger_path = live_account / dashboard.TREND_SCORE_AUTO_LEDGER_FILE
     assert not ledger_path.exists()
+
+
+def test_cockpit_retries_once_with_delta_affordable_lots_after_margin_rejection(
+    live_account, monkeypatch,
+):
+    monkeypatch.setattr(
+        dashboard, "_cockpit_market_snapshot",
+        lambda: {"market": {"spot": 65_000}},
+    )
+    monkeypatch.setattr(
+        dashboard, "_cockpit_prepare_manual_entry",
+        lambda action, snapshot: {
+            "zone": dashboard.TREND_SCORE_SHORT_CE_ZONE,
+            "side": "short",
+            "symbol": "C-BTC-65000-140826",
+            "product_id": 101,
+            "lots": 1_000,
+            "live_affordability": {
+                "configured_lots": 1_000,
+                "selected_lots": 1_000,
+                "affordable_lots": 1_000,
+            },
+        },
+    )
+    rejection = {
+        "code": "insufficient_margin",
+        "context": {
+            "available_balance": "2.83347541",
+            "required_additional_balance": "2.0594530211466667",
+        },
+    }
+    calls = []
+
+    def execute(**kwargs):
+        calls.append(copy.deepcopy(kwargs))
+        if len(calls) == 1:
+            return {
+                "ok": False,
+                "status": "REJECTED",
+                "order_submitted": True,
+                "state": {
+                    "status": "IDLE",
+                    "last_entry_rejection": rejection,
+                    "last_entry_rejection_exact_absence": True,
+                    "last_entry_position_verified_flat": True,
+                },
+                "error": str(rejection),
+            }
+        return _mock_execution_result(
+            symbol=kwargs["prepared"]["symbol"],
+            lots=kwargs["prepared"]["lots"],
+        )
+
+    monkeypatch.setattr(
+        dashboard, "_trend_score_auto_live_execute", Mock(side_effect=execute),
+    )
+
+    response, status = _post_cockpit_enter("sell_ce")
+
+    assert status == 200
+    body = response.get_json()
+    assert body["ok"] is True
+    assert len(calls) == 2
+    expected = dashboard._downsized_lots(1_000, rejection["context"])
+    assert calls[0]["prepared"]["lots"] == 1_000
+    assert calls[1]["prepared"]["lots"] == expected
+    assert body["state"]["lots"] == expected
+    assert body["margin_retry"] == {
+        "attempted_lots": 1_000,
+        "retried_lots": expected,
+    }
 
 
 def test_cockpit_enter_refuses_when_a_contract_cannot_be_selected(

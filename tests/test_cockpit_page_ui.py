@@ -43,7 +43,8 @@ def test_cockpit_page_contains_every_supported_manual_strategy():
         'id="cockpit-bot-toggle"',
         "function cockpitToggleBot(checked)",
         "TREND_ENGINE_SCORE_AUTO_MODE: checked ? 'live' : 'disabled'",
-        "Manual fills leave automation OFF",
+        "BOT = automatic · COCKPIT = manual",
+        "cockpitBotMode === 'disabled'",
         "Wallet-affordable lots",
         "Protected premium-selling strategies",
     ):
@@ -88,6 +89,7 @@ def test_cockpit_page_has_responsive_strategy_terminal_styles():
         ".cockpit-option-group.is-sell",
         ".cockpit-option-choice.is-enabled",
         ".cockpit-preview-dialog",
+        "position: fixed; inset: 0",
         ".cockpit-safety-strip",
         "@media (max-width: 920px)",
         "@media (max-width: 640px)",

@@ -290,13 +290,6 @@ class _TodayScreenState extends State<TodayScreen> {
               controller: _controller,
             ),
             const SizedBox(height: Gap.md),
-            _CockpitCard(
-              api: widget.api,
-              todayTrades: trades,
-              controller: _controller,
-              onChanged: () => _refresh(quiet: true),
-            ),
-            const SizedBox(height: Gap.md),
             MetricWrap(
               children: [
                 MetricTile(label: 'Trades', value: '${trades.length}'),
@@ -735,7 +728,7 @@ class _CockpitCardState extends State<_CockpitCard> {
       _statusIsError = false;
       _status = 'Resolving $label contract…';
     });
-    final preview = await widget.api.cockpitPreview(action);
+    final preview = await widget.api.cockpitPreview(action, '');
     if (!mounted) return;
     final previewData = preview.data;
     if (!preview.ok || previewData == null) {
@@ -782,7 +775,7 @@ class _CockpitCardState extends State<_CockpitCard> {
       return;
     }
     setState(() => _status = 'Placing $label…');
-    final result = await widget.api.cockpitEnter(action);
+    final result = await widget.api.cockpitEnter(action, '');
     if (!mounted) return;
     final data = result.data;
     final ok = result.ok && data != null;
@@ -840,7 +833,9 @@ class _CockpitCardState extends State<_CockpitCard> {
         : released
         ? 'Setup lock for ${zone.replaceAll('_', ' ')} reset — the next '
               'eligible candle may enter once.'
-        : (data is Map ? '${data['message'] ?? 'No zone lock is active'}' : 'No zone lock is active');
+        : (data is Map
+              ? '${data['message'] ?? 'No zone lock is active'}'
+              : 'No zone lock is active');
     _notify(message, ok: result.ok);
     widget.onChanged();
   }

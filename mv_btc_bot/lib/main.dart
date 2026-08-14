@@ -8,6 +8,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
 import 'api/client.dart';
+import 'screens/cockpit_screen.dart';
 import 'screens/exposure_screen.dart';
 import 'screens/performance_screen.dart';
 import 'screens/accounts_screen.dart';
@@ -71,7 +72,7 @@ const kBlueBackgroundAsset = 'assets/sparkling-blue-dashboard-bg.png';
 
 final appTheme = AppThemeController();
 
-const kWebAssetRevision = '6.2.9+33-score-dial-shading';
+const kWebAssetRevision = '6.3.2+37-bot-cockpit-mode';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -574,6 +575,12 @@ const appPages = <AppPageSpec>[
     icon: Icons.home_outlined,
   ),
   AppPageSpec(
+    label: 'Cockpit',
+    navLabel: 'Cockpit',
+    path: '/cockpit',
+    icon: Icons.sports_esports_rounded,
+  ),
+  AppPageSpec(
     label: 'Performance',
     // 'Performance' is the widest tab in the bar and the only one that has to
     // shrink to fit; 'Trades' matches the /trades route it opens.
@@ -621,7 +628,7 @@ const appPages = <AppPageSpec>[
 
 /// The five phone tabs, ordered for the trading workflow requested by the
 /// operator. Auxiliary pages remain available from the app-bar workspace menu.
-const primaryPageIndexes = <int>[0, 1, 7, 3, 6];
+const primaryPageIndexes = <int>[0, 1, 2, 8, 4, 7];
 
 class SessionService {
   static const _defaultUrl = 'https://mathibot.duckdns.org';
@@ -897,6 +904,7 @@ class _HomeShellState extends State<HomeShell> {
         onUnauthorised: _signOut,
         onBtcPrice: _updateBtcPrice,
       ),
+      '/cockpit' => CockpitScreen(api: api, onUnauthorised: _signOut),
       '/positions' => ExposureScreen(api: api, onUnauthorised: _signOut),
       '/trades' => PerformanceScreen(api: api, onUnauthorised: _signOut),
       '/dry-run' => DryRunScreen(api: api, onUnauthorised: _signOut),

@@ -9584,6 +9584,66 @@ def _cockpit_manual_signal(action: str, snapshot: dict) -> dict:
     }
 
 
+def _cockpit_require_manual_mode() -> None:
+    """Require COCKPIT mode while score automation is disabled."""
+    if _trend_score_auto_mode() != "disabled":
+        raise RuntimeError(
+            "Select COCKPIT mode before placing a manual order; BOT mode "
+            "trades automatically"
+        )
+
+
+def _cockpit_margin_retry_entry(
+    prepared: dict,
+    result: dict,
+) -> dict | None:
+    """Build one reduced retry after Delta proves rejection and flatness."""
+    if str(result.get("status") or "").upper() != "REJECTED":
+        return None
+    state = result.get("state")
+    if not isinstance(state, dict):
+        return None
+    if (
+        state.get("last_entry_rejection_exact_absence") is not True
+        or state.get("last_entry_position_verified_flat") is not True
+    ):
+        return None
+    rejection = state.get("last_entry_rejection")
+    if not isinstance(rejection, dict):
+        return None
+    if str(rejection.get("code") or "") not in BALANCE_REJECTIONS:
+        return None
+    attempted = _trend_score_auto_exact_int(
+        prepared.get("lots"), "Cockpit attempted order size", positive=True,
+    )
+    context = rejection.get("context")
+    resized_lots = _downsized_lots(
+        attempted, context if isinstance(context, dict) else {},
+    )
+    if resized_lots is None or resized_lots >= attempted:
+        return None
+    resized = copy.deepcopy(prepared)
+    affordability = resized.get("live_affordability")
+    affordability = (
+        copy.deepcopy(affordability)
+        if isinstance(affordability, dict) else {}
+    )
+    affordability.update({
+        "selected_lots": resized_lots,
+        "affordable_lots": resized_lots,
+        "downsized": True,
+        "exchange_margin_adjusted": True,
+        "exchange_rejected_lots": attempted,
+        "exchange_rejection_code": str(rejection.get("code") or ""),
+    })
+    resized.update({
+        "lots": resized_lots,
+        "affordability_limited": True,
+        "live_affordability": affordability,
+    })
+    return resized
+
+
 def _cockpit_disable_score_automation_after_open(
     *,
     root_dir: Path,
@@ -14125,6 +14185,10 @@ def api_trend_engine_score_auto_status():
         "fixed_lots": configured_lots,
         "configured_lots": configured_lots,
         "config_error": error,
+        "account_live": not _config_truthy(cfg.get("DRY_RUN"), False),
+        "account_trading_mode": (
+            "DRY RUN" if _config_truthy(cfg.get("DRY_RUN"), False) else "LIVE"
+        ),
     }
     engine_zone = str(payload.get("engine_zone") or "").strip().upper()
     if not engine_zone and active_mode:
@@ -14414,6 +14478,10 @@ def api_cockpit_enter():
             "ok": False,
             "error": "The Cockpit only places LIVE trades; switch to LIVE trading mode first",
         }), 409
+    try:
+        _cockpit_require_manual_mode()
+    except RuntimeError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 409
     key, secret = _active_creds()
     if not key or not secret:
         return jsonify({
@@ -14442,6 +14510,10 @@ def api_cockpit_enter():
                     "ok": False,
                     "error": "Trading mode changed; reload and retry",
                 }), 409
+            try:
+                _cockpit_require_manual_mode()
+            except RuntimeError as exc:
+                return jsonify({"ok": False, "error": str(exc)}), 409
 
             with account_file_lock(
                 root_dir, "close-trend", owner,
@@ -14502,6 +14574,33 @@ def api_cockpit_enter():
                 existing_state=states["trend"],
                 ownership=TREND_SCORE_MANUAL_LIVE_OWNERSHIP,
             )
+            margin_retry = _cockpit_margin_retry_entry(prepared, result)
+            if margin_retry is not None:
+                prepared = margin_retry
+                signal = _cockpit_manual_signal(action, snapshot)
+                signal["zone"] = prepared["zone"]
+                signal["mode"] = dict(initial_mode)
+                transition_id = _trend_score_auto_transition_id(
+                    user, signal["signal_key"], prepared["zone"],
+                )
+                retry_state = _trend_score_auto_strict_json(
+                    _slot_file("trend"), {},
+                )
+                result = _trend_score_auto_live_execute(
+                    user=user,
+                    signal=signal,
+                    prepared=prepared,
+                    transition_id=transition_id,
+                    initial_revision=initial_mode.get("mode_revision"),
+                    existing_state=retry_state,
+                    ownership=TREND_SCORE_MANUAL_LIVE_OWNERSHIP,
+                )
+                result["margin_retry"] = {
+                    "attempted_lots": margin_retry[
+                        "live_affordability"
+                    ].get("exchange_rejected_lots"),
+                    "retried_lots": margin_retry["lots"],
+                }
             cockpit_opened = (
                 bool(result.get("ok"))
                 and str(result.get("status") or "").upper() == "OPEN"
@@ -14542,6 +14641,7 @@ def api_cockpit_enter():
         "bot_automation_disabled": ok,
         "automation_mode_before": automation_mode_before if ok else None,
         "exchange_api_called": True,
+        "margin_retry": result.get("margin_retry"),
     })
     if ok:
         state = result.get("state") if isinstance(result.get("state"), dict) else {}
@@ -14553,13 +14653,16 @@ def api_cockpit_enter():
         ]
         if isinstance(lots, int):
             lines.append(f"Lots » <code>{lots:,}</code>")
-        lines.append("Bot » <b>OFF — manual re-enable required</b>")
+        lines.append(
+            "Order mode » <b>COCKPIT — select BOT to resume automation</b>"
+        )
         _trend_score_auto_notify("\n".join(lines))
     return jsonify({
         "ok": ok,
         "status": result.get("status"),
         "error": result.get("error"),
         "state": result.get("state"),
+        "margin_retry": result.get("margin_retry"),
         "bot_automation_mode": "disabled" if ok else None,
     }), (200 if ok else 409)
 
@@ -14592,6 +14695,10 @@ def api_cockpit_preview():
             "ok": False,
             "error": "The Cockpit only places LIVE trades; switch to LIVE trading mode first",
         }), 409
+    try:
+        _cockpit_require_manual_mode()
+    except RuntimeError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 409
     key, secret = _active_creds()
     if not key or not secret:
         return jsonify({

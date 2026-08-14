@@ -200,9 +200,10 @@ class DashboardApi {
         yield ApiResult.failed('Server returned ${response.statusCode}');
         return;
       }
-      await for (final line in response.stream
-          .transform(utf8.decoder)
-          .transform(const LineSplitter())) {
+      await for (final line
+          in response.stream
+              .transform(utf8.decoder)
+              .transform(const LineSplitter())) {
         if (!line.startsWith('data:')) continue;
         try {
           final decoded = jsonDecode(line.substring(5).trim());
@@ -222,6 +223,7 @@ class DashboardApi {
       client.close();
     }
   }
+
   Future<ApiResult<Map<String, dynamic>>> tradingMode() =>
       getMap('/api/trading-mode-availability');
   Future<ApiResult<Map<String, dynamic>>> engineLive() =>
@@ -261,17 +263,26 @@ class DashboardApi {
     '/api/bots/${Uri.encodeComponent(username)}/${active ? 'start' : 'stop'}',
   );
 
-  /// Resolve the exact contract/price a Cockpit trade would use right now,
-  /// without submitting anything (read-only preview).
-  Future<ApiResult<Map<String, dynamic>>> cockpitPreview(String action) =>
-      postMap('/api/cockpit/preview', {'action': action});
+  /// Server-authoritative Cockpit setup eligibility and allowed strategies.
+  Future<ApiResult<Map<String, dynamic>>> cockpitSetups() =>
+      getMap('/api/cockpit/setups');
 
-  /// Place one manual LIVE Cockpit trade: buy_ce, buy_pe, buy_move, or
-  /// sell_move. Reuses the same execution seam and exclusivity as the
-  /// automated controller, tagged with manual ownership so the controller
-  /// never manages or replaces it.
-  Future<ApiResult<Map<String, dynamic>>> cockpitEnter(String action) =>
-      postMap('/api/cockpit/enter', {'action': action});
+  /// Resolve the exact contract/price a Cockpit trade would use right now,
+  /// without submitting anything (read-only preview). The setup is mandatory:
+  /// the server revalidates it rather than trusting a green client-side tile.
+  Future<ApiResult<Map<String, dynamic>>> cockpitPreview(
+    String action,
+    String setup,
+  ) => postMap('/api/cockpit/preview', {'action': action, 'setup': setup});
+
+  /// Place one setup-gated manual LIVE Cockpit trade: buy or sell CE/PE/MOVE.
+  /// Reuses the same execution seam and exclusivity as the automated
+  /// controller, tagged with manual ownership so the controller never manages
+  /// or replaces it.
+  Future<ApiResult<Map<String, dynamic>>> cockpitEnter(
+    String action,
+    String setup,
+  ) => postMap('/api/cockpit/enter', {'action': action, 'setup': setup});
 
   Future<ApiResult<dynamic>> squareOff({
     required String slot,

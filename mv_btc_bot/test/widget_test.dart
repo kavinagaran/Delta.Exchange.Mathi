@@ -3,6 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:mv_btc_bot/main.dart';
 import 'package:mv_btc_bot/api/client.dart';
+import 'package:mv_btc_bot/screens/cockpit_screen.dart';
 import 'package:mv_btc_bot/screens/performance_screen.dart';
 import 'package:mv_btc_bot/screens/today_screen.dart';
 import 'package:mv_btc_bot/screens/trend_engine_screen.dart';
@@ -85,17 +86,14 @@ void main() {
     expect(find.text('ENTRY READY'), findsNothing);
     expect(find.text('SIGNAL CONSUMED'), findsNothing);
     expect(find.text('P-BTC-63000-020826'), findsOneWidget);
-    expect(
-      find.text(r'-$53.30 (-11.22%)', findRichText: true),
-      findsOneWidget,
-    );
+    expect(find.text(r'-$53.30 (-11.22%)', findRichText: true), findsOneWidget);
     expect(find.text(r'-$65.90'), findsWidgets);
     expect(find.textContaining('7:41 AM IST'), findsOneWidget);
     // scrollUntilVisible stops as soon as any part of the target overlaps
     // the viewport, which used to be enough when this row sat near the top
-    // of the list. The Cockpit card now pushes it further down, so the row
-    // can land only partially onscreen (its centre -- what tap() targets --
-    // still below the fold). ensureVisible aligns it fully into view instead.
+    // of the list, so the row can land only partially onscreen (its centre --
+    // what tap() targets -- still below the fold). ensureVisible aligns it
+    // fully into view instead.
     await tester.scrollUntilVisible(
       find.text('P-BTC-63000-020826'),
       300,
@@ -142,10 +140,11 @@ void main() {
 
     expect(tester.takeException(), isNull);
     expect(find.text('Trend'), findsOneWidget);
+    expect(find.text('Cockpit'), findsOneWidget);
     expect(find.text('Dry Run'), findsOneWidget);
     expect(find.text('Config'), findsOneWidget);
     // The /trades tab is labelled by its route, not by the page title — the
-    // full 'Performance' does not fit a seven-tab bar at 360dp.
+    // full 'Performance' does not fit the compact phone bar at 360dp.
     expect(find.text('Trades'), findsOneWidget);
     expect(find.text('Performance'), findsNothing);
   });
@@ -174,6 +173,59 @@ void main() {
     expect(find.text(r'$22.00'), findsOneWidget);
     expect(find.text('3 trade cycles'), findsOneWidget);
   });
+
+  testWidgets(
+    'Cockpit gates strategies by setup and submits selected SELL PE',
+    (WidgetTester tester) async {
+      tester.view.physicalSize = const Size(390, 1200);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final api = _CockpitApi();
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: buildAppTheme(blue: true),
+          home: Scaffold(
+            body: CockpitScreen(api: api, onUnauthorised: () {}),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('LIVE COCKPIT'), findsOneWidget);
+      expect(find.text('Bullish trend score'), findsOneWidget);
+      expect(find.text('ELIGIBLE'), findsOneWidget);
+
+      await tester.tap(find.text('Bullish trend score'));
+      await tester.pumpAndSettle();
+      await tester.scrollUntilVisible(
+        find.text('ATM Put'),
+        300,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await tester.ensureVisible(find.text('ATM Put'));
+      await tester.pumpAndSettle();
+      expect(find.text('Protected premium-selling strategies'), findsOneWidget);
+      await tester.tap(find.text('ATM Put'));
+      await tester.pumpAndSettle();
+      await tester.ensureVisible(find.text('Preview Order'));
+      await tester.tap(find.text('Preview Order'));
+      await tester.pump(const Duration(milliseconds: 500));
+
+      expect(find.text('Confirm LIVE order'), findsOneWidget);
+      expect(find.text('P-BTC-64000-140826'), findsOneWidget);
+      expect(api.previewAction, 'sell_pe');
+      expect(api.previewSetup, 'trend_bullish');
+
+      await tester.tap(find.text('Place LIVE Order'));
+      await tester.pump(const Duration(milliseconds: 500));
+      expect(api.enterAction, 'sell_pe');
+      expect(api.enterSetup, 'trend_bullish');
+
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
 
   testWidgets('Trend preview reads live_score and chart supports touch zoom', (
     WidgetTester tester,
@@ -226,6 +278,7 @@ void main() {
       appPages.map((page) => page.label),
       equals([
         'Today',
+        'Cockpit',
         'Performance',
         'Exposure',
         'Bot Config',
@@ -237,7 +290,13 @@ void main() {
     );
     expect(
       appPages.map((page) => page.path),
-      containsAllInOrder(['/', '/trades', '/dry-run', '/trend-engine']),
+      containsAllInOrder([
+        '/',
+        '/cockpit',
+        '/trades',
+        '/dry-run',
+        '/trend-engine',
+      ]),
     );
     expect(appPages.any((page) => page.label == 'Logs'), isTrue);
   });
@@ -362,6 +421,79 @@ class _TodayApi extends DashboardApi {
       'exit_trigger': 'trailing_stop',
     },
   ]);
+}
+
+class _CockpitApi extends DashboardApi {
+  _CockpitApi()
+    : super(baseUrl: 'https://example.invalid', sessionCookie: null);
+
+  String? previewAction;
+  String? previewSetup;
+  String? enterAction;
+  String? enterSetup;
+
+  @override
+  Future<ApiResult<Map<String, dynamic>>> cockpitSetups() async =>
+      const ApiResult.ok(<String, dynamic>{
+        'data_quality': 'OK',
+        'score': 52.0,
+        'adx': 31.0,
+        'regime': 'TREND_UP',
+        'setups': <String, dynamic>{
+          'trend_bullish': <String, dynamic>{
+            'eligible': true,
+            'actions': <dynamic>['buy_ce', 'sell_pe'],
+            'detail': 'Score > +40',
+          },
+          'trend_bearish': <String, dynamic>{
+            'eligible': false,
+            'actions': <dynamic>['buy_pe', 'sell_ce'],
+          },
+        },
+      });
+
+  @override
+  Future<ApiResult<Map<String, dynamic>>> scoreAutoStatus() async =>
+      const ApiResult.ok(<String, dynamic>{
+        'mode': 'disabled',
+        'account_live': true,
+        'account_trading_mode': 'LIVE',
+        'position_status': 'NONE',
+        'setup_lock': <String, dynamic>{'active': true, 'zone': 'CE_2_ITM'},
+      });
+
+  @override
+  Future<ApiResult<List<dynamic>>> todayTrades() async =>
+      const ApiResult.ok(<dynamic>[]);
+
+  @override
+  Future<ApiResult<Map<String, dynamic>>> cockpitPreview(
+    String action,
+    String setup,
+  ) async {
+    previewAction = action;
+    previewSetup = setup;
+    return const ApiResult.ok(<String, dynamic>{
+      'side': 'short',
+      'instrument_kind': 'BTC_OPTION',
+      'symbol': 'P-BTC-64000-140826',
+      'strike': 64000,
+      'entry_price': 325.0,
+      'lots': 500,
+    });
+  }
+
+  @override
+  Future<ApiResult<Map<String, dynamic>>> cockpitEnter(
+    String action,
+    String setup,
+  ) async {
+    enterAction = action;
+    enterSetup = setup;
+    return const ApiResult.ok(<String, dynamic>{
+      'state': <String, dynamic>{'symbol': 'P-BTC-64000-140826', 'lots': 500},
+    });
+  }
 }
 
 class _PerformanceApi extends DashboardApi {
