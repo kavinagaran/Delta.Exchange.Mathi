@@ -77,7 +77,15 @@
         <section class="cockpit-option-group is-sell" aria-labelledby="cockpit-sell-title">
           <header><span>SELL</span><small>Protected premium-selling strategy</small></header>
           <div class="cockpit-option-list">
-            <label class="cockpit-option-choice" data-action="sell_move">
+            <label class="cockpit-option-choice" data-action="sell_ce">
+              <input type="radio" name="cockpit-trade" value="sell_ce" disabled>
+              <span><strong>ATM Call</strong><small>Bearish premium sell · protected</small></span><i>CE</i>
+            </label>
+            <label class="cockpit-option-choice" data-action="sell_pe">
+              <input type="radio" name="cockpit-trade" value="sell_pe" disabled>
+              <span><strong>ATM Put</strong><small>Bullish premium sell · protected</small></span><i>PE</i>
+            </label>
+            <label class="cockpit-option-choice is-wide" data-action="sell_move">
               <input type="radio" name="cockpit-trade" value="sell_move" disabled>
               <span><strong>ATM MOVE Straddle</strong><small>Short volatility · TP / SL / TSL protected</small></span><i>MV</i>
             </label>
@@ -122,29 +130,30 @@
 <script>
 const COCKPIT_TRADE_LABELS = {
   buy_ce: 'Buy 2-Step ITM Call', buy_pe: 'Buy 2-Step ITM Put',
-  buy_move: 'Buy ATM MOVE', sell_move: 'Sell ATM MOVE Straddle',
+  buy_move: 'Buy ATM MOVE', sell_ce: 'Sell ATM Call',
+  sell_pe: 'Sell ATM Put', sell_move: 'Sell ATM MOVE Straddle',
 };
 const COCKPIT_SETUP_GROUPS = [
   { title: 'Trend & momentum', setups: [
-    { id: 'trend_bullish', label: 'Bullish trend score', source: 'Score > +40', actions: ['buy_ce'] },
-    { id: 'trend_bearish', label: 'Bearish trend score', source: 'Score < −40', actions: ['buy_pe'] },
-    { id: 'ema_bullish', label: 'EMA bullish alignment', source: 'Higher + lower timeframe', actions: ['buy_ce'] },
-    { id: 'ema_bearish', label: 'EMA bearish alignment', source: 'Higher + lower timeframe', actions: ['buy_pe'] },
-    { id: 'rsi_bullish', label: 'RSI bullish momentum', source: 'RSI component', actions: ['buy_ce'] },
-    { id: 'rsi_bearish', label: 'RSI bearish momentum', source: 'RSI component', actions: ['buy_pe'] },
+    { id: 'trend_bullish', label: 'Bullish trend score', source: 'Score > +40', actions: ['buy_ce', 'sell_pe'] },
+    { id: 'trend_bearish', label: 'Bearish trend score', source: 'Score < −40', actions: ['buy_pe', 'sell_ce'] },
+    { id: 'ema_bullish', label: 'EMA bullish alignment', source: 'Higher + lower timeframe', actions: ['buy_ce', 'sell_pe'] },
+    { id: 'ema_bearish', label: 'EMA bearish alignment', source: 'Higher + lower timeframe', actions: ['buy_pe', 'sell_ce'] },
+    { id: 'rsi_bullish', label: 'RSI bullish momentum', source: 'RSI component', actions: ['buy_ce', 'sell_pe'] },
+    { id: 'rsi_bearish', label: 'RSI bearish momentum', source: 'RSI component', actions: ['buy_pe', 'sell_ce'] },
   ]},
   { title: 'Structure & flow', setups: [
-    { id: 'supertrend_bullish', label: 'Supertrend bullish flip', source: 'Confirmed engine reason', actions: ['buy_ce'] },
-    { id: 'supertrend_bearish', label: 'Supertrend bearish flip', source: 'Confirmed engine reason', actions: ['buy_pe'] },
-    { id: 'support_bounce', label: 'Support bounce', source: 'Positive market structure', actions: ['buy_ce'] },
-    { id: 'resistance_rejection', label: 'Resistance rejection', source: 'Negative market structure', actions: ['buy_pe'] },
-    { id: 'breakout_bullish', label: 'Bullish breakout', source: 'Breakout quality', actions: ['buy_ce', 'buy_move'] },
-    { id: 'breakout_bearish', label: 'Bearish breakdown', source: 'Breakout quality', actions: ['buy_pe', 'buy_move'] },
-    { id: 'orderflow_buy', label: 'Order-flow buy pressure', source: 'Live order-flow component', actions: ['buy_ce'] },
-    { id: 'orderflow_sell', label: 'Order-flow sell pressure', source: 'Live order-flow component', actions: ['buy_pe'] },
+    { id: 'supertrend_bullish', label: 'Supertrend bullish flip', source: 'Confirmed engine reason', actions: ['buy_ce', 'sell_pe'] },
+    { id: 'supertrend_bearish', label: 'Supertrend bearish flip', source: 'Confirmed engine reason', actions: ['buy_pe', 'sell_ce'] },
+    { id: 'support_bounce', label: 'Support bounce', source: 'Positive market structure', actions: ['buy_ce', 'sell_pe'] },
+    { id: 'resistance_rejection', label: 'Resistance rejection', source: 'Negative market structure', actions: ['buy_pe', 'sell_ce'] },
+    { id: 'breakout_bullish', label: 'Bullish breakout', source: 'Breakout quality', actions: ['buy_ce', 'sell_pe', 'buy_move'] },
+    { id: 'breakout_bearish', label: 'Bearish breakdown', source: 'Breakout quality', actions: ['buy_pe', 'sell_ce', 'buy_move'] },
+    { id: 'orderflow_buy', label: 'Order-flow buy pressure', source: 'Live order-flow component', actions: ['buy_ce', 'sell_pe'] },
+    { id: 'orderflow_sell', label: 'Order-flow sell pressure', source: 'Live order-flow component', actions: ['buy_pe', 'sell_ce'] },
   ]},
   { title: 'Volatility', setups: [
-    { id: 'calm_range', label: 'Calm / range market', source: '|score| ≤ 30 · ADX ≤ 20', actions: ['sell_move'] },
+    { id: 'calm_range', label: 'Calm / range market', source: '|score| ≤ 30 · ADX ≤ 20', actions: ['sell_ce', 'sell_pe', 'sell_move'] },
     { id: 'volatility_expansion', label: 'Volatility expansion', source: 'ADX > 25 · breakout active', actions: ['buy_move'] },
   ]},
 ];
@@ -203,7 +212,19 @@ function cockpitDeriveSetups(snapshot) {
 }
 
 function cockpitRenderSetups(snapshot) {
-  const derived = cockpitDeriveSetups(snapshot);
+  let derived = cockpitDeriveSetups(snapshot);
+  if (snapshot?.setups && typeof snapshot.setups === 'object') {
+    const serverResult = new Map();
+    for (const group of COCKPIT_SETUP_GROUPS) for (const base of group.setups) {
+      const state = snapshot.setups[base.id] || {};
+      serverResult.set(base.id, {
+        ...base, eligible: state.eligible === true,
+        actions: Array.isArray(state.actions) ? state.actions : base.actions,
+        detail: state.detail || base.source,
+      });
+    }
+    derived = { result: serverResult, score: cockpitFinite(snapshot.score), adx: cockpitFinite(snapshot.adx) };
+  }
   cockpitSetupState = derived.result;
   document.getElementById('cockpit-engine-score').textContent = derived.score === null ? '—' : `${derived.score >= 0 ? '+' : ''}${derived.score.toFixed(1)}`;
   document.getElementById('cockpit-engine-adx').textContent = derived.adx === null ? '—' : derived.adx.toFixed(1);
@@ -280,7 +301,7 @@ function cockpitRenderState(trades, engineStatus) {
 }
 async function loadCockpit() {
   try {
-    const [trades, engineStatus, snapshot] = await Promise.all([jget('/api/today-trades').catch(() => []), jget('/api/trend-engine/score-auto/status'), jget('/api/engine/snapshot')]);
+    const [trades, engineStatus, snapshot] = await Promise.all([jget('/api/today-trades').catch(() => []), jget('/api/trend-engine/score-auto/status'), jget('/api/cockpit/setups')]);
     cockpitRenderState(trades, engineStatus); cockpitRenderSetups(snapshot);
   } catch (error) { cockpitLiveMode = false; cockpitClearSetup(); cockpitSetStatus(error?.message || 'Cockpit status is unavailable.', 'err'); }
   refreshTopbar();

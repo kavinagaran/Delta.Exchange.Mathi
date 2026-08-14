@@ -321,6 +321,7 @@ def select_directional_option(
     lots: int = AUTO_TRADE_LOTS,
     today_only: bool = False,
     min_time_to_expiry_seconds: float = MIN_TIME_TO_EXPIRY_SECONDS,
+    manual_itm_steps: int | None = None,
 ) -> dict[str, Any] | None:
     """Select the exact policy strike or return ``None`` without substitution.
 
@@ -331,6 +332,11 @@ def select_directional_option(
     under the old policy can be selected and closed.  If that exact product
     is absent or not executable for the requested lot count, the function returns
     ``None``; it never shifts strike or tries a later expiry.
+
+    ``manual_itm_steps`` is reserved for an operator-selected Cockpit trade.
+    It may choose the same option type at a specific non-negative strike
+    offset (including ATM with ``0``) without weakening the automated zone's
+    fixed two-step policy; automated callers leave it as ``None``.
 
     ``today_only=True`` additionally restricts the ladder to the single
     *nearest* listed expiry -- never a later one -- used by the automated
@@ -361,6 +367,15 @@ def select_directional_option(
         raise TrendScoreAutoInputError(
             "zone must be CE_2_ITM, PE_2_ITM or PE_3_ITM for option selection"
         )
+    if manual_itm_steps is not None:
+        try:
+            override = int(manual_itm_steps)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if isinstance(manual_itm_steps, bool) or override != manual_itm_steps \
+                or override < 0:
+            return None
+        steps = override
     current = _utc_time(now, "now")
     current_spot = _finite(spot, "spot")
     if current_spot <= 0:

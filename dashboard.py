@@ -142,7 +142,7 @@ DRY_CLOSED_TRADE_OUTBOX_FILE = "dry_closed_trade_outbox.json"
 TREND_SCORE_AUTO_OWNERSHIP = "trend_score_auto_dry_run"
 TREND_SCORE_AUTO_LIVE_OWNERSHIP = "trend_score_auto_live"
 TREND_SCORE_AUTO_TRIGGER = "trend_engine_score_zone_auto"
-# The Cockpit's manual LIVE entries (Buy CE/PE/MOVE, Sell MOVE). A manual
+# The Cockpit's manual LIVE entries (Buy CE/PE/MOVE, Sell CE/PE/MOVE). A manual
 # trade has a real fill ledger -- it goes through the identical execution
 # seam as a bot entry -- so it is deliberately NOT treated like an adopted
 # external position (tp_monitor.py's fill-ledger-reconstruction exemptions
@@ -151,11 +151,33 @@ TREND_SCORE_AUTO_TRIGGER = "trend_engine_score_zone_auto"
 # _trend_score_auto_live_owned_position), only block new entries while it
 # is open.
 TREND_SCORE_MANUAL_LIVE_OWNERSHIP = "manual_cockpit_live"
+TREND_SCORE_SHORT_CE_ZONE = "SHORT_CE"
+TREND_SCORE_SHORT_PE_ZONE = "SHORT_PE"
 TREND_SCORE_MANUAL_TRIGGERS = {
     "buy_ce": "manual_cockpit_buy_ce",
     "buy_pe": "manual_cockpit_buy_pe",
     "buy_move": "manual_cockpit_buy_move",
+    "sell_ce": "manual_cockpit_sell_ce",
+    "sell_pe": "manual_cockpit_sell_pe",
     "sell_move": "manual_cockpit_sell_move",
+}
+COCKPIT_SETUP_ACTIONS = {
+    "trend_bullish": {"buy_ce", "sell_pe"},
+    "trend_bearish": {"buy_pe", "sell_ce"},
+    "ema_bullish": {"buy_ce", "sell_pe"},
+    "ema_bearish": {"buy_pe", "sell_ce"},
+    "rsi_bullish": {"buy_ce", "sell_pe"},
+    "rsi_bearish": {"buy_pe", "sell_ce"},
+    "supertrend_bullish": {"buy_ce", "sell_pe"},
+    "supertrend_bearish": {"buy_pe", "sell_ce"},
+    "support_bounce": {"buy_ce", "sell_pe"},
+    "resistance_rejection": {"buy_pe", "sell_ce"},
+    "breakout_bullish": {"buy_ce", "sell_pe", "buy_move"},
+    "breakout_bearish": {"buy_pe", "sell_ce", "buy_move"},
+    "orderflow_buy": {"buy_ce", "sell_pe"},
+    "orderflow_sell": {"buy_pe", "sell_ce"},
+    "calm_range": {"sell_ce", "sell_pe", "sell_move"},
+    "volatility_expansion": {"buy_move"},
 }
 TREND_SCORE_AUTO_LEDGER_SIGNAL_LIMIT = 576
 # A zero-fill IOC is a transient liquidity outcome, not a completed trading
@@ -9282,6 +9304,124 @@ def _cockpit_market_snapshot() -> dict:
     )
 
 
+def _cockpit_setup_eligibility(snapshot: dict) -> dict[str, dict]:
+    """Return the server-authoritative Cockpit setup matrix.
+
+    The browser renders the same evidence, but every preview and entry calls
+    this function again so a stale green radio button can never authorize an
+    action after its setup has ceased to be eligible.
+    """
+    components = {}
+    for item in snapshot.get("components") or []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "")
+        if not name or item.get("available") is False:
+            continue
+        try:
+            value = float(item.get("score"))
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if math.isfinite(value):
+            components[name] = value
+
+    def number(key: str) -> float | None:
+        try:
+            value = float(snapshot.get(key))
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return value if math.isfinite(value) else None
+
+    score = number("trend_score")
+    adx = number("trigger_adx")
+    higher = components.get("higher_timeframe_trend")
+    lower = components.get("lower_timeframe_momentum")
+    rsi = components.get("rsi_momentum")
+    structure = components.get("market_structure")
+    breakout = components.get("breakout_quality")
+    flow = components.get("order_flow")
+    reasons = [
+        str(value).upper()
+        for value in (snapshot.get("reason_codes") or [])
+    ]
+
+    def has_reason(*parts: str) -> bool:
+        return any(
+            all(part in reason for part in parts)
+            for reason in reasons
+        )
+
+    checks = {
+        "trend_bullish": score is not None and score > 40,
+        "trend_bearish": score is not None and score < -40,
+        "ema_bullish": (
+            higher is not None and lower is not None
+            and higher >= 15 and lower >= 15
+        ),
+        "ema_bearish": (
+            higher is not None and lower is not None
+            and higher <= -15 and lower <= -15
+        ),
+        "rsi_bullish": rsi is not None and rsi >= 20,
+        "rsi_bearish": rsi is not None and rsi <= -20,
+        "supertrend_bullish": (
+            has_reason("SUPER", "BULL") or has_reason("SUPER", "UP")
+        ),
+        "supertrend_bearish": (
+            has_reason("SUPER", "BEAR") or has_reason("SUPER", "DOWN")
+        ),
+        "support_bounce": (
+            structure is not None and structure >= 25
+            and not (breakout is not None and breakout >= 20)
+        ),
+        "resistance_rejection": (
+            structure is not None and structure <= -25
+            and not (breakout is not None and breakout <= -20)
+        ),
+        "breakout_bullish": breakout is not None and breakout >= 20,
+        "breakout_bearish": breakout is not None and breakout <= -20,
+        "orderflow_buy": flow is not None and flow >= 15,
+        "orderflow_sell": flow is not None and flow <= -15,
+        "calm_range": (
+            score is not None and abs(score) <= 30
+            and adx is not None and adx <= 20
+        ),
+        "volatility_expansion": (
+            adx is not None and adx > 25
+            and breakout is not None and abs(breakout) >= 20
+        ),
+    }
+    quality_ok = snapshot.get("data_quality") == "OK"
+    result = {}
+    for setup_id, actions in COCKPIT_SETUP_ACTIONS.items():
+        detail = None
+        if setup_id.startswith("orderflow_") and flow is None:
+            detail = "Order-flow feed unavailable"
+        elif setup_id.startswith("supertrend_") and not checks[setup_id]:
+            detail = "No fresh flip confirmation"
+        result[setup_id] = {
+            "eligible": bool(quality_ok and checks[setup_id]),
+            "actions": sorted(actions),
+            "detail": detail,
+        }
+    return result
+
+
+def _cockpit_require_eligible_setup(setup_id: str, action: str) -> dict:
+    setup = str(setup_id or "").strip().lower()
+    if setup not in COCKPIT_SETUP_ACTIONS:
+        raise ValueError("Select a valid Cockpit market setup")
+    if action not in COCKPIT_SETUP_ACTIONS[setup]:
+        raise ValueError("The selected option does not match this market setup")
+    snapshot = trend_engine_client.get_snapshot("BTCUSD")
+    state = _cockpit_setup_eligibility(snapshot).get(setup) or {}
+    if state.get("eligible") is not True:
+        raise RuntimeError(
+            "The selected market setup is no longer eligible; refresh Cockpit"
+        )
+    return snapshot
+
+
 def _cockpit_prepare_manual_entry(action: str, snapshot: dict) -> dict:
     """Resolve and wallet-size the exact contract for one Cockpit trade type.
 
@@ -9290,8 +9430,10 @@ def _cockpit_prepare_manual_entry(action: str, snapshot: dict) -> dict:
     automated-only precondition: there is no engine ``zone_action_allowed``
     gate to satisfy and no ``plan_score_transition``/ADX calm-market check
     to pass, because a manual trade substitutes the operator's own
-    real-time judgement for both. ``buy_ce``/``buy_pe`` still require a
-    fresh, non-stale executable quote; ``sell_move`` still enforces the
+    real-time judgement for both. Directional buys select the configured
+    two-step ITM contract; individual directional sells select the current
+    ATM CE/PE. Every vanilla option still requires a fresh, non-stale
+    executable quote; ``sell_move`` still enforces the
     strategy-wide weekday-blackout guard but skips the automated $300
     premium floor;
     ``buy_move`` has no automated precedent to mirror.
@@ -9312,18 +9454,23 @@ def _cockpit_prepare_manual_entry(action: str, snapshot: dict) -> dict:
         (snapshot.get("market") or {}).get("spot"), "BTC spot", positive=True,
     )
 
-    if action in ("buy_ce", "buy_pe"):
+    if action in ("buy_ce", "buy_pe", "sell_ce", "sell_pe"):
+        is_short = action.startswith("sell_")
+        is_call = action.endswith("_ce")
         zone = (
-            TREND_SCORE_CE_ZONE if action == "buy_ce" else TREND_SCORE_PE_ZONE
+            TREND_SCORE_CE_ZONE if is_call else TREND_SCORE_PE_ZONE
         )
         selection = select_directional_option(
             _fetch_live_vanilla_products(),
             snapshot.get("option_contracts") or [],
             spot=spot, zone=zone, now=now, lots=lots,
             today_only=True, min_time_to_expiry_seconds=0,
+            manual_itm_steps=0 if is_short else None,
         )
         if not selection:
-            label = "2-step ITM CALL" if action == "buy_ce" else "2-step ITM PUT"
+            option_label = "CALL" if is_call else "PUT"
+            label = f"ATM {option_label}" if is_short \
+                else f"2-step ITM {option_label}"
             raise RuntimeError(
                 f"No exact executable today's-expiry {label} contract "
                 "is available"
@@ -9333,10 +9480,23 @@ def _cockpit_prepare_manual_entry(action: str, snapshot: dict) -> dict:
         age = _trend_score_auto_quote_age(contract.get("quote_timestamp"), now)
         if age > max_age:
             raise RuntimeError("selected option quote is stale")
+        price_key = "bid" if is_short else "ask"
+        depth_keys = (
+            ("bid_size", "bid_quantity") if is_short
+            else ("ask_size", "ask_quantity")
+        )
         prepared = {
             **selection,
-            "side": "long",
+            "zone": (
+                TREND_SCORE_SHORT_CE_ZONE if is_short and is_call
+                else TREND_SCORE_SHORT_PE_ZONE if is_short
+                else zone
+            ),
+            "side": "short" if is_short else "long",
             "instrument_kind": "BTC_OPTION",
+            "entry_price": _trend_score_auto_number(
+                contract.get(price_key), f"option {price_key}", positive=True,
+            ),
             "contract_value": _trend_score_auto_number(
                 contract.get("contract_value"), "option contract value",
                 positive=True,
@@ -9344,8 +9504,8 @@ def _cockpit_prepare_manual_entry(action: str, snapshot: dict) -> dict:
             "settlement": selection["expiry"],
             "quote_timestamp": contract.get("quote_timestamp"),
             "entry_depth": _trend_score_auto_number(
-                contract.get("ask_size") or contract.get("ask_quantity"),
-                "option ask depth", positive=True,
+                contract.get(depth_keys[0]) or contract.get(depth_keys[1]),
+                f"option {price_key} depth", positive=True,
             ),
             "quote_snapshot": copy.deepcopy(contract),
         }
@@ -10585,7 +10745,9 @@ def _trend_score_auto_live_required_funds(
     cv = _trend_score_auto_number(
         prepared.get("contract_value"), "contract value", positive=True,
     )
-    is_short = prepared.get("zone") == TREND_SCORE_MOVE_ZONE
+    is_short = str(prepared.get("side") or "").strip().lower() in {
+        "short", "sell",
+    }
     # A MOVE straddle is always two legs (call + put together) regardless of
     # direction -- this must key off the instrument, not is_short, or a long
     # MOVE entry silently halves its estimated commission.
@@ -10598,10 +10760,10 @@ def _trend_score_auto_live_required_funds(
         product = prepared.get("raw_product")
         if not isinstance(product, dict):
             raise RuntimeError(
-                "selected MOVE contract has no authoritative margin fields"
+                "selected short contract has no authoritative margin fields"
             )
         initial_margin_pct = _trend_score_auto_number(
-            product.get("initial_margin"), "MOVE initial margin", positive=True,
+            product.get("initial_margin"), "short initial margin", positive=True,
         )
         reference = max(
             _trend_score_auto_number(
@@ -10611,7 +10773,7 @@ def _trend_score_auto_live_required_funds(
                 prepared.get("strike"), "MOVE strike", positive=True,
             ),
         )
-        notional = 2.0 * reference * cv * requested
+        notional = float(legs) * reference * cv * requested
         ratio = initial_margin_pct / 100.0
         max_leverage_notional = _trend_score_auto_number(
             product.get("max_leverage_notional") or notional,
@@ -10632,7 +10794,10 @@ def _trend_score_auto_live_required_funds(
         fee_per_lot = _trend_score_auto_product_fee_per_lot(
             prepared, price=touch, legs=legs,
         )
-        basis = "move_isolated_margin_plus_entry_charges"
+        basis = (
+            "move_isolated_margin_plus_entry_charges"
+            if legs == 2 else "option_isolated_margin_plus_entry_charges"
+        )
         funding_price = touch
     else:
         max_slippage = max(_as_float(
@@ -10693,7 +10858,9 @@ def _trend_score_auto_live_affordability(
     )
     if available < 0:
         raise RuntimeError("available USD balance is invalid")
-    is_short = prepared.get("zone") == TREND_SCORE_MOVE_ZONE
+    is_short = str(prepared.get("side") or "").strip().lower() in {
+        "short", "sell",
+    }
     depth_key = "bid_size" if is_short else "ask_size"
     depth = int(math.floor(_trend_score_auto_number(
         quote.get(depth_key), f"fresh {depth_key}", positive=True,
@@ -10785,7 +10952,9 @@ def _trend_score_auto_risk_snapshot(
     strike = _trend_score_auto_number(
         prepared.get("strike"), "strike", positive=True,
     )
-    is_short = prepared.get("zone") == TREND_SCORE_MOVE_ZONE
+    is_short = str(prepared.get("side") or "").strip().lower() in {
+        "short", "sell",
+    }
     side_price_key = "bid" if is_short else "ask"
     quoted_price = _trend_score_auto_number(
         quote.get(side_price_key), f"fresh {side_price_key}", positive=True,
@@ -14199,10 +14368,22 @@ def api_trend_engine_score_auto_setup_lock_reset():
         return jsonify({"ok": False, "error": str(exc)[:300]}), 400
 
 
+@app.route("/api/cockpit/setups")
+def api_cockpit_setups():
+    snapshot = trend_engine_client.get_snapshot("BTCUSD")
+    return jsonify({
+        "data_quality": snapshot.get("data_quality"),
+        "score": snapshot.get("trend_score"),
+        "adx": snapshot.get("trigger_adx"),
+        "regime": snapshot.get("regime"),
+        "setups": _cockpit_setup_eligibility(snapshot),
+    })
+
+
 @app.route("/api/cockpit/enter", methods=["POST"])
 def api_cockpit_enter():
-    """Place one manually chosen LIVE Trend trade: Buy CE, Buy PE, Buy MOVE,
-    or Sell MOVE.
+    """Place one manually chosen LIVE Trend trade: Buy CE/PE/MOVE or sell
+    ATM CE/PE/MOVE.
 
     Reuses the identical execution seam the automated LIVE score-auto
     controller uses -- same risk gating, wallet-affordable sizing, IOC
@@ -14215,13 +14396,16 @@ def api_cockpit_enter():
     primitive.
     """
     user = _active_user()
-    action = str(
-        (request.get_json(silent=True) or {}).get("action") or ""
-    ).strip().lower()
+    request_body = request.get_json(silent=True) or {}
+    action = str(request_body.get("action") or "").strip().lower()
+    setup_id = str(request_body.get("setup") or "").strip().lower()
     if action not in TREND_SCORE_MANUAL_TRIGGERS:
         return jsonify({
             "ok": False,
-            "error": "action must be buy_ce, buy_pe, buy_move, or sell_move",
+            "error": (
+                "action must be buy_ce, buy_pe, buy_move, sell_ce, sell_pe, "
+                "or sell_move"
+            ),
         }), 400
 
     initial_mode = _trading_mode_payload()
@@ -14295,6 +14479,12 @@ def api_cockpit_enter():
             if blocker:
                 return jsonify({"ok": False, "error": blocker}), 409
 
+            try:
+                _cockpit_require_eligible_setup(setup_id, action)
+            except ValueError as exc:
+                return jsonify({"ok": False, "error": str(exc)}), 400
+            except RuntimeError as exc:
+                return jsonify({"ok": False, "error": str(exc)}), 409
             snapshot = _cockpit_market_snapshot()
             prepared = _cockpit_prepare_manual_entry(action, snapshot)
             signal = _cockpit_manual_signal(action, snapshot)
@@ -14386,13 +14576,16 @@ def api_cockpit_preview():
     re-validates everything fresh regardless, exactly as if this preview
     had never been called.
     """
-    action = str(
-        (request.get_json(silent=True) or {}).get("action") or ""
-    ).strip().lower()
+    request_body = request.get_json(silent=True) or {}
+    action = str(request_body.get("action") or "").strip().lower()
+    setup_id = str(request_body.get("setup") or "").strip().lower()
     if action not in TREND_SCORE_MANUAL_TRIGGERS:
         return jsonify({
             "ok": False,
-            "error": "action must be buy_ce, buy_pe, buy_move, or sell_move",
+            "error": (
+                "action must be buy_ce, buy_pe, buy_move, sell_ce, sell_pe, "
+                "or sell_move"
+            ),
         }), 400
     if _trading_mode_payload().get("dry_run_mode"):
         return jsonify({
@@ -14405,8 +14598,11 @@ def api_cockpit_preview():
             "ok": False, "error": "API credentials are not configured",
         }), 409
     try:
+        _cockpit_require_eligible_setup(setup_id, action)
         snapshot = _cockpit_market_snapshot()
         prepared = _cockpit_prepare_manual_entry(action, snapshot)
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
     except Exception as exc:
         return jsonify({"ok": False, "error": str(exc)[:300]}), 400
     return jsonify({

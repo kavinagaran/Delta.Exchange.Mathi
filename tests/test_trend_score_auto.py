@@ -292,6 +292,34 @@ def test_directional_zero_floor_still_selects_todays_near_expiry():
     assert selected["expiry"] == soon.isoformat().replace("+00:00", "Z")
 
 
+@pytest.mark.parametrize(
+    ("zone", "prefix", "option_type"),
+    (
+        (CE_2_ITM, "C-BTC-64800-", "CE"),
+        (PE_2_ITM, "P-BTC-64800-", "PE"),
+    ),
+)
+def test_manual_zero_step_override_selects_atm_without_changing_zone_policy(
+    zone, prefix, option_type,
+):
+    expiry = NOW + timedelta(hours=6)
+    products = _products(
+        expiry, [64200, 64400, 64600, 64800, 65000, 65200],
+    )
+    target = next(row for row in products if row["symbol"].startswith(prefix))
+
+    selected = select_directional_option(
+        products, [_executable(target)], spot=64850, zone=zone, now=NOW,
+        manual_itm_steps=0,
+    )
+
+    assert selected is not None
+    assert selected["strike"] == 64800
+    assert selected["atm_strike"] == 64800
+    assert selected["itm_steps"] == 0
+    assert selected["option_type"] == option_type
+
+
 def test_missing_exact_target_does_not_substitute_a_strike_or_later_expiry():
     first = NOW + timedelta(hours=6)
     later = NOW + timedelta(days=1)

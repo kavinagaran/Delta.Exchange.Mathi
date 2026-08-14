@@ -302,6 +302,13 @@ ZONE_EXECUTION: dict[str, ZoneExecutionPolicy] = {
     # every other executable zone has.
     "LONG_MOVE": ZoneExecutionPolicy(
         ("BTC_MOVE", "MOVE", "long", "MV-BTC-"), "neutral", "BUY_MOVE"),
+    # Manual-only Cockpit entries. These ATM option sells are never produced
+    # by score automation, but retain the same strict instrument/side/prefix
+    # proof and protection lifecycle as every other LIVE entry.
+    "SHORT_CE": ZoneExecutionPolicy(
+        ("BTC_OPTION", "CE", "short", "C-BTC-"), "down", "SELL_CE"),
+    "SHORT_PE": ZoneExecutionPolicy(
+        ("BTC_OPTION", "PE", "short", "P-BTC-"), "up", "SELL_PE"),
 }
 
 

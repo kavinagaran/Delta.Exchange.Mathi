@@ -63,6 +63,26 @@ def _prepared(zone: str = "CE_2_ITM") -> dict:
             "instrument_kind": "BTC_OPTION",
             "entry_price": 240.0,
         }
+    elif zone == "SHORT_CE":
+        values = {
+            "symbol": "C-BTC-65800-230726",
+            "product_id": 104,
+            "strike": 65_800,
+            "side": "short",
+            "option_type": "CE",
+            "instrument_kind": "BTC_OPTION",
+            "entry_price": 210.0,
+        }
+    elif zone == "SHORT_PE":
+        values = {
+            "symbol": "P-BTC-65800-230726",
+            "product_id": 105,
+            "strike": 65_800,
+            "side": "short",
+            "option_type": "PE",
+            "instrument_kind": "BTC_OPTION",
+            "entry_price": 205.0,
+        }
     elif zone == "LONG_MOVE":
         values = {
             "symbol": "MV-BTC-65800-230726",
@@ -94,8 +114,9 @@ def _prepared(zone: str = "CE_2_ITM") -> dict:
 
 
 def _quote(zone: str = "CE_2_ITM") -> dict:
-    if zone == "SHORT_MOVE":
-        bid, ask = 445.0, 446.0
+    if zone in {"SHORT_MOVE", "SHORT_CE", "SHORT_PE"}:
+        entry = _prepared(zone)["entry_price"]
+        bid, ask = entry, entry + 1.0
     else:
         entry = _prepared(zone)["entry_price"]
         bid, ask = entry - 1.0, entry
@@ -349,13 +370,16 @@ def test_filled_premium_policy_uses_exact_percentages_and_actual_fill_basis():
 
 @pytest.mark.parametrize(
     "zone",
-    ("CE_2_ITM", "PE_3_ITM", "SHORT_MOVE", "LONG_MOVE"),
+    (
+        "CE_2_ITM", "PE_3_ITM", "SHORT_MOVE", "LONG_MOVE",
+        "SHORT_CE", "SHORT_PE",
+    ),
 )
 def test_entry_validation_accepts_configured_size_for_exact_policy_contract(zone):
     normalized = validate_fixed_entry(_prepared(zone))
     assert normalized["lots"] == 1_000
     assert normalized["exchange_side"] == (
-        "sell" if zone == "SHORT_MOVE" else "buy"
+        "sell" if zone in {"SHORT_MOVE", "SHORT_CE", "SHORT_PE"} else "buy"
     )
 
     configured_lots = _prepared(zone)
@@ -1474,6 +1498,10 @@ def test_every_executable_zone_has_a_consistent_instrument_and_side():
         elif zone == "LONG_MOVE":
             assert (instrument, option_type, side) == ("BTC_MOVE", "MOVE", "long")
             assert prefix == "MV-BTC-"
+        elif zone in {"SHORT_CE", "SHORT_PE"}:
+            assert instrument == "BTC_OPTION" and side == "short"
+            assert option_type in ("CE", "PE")
+            assert prefix == ("C-BTC-" if option_type == "CE" else "P-BTC-")
         else:
             assert instrument == "BTC_OPTION" and side == "long"
             assert option_type in ("CE", "PE")

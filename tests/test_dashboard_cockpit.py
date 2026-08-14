@@ -69,6 +69,11 @@ def live_account(tmp_path, monkeypatch):
     monkeypatch.setattr(dashboard, "_active_creds", lambda: ("key", "secret"))
     monkeypatch.setattr(dashboard, "_trend_audit", Mock())
     monkeypatch.setattr(dashboard, "_trend_score_auto_notify", Mock())
+    monkeypatch.setattr(
+        dashboard,
+        "_cockpit_require_eligible_setup",
+        lambda setup, action: {"data_quality": "OK"},
+    )
     dashboard._basic_cache.clear()
     dashboard._trend_score_auto_health.clear()
     dashboard._trend_score_auto_cycle_locks.clear()
@@ -126,16 +131,56 @@ def _mock_execution_result(*, symbol="C-BTC-65400-240726", lots=1_000) -> dict:
     }
 
 
-def _post_cockpit_enter(action: str):
+def test_cockpit_setup_matrix_maps_bullish_bearish_and_calm_sells():
+    common = [
+        {"name": "higher_timeframe_trend", "score": 60, "available": True},
+        {"name": "lower_timeframe_momentum", "score": 55, "available": True},
+        {"name": "rsi_momentum", "score": 40, "available": True},
+        {"name": "market_structure", "score": 35, "available": True},
+        {"name": "breakout_quality", "score": 0, "available": True},
+        {"name": "order_flow", "score": None, "available": False},
+    ]
+    bullish = dashboard._cockpit_setup_eligibility({
+        "data_quality": "OK", "trend_score": 52, "trigger_adx": 31,
+        "components": common, "reason_codes": [],
+    })
+    assert bullish["trend_bullish"]["eligible"] is True
+    assert set(bullish["trend_bullish"]["actions"]) == {"buy_ce", "sell_pe"}
+    assert bullish["trend_bearish"]["eligible"] is False
+
+    calm = dashboard._cockpit_setup_eligibility({
+        "data_quality": "OK", "trend_score": 12, "trigger_adx": 18,
+        "components": common, "reason_codes": [],
+    })
+    assert calm["calm_range"]["eligible"] is True
+    assert set(calm["calm_range"]["actions"]) == {
+        "sell_ce", "sell_pe", "sell_move",
+    }
+
+
+def _setup_for_action(action: str) -> str:
+    return {
+        "buy_ce": "trend_bullish",
+        "sell_pe": "trend_bullish",
+        "buy_pe": "trend_bearish",
+        "sell_ce": "trend_bearish",
+        "buy_move": "volatility_expansion",
+        "sell_move": "calm_range",
+    }.get(action, "trend_bullish")
+
+
+def _post_cockpit_enter(action: str, setup: str | None = None):
     with dashboard.app.test_request_context(
-        "/api/cockpit/enter", method="POST", json={"action": action},
+        "/api/cockpit/enter", method="POST",
+        json={"action": action, "setup": setup or _setup_for_action(action)},
     ):
         return _response_tuple(dashboard.api_cockpit_enter())
 
 
-def _post_cockpit_preview(action: str):
+def _post_cockpit_preview(action: str, setup: str | None = None):
     with dashboard.app.test_request_context(
-        "/api/cockpit/preview", method="POST", json={"action": action},
+        "/api/cockpit/preview", method="POST",
+        json={"action": action, "setup": setup or _setup_for_action(action)},
     ):
         return _response_tuple(dashboard.api_cockpit_preview())
 
@@ -236,6 +281,8 @@ def test_cockpit_enter_refused_when_an_adopted_external_position_is_open(
         ("buy_ce", dashboard.TREND_SCORE_CE_ZONE, "long"),
         ("buy_pe", dashboard.TREND_SCORE_PE_ZONE, "long"),
         ("buy_move", dashboard.TREND_SCORE_LONG_MOVE_ZONE, "long"),
+        ("sell_ce", dashboard.TREND_SCORE_SHORT_CE_ZONE, "short"),
+        ("sell_pe", dashboard.TREND_SCORE_SHORT_PE_ZONE, "short"),
         ("sell_move", dashboard.TREND_SCORE_MOVE_ZONE, "short"),
     ),
 )
@@ -599,10 +646,11 @@ def test_prepare_buy_ce_selects_the_2_step_itm_call_zone(live_account, monkeypat
     selection = {
         "zone": dashboard.TREND_SCORE_CE_ZONE, "symbol": "C-BTC-1",
         "product_id": 1, "strike": 65_000, "expiry": "2026-08-06T12:00:00Z",
-        "executable_contract": {
-            "contract_value": "0.001", "ask_size": 5000,
-            "quote_timestamp": dashboard.datetime.now(dashboard.timezone.utc).isoformat(),
-        },
+            "executable_contract": {
+                "contract_value": "0.001", "ask": 250.0,
+                "ask_size": 5000,
+                "quote_timestamp": dashboard.datetime.now(dashboard.timezone.utc).isoformat(),
+            },
     }
     select = Mock(return_value=selection)
     monkeypatch.setattr(dashboard, "select_directional_option", select)
@@ -622,6 +670,50 @@ def test_prepare_buy_ce_selects_the_2_step_itm_call_zone(live_account, monkeypat
     # standard 90-minute floor -- the operator's own judgement substitutes.
     assert select.call_args.kwargs["today_only"] is True
     assert select.call_args.kwargs["min_time_to_expiry_seconds"] == 0
+
+
+@pytest.mark.parametrize(
+    ("action", "long_zone", "short_zone", "option_type"),
+    (
+        ("sell_ce", dashboard.TREND_SCORE_CE_ZONE,
+         dashboard.TREND_SCORE_SHORT_CE_ZONE, "CE"),
+        ("sell_pe", dashboard.TREND_SCORE_PE_ZONE,
+         dashboard.TREND_SCORE_SHORT_PE_ZONE, "PE"),
+    ),
+)
+def test_prepare_individual_option_sell_selects_atm_and_short_side(
+    live_account, monkeypatch, action, long_zone, short_zone, option_type,
+):
+    now = dashboard.datetime.now(dashboard.timezone.utc).isoformat()
+    selection = {
+        "zone": long_zone, "symbol": f"{option_type[0]}-BTC-65000-060826",
+        "product_id": 7, "strike": 65_000,
+        "option_type": option_type,
+        "expiry": "2026-08-06T12:00:00Z",
+        "entry_price": 205.0, "max_order_lots": 5000,
+        "executable_contract": {
+            "contract_value": "0.001", "bid": 200.0, "ask": 205.0,
+            "bid_size": 2500, "ask_size": 2500,
+            "quote_timestamp": now,
+        },
+    }
+    select = Mock(return_value=selection)
+    monkeypatch.setattr(dashboard, "select_directional_option", select)
+    monkeypatch.setattr(dashboard, "_fetch_live_vanilla_products", lambda: [])
+    monkeypatch.setattr(
+        dashboard, "_trend_score_auto_live_affordable_entry", lambda p: p,
+    )
+
+    prepared = dashboard._cockpit_prepare_manual_entry(action, _snapshot())
+
+    assert prepared["zone"] == short_zone
+    assert prepared["side"] == "short"
+    assert prepared["option_type"] == option_type
+    assert prepared["entry_price"] == 200.0
+    assert prepared["entry_depth"] == 2500
+    assert select.call_args.kwargs["zone"] == long_zone
+    assert select.call_args.kwargs["manual_itm_steps"] == 0
+    assert select.call_args.kwargs["today_only"] is True
 
 
 def test_prepare_sell_move_keeps_short_zone_and_checks_short_move_eligibility(
