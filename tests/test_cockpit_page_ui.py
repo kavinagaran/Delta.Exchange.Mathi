@@ -40,18 +40,20 @@ def test_cockpit_page_contains_every_supported_manual_strategy():
         "function cockpitConfirmEntry()",
         'id="cockpit-setup-lock-reset"',
         "function cockpitResetZoneLock()",
-        'id="cockpit-bot-toggle"',
-        "function cockpitToggleBot(checked)",
-        "const automaticMode = cockpitAccountLive ? 'live' : 'dry_run'",
-        "TREND_ENGINE_SCORE_AUTO_MODE: checked ? automaticMode : 'disabled'",
-        "BOT = automatic · COCKPIT = manual",
-        "cockpitBotMode === 'disabled'",
         "Wallet-affordable lots",
         "DRY RUN dashboard",
         "Open DRY RUN Trade",
         "Protected premium-selling strategies",
     ):
         assert required in source
+
+    for removed in (
+        'id="cockpit-bot-toggle"',
+        "function cockpitToggleBot(checked)",
+        "BOT = automatic · COCKPIT = manual",
+        "cockpitBotMode === 'disabled'",
+    ):
+        assert removed not in source
 
 
 def test_cockpit_requires_an_eligible_setup_before_enabling_a_trade():

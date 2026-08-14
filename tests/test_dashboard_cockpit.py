@@ -196,7 +196,9 @@ def test_cockpit_enter_rejects_an_unknown_action(live_account):
 def test_cockpit_enter_in_dry_run_opens_only_an_isolated_simulation(
     live_account, monkeypatch,
 ):
-    _write(live_account / "config.json", _live_config(DRY_RUN="true"))
+    _write(live_account / "config.json", _live_config(
+        DRY_RUN="true", TREND_ENGINE_SCORE_AUTO_MODE="dry_run",
+    ))
     now = dashboard.datetime.now(dashboard.timezone.utc)
     prepared = {
         "zone": dashboard.TREND_SCORE_CE_ZONE,
@@ -233,6 +235,7 @@ def test_cockpit_enter_in_dry_run_opens_only_an_isolated_simulation(
     assert body["dry_run"] is True
     assert body["destination"] == "dry_run_dashboard"
     assert body["order_submitted"] is False
+    assert body["bot_automation_mode"] == "dry_run"
     execute.assert_not_called()
     market.assert_called_once_with(dry_run=True)
     prepare.assert_called_once_with("buy_ce", snapshot, dry_run=True)
@@ -255,24 +258,68 @@ def test_cockpit_enter_in_dry_run_opens_only_an_isolated_simulation(
     assert dashboard_rows[0]["symbol"] == state["symbol"]
 
 
-def test_cockpit_enter_requires_bot_off(live_account):
+def test_cockpit_enter_does_not_require_or_change_bot_mode(
+    live_account, monkeypatch,
+):
     config = _live_config(TREND_ENGINE_SCORE_AUTO_MODE="live")
     _write(live_account / "config.json", config)
+    monkeypatch.setattr(
+        dashboard, "_cockpit_market_snapshot",
+        lambda: {"market": {"spot": 65_000}},
+    )
+    monkeypatch.setattr(
+        dashboard, "_cockpit_prepare_manual_entry",
+        lambda action, snapshot: {
+            "zone": dashboard.TREND_SCORE_CE_ZONE,
+            "side": "long",
+            "symbol": "C-BTC-1",
+            "product_id": 1,
+            "lots": 1_000,
+        },
+    )
+    monkeypatch.setattr(
+        dashboard, "_trend_score_auto_live_execute",
+        Mock(return_value=_mock_execution_result(symbol="C-BTC-1")),
+    )
 
     response, status = _post_cockpit_enter("buy_ce")
 
-    assert status == 409
-    assert "COCKPIT mode" in response.get_json()["error"]
+    assert status == 200
+    assert response.get_json()["bot_automation_mode"] == "live"
+    saved = json.loads(
+        (live_account / "config.json").read_text(encoding="utf-8")
+    )
+    assert saved["TREND_ENGINE_SCORE_AUTO_MODE"] == "live"
 
 
-def test_cockpit_preview_requires_bot_off(live_account):
+def test_cockpit_preview_does_not_require_bot_off(live_account, monkeypatch):
     config = _live_config(TREND_ENGINE_SCORE_AUTO_MODE="live")
     _write(live_account / "config.json", config)
+    monkeypatch.setattr(
+        dashboard, "_cockpit_market_snapshot",
+        lambda: {"market": {"spot": 65_000}},
+    )
+    monkeypatch.setattr(
+        dashboard, "_cockpit_prepare_manual_entry",
+        lambda action, snapshot: {
+            "zone": dashboard.TREND_SCORE_CE_ZONE,
+            "side": "long",
+            "option_type": "CE",
+            "instrument_kind": "BTC_OPTION",
+            "symbol": "C-BTC-1",
+            "strike": 65_000,
+            "product_id": 1,
+            "lots": 1_000,
+            "entry_price": 200,
+            "contract_value": 0.001,
+        },
+    )
 
     response, status = _post_cockpit_preview("buy_ce")
 
-    assert status == 409
-    assert "COCKPIT mode" in response.get_json()["error"]
+    assert status == 200
+    assert response.get_json()["ok"] is True
+    assert dashboard._trend_score_auto_mode() == "live"
 
 
 # ---------------------------------------------------------------------------
@@ -359,6 +406,9 @@ def test_cockpit_enter_refused_when_an_adopted_external_position_is_open(
 def test_cockpit_enter_tags_manual_ownership_for_every_trade_type(
     live_account, monkeypatch, action, zone, side,
 ):
+    _write(live_account / "config.json", _live_config(
+        TREND_ENGINE_SCORE_AUTO_MODE="live",
+    ))
     prepared = {
         "zone": zone, "side": side, "symbol": "X", "product_id": 1,
         "lots": 1_000,
@@ -387,8 +437,8 @@ def test_cockpit_enter_tags_manual_ownership_for_every_trade_type(
     saved = json.loads(
         (live_account / "config.json").read_text(encoding="utf-8")
     )
-    assert saved["TREND_ENGINE_SCORE_AUTO_MODE"] == "disabled"
-    assert response.get_json()["bot_automation_mode"] == "disabled"
+    assert saved["TREND_ENGINE_SCORE_AUTO_MODE"] == "live"
+    assert response.get_json()["bot_automation_mode"] == "live"
     dashboard._trend_score_auto_notify.assert_called_once()
 
 
@@ -424,9 +474,12 @@ def test_cockpit_enter_records_setup_lock_without_consuming_engine_signal(
     )
 
 
-def test_cockpit_bot_stays_off_until_manually_reenabled_after_close(
+def test_cockpit_entry_preserves_bot_setting_after_open_and_close(
     live_account, monkeypatch,
 ):
+    _write(live_account / "config.json", _live_config(
+        TREND_ENGINE_SCORE_AUTO_MODE="live",
+    ))
     monkeypatch.setattr(
         dashboard, "_cockpit_market_snapshot",
         lambda: {"market": {"spot": 65_000}},
@@ -450,26 +503,11 @@ def test_cockpit_bot_stays_off_until_manually_reenabled_after_close(
     response, status = _post_cockpit_enter("buy_pe")
 
     assert status == 200
-    assert response.get_json()["bot_automation_mode"] == "disabled"
-    assert dashboard._trend_score_auto_mode() == "disabled"
+    assert response.get_json()["bot_automation_mode"] == "live"
+    assert dashboard._trend_score_auto_mode() == "live"
 
-    # Closing the manually owned trade must not silently turn automation on.
+    # Closing the manually owned trade must not mutate automation either.
     _write(live_account / "trend_state.json", {"status": "CLOSED"})
-    assert dashboard._trend_score_auto_mode() == "disabled"
-
-    # The only re-enable path is a later explicit operator action.
-    with dashboard.app.test_request_context(
-        "/api/config",
-        method="POST",
-        json={"TREND_ENGINE_SCORE_AUTO_MODE": "live"},
-    ):
-        enabled = dashboard.set_config()
-    enabled_body, enabled_status = (
-        enabled if isinstance(enabled, tuple)
-        else (enabled, enabled.status_code)
-    )
-    assert enabled_status == 200
-    assert enabled_body.get_json()["ok"] is True
     assert dashboard._trend_score_auto_mode() == "live"
 
 

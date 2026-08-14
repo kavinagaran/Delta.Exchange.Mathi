@@ -194,6 +194,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('LIVE COCKPIT'), findsOneWidget);
+      expect(find.text('Order mode'), findsNothing);
       expect(find.text('Bullish trend score'), findsOneWidget);
       expect(find.text('ELIGIBLE'), findsOneWidget);
 
@@ -227,7 +228,7 @@ void main() {
     },
   );
 
-  testWidgets('Cockpit opens DRY RUN simulations in manual mode', (
+  testWidgets('Cockpit opens DRY RUN simulations while the bot remains on', (
     WidgetTester tester,
   ) async {
     tester.view.physicalSize = const Size(390, 1200);
@@ -247,6 +248,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('DRY RUN COCKPIT'), findsOneWidget);
+    expect(find.text('Order mode'), findsNothing);
     expect(find.text('DRY RUN READY'), findsOneWidget);
     expect(find.text('Orders go to the DRY RUN dashboard'), findsOneWidget);
     await tester.tap(find.text('Bullish trend score'));
@@ -510,7 +512,7 @@ class _CockpitApi extends DashboardApi {
   @override
   Future<ApiResult<Map<String, dynamic>>> scoreAutoStatus() async =>
       ApiResult.ok(<String, dynamic>{
-        'mode': 'disabled',
+        'mode': dryRun ? 'dry_run' : 'live',
         'account_live': !dryRun,
         'account_trading_mode': dryRun ? 'DRY RUN' : 'LIVE',
         'position_status': 'NONE',

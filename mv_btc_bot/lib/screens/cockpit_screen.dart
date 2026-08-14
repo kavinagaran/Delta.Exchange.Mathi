@@ -173,7 +173,6 @@ class _CockpitScreenState extends State<CockpitScreen> {
   bool _loading = true;
   bool _busy = false;
   bool _resettingLock = false;
-  bool _togglingBot = false;
   Timer? _poll;
 
   @override
@@ -259,7 +258,6 @@ class _CockpitScreenState extends State<CockpitScreen> {
     });
   }
 
-  String get _mode => '${_controller?['mode'] ?? ''}'.toLowerCase();
   String get _accountTradingMode {
     final value = '${_controller?['account_trading_mode'] ?? ''}'.toUpperCase();
     if (value.isNotEmpty) return value;
@@ -270,10 +268,8 @@ class _CockpitScreenState extends State<CockpitScreen> {
       _controller?['account_live'] == true || _accountTradingMode == 'LIVE';
   bool get _accountDryRun => _accountTradingMode == 'DRY RUN';
   bool get _accountModeReady => _accountLive || _accountDryRun;
-  String get _automaticMode => _accountLive ? 'live' : 'dry_run';
-  bool get _cockpitMode => _mode == 'disabled';
   bool get _canTrade =>
-      _accountModeReady && _cockpitMode && !_hasOpenPosition && !_busy;
+      _accountModeReady && !_hasOpenPosition && !_busy;
 
   Map<String, dynamic>? get _lock {
     final value = _controller?['setup_lock'];
@@ -344,7 +340,7 @@ class _CockpitScreenState extends State<CockpitScreen> {
     final message = ok
         ? '${_strategy(action).title} ${dryRun ? 'simulation opened' : 'filled'} · '
               '${state?['symbol'] ?? ''} · ${state?['lots'] ?? '—'} lots. '
-              '${dryRun ? 'View it in DRY RUN.' : 'Order mode: COCKPIT.'}'
+              '${dryRun ? 'View it in DRY RUN.' : ''}'
         : (result.error ?? 'Cockpit order failed');
     setState(() {
       _busy = false;
@@ -464,25 +460,6 @@ class _CockpitScreenState extends State<CockpitScreen> {
     await _refresh(quiet: true);
   }
 
-  Future<void> _toggleBot(bool enabled) async {
-    if (_hasOpenPosition || _togglingBot) return;
-    setState(() => _togglingBot = true);
-    final result = await widget.api.saveConfig({
-      'TREND_ENGINE_SCORE_AUTO_MODE': enabled ? _automaticMode : 'disabled',
-    });
-    if (!mounted) return;
-    setState(() => _togglingBot = false);
-    _notify(
-      result.ok
-          ? enabled
-                ? 'BOT mode selected · automatic trading enabled'
-                : 'COCKPIT mode selected · manual orders enabled'
-          : result.error ?? 'Could not change order mode',
-      ok: result.ok,
-    );
-    await _refresh(quiet: true);
-  }
-
   void _notify(String message, {required bool ok}) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
@@ -517,9 +494,6 @@ class _CockpitScreenState extends State<CockpitScreen> {
             modeLabel: '${_accountDryRun ? 'DRY RUN' : 'LIVE'} COCKPIT',
             message: !_accountModeReady
                 ? 'Cockpit locked · account execution mode is unavailable.'
-                : !_cockpitMode
-                ? 'BOT mode is active · orders are automatic. Select '
-                      'COCKPIT for manual orders.'
                 : _hasOpenPosition
                 ? 'Cockpit locked · an active position is already open.'
                 : _status ??
@@ -572,22 +546,6 @@ class _CockpitScreenState extends State<CockpitScreen> {
                     ? 'One active Trend position'
                     : 'Trend slot available',
                 tone: _hasOpenPosition ? kWarning : kPositive,
-              ),
-            ),
-            SizedBox(
-              width: width,
-              child: _StateTile(
-                label: 'Order mode',
-                value: _mode == _automaticMode ? 'BOT' : 'COCKPIT',
-                detail: 'BOT = automatic · COCKPIT = manual',
-                tone: _cockpitMode ? kPositive : kWarning,
-                trailing: Switch.adaptive(
-                  value: _mode == _automaticMode,
-                  onChanged:
-                      (_hasOpenPosition || _togglingBot || !_accountModeReady)
-                      ? null
-                      : _toggleBot,
-                ),
               ),
             ),
             SizedBox(

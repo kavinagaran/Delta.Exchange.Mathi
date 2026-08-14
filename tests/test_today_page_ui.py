@@ -106,7 +106,6 @@ def test_today_page_uses_compact_responsive_terminal_layout():
         ".today-layout",
         ".today-right-col",
         ".today-current-trade-body",
-        ".lever-switch",
         ".overview-page .today-summary .performance-stat",
         ".overview-page .today-summary .today-stat-icon",
         ".overview-page .today-summary .today-stat-icon svg",

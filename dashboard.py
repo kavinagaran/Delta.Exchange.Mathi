@@ -9605,15 +9605,6 @@ def _cockpit_manual_signal(action: str, snapshot: dict) -> dict:
     }
 
 
-def _cockpit_require_manual_mode() -> None:
-    """Require COCKPIT mode while score automation is disabled."""
-    if _trend_score_auto_mode() != "disabled":
-        raise RuntimeError(
-            "Select COCKPIT mode before placing a manual order; BOT mode "
-            "trades automatically"
-        )
-
-
 def _cockpit_margin_retry_entry(
     prepared: dict,
     result: dict,
@@ -9665,45 +9656,6 @@ def _cockpit_margin_retry_entry(
     return resized
 
 
-def _cockpit_disable_score_automation_after_open(
-    *,
-    root_dir: Path,
-    owner: str,
-) -> str:
-    """Persist Bot OFF after a confirmed Cockpit fill.
-
-    This is intentionally not routed through ``/api/config``: that public
-    endpoint correctly refuses mode changes while a position is open, while
-    the Cockpit entry itself must atomically finish by turning automation off.
-    The account-entry lock is already held by the caller; the config-file lock
-    also serializes this mutation against ordinary non-mode Bot Config saves.
-    Protection remains attached to the open position and is not restarted.
-    """
-    with account_file_lock(
-        root_dir,
-        "config",
-        owner,
-        stale_after_sec=30,
-        wait_sec=5,
-    ) as config_acquired:
-        if not config_acquired:
-            raise RuntimeError(
-                "Cockpit position opened but Bot OFF could not be persisted"
-            )
-        saved, _ = _saved_user_cfg()
-        previous = str(
-            saved.get("TREND_ENGINE_SCORE_AUTO_MODE") or "disabled"
-        ).strip().lower()
-        saved["TREND_ENGINE_SCORE_AUTO_MODE"] = "disabled"
-        saved.update({
-            key: str(value)
-            for key, value in SCORE_ZONE_LEGACY_DISABLED_SETTINGS.items()
-        })
-        _atomic_write_json(_cfg_file(), saved)
-    _trend_cache.pop(_active_user(), None)
-    return previous
-
-
 def _cockpit_enter_dry_run(
     *,
     user: str,
@@ -9742,7 +9694,6 @@ def _cockpit_enter_dry_run(
                     "ok": False,
                     "error": "Trading mode changed; reload and retry",
                 }), 409
-            _cockpit_require_manual_mode()
             _cockpit_require_eligible_setup(setup_id, action)
             snapshot = _cockpit_market_snapshot(dry_run=True)
             prepared = _cockpit_prepare_manual_entry(
@@ -9792,7 +9743,6 @@ def _cockpit_enter_dry_run(
                         "ok": False,
                         "error": "Trading mode changed before the simulation opened",
                     }), 409
-                _cockpit_require_manual_mode()
                 if not _recover_closed_dry_trade_outbox(owner=owner):
                     raise RuntimeError(
                         "A closed DRY RUN trade is awaiting durable history; "
@@ -9893,7 +9843,7 @@ def _cockpit_enter_dry_run(
             "destination": "dry_run_dashboard",
             "order_submitted": False,
             "state": opened,
-            "bot_automation_mode": "disabled",
+            "bot_automation_mode": _trend_score_auto_mode(),
         })
     except ValueError as exc:
         return jsonify({"ok": False, "error": str(exc)[:300]}), 400
@@ -14702,10 +14652,6 @@ def api_cockpit_enter():
         }), 400
 
     initial_mode = _trading_mode_payload()
-    try:
-        _cockpit_require_manual_mode()
-    except RuntimeError as exc:
-        return jsonify({"ok": False, "error": str(exc)}), 409
     if initial_mode.get("dry_run_mode"):
         return _cockpit_enter_dry_run(
             user=user,
@@ -14741,11 +14687,6 @@ def api_cockpit_enter():
                     "ok": False,
                     "error": "Trading mode changed; reload and retry",
                 }), 409
-            try:
-                _cockpit_require_manual_mode()
-            except RuntimeError as exc:
-                return jsonify({"ok": False, "error": str(exc)}), 409
-
             with account_file_lock(
                 root_dir, "close-trend", owner,
                 stale_after_sec=120, wait_sec=2,
@@ -14853,12 +14794,6 @@ def api_cockpit_enter():
                     action=f"COCKPIT_{action.upper()}",
                 )
                 _trend_score_auto_write_ledger(data_dir, ledger)
-                automation_mode_before = (
-                    _cockpit_disable_score_automation_after_open(
-                        root_dir=root_dir,
-                        owner=owner,
-                    )
-                )
     except Exception as exc:
         return jsonify({"ok": False, "error": str(exc)[:300]}), 400
 
@@ -14869,8 +14804,8 @@ def api_cockpit_enter():
         "status": result.get("status"),
         "order_submitted": bool(result.get("order_submitted")),
         "filled_lots": result.get("filled_lots"),
-        "bot_automation_disabled": ok,
-        "automation_mode_before": automation_mode_before if ok else None,
+        "bot_automation_changed": False,
+        "bot_automation_mode": _trend_score_auto_mode() if ok else None,
         "exchange_api_called": True,
         "margin_retry": result.get("margin_retry"),
     })
@@ -14885,7 +14820,7 @@ def api_cockpit_enter():
         if isinstance(lots, int):
             lines.append(f"Lots » <code>{lots:,}</code>")
         lines.append(
-            "Order mode » <b>COCKPIT — select BOT to resume automation</b>"
+            "Bot automation » <b>setting unchanged</b>"
         )
         _trend_score_auto_notify("\n".join(lines))
     return jsonify({
@@ -14894,7 +14829,7 @@ def api_cockpit_enter():
         "error": result.get("error"),
         "state": result.get("state"),
         "margin_retry": result.get("margin_retry"),
-        "bot_automation_mode": "disabled" if ok else None,
+        "bot_automation_mode": _trend_score_auto_mode() if ok else None,
     }), (200 if ok else 409)
 
 
@@ -14923,10 +14858,6 @@ def api_cockpit_preview():
         }), 400
     mode = _trading_mode_payload()
     dry_run = bool(mode.get("dry_run_mode"))
-    try:
-        _cockpit_require_manual_mode()
-    except RuntimeError as exc:
-        return jsonify({"ok": False, "error": str(exc)}), 409
     key, secret = _active_creds()
     if not dry_run and (not key or not secret):
         return jsonify({
