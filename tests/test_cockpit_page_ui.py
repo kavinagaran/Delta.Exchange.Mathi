@@ -45,6 +45,7 @@ def test_cockpit_page_contains_every_supported_manual_strategy():
         "TREND_ENGINE_SCORE_AUTO_MODE: checked ? 'live' : 'disabled'",
         "Manual fills leave automation OFF",
         "Wallet-affordable lots",
+        "Protected premium-selling strategies",
     ):
         assert required in source
 
