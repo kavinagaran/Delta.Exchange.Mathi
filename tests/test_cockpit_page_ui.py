@@ -27,6 +27,8 @@ def test_cockpit_page_contains_every_supported_manual_strategy():
         'data-action="sell_ce"',
         'data-action="sell_pe"',
         'data-action="sell_move"',
+        'class="cockpit-option-choice is-wide" data-action="buy_move"',
+        'class="cockpit-option-choice is-wide" data-action="sell_move"',
         "buy_ce: 'Buy 2-Step ITM Call'",
         "buy_pe: 'Buy 2-Step ITM Put'",
         "buy_move: 'Buy ATM MOVE'",
