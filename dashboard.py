@@ -2874,9 +2874,14 @@ def api_status():
             "https://api.india.delta.exchange/v2/tickers/BTCUSD",
             timeout=5,
         )
-        state["btc_futures_price"] = float(r_btc.json().get("result", {}).get("mark_price") or 0)
+        btc_ticker = r_btc.json().get("result", {})
+        state["btc_futures_price"] = float(btc_ticker.get("mark_price") or 0)
+        btc_change = btc_ticker.get("mark_change_24h")
+        state["btc_futures_change_pct"] = (
+            float(btc_change) if btc_change not in (None, "") else None)
     except Exception:
         state["btc_futures_price"] = None
+        state["btc_futures_change_pct"] = None
     # IST schedule strings for the UI, from the active account's own config
     cfg = _user_cfg()
     def _ist_str(h_key, m_key, dflt_h, dflt_m):

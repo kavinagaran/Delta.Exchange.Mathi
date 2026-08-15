@@ -5,14 +5,16 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{ page_title }} · BTC BOT</title>
 <script>
-  /* Apply a saved choice before the stylesheet loads, avoiding a light-theme flash. */
+  /* Apply a saved choice before the stylesheet loads, avoiding a theme flash. */
   try {
-    const appTheme = new URLSearchParams(window.location.search).get('theme');
-    if (appTheme === 'dark' || (!appTheme && localStorage.getItem('nithi-theme') === 'dark')) {
-      document.documentElement.dataset.theme = 'dark';
-    } else if (appTheme === 'light') {
-      delete document.documentElement.dataset.theme;
-    }
+    const choices = ['red', 'blue', 'green', 'violet', 'amber'];
+    const requested = new URLSearchParams(window.location.search).get('theme') ||
+      localStorage.getItem('nithi-theme') || 'blue';
+    const palette = requested === 'dark' ? 'blue' : (requested === 'light' ? 'red' : requested);
+    const selected = choices.includes(palette) ? palette : 'blue';
+    document.documentElement.dataset.palette = selected;
+    if (selected === 'red') delete document.documentElement.dataset.theme;
+    else document.documentElement.dataset.theme = 'dark';
   } catch (_) {}
 </script>
 <link rel="icon" type="image/png" href="/static/img/favicon.png?v={{ asset_v('img/favicon.png') }}">
@@ -83,12 +85,13 @@
   <div class="main">
     <header class="topbar">
       <h1>{{ page_title }}</h1>
-      <button class="theme-toggle" id="theme-toggle" type="button"
-              aria-label="Switch to Blue theme" aria-pressed="false" title="Switch to Blue theme">
-        <span class="theme-icon theme-red" aria-hidden="true">Red</span>
-        <span class="theme-knob" aria-hidden="true"></span>
-        <span class="theme-icon theme-blue" aria-hidden="true">Blue</span>
-      </button>
+      <div class="theme-picker" id="theme-picker" role="radiogroup" aria-label="Colour theme">
+        {% for name in ('red', 'blue', 'green', 'violet', 'amber') %}
+        <button class="theme-swatch is-{{ name }}" type="button" role="radio"
+                data-theme-choice="{{ name }}" aria-checked="false"
+                aria-label="Use {{ name|capitalize }} theme" title="{{ name|capitalize }} theme"></button>
+        {% endfor %}
+      </div>
       <span class="trading-mode-pill loading" id="tb-mode" role="status"
             aria-live="polite" aria-label="Trading mode is loading">
         <span class="dot" aria-hidden="true"></span>

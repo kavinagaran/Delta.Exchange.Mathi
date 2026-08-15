@@ -18,15 +18,23 @@ async function jpost(url, body) {
 
 /* ── Persistent site theme ──────────────────────────────── */
 const THEME_STORAGE_KEY = 'nithi-theme';
+const THEME_CHOICES = ['red', 'blue', 'green', 'violet', 'amber'];
+
+function normalizeTheme(theme) {
+  const candidate = theme === 'dark' ? 'blue' : (theme === 'light' ? 'red' : theme);
+  return THEME_CHOICES.includes(candidate) ? candidate : 'blue';
+}
 
 function currentTheme() {
-  return document.documentElement?.dataset?.theme === 'dark' ? 'dark' : 'light';
+  return normalizeTheme(document.documentElement?.dataset?.palette ||
+    (document.documentElement?.dataset?.theme === 'dark' ? 'blue' : 'red'));
 }
 
 function applyTheme(theme, persist = true) {
-  const next = theme === 'dark' ? 'dark' : 'light';
-  if (next === 'dark') document.documentElement.dataset.theme = 'dark';
-  else delete document.documentElement.dataset.theme;
+  const next = normalizeTheme(theme);
+  document.documentElement.dataset.palette = next;
+  if (next === 'red') delete document.documentElement.dataset.theme;
+  else document.documentElement.dataset.theme = 'dark';
   if (persist) {
     try { localStorage.setItem(THEME_STORAGE_KEY, next); } catch (_) { /* storage unavailable */ }
   }
@@ -34,18 +42,22 @@ function applyTheme(theme, persist = true) {
   return next;
 }
 
-function initThemeToggle() {
-  const toggle = document.getElementById('theme-toggle');
-  if (!toggle) return;
+function initThemePicker() {
+  const picker = document.getElementById('theme-picker');
+  if (!picker) return;
   const sync = () => {
-    const dark = currentTheme() === 'dark';
-    toggle.setAttribute('aria-pressed', String(dark));
-    toggle.setAttribute('aria-label', `Switch to ${dark ? 'Red' : 'Blue'} theme`);
-    toggle.title = `Switch to ${dark ? 'Red' : 'Blue'} theme`;
+    const active = currentTheme();
+    picker.querySelectorAll('[data-theme-choice]').forEach(swatch => {
+      const selected = swatch.dataset.themeChoice === active;
+      swatch.setAttribute('aria-checked', String(selected));
+      swatch.classList.toggle('is-selected', selected);
+    });
   };
   sync();
-  toggle.addEventListener('click', () => {
-    applyTheme(currentTheme() === 'dark' ? 'light' : 'dark');
+  picker.addEventListener('click', event => {
+    const swatch = event.target.closest?.('[data-theme-choice]');
+    if (!swatch) return;
+    applyTheme(swatch.dataset.themeChoice);
     sync();
   });
 }
@@ -93,7 +105,7 @@ function initDynamicSurfaces() {
   }
 
   document.addEventListener('pointerdown', event => {
-    const target = event.target.closest?.('.btn, .nav a, .theme-toggle');
+    const target = event.target.closest?.('.btn, .nav a, .theme-swatch');
     if (!target || target.matches(':disabled')) return;
     const rect = target.getBoundingClientRect();
     const ripple = document.createElement('span');
@@ -189,6 +201,21 @@ function _closedAtMs(trade) {
   return Number.isFinite(parsed) ? parsed : Number.NEGATIVE_INFINITY;
 }
 
+function setBtcMarketPill(el, rawPrice, rawChange) {
+  if (!el) return;
+  const price = Number(rawPrice);
+  const change = Number(rawChange);
+  const validPrice = rawPrice !== null && rawPrice !== undefined && rawPrice !== '' &&
+    Number.isFinite(price) && price > 0;
+  const validChange = rawChange !== null && rawChange !== undefined && rawChange !== '' &&
+    Number.isFinite(change);
+  const direction = validChange ? (change > 0 ? 'up' : (change < 0 ? 'down' : 'flat')) : 'flat';
+  const changeLabel = validChange ? `${change >= 0 ? '+' : ''}${fN(change, 2)}%` : '—';
+  el.className = `chip btc-market ${direction}`;
+  el.setAttribute('aria-label', `Bitcoin ${validPrice ? `$${fN(price)}` : 'price unavailable'}, 24-hour change ${changeLabel}`);
+  el.innerHTML = `BTC <b>$${fN(validPrice ? price : null)}</b><small>${changeLabel}</small>`;
+}
+
 function statusFromSlots(st) {
   const slots = [st.morning || {}, { ...st, morning: undefined, trend: undefined }, st.trend || {}];
   const realOpen = slots.filter(s => s && s.status === 'OPEN' && !s.dry_run);
@@ -210,12 +237,11 @@ async function refreshTopbar() {
   try {
     const st = await jget('/api/status');
     setTradingModeIndicator(st.trading_mode, st.dry_run_mode);
-    const btc = document.getElementById('tb-btc');
-    if (btc) {
-      const price = +st.btc_futures_price;
-      const valid = Number.isFinite(price) && price > 0;
-      btc.innerHTML = `BTC <b>$${fN(valid ? price : null)}</b>`;
-    }
+    setBtcMarketPill(
+      document.getElementById('tb-btc'),
+      st.btc_futures_price,
+      st.btc_futures_change_pct,
+    );
     const pill = document.getElementById('tb-pill');
     if (pill) {
       const s = statusFromSlots(st);
@@ -246,7 +272,7 @@ function tickClock() {
 
 document.addEventListener('DOMContentLoaded', () => {
   initDynamicSurfaces();
-  initThemeToggle();
+  initThemePicker();
   tickClock();
   setInterval(tickClock, 10_000);
   refreshTopbar();

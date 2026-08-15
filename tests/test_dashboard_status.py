@@ -198,7 +198,7 @@ def test_status_marks_only_old_closed_cards_hidden_and_keeps_latest_trade(
     class TickerResponse:
         @staticmethod
         def json():
-            return {"result": {"mark_price": "64637"}}
+            return {"result": {"mark_price": "64637", "mark_change_24h": "-0.4640"}}
 
     monkeypatch.setattr(
         dashboard.req, "get", lambda *args, **kwargs: TickerResponse())
@@ -210,6 +210,8 @@ def test_status_marks_only_old_closed_cards_hidden_and_keeps_latest_trade(
     assert payload["morning"]["dashboard_visible"] is True
     assert payload["trend"]["dashboard_visible"] is True
     assert payload["latest_closed_trade"]["symbol"] == "TODAY-MORNING"
+    assert payload["btc_futures_price"] == 64637.0
+    assert payload["btc_futures_change_pct"] == -0.464
     assert json.loads(
         (isolated_status_account / "straddle_state.json").read_text(
             encoding="utf-8")) == old_evening

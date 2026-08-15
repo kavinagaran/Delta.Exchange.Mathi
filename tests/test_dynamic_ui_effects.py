@@ -26,7 +26,7 @@ def test_controls_have_pressed_feedback_and_delegated_ripple():
 
     assert ".btn:active:not(:disabled)" in styles
     assert "@keyframes surface-ripple" in styles
-    assert "event.target.closest?.('.btn, .nav a, .theme-toggle')" in script
+    assert "event.target.closest?.('.btn, .nav a, .theme-swatch')" in script
     assert "ripple.addEventListener('animationend'" in script
 
 
@@ -38,4 +38,3 @@ def test_motion_layer_respects_reduced_motion_and_coarse_pointers():
     assert "@media (max-width: 760px), (hover: none), (pointer: coarse)" in styles
     assert "(prefers-reduced-motion: reduce)" in script
     assert "(hover: hover) and (pointer: fine)" in script
-

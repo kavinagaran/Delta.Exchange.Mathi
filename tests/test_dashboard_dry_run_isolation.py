@@ -840,15 +840,17 @@ def test_saving_dry_protection_updates_open_snapshot_and_makes_check_due(
     assert saved["dry_protection_last_error"] == ""
 
 
-def test_topbar_contains_server_driven_trading_mode_next_to_theme():
+def test_topbar_contains_server_driven_trading_mode_next_to_palette_picker():
     root = Path(dashboard.__file__).resolve().parent
     template = (root / "templates" / "base.html").read_text(encoding="utf-8")
     script = (root / "static" / "js" / "app.js").read_text(encoding="utf-8")
 
-    theme_index = template.index('id="theme-toggle"')
+    theme_index = template.index('id="theme-picker"')
     mode_index = template.index('id="tb-mode"')
     spacer_index = template.index('class="topbar-spacer"')
     assert theme_index < mode_index < spacer_index
+    assert template.count('data-theme-choice="{{ name }}"') == 1
+    assert "('red', 'blue', 'green', 'violet', 'amber')" in template
     assert "Trading Mode" in template
     assert "setTradingModeIndicator(st.trading_mode, st.dry_run_mode)" in script
 
