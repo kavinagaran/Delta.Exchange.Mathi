@@ -162,6 +162,17 @@ TREND_SCORE_MANUAL_TRIGGERS = {
     "sell_pe": "manual_cockpit_sell_pe",
     "sell_move": "manual_cockpit_sell_move",
 }
+# "Lemme Risk": the operator's explicit manual override setup. Unlike every
+# other Cockpit setup it is gated by no engine evidence at all -- it is
+# always eligible, and every Cockpit trade type is selectable under it. It
+# is a *selection* bypass only: the entry it authorizes still runs through
+# the identical execution seam as any other Cockpit trade (contract
+# selection, fresh-quote check, wallet-affordable sizing, IOC submission,
+# and the standard TP/SL/TSL protection spawn), and it does not relax the
+# structural safety rails -- one open Trend position at a time, today's
+# expiry only, and the strategy-wide SHORT MOVE weekday blackout all still
+# apply.
+COCKPIT_OVERRIDE_SETUP = "lemme_risk"
 COCKPIT_SETUP_ACTIONS = {
     "trend_bullish": {"buy_ce", "sell_pe"},
     "trend_bearish": {"buy_pe", "sell_ce"},
@@ -179,6 +190,9 @@ COCKPIT_SETUP_ACTIONS = {
     "orderflow_sell": {"buy_pe", "sell_ce"},
     "calm_range": {"sell_ce", "sell_pe", "sell_move"},
     "volatility_expansion": {"buy_move"},
+    COCKPIT_OVERRIDE_SETUP: {
+        "buy_ce", "buy_pe", "buy_move", "sell_ce", "sell_pe", "sell_move",
+    },
 }
 TREND_SCORE_AUTO_LEDGER_SIGNAL_LIMIT = 576
 # A zero-fill IOC is a transient liquidity outcome, not a completed trading
@@ -9317,6 +9331,12 @@ def _cockpit_setup_eligibility(snapshot: dict) -> dict[str, dict]:
     The browser renders the same evidence, but every preview and entry calls
     this function again so a stale green radio button can never authorize an
     action after its setup has ceased to be eligible.
+
+    ``COCKPIT_OVERRIDE_SETUP`` ("Lemme Risk") is the single deliberate
+    exception: it is reported eligible unconditionally, including when
+    ``data_quality`` is degraded, because it exists precisely to let the
+    operator trade against -- or without -- engine evidence. Everything
+    downstream of the selection is unchanged.
     """
     components = {}
     for item in snapshot.get("components") or []:
@@ -9397,29 +9417,46 @@ def _cockpit_setup_eligibility(snapshot: dict) -> dict[str, dict]:
             adx is not None and adx > 25
             and breakout is not None and abs(breakout) >= 20
         ),
+        # Deliberately unconditional -- see COCKPIT_OVERRIDE_SETUP.
+        COCKPIT_OVERRIDE_SETUP: True,
     }
     quality_ok = snapshot.get("data_quality") == "OK"
     result = {}
     for setup_id, actions in COCKPIT_SETUP_ACTIONS.items():
+        override = setup_id == COCKPIT_OVERRIDE_SETUP
         detail = None
-        if setup_id.startswith("orderflow_") and flow is None:
+        if override:
+            detail = "Operator override · no engine confirmation required"
+        elif setup_id.startswith("orderflow_") and flow is None:
             detail = "Order-flow feed unavailable"
         elif setup_id.startswith("supertrend_") and not checks[setup_id]:
             detail = "No fresh flip confirmation"
         result[setup_id] = {
-            "eligible": bool(quality_ok and checks[setup_id]),
+            "eligible": bool(override or (quality_ok and checks[setup_id])),
             "actions": sorted(actions),
             "detail": detail,
+            "override": override,
         }
     return result
 
 
 def _cockpit_require_eligible_setup(setup_id: str, action: str) -> dict:
+    """Re-authorize a setup/action pair server-side at preview and entry.
+
+    The returned snapshot is informational -- every caller re-collects its
+    own execution snapshot -- so the ``COCKPIT_OVERRIDE_SETUP`` short-circuit
+    below is a pure authorization decision. It is taken before the engine
+    snapshot is fetched on purpose: "Lemme Risk" must stay usable when the
+    Trend Engine is unreachable or degraded, which is one of the states an
+    operator is most likely to want it in.
+    """
     setup = str(setup_id or "").strip().lower()
     if setup not in COCKPIT_SETUP_ACTIONS:
         raise ValueError("Select a valid Cockpit market setup")
     if action not in COCKPIT_SETUP_ACTIONS[setup]:
         raise ValueError("The selected option does not match this market setup")
+    if setup == COCKPIT_OVERRIDE_SETUP:
+        return {}
     snapshot = trend_engine_client.get_snapshot("BTCUSD")
     state = _cockpit_setup_eligibility(snapshot).get(setup) or {}
     if state.get("eligible") is not True:

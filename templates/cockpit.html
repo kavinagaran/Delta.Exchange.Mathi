@@ -143,9 +143,14 @@ const COCKPIT_SETUP_GROUPS = [
     { id: 'orderflow_buy', label: 'Order-flow buy pressure', source: 'Live order-flow component', actions: ['buy_ce', 'sell_pe'] },
     { id: 'orderflow_sell', label: 'Order-flow sell pressure', source: 'Live order-flow component', actions: ['buy_pe', 'sell_ce'] },
   ]},
-  { title: 'Volatility', setups: [
+  { title: 'Volatility', wide: true, setups: [
     { id: 'calm_range', label: 'Calm / range market', source: '|score| ≤ 30 · ADX ≤ 20', actions: ['sell_ce', 'sell_pe', 'sell_move'] },
     { id: 'volatility_expansion', label: 'Volatility expansion', source: 'ADX > 25 · breakout active', actions: ['buy_move'] },
+  ]},
+  { title: 'Operator override', wide: true, single: true, setups: [
+    { id: 'lemme_risk', label: 'Lemme Risk', override: true,
+      source: 'No engine confirmation · every strategy selectable · TP / SL / TSL as usual',
+      actions: ['buy_ce', 'buy_pe', 'buy_move', 'sell_ce', 'sell_pe', 'sell_move'] },
   ]},
 ];
 const COCKPIT_BUTTON_IDS = ['cockpit-preview-order'];
@@ -192,13 +197,15 @@ function cockpitDeriveSetups(snapshot) {
     orderflow_sell: flow !== null && flow <= -15,
     calm_range: score !== null && Math.abs(score) <= 30 && adx !== null && adx <= 20,
     volatility_expansion: adx !== null && adx > 25 && breakout !== null && Math.abs(breakout) >= 20,
+    // Deliberately unconditional -- mirrors COCKPIT_OVERRIDE_SETUP server-side.
+    lemme_risk: true,
   };
   const result = new Map();
   for (const group of COCKPIT_SETUP_GROUPS) for (const setup of group.setups) {
     let detail = setup.source;
     if (setup.id.startsWith('orderflow_') && flow === null) detail = 'Order-flow feed unavailable';
     else if (setup.id.startsWith('supertrend_') && !checks[setup.id]) detail = 'No fresh flip confirmation';
-    result.set(setup.id, { ...setup, eligible: qualityOk && checks[setup.id] === true, detail });
+    result.set(setup.id, { ...setup, eligible: setup.override === true || (qualityOk && checks[setup.id] === true), detail });
   }
   return { result, score, adx };
 }
@@ -222,14 +229,15 @@ function cockpitRenderSetups(snapshot) {
   document.getElementById('cockpit-engine-adx').textContent = derived.adx === null ? '—' : derived.adx.toFixed(1);
   document.getElementById('cockpit-engine-regime').textContent = String(snapshot?.regime || 'Unavailable').replaceAll('_', ' ');
   const host = document.getElementById('cockpit-setup-groups');
-  host.innerHTML = COCKPIT_SETUP_GROUPS.map(group => `<section class="cockpit-setup-group">
+  host.innerHTML = COCKPIT_SETUP_GROUPS.map(group => `<section class="cockpit-setup-group${group.wide ? ' is-wide' : ''}${group.single ? ' is-single' : ''}">
     <h3>${esc(group.title)}</h3><div class="cockpit-setup-list">${group.setups.map(base => {
-      const setup = cockpitSetupState.get(base.id); const state = setup?.eligible ? 'is-eligible' : 'is-ineligible';
+      const setup = cockpitSetupState.get(base.id);
+      const state = base.override ? 'is-override' : setup?.eligible ? 'is-eligible' : 'is-ineligible';
       return `<label class="cockpit-setup-choice ${state}">
         <input type="radio" name="cockpit-setup" value="${esc(base.id)}" ${setup?.eligible ? '' : 'disabled'}>
         <span class="cockpit-setup-state" aria-hidden="true"></span>
         <span><strong>${esc(base.label)}</strong><small>${esc(setup?.detail || base.source)}</small></span>
-        <b>${setup?.eligible ? 'ELIGIBLE' : 'BLOCKED'}</b></label>`;
+        <b>${base.override ? 'UNGATED' : setup?.eligible ? 'ELIGIBLE' : 'BLOCKED'}</b></label>`;
     }).join('')}</div></section>`).join('');
   host.querySelectorAll('input[name="cockpit-setup"]').forEach(input => input.addEventListener('change', () => cockpitSelectSetup(input.value)));
   if (cockpitSelectedSetup && cockpitSetupState.get(cockpitSelectedSetup.id)?.eligible) cockpitSelectSetup(cockpitSelectedSetup.id);
@@ -243,6 +251,7 @@ function cockpitSelectSetup(id) {
   document.getElementById('cockpit-option-panel').disabled = false;
   document.getElementById('cockpit-option-caption').textContent = `${setup.label} · ${setup.actions.length} matching ${setup.actions.length === 1 ? 'strategy' : 'strategies'}`;
   const selected = document.getElementById('cockpit-selected-setup');
+  selected.classList.toggle('is-override', setup.override === true);
   selected.querySelector('strong').textContent = setup.label; selected.querySelector('small').textContent = setup.detail;
   document.querySelectorAll('.cockpit-option-choice').forEach(label => {
     const action = label.dataset.action; const enabled = setup.actions.includes(action) && cockpitCanTrade();
@@ -254,7 +263,7 @@ function cockpitSelectSetup(id) {
 function cockpitClearSetup() {
   cockpitSelectedSetup = null; document.getElementById('cockpit-option-panel').disabled = true;
   document.getElementById('cockpit-option-caption').textContent = 'Choose a green setup first';
-  const selected = document.getElementById('cockpit-selected-setup'); selected.querySelector('strong').textContent = 'None';
+  const selected = document.getElementById('cockpit-selected-setup'); selected.classList.remove('is-override'); selected.querySelector('strong').textContent = 'None';
   selected.querySelector('small').textContent = 'Eligible strategies will appear here.';
   document.querySelectorAll('input[name="cockpit-trade"]').forEach(input => { input.checked = false; input.disabled = true; });
   document.querySelectorAll('.cockpit-option-choice').forEach(label => { label.classList.remove('is-enabled'); label.classList.add('is-disabled'); });
@@ -310,7 +319,10 @@ function cockpitShowPreview(action, preview) {
   const dryRun = preview?.dry_run === true || preview?.execution_mode === 'dry_run';
   document.getElementById('cockpit-preview-mode').textContent = dryRun ? 'DRY RUN PREVIEW' : 'LIVE ORDER PREVIEW';
   document.getElementById('cockpit-preview-lots-label').textContent = dryRun ? 'Simulation lots' : 'Affordable lots';
-  document.getElementById('cockpit-preview-warning').textContent = dryRun ? 'This opens a DRY RUN simulation and sends no order to Delta Exchange.' : 'This submits a real marketable LIVE order. Verify the contract and size before confirming.';
+  const override = cockpitSelectedSetup?.override === true;
+  const warning = document.getElementById('cockpit-preview-warning');
+  warning.classList.toggle('is-override', override);
+  warning.textContent = `${override ? 'LEMME RISK · no engine confirmation backs this trade. ' : ''}${dryRun ? 'This opens a DRY RUN simulation and sends no order to Delta Exchange.' : 'This submits a real marketable LIVE order. Verify the contract and size before confirming.'}`;
   document.getElementById('cockpit-confirm-entry').textContent = dryRun ? 'Open DRY RUN Trade' : 'Place LIVE Order';
   document.getElementById('cockpit-preview-setup').textContent = cockpitSelectedSetup?.label || '—';
   document.getElementById('cockpit-preview-strategy').textContent = COCKPIT_TRADE_LABELS[action] || action;

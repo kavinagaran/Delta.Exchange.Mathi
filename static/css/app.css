@@ -2712,10 +2712,11 @@ body:has(.overview-page) .nav a.active {
 }
 .cockpit-engine-strip strong { display: block; margin-top: 4px; overflow: hidden; color: var(--text); font-size: 15px; font-weight: 800; text-overflow: ellipsis; white-space: nowrap; text-transform: uppercase; }
 .cockpit-setup-groups { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 11px; }
-.cockpit-setup-group:last-child { grid-column: 1 / -1; }
+.cockpit-setup-group.is-wide { grid-column: 1 / -1; }
 .cockpit-setup-group h3 { margin: 0 0 7px; color: var(--cockpit-secondary); font-size: 10.5px; font-weight: 850; letter-spacing: .075em; text-transform: uppercase; }
 .cockpit-setup-list { display: grid; gap: 5px; }
-.cockpit-setup-group:last-child .cockpit-setup-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.cockpit-setup-group.is-wide .cockpit-setup-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.cockpit-setup-group.is-single .cockpit-setup-list { grid-template-columns: minmax(0, 1fr); }
 .cockpit-setup-choice {
   position: relative; min-width: 0; min-height: 58px; display: grid; grid-template-columns: auto auto 1fr auto;
   align-items: center; gap: 9px; padding: 9px 10px; overflow: hidden; border: 1px solid var(--setup-tone);
@@ -2724,9 +2725,11 @@ body:has(.overview-page) .nav a.active {
 }
 .cockpit-setup-choice.is-eligible { --setup-tone: var(--pos); }
 .cockpit-setup-choice.is-ineligible { --setup-tone: var(--neg); cursor: not-allowed; opacity: .8; }
-.cockpit-setup-choice.is-eligible:hover { transform: translateX(2px); background: color-mix(in srgb, var(--pos) 12%, var(--surface-subtle)); }
-.cockpit-setup-choice:has(input:checked) { background: color-mix(in srgb, var(--pos) 18%, var(--surface)); box-shadow: 0 0 17px color-mix(in srgb, var(--pos) 15%, transparent), inset 0 1px rgba(255,255,255,.08); }
-.cockpit-setup-choice input { width: 14px; height: 14px; margin: 0; accent-color: var(--pos); }
+.cockpit-setup-choice.is-override { --setup-tone: var(--warn); min-height: 62px; border-style: dashed; border-width: 1.5px; }
+.cockpit-setup-choice.is-override strong { letter-spacing: .01em; text-transform: uppercase; }
+.cockpit-setup-choice.is-eligible:hover, .cockpit-setup-choice.is-override:hover { transform: translateX(2px); background: color-mix(in srgb, var(--setup-tone) 12%, var(--surface-subtle)); }
+.cockpit-setup-choice:has(input:checked) { background: color-mix(in srgb, var(--setup-tone) 18%, var(--surface)); box-shadow: 0 0 17px color-mix(in srgb, var(--setup-tone) 15%, transparent), inset 0 1px rgba(255,255,255,.08); }
+.cockpit-setup-choice input { width: 14px; height: 14px; margin: 0; accent-color: var(--setup-tone); }
 .cockpit-setup-state { width: 7px; height: 7px; border-radius: 50%; background: var(--setup-tone); box-shadow: 0 0 8px var(--setup-tone); }
 .cockpit-setup-choice > span:nth-of-type(2) { display: grid; gap: 2px; min-width: 0; }
 .cockpit-setup-choice strong { overflow: hidden; color: var(--text); font-size: 12.5px; font-weight: 750; text-overflow: ellipsis; white-space: nowrap; }
@@ -2736,6 +2739,8 @@ body:has(.overview-page) .nav a.active {
 .cockpit-selected-setup { margin: 14px 0 12px; padding: 10px 12px; border-left: 3px solid var(--pos); border-radius: 8px; background: color-mix(in srgb, var(--pos) 8%, var(--surface-subtle)); }
 .cockpit-selected-setup strong { display: block; margin-top: 4px; color: var(--text); font-size: 14px; font-weight: 800; }
 .cockpit-selected-setup small { display: block; margin-top: 2px; color: var(--cockpit-secondary); font-size: 11.5px; font-weight: 550; }
+.cockpit-selected-setup.is-override { border-left-color: var(--warn); background: color-mix(in srgb, var(--warn) 10%, var(--surface-subtle)); }
+.cockpit-selected-setup.is-override strong { color: var(--warn); }
 .cockpit-option-groups { display: grid; gap: 11px; }
 .cockpit-option-group { overflow: hidden; border: 1px solid var(--option-tone); border-radius: 11px; background: color-mix(in srgb, var(--option-tone) 5%, var(--surface-subtle)); }
 .cockpit-option-group.is-buy { --option-tone: var(--pos); }
@@ -2788,6 +2793,7 @@ body:has(.overview-page) .nav a.active {
 .cockpit-preview-grid span { display: block; margin-bottom: 4px; color: var(--cockpit-secondary); font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: .055em; }
 .cockpit-preview-grid strong { display: block; overflow: hidden; color: var(--text); font: 750 13px/1.35 ui-monospace, SFMono-Regular, Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
 .cockpit-preview-warning { margin: 6px 20px 0; padding: 10px 12px; color: var(--warn); border: 1px solid color-mix(in srgb, var(--warn) 38%, var(--border)); border-radius: 8px; background: color-mix(in srgb, var(--warn) 7%, var(--surface)); font-size: 11.5px; font-weight: 700; }
+.cockpit-preview-warning.is-override { color: var(--neg); border-color: color-mix(in srgb, var(--neg) 45%, var(--border)); background: color-mix(in srgb, var(--neg) 9%, var(--surface)); }
 .cockpit-dialog-actions { display: flex; justify-content: flex-end; gap: 9px; padding: 16px 20px 20px; }
 .cockpit-confirm-btn { color: #fff; background: linear-gradient(135deg, var(--accent), var(--accent-dark)); }
 @media (max-width: 920px) {
@@ -2802,8 +2808,8 @@ body:has(.overview-page) .nav a.active {
   .cockpit-command-copy small { grid-column: 1; }
   .cockpit-status { max-width: none; text-align: left; }
   .cockpit-state-grid, .cockpit-setup-groups, .cockpit-safety-strip { grid-template-columns: 1fr; }
-  .cockpit-setup-group:last-child { grid-column: auto; }
-  .cockpit-setup-group:last-child .cockpit-setup-list, .cockpit-option-list { grid-template-columns: 1fr; }
+  .cockpit-setup-group.is-wide { grid-column: auto; }
+  .cockpit-setup-group.is-wide .cockpit-setup-list, .cockpit-option-list { grid-template-columns: 1fr; }
   .cockpit-engine-strip { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .cockpit-order-bar { align-items: stretch; flex-direction: column; }
   .cockpit-preview-btn { width: 100%; }

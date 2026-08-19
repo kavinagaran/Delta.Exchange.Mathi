@@ -18,6 +18,11 @@ import pytest
 import dashboard
 from risk_controls import account_entry_lock
 
+# Captured before ``live_account`` stubs it, so the override tests can
+# exercise the real authorization path while keeping the fixture's
+# unmocked-exchange-seam guards in place.
+_REAL_REQUIRE_ELIGIBLE = dashboard._cockpit_require_eligible_setup
+
 
 def _write(path: Path, value) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1017,3 +1022,98 @@ def test_prepare_buy_move_overrides_zone_and_side_and_skips_short_eligibility(
     assert select.call_args.kwargs["min_time_to_expiry_seconds"] == 0
     eligibility.assert_not_called()
     assert "move_eligibility" not in prepared
+
+
+# ---------------------------------------------------------------------------
+# "Lemme Risk" -- the ungated operator-override setup
+# ---------------------------------------------------------------------------
+
+def test_lemme_risk_is_eligible_without_any_engine_evidence():
+    """The override setup must stay green when every gated setup is red,
+    including on degraded data quality -- that is the state an operator is
+    most likely to want it in."""
+    matrix = dashboard._cockpit_setup_eligibility({
+        "data_quality": "DEGRADED", "trend_score": None, "trigger_adx": None,
+        "components": [], "reason_codes": [],
+    })
+    eligible = {key for key, value in matrix.items() if value["eligible"]}
+    assert eligible == {dashboard.COCKPIT_OVERRIDE_SETUP}
+    override = matrix[dashboard.COCKPIT_OVERRIDE_SETUP]
+    assert override["override"] is True
+    assert set(override["actions"]) == set(dashboard.TREND_SCORE_MANUAL_TRIGGERS)
+    assert all(
+        matrix[key]["override"] is False
+        for key in matrix
+        if key != dashboard.COCKPIT_OVERRIDE_SETUP
+    )
+
+
+def test_lemme_risk_authorizes_every_trade_type_without_the_trend_engine(
+    monkeypatch,
+):
+    """Authorization short-circuits before the engine snapshot: an
+    unreachable Trend Engine may not block the override, but must still
+    block a gated setup."""
+    snapshot = Mock(side_effect=RuntimeError("engine unreachable"))
+    monkeypatch.setattr(dashboard.trend_engine_client, "get_snapshot", snapshot)
+
+    for action in dashboard.TREND_SCORE_MANUAL_TRIGGERS:
+        dashboard._cockpit_require_eligible_setup(
+            dashboard.COCKPIT_OVERRIDE_SETUP, action,
+        )
+    snapshot.assert_not_called()
+
+    with pytest.raises(RuntimeError, match="engine unreachable"):
+        dashboard._cockpit_require_eligible_setup("trend_bullish", "buy_ce")
+
+
+def test_lemme_risk_still_rejects_an_action_outside_the_cockpit_set():
+    """Ungated means "any listed strategy", not "any string": the override
+    still may not authorize a trade type the Cockpit does not offer."""
+    with pytest.raises(ValueError, match="does not match this market setup"):
+        dashboard._cockpit_require_eligible_setup(
+            dashboard.COCKPIT_OVERRIDE_SETUP, "buy_the_dip",
+        )
+
+
+def test_lemme_risk_live_entry_uses_the_standard_protected_seam(
+    live_account, monkeypatch,
+):
+    """An override entry is ordinary downstream: it takes the real
+    authorization path (not the fixture stub), and still reaches the same
+    execution seam with the same manual-LIVE ownership that spawns
+    TP / SL / TSL protection."""
+    monkeypatch.setattr(
+        dashboard, "_cockpit_require_eligible_setup", _REAL_REQUIRE_ELIGIBLE,
+    )
+    monkeypatch.setattr(
+        dashboard.trend_engine_client, "get_snapshot",
+        Mock(side_effect=AssertionError("override consulted the Trend Engine")),
+    )
+    monkeypatch.setattr(
+        dashboard, "_cockpit_market_snapshot", lambda: {"market": {"spot": 65_000}},
+    )
+    monkeypatch.setattr(
+        dashboard, "_cockpit_prepare_manual_entry",
+        lambda action_arg, snapshot: {
+            "zone": dashboard.TREND_SCORE_SHORT_PE_ZONE, "side": "short",
+            "symbol": "MV-BTC-1", "product_id": 2, "lots": 1_000,
+        },
+    )
+    execute = Mock(return_value=_mock_execution_result())
+    monkeypatch.setattr(dashboard, "_trend_score_auto_live_execute", execute)
+
+    response, status = _post_cockpit_enter(
+        "sell_move", setup=dashboard.COCKPIT_OVERRIDE_SETUP,
+    )
+
+    assert status == 200
+    assert response.get_json()["ok"] is True
+    execute.assert_called_once()
+    call_kwargs = execute.call_args.kwargs
+    assert (
+        call_kwargs["ownership"] == dashboard.TREND_SCORE_MANUAL_LIVE_OWNERSHIP
+    )
+    assert call_kwargs["signal"]["signal_key"].startswith(
+        "manual-cockpit|sell_move|"
+    )
