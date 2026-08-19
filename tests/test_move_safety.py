@@ -209,8 +209,19 @@ def test_move_value_gate_uses_only_completed_candles():
     assert "forecast_abs_move" in result
 
 
-def test_short_move_requires_explicit_enable():
-    with patch.object(bot, "ALLOW_SHORT_MOVE", False):
+def test_short_move_requires_explicit_enable(tmp_path):
+    """The SHORT-MOVE guard must be reached on its own merits.
+
+    ``build_move_entry_plan`` runs four earlier preconditions -- entry
+    configuration, the protection snapshot, the pending-entry journal, and
+    the concurrent-MOVE cap -- before it looks at ALLOW_SHORT_MOVE. Leaving
+    them unpatched made this test pass only where ambient config happened to
+    satisfy them: on a machine with a populated .env. Without credentials it
+    raised "new entries disabled: account API credentials are unavailable"
+    instead, so the assertion never exercised the guard it names.
+    """
+    with patch.object(bot, "ALLOW_SHORT_MOVE", False),          patch.object(bot, "DATA_DIR", tmp_path),          patch.object(bot, "_assert_entry_configuration"),          patch.object(bot, "_protection_snapshot",
+                      return_value={"tp_target_pnl": 200, "sl_target_pnl": 0}),          patch.object(bot, "load_states", return_value={}):
         with pytest.raises(RuntimeError, match="short MOVE entries are disabled"):
             bot.build_move_entry_plan({"symbol": "MV-X"}, 10, "sell", "evening")
 
