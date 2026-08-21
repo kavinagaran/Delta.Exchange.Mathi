@@ -9426,7 +9426,7 @@ def _cockpit_setup_eligibility(snapshot: dict) -> dict[str, dict]:
         override = setup_id == COCKPIT_OVERRIDE_SETUP
         detail = None
         if override:
-            detail = "Operator override · no engine confirmation required"
+            detail = "Ungated · every strategy · TP/SL/TSL"
         elif setup_id.startswith("orderflow_") and flow is None:
             detail = "Order-flow feed unavailable"
         elif setup_id.startswith("supertrend_") and not checks[setup_id]:

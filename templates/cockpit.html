@@ -132,6 +132,9 @@ const COCKPIT_SETUP_GROUPS = [
     { id: 'ema_bearish', label: 'EMA bearish alignment', source: 'Higher + lower timeframe', actions: ['buy_pe', 'sell_ce'] },
     { id: 'rsi_bullish', label: 'RSI bullish momentum', source: 'RSI component', actions: ['buy_ce', 'sell_pe'] },
     { id: 'rsi_bearish', label: 'RSI bearish momentum', source: 'RSI component', actions: ['buy_pe', 'sell_ce'] },
+    { id: 'lemme_risk', label: 'Lemme Risk', override: true,
+      source: 'Ungated · every strategy · TP/SL/TSL',
+      actions: ['buy_ce', 'buy_pe', 'buy_move', 'sell_ce', 'sell_pe', 'sell_move'] },
   ]},
   { title: 'Structure & flow', setups: [
     { id: 'supertrend_bullish', label: 'Supertrend bullish flip', source: 'Confirmed engine reason', actions: ['buy_ce', 'sell_pe'] },
@@ -146,11 +149,6 @@ const COCKPIT_SETUP_GROUPS = [
   { title: 'Volatility', wide: true, setups: [
     { id: 'calm_range', label: 'Calm / range market', source: '|score| ≤ 30 · ADX ≤ 20', actions: ['sell_ce', 'sell_pe', 'sell_move'] },
     { id: 'volatility_expansion', label: 'Volatility expansion', source: 'ADX > 25 · breakout active', actions: ['buy_move'] },
-  ]},
-  { title: 'Operator override', wide: true, single: true, setups: [
-    { id: 'lemme_risk', label: 'Lemme Risk', override: true,
-      source: 'No engine confirmation · every strategy selectable · TP / SL / TSL as usual',
-      actions: ['buy_ce', 'buy_pe', 'buy_move', 'sell_ce', 'sell_pe', 'sell_move'] },
   ]},
 ];
 const COCKPIT_BUTTON_IDS = ['cockpit-preview-order'];
@@ -229,7 +227,7 @@ function cockpitRenderSetups(snapshot) {
   document.getElementById('cockpit-engine-adx').textContent = derived.adx === null ? '—' : derived.adx.toFixed(1);
   document.getElementById('cockpit-engine-regime').textContent = String(snapshot?.regime || 'Unavailable').replaceAll('_', ' ');
   const host = document.getElementById('cockpit-setup-groups');
-  host.innerHTML = COCKPIT_SETUP_GROUPS.map(group => `<section class="cockpit-setup-group${group.wide ? ' is-wide' : ''}${group.single ? ' is-single' : ''}">
+  host.innerHTML = COCKPIT_SETUP_GROUPS.map(group => `<section class="cockpit-setup-group${group.wide ? ' is-wide' : ''}">
     <h3>${esc(group.title)}</h3><div class="cockpit-setup-list">${group.setups.map(base => {
       const setup = cockpitSetupState.get(base.id);
       const state = base.override ? 'is-override' : setup?.eligible ? 'is-eligible' : 'is-ineligible';
