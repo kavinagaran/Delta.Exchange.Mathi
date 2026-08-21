@@ -526,16 +526,37 @@ class _TslArmedLine extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    // Same fallback chains the web Today panel uses
+    // (`todayInlineProtectionHtml`). The `stream_*` fields are populated
+    // only while a matching live stream is attached, so on the watchdog
+    // path they are always null -- without the fallbacks the line reads
+    // "not armed / peak pending" while the pill says TSL ARMED.
+    final health = protection['health'] is Map
+        ? Map<String, dynamic>.from(protection['health'] as Map)
+        : <String, dynamic>{
+            'heartbeat_utc': protection['last_check_utc'],
+            'peak_pnl': protection['peak_pnl_usd'],
+          };
     final floor = _number(
-      protection['stream_tsl_floor'] ?? protection['tsl_floor'],
+      protection['stream_tsl_floor'] ??
+          protection['tsl_floor'] ??
+          protection['tsl_floor_usd'] ??
+          health['stop_floor'],
     );
-    final peak = _number(protection['stream_tsl_peak']);
+    final peak =
+        _number(protection['stream_tsl_peak']) ?? _number(health['peak_pnl']);
     final floorText = armed && floor != null
         ? 'floor \$${floor.toStringAsFixed(2)}'
         : 'not armed';
     final peakText = peak == null
         ? 'peak pending'
         : 'peak \$${peak.toStringAsFixed(2)}';
+    final coverage = '${protection['coverage_status'] ?? ''}'
+        .trim()
+        .toLowerCase();
+    final coverageText = coverage.isEmpty || coverage == 'local_fallback'
+        ? ''
+        : ' · ${coverage.replaceAll('_', ' ').toUpperCase()}';
     final tone = armed ? kWarning : scheme.onSurfaceVariant;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: Gap.sm, vertical: 7),
@@ -554,7 +575,7 @@ class _TslArmedLine extends StatelessWidget {
           const SizedBox(width: 6),
           Expanded(
             child: Text(
-              'TSL ${armed ? 'Armed' : 'Not Armed'} · $floorText · $peakText',
+              'TSL ${armed ? 'Armed' : 'Not Armed'} · $floorText · $peakText$coverageText',
               style: AppText.caption.copyWith(
                 color: tone,
                 fontWeight: FontWeight.w700,

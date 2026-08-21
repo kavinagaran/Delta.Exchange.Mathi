@@ -413,6 +413,40 @@ void main() {
       expect(kWebAssetRevision, matches(RegExp(r'^\d+\.\d+\.\d+\+\d+-')));
     },
   );
+
+  testWidgets('TSL telemetry reads the watchdog fields the web page reads', (
+    WidgetTester tester,
+  ) async {
+    // The state from the live app: armed, but on the watchdog path, so every
+    // `stream_*` field is null. Reading only those made the line contradict
+    // its own pill -- "TSL ARMED" beside "not armed / peak pending".
+    tester.view.physicalSize = const Size(390, 1400);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: buildAppTheme(blue: true),
+        home: Scaffold(
+          body: TodayScreen(
+            api: _WatchdogProtectionApi(),
+            onUnauthorised: () {},
+            onBtcPrice: (_) {},
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('TSL ARMED'), findsOneWidget);
+    expect(
+      find.text(
+        'TSL Armed · floor \$360.36 · peak \$412.90 · EXCHANGE PROTECTED',
+      ),
+      findsOneWidget,
+    );
+  });
 }
 
 class _TodayApi extends DashboardApi {
@@ -642,5 +676,29 @@ class _TrendApi extends DashboardApi {
           <String, dynamic>{'committed_score': -57.6},
         ],
         'trade_markers': <dynamic>[],
+      });
+}
+
+/// Armed trailing stop on the watchdog path: no `stream_*` telemetry at all,
+/// the floor carried top-level and the peak only inside `health`, exactly as
+/// `_tp_monitor_payload` emits it when no live stream is attached.
+class _WatchdogProtectionApi extends _TodayApi {
+  @override
+  Future<ApiResult<Map<String, dynamic>>> protectionStatus() async =>
+      const ApiResult.ok(<String, dynamic>{
+        'trend': <String, dynamic>{
+          'running': true,
+          'streaming': false,
+          'poll_secs': 10,
+          'tsl_armed': true,
+          'tsl_floor': 360.36,
+          'target_pnl': 1204.0,
+          'sl_pnl': 361.2,
+          'tsl_arm_pnl': 361.2,
+          'tsl_trail_pnl': 360.36,
+          'tsl_lock_min_pnl': 0,
+          'coverage_status': 'exchange_protected',
+          'health': <String, dynamic>{'peak_pnl': 412.9},
+        },
       });
 }
