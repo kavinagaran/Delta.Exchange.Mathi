@@ -75,6 +75,14 @@ const _setupGroups = <_SetupGroup>[
     ),
     _SetupSpec('rsi_bullish', 'RSI bullish momentum', 'RSI component'),
     _SetupSpec('rsi_bearish', 'RSI bearish momentum', 'RSI component'),
+    // Ungated operator override. The server reports it eligible
+    // unconditionally and returns every action, so the strategy panel
+    // unlocks all six from the same `actions` payload as any other setup.
+    _SetupSpec(
+      'lemme_risk',
+      'Lemme Risk',
+      'Ungated · every strategy · TP/SL/TSL',
+    ),
   ]),
   _SetupGroup('Structure & flow', [
     _SetupSpec(
@@ -655,6 +663,9 @@ class _CockpitScreenState extends State<CockpitScreen> {
               title: setup.label,
               detail:
                   '${_setupState(setup.id)?['detail'] ?? setup.fallbackDetail}',
+              tone: _setupState(setup.id)?['override'] == true
+                  ? kWarning
+                  : kPositive,
             ),
           if (setup != null) const SizedBox(height: Gap.md),
           _StrategySection(
@@ -869,13 +880,26 @@ class _SetupTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final eligible = state?['eligible'] == true;
-    final tone = eligible ? kPositive : kNegative;
+    // The server flags its ungated override setup. Tone it as a warning
+    // rather than a green confirmation so an operator can never mistake it
+    // for engine-backed evidence.
+    final override = state?['override'] == true;
+    final tone = override
+        ? kWarning
+        : eligible
+        ? kPositive
+        : kNegative;
     final detail = '${state?['detail'] ?? spec.fallbackDetail}';
     return Semantics(
       button: eligible,
       selected: selected,
       enabled: eligible,
-      label: '${spec.label}, ${eligible ? 'eligible' : 'blocked'}',
+      label:
+          '${spec.label}, ${override
+              ? 'ungated'
+              : eligible
+              ? 'eligible'
+              : 'blocked'}',
       child: InkWell(
         onTap: eligible ? onTap : null,
         borderRadius: BorderRadius.circular(Radii.md),
@@ -925,7 +949,11 @@ class _SetupTile extends StatelessWidget {
               ),
               const SizedBox(width: Gap.sm),
               Text(
-                eligible ? 'ELIGIBLE' : 'BLOCKED',
+                override
+                    ? 'UNGATED'
+                    : eligible
+                    ? 'ELIGIBLE'
+                    : 'BLOCKED',
                 style: AppText.kicker.copyWith(color: tone, fontSize: 7.5),
               ),
             ],
@@ -962,10 +990,15 @@ class _SelectionDot extends StatelessWidget {
 }
 
 class _SelectedSetupBanner extends StatelessWidget {
-  const _SelectedSetupBanner({required this.title, required this.detail});
+  const _SelectedSetupBanner({
+    required this.title,
+    required this.detail,
+    this.tone = kPositive,
+  });
 
   final String title;
   final String detail;
+  final Color tone;
 
   @override
   Widget build(BuildContext context) {
@@ -973,17 +1006,14 @@ class _SelectedSetupBanner extends StatelessWidget {
       width: double.infinity,
       padding: const EdgeInsets.all(Gap.md),
       decoration: BoxDecoration(
-        color: kPositive.withValues(alpha: .10),
+        color: tone.withValues(alpha: .10),
         borderRadius: BorderRadius.circular(Radii.md),
-        border: const Border(left: BorderSide(color: kPositive, width: 3)),
+        border: Border(left: BorderSide(color: tone, width: 3)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            'SELECTED SETUP',
-            style: AppText.kicker.copyWith(color: kPositive),
-          ),
+          Text('SELECTED SETUP', style: AppText.kicker.copyWith(color: tone)),
           const SizedBox(height: Gap.xs),
           Text(title, style: AppText.title),
           Text(
