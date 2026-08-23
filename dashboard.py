@@ -9203,7 +9203,20 @@ def _trend_score_auto_short_move_eligibility(
 
 
 def _prepare_trend_score_auto_entry(signal: dict) -> dict:
-    """Resolve and validate the exact public contract for a score zone."""
+    """Resolve and validate the exact public contract for a score zone.
+
+    Top-of-book depth is observational in both modes, matching the Cockpit
+    (``_cockpit_prepare_manual_entry``) and the LIVE sizing rule documented
+    on ``_trend_score_auto_live_affordability``: the bounded IOC sweeps
+    deeper price levels up to its slippage cap, so one volatile touch
+    quantity never decides the order size. DRY RUN used to demand the whole
+    configured size at the touch, which made the paper controller skip
+    entries the LIVE controller would have taken -- the opposite of what a
+    paper proxy is for, given Delta's daily books rest tens-to-hundreds of
+    contracts at the touch against a four-digit configured size. The
+    quantity is still resolved, still required to be positive, and still
+    recorded as ``entry_depth``; it just no longer gates.
+    """
     if signal.get("zone_action_allowed") is not True:
         reason = str(signal.get("zone_reason") or "").strip()
         raise RuntimeError(
@@ -9244,10 +9257,6 @@ def _prepare_trend_score_auto_entry(signal: dict) -> dict:
             contract.get("ask_size") or contract.get("ask_quantity"),
             "option ask depth", positive=True,
         )
-        if not live_sizing and depth < lots:
-            raise RuntimeError(
-                "option ask depth cannot fill the configured order size"
-            )
         prepared = {
             **selection,
             "side": "long",
@@ -9279,11 +9288,10 @@ def _prepare_trend_score_auto_entry(signal: dict) -> dict:
         )
     # LIVE sizing needs the executable quote before it can turn the account's
     # available USD into an affordable whole-lot quantity.  Require at least
-    # one quoted lot here; the sizing step below applies both the wallet and
-    # full top-of-book limits.  Paper retains the configured-size depth rule.
-    quote = _trend_score_auto_move_quote(
-        selection["symbol"], 1 if live_sizing else lots,
-    )
+    # one quoted lot here; the sizing step below applies the wallet limit.
+    # DRY RUN asks for the same single lot -- see the docstring on why the
+    # touch quantity is observational in both modes.
+    quote = _trend_score_auto_move_quote(selection["symbol"], 1)
     move_eligibility = _trend_score_auto_short_move_eligibility(selection, quote)
     prepared = {
         **selection,
@@ -9489,6 +9497,20 @@ def _cockpit_prepare_manual_entry(
     premium floor;
     ``buy_move`` has no automated precedent to mirror.
 
+    Top-of-book depth is observational in *both* modes, exactly as
+    ``_trend_score_auto_live_affordability`` documents for LIVE: the bounded
+    IOC sweeps deeper price levels up to its slippage cap, so one volatile
+    touch quantity never decides the order size. DRY RUN previously demanded
+    that the whole configured size rest at the touch before it would
+    simulate, which made the rehearsal stricter than the real-money path it
+    rehearses and blocked it against ordinary Delta daily-option books (a
+    2-step ITM strike routinely shows tens-to-hundreds of contracts at the
+    touch against a four-digit configured size). A simulation consumes no
+    liquidity at all, so the quantity is recorded -- ``entry_depth`` here and
+    ``execution_snapshot.observed_entry_depth`` on the simulated position --
+    and never gates. Both modes still require a fresh, positive, executable
+    quote on the side being traded.
+
     Every trade type is restricted to today's IST expiry, same as the
     automated controller -- a Cockpit trade must never silently roll to
     tomorrow's contract either. Unlike the automated controller, none of
@@ -9561,10 +9583,6 @@ def _cockpit_prepare_manual_entry(
             "quote_snapshot": copy.deepcopy(contract),
         }
         if dry_run:
-            if prepared["entry_depth"] < lots:
-                raise RuntimeError(
-                    "option quote depth cannot simulate the configured order size"
-                )
             return prepared
         return _trend_score_auto_live_affordable_entry(prepared)
 
@@ -9579,9 +9597,7 @@ def _cockpit_prepare_manual_entry(
             "No operational ATM MOVE contract is available for today's expiry"
         )
     if action == "sell_move":
-        quote = _trend_score_auto_move_quote(
-            selection["symbol"], lots if dry_run else 1,
-        )
+        quote = _trend_score_auto_move_quote(selection["symbol"], 1)
         move_eligibility = _trend_score_auto_short_move_eligibility(
             selection,
             quote,
@@ -9602,7 +9618,7 @@ def _cockpit_prepare_manual_entry(
         }
     else:
         quote = _trend_score_auto_move_quote(
-            selection["symbol"], lots if dry_run else 1, side="buy",
+            selection["symbol"], 1, side="buy",
         )
         prepared = {
             **selection,

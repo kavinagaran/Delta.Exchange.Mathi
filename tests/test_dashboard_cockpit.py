@@ -1025,6 +1025,166 @@ def test_prepare_buy_move_overrides_zone_and_side_and_skips_short_eligibility(
 
 
 # ---------------------------------------------------------------------------
+# Top-of-book depth is observational, never a gate
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("action", ("buy_pe", "sell_ce"))
+def test_dry_run_simulates_when_touch_depth_is_below_the_configured_size(
+    live_account, monkeypatch, action,
+):
+    """A thin touch must not block a simulation that consumes no liquidity.
+
+    Delta's daily BTC option book routinely rests tens-to-hundreds of
+    contracts at the touch against a four-digit configured size, and the
+    LIVE path treats that quantity as observational because the bounded IOC
+    sweeps deeper levels. DRY RUN must not be the stricter of the two.
+    """
+    now = dashboard.datetime.now(dashboard.timezone.utc).isoformat()
+    configured = dashboard._trend_score_auto_configured_lots()
+    thin = 12
+    assert thin < configured
+    selection = {
+        "zone": dashboard.TREND_SCORE_PE_ZONE, "symbol": "P-BTC-76800-230826",
+        "product_id": 9, "strike": 76_800, "option_type": "PE",
+        "expiry": "2026-08-23T12:00:00Z", "lots": configured,
+        "max_order_lots": 5000,
+        "executable_contract": {
+            "contract_value": "0.001", "bid": 200.0, "ask": 205.0,
+            "bid_size": thin, "ask_size": thin, "quote_timestamp": now,
+        },
+    }
+    monkeypatch.setattr(
+        dashboard, "select_directional_option", Mock(return_value=selection),
+    )
+    monkeypatch.setattr(dashboard, "_fetch_live_vanilla_products", lambda: [])
+    affordable = Mock(
+        side_effect=AssertionError("DRY RUN must not wallet-size a simulation")
+    )
+    monkeypatch.setattr(
+        dashboard, "_trend_score_auto_live_affordable_entry", affordable,
+    )
+
+    prepared = dashboard._cockpit_prepare_manual_entry(
+        action, _snapshot(), dry_run=True,
+    )
+
+    # The configured simulation size is kept, and the thin touch quantity is
+    # recorded for the operator rather than used to refuse the trade.
+    assert prepared["lots"] == configured
+    assert prepared["entry_depth"] == thin
+
+
+def test_dry_run_still_requires_a_positive_quoted_depth(
+    live_account, monkeypatch,
+):
+    """Observational is not optional -- a quote-less book still fails closed."""
+    now = dashboard.datetime.now(dashboard.timezone.utc).isoformat()
+    selection = {
+        "zone": dashboard.TREND_SCORE_CE_ZONE, "symbol": "C-BTC-76000-230826",
+        "product_id": 9, "strike": 76_000, "option_type": "CE",
+        "expiry": "2026-08-23T12:00:00Z", "lots": 1000,
+        "executable_contract": {
+            "contract_value": "0.001", "bid": 200.0, "ask": 205.0,
+            "bid_size": 0, "ask_size": 0, "quote_timestamp": now,
+        },
+    }
+    monkeypatch.setattr(
+        dashboard, "select_directional_option", Mock(return_value=selection),
+    )
+    monkeypatch.setattr(dashboard, "_fetch_live_vanilla_products", lambda: [])
+
+    with pytest.raises(RuntimeError, match="depth"):
+        dashboard._cockpit_prepare_manual_entry(
+            "buy_ce", _snapshot(), dry_run=True,
+        )
+
+
+@pytest.mark.parametrize(
+    ("action", "side"), (("sell_move", "sell"), ("buy_move", "buy")),
+)
+def test_dry_run_move_quote_requires_one_lot_of_depth_like_live(
+    live_account, monkeypatch, action, side,
+):
+    """Both Cockpit modes ask the MOVE quote helper for the same one lot."""
+    selection = {
+        "zone": dashboard.TREND_SCORE_MOVE_ZONE, "symbol": "MV-BTC-1",
+        "product_id": 2, "expiry": "2026-08-23T12:00:00Z",
+    }
+    monkeypatch.setattr(
+        dashboard, "select_move_contract", Mock(return_value=selection),
+    )
+    monkeypatch.setattr(dashboard, "_fetch_live_mv_products", lambda: [])
+    quote_fn = Mock(return_value={
+        "entry_price": 350.0, "entry_depth": 3, "side": side,
+    })
+    monkeypatch.setattr(dashboard, "_trend_score_auto_move_quote", quote_fn)
+    monkeypatch.setattr(
+        dashboard,
+        "_trend_score_auto_short_move_eligibility",
+        Mock(return_value={"quoted_premium_usd": 350.0}),
+    )
+
+    prepared = dashboard._cockpit_prepare_manual_entry(
+        action, _snapshot(), dry_run=True,
+    )
+
+    assert quote_fn.call_args.args[1] == 1
+    assert prepared["entry_depth"] == 3
+
+
+def test_dry_run_buy_move_accepts_a_real_book_thinner_than_the_order_size(
+    live_account, monkeypatch,
+):
+    """End-to-end against a real ATM MOVE book, through the real quote helper.
+
+    Reproduces the reported "MOVE ask depth cannot fill the configured order
+    size" toast: Delta's ATM MOVE book rests a few hundred contracts at the
+    touch (484-723 observed on the 2026-08-23 expiry) while the configured
+    simulation size is four digits. Only ``_trend_score_auto_move_quote`` is
+    left unmocked here, so the depth rule itself is what is under test.
+    """
+    configured = dashboard._trend_score_auto_configured_lots()
+    thin = 484
+    assert thin < configured
+    ticker = {
+        "symbol": "MV-BTC-76400-230826",
+        "mark_price": "427.0",
+        "timestamp": int(dashboard.time.time() * 1_000_000),
+        "product_trading_status": "operational",
+        "quotes": {
+            "best_bid": "424.0", "best_ask": "430.0",
+            "bid_size": 716, "ask_size": thin,
+        },
+    }
+    monkeypatch.setattr(
+        dashboard.req, "get", Mock(return_value=Mock(
+            json=Mock(return_value={"result": ticker}),
+        )),
+    )
+    monkeypatch.setattr(dashboard, "_fetch_live_mv_products", lambda: [])
+    monkeypatch.setattr(
+        dashboard,
+        "select_move_contract",
+        Mock(return_value={
+            "zone": dashboard.TREND_SCORE_MOVE_ZONE,
+            "symbol": "MV-BTC-76400-230826",
+            "product_id": 2, "expiry": "2026-08-23T12:00:00Z",
+            "lots": configured,
+        }),
+    )
+
+    prepared = dashboard._cockpit_prepare_manual_entry(
+        "buy_move", _snapshot(spot=76_309.3), dry_run=True,
+    )
+
+    assert prepared["side"] == "long"
+    assert prepared["zone"] == dashboard.TREND_SCORE_LONG_MOVE_ZONE
+    assert prepared["entry_price"] == 430.0
+    assert prepared["lots"] == configured
+    assert prepared["entry_depth"] == thin
+
+
+# ---------------------------------------------------------------------------
 # "Lemme Risk" -- the ungated operator-override setup
 # ---------------------------------------------------------------------------
 

@@ -504,6 +504,81 @@ def test_prepare_move_entry_restricts_to_today_without_a_floor_override(
     assert "min_time_to_expiry_seconds" not in select.call_args.kwargs
 
 
+def test_paper_directional_entry_does_not_gate_on_top_of_book_depth(
+        isolated_score_account, monkeypatch):
+    """DRY RUN must not skip an entry LIVE would have taken.
+
+    LIVE treats the touch quantity as observational because the bounded IOC
+    sweeps deeper levels (see ``_trend_score_auto_live_affordability``).  The
+    paper controller exists to proxy LIVE, so a book resting less than the
+    configured size at the touch -- the norm on Delta's daily strikes -- must
+    prepare here exactly as it does there.
+    """
+    _write(isolated_score_account / "config.json", _safe_score_config())
+    assert dashboard._trend_score_auto_mode() == "dry_run"
+    configured = dashboard._trend_score_auto_configured_lots()
+    thin = 955
+    assert thin < configured
+    selection = {
+        "zone": dashboard.TREND_SCORE_PE_ZONE, "symbol": "P-BTC-76800-230826",
+        "product_id": 1, "strike": 76_800, "expiry": "2026-08-23T12:00:00Z",
+        "lots": configured,
+        "executable_contract": {
+            "contract_value": "0.001", "ask": 205.0, "ask_size": thin,
+            "quote_timestamp": dashboard.datetime.now(
+                dashboard.timezone.utc,
+            ).isoformat(),
+        },
+    }
+    monkeypatch.setattr(
+        dashboard, "select_directional_option", Mock(return_value=selection),
+    )
+    monkeypatch.setattr(dashboard, "_fetch_live_vanilla_products", lambda: [])
+
+    prepared = dashboard._prepare_trend_score_auto_entry({
+        "zone": dashboard.TREND_SCORE_PE_ZONE,
+        "zone_action_allowed": True,
+        "snapshot": {"market": {"spot": 76_309.3}, "option_contracts": []},
+    })
+
+    # Observed, not enforced.
+    assert prepared["entry_depth"] == thin
+    assert prepared["lots"] == configured
+
+
+def test_paper_move_entry_requests_one_lot_of_depth_like_live(
+        isolated_score_account, monkeypatch):
+    """Both controller modes ask the MOVE quote helper for the same one lot."""
+    _write(isolated_score_account / "config.json", _safe_score_config())
+    assert dashboard._trend_score_auto_mode() == "dry_run"
+    monkeypatch.setattr(
+        dashboard,
+        "select_move_contract",
+        Mock(return_value={
+            "zone": dashboard.TREND_SCORE_MOVE_ZONE, "symbol": "MV-BTC-1",
+            "product_id": 2, "expiry": "2026-08-23T12:00:00Z",
+        }),
+    )
+    monkeypatch.setattr(dashboard, "_fetch_live_mv_products", lambda: [])
+    quote_fn = Mock(return_value={
+        "entry_price": 350.0, "entry_depth": 484, "side": "sell",
+    })
+    monkeypatch.setattr(dashboard, "_trend_score_auto_move_quote", quote_fn)
+    monkeypatch.setattr(
+        dashboard, "_trend_score_auto_short_move_eligibility",
+        lambda *a, **k: {"quoted_premium_usd": 350.0},
+    )
+
+    prepared = dashboard._prepare_trend_score_auto_entry({
+        "zone": dashboard.TREND_SCORE_MOVE_ZONE,
+        "zone_action_allowed": True,
+        "snapshot": {"market": {"spot": 76_309.3}, "option_contracts": []},
+    })
+
+    assert quote_fn.call_args.args[1] == 1
+    assert prepared["entry_depth"] == 484
+
+
 def test_short_move_uses_premium_expiry_and_weekday_entry_window():
     allowed = datetime(2026, 8, 3, 11, 59, tzinfo=timezone.utc)
     valid_selection = {
