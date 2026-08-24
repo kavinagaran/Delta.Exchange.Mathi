@@ -1029,12 +1029,20 @@ class _CockpitButton extends StatelessWidget {
   }
 }
 
-/// Every trade opened today, presented as compact expandable rows so the full
-/// web table remains usable on a 360dp phone without horizontal scrolling.
+/// Every trade opened in the current trading day, presented as compact
+/// expandable rows so the full web table remains usable on a 360dp phone
+/// without horizontal scrolling.
+///
+/// "Today" here is the bot's trading day, not the IST calendar day: Delta
+/// delists each day's contract at 17:30 IST, so the window the server
+/// returns (and this card labels) runs 5:31 pm IST to 5:30 pm IST the next
+/// day — matching the web Today panel.
 class _TodayTradesCard extends StatelessWidget {
   const _TodayTradesCard({required this.trades});
 
   final List<Map<String, dynamic>> trades;
+
+  static const _windowNote = 'Trading day: 5:31 pm IST → 5:30 pm IST next day';
 
   @override
   Widget build(BuildContext context) {
@@ -1043,9 +1051,19 @@ class _TodayTradesCard extends StatelessWidget {
       return AppCard(
         kicker: "Today's activity",
         title: 'No trades yet',
-        child: Text(
-          'New entries will appear here automatically.',
-          style: AppText.body.copyWith(color: scheme.onSurfaceVariant),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'New entries will appear here automatically.',
+              style: AppText.body.copyWith(color: scheme.onSurfaceVariant),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              _windowNote,
+              style: AppText.caption.copyWith(color: scheme.onSurfaceVariant),
+            ),
+          ],
         ),
       );
     }
@@ -1055,7 +1073,15 @@ class _TodayTradesCard extends StatelessWidget {
       trailing: const Icon(Icons.receipt_long_rounded, size: 19),
       padding: const EdgeInsets.fromLTRB(Gap.md, Gap.lg, Gap.md, Gap.sm),
       child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          Padding(
+            padding: const EdgeInsets.only(bottom: Gap.xs),
+            child: Text(
+              _windowNote,
+              style: AppText.caption.copyWith(color: scheme.onSurfaceVariant),
+            ),
+          ),
           for (var index = 0; index < trades.length; index++) ...[
             _TradeHistoryRow(trade: trades[index]),
             if (index != trades.length - 1)

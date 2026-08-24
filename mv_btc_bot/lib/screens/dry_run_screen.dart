@@ -324,20 +324,40 @@ class _DryRunTradesCard extends StatelessWidget {
   final List<Map<String, dynamic>> rows;
   final int limit;
 
+  // "Today" is the bot's trading day (Delta delists each day's contract at
+  // 17:30 IST), not the IST calendar day — matches the web Today panel.
+  static const _windowNote = 'Trading day: 5:31 pm IST → 5:30 pm IST next day';
+
   @override
   Widget build(BuildContext context) {
-    final shown = rows.take(limit).toList();
+    // The API returns rows oldest-first; sort newest-first before capping to
+    // `limit` so a long History list shows its most recent trades instead of
+    // silently truncating to whatever entered first.
+    final ordered = List<Map<String, dynamic>>.from(rows)
+      ..sort((a, b) => _entryMoment(b).compareTo(_entryMoment(a)));
+    final shown = ordered.take(limit).toList();
+    final isToday = title == "Today's trades";
+    final onSurfaceVariant = Theme.of(context).colorScheme.onSurfaceVariant;
     return AppCard(
       kicker: 'Dry Run',
       title: '$title · ${rows.length}',
-      child: shown.isEmpty
-          ? Text(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (isToday) ...[
+            Text(
+              _windowNote,
+              style: AppText.caption.copyWith(color: onSurfaceVariant),
+            ),
+            const SizedBox(height: Gap.xs),
+          ],
+          if (shown.isEmpty)
+            Text(
               'No dry-run trades.',
-              style: AppText.body.copyWith(
-                color: Theme.of(context).colorScheme.onSurfaceVariant,
-              ),
+              style: AppText.body.copyWith(color: onSurfaceVariant),
             )
-          : Column(
+          else
+            Column(
               children: [
                 for (var index = 0; index < shown.length; index++) ...[
                   _TradeRow(trade: shown[index]),
@@ -345,6 +365,8 @@ class _DryRunTradesCard extends StatelessWidget {
                 ],
               ],
             ),
+        ],
+      ),
     );
   }
 }
@@ -401,6 +423,19 @@ List<Map<String, dynamic>> _maps(Object? value) =>
     (value as List<dynamic>? ?? const [])
         .whereType<Map<String, dynamic>>()
         .toList();
+
+/// UTC instant a trade opened. entry_date/entry_time(_utc) are always
+/// stored in UTC; an unparseable or missing stamp sorts to the epoch rather
+/// than throwing, so a malformed legacy row doesn't crash the list.
+DateTime _entryMoment(Map<String, dynamic> trade) {
+  final date = '${trade['entry_date'] ?? trade['date'] ?? ''}'.trim();
+  if (date.isEmpty) return DateTime.fromMillisecondsSinceEpoch(0, isUtc: true);
+  final clock = '${trade['entry_time_utc'] ?? trade['entry_time'] ?? '00:00:00'}'
+      .trim()
+      .replaceAll('Z', '');
+  return DateTime.tryParse('${date}T${clock}Z')?.toUtc() ??
+      DateTime.fromMillisecondsSinceEpoch(0, isUtc: true);
+}
 
 double? _number(Object? value) =>
     value is num ? value.toDouble() : double.tryParse('$value');

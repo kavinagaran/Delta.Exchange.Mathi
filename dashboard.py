@@ -2920,22 +2920,68 @@ def api_status():
     return jsonify(state)
 
 
-def _ist_calendar_date(date_str: str, time_str: str) -> str:
-    """IST (UTC+5:30) calendar date a UTC (date, time-of-day) pair falls on.
-    Users think in IST "today", but entry_date/entry_time are always stored
-    in UTC, so a straight string compare against a UTC or IST "today" is
-    wrong for whichever side of the actual moment doesn't match — this
-    converts the trade's own timestamp before comparing calendar dates."""
-    try:
-        dt_utc = datetime.strptime(f"{date_str} {time_str or '00:00:00'}", "%Y-%m-%d %H:%M:%S")
-        return (dt_utc + timedelta(hours=5, minutes=30)).strftime("%Y-%m-%d")
-    except (ValueError, TypeError):
-        return date_str
+# Delta delists each day's contract at 17:30 IST, so the bot's trading day
+# runs 17:31 IST one day to 17:30 IST the next, not IST midnight to midnight.
+# "Today's trades" means that window: an evening entry and its next-morning
+# exit belong to one dashboard day instead of being split across two.
+_TRADING_DAY_START_IST = (17, 31)
+
+_ENTRY_STAMP_FORMATS = ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d")
+
+
+def _trading_day_window(
+        now: datetime | None = None) -> tuple[datetime, datetime]:
+    """Half-open [start, end) in UTC of the trading day ``now`` falls in.
+
+    The day pivots at 17:31 IST (12:01 UTC): a trade stamped 17:30 IST still
+    belongs to the day that is ending, and 17:31 IST opens the next one, so
+    every trade lands in exactly one window."""
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    current = current.astimezone(_IST_TIMEZONE)
+    hour, minute = _TRADING_DAY_START_IST
+    start = current.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if (current.hour, current.minute) < (hour, minute):
+        start -= timedelta(days=1)
+    return (start.astimezone(timezone.utc),
+            (start + timedelta(days=1)).astimezone(timezone.utc))
+
+
+def _trade_entry_utc(date_str: str, time_str: str) -> datetime | None:
+    """The UTC moment a trade opened.
+
+    entry_date/entry_time are always stored in UTC, so the trade's own
+    timestamp is compared as an instant rather than as a date string — a
+    string compare is wrong for whichever side of the moment doesn't match.
+    Legacy records carrying a date but no usable clock fall back to midnight
+    UTC so they stay visible instead of silently dropping out."""
+    date_part = str(date_str or "").strip()
+    if not date_part:
+        return None
+    clock = str(time_str or "").strip().replace("Z", "")
+    for stamp in (f"{date_part} {clock}" if clock else "", date_part):
+        if not stamp:
+            continue
+        for fmt in _ENTRY_STAMP_FORMATS:
+            try:
+                return datetime.strptime(stamp, fmt).replace(tzinfo=timezone.utc)
+            except (ValueError, TypeError):
+                continue
+    return None
+
+
+def _in_trading_day(
+        date_str: str, time_str: str,
+        window: tuple[datetime, datetime]) -> bool:
+    """Whether a stored (date, time-of-day) UTC pair is in ``window``."""
+    moment = _trade_entry_utc(date_str, time_str)
+    return moment is not None and window[0] <= moment < window[1]
 
 
 @app.route("/api/today-trades")
 def api_today_trades():
-    today_ist = (datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)).strftime("%Y-%m-%d")
+    window = _trading_day_window()
     dry_run_mode = _trading_mode_payload()["dry_run_mode"]
     trades = (
         _dry_run_trades()
@@ -2946,19 +2992,21 @@ def api_today_trades():
         t for t in trades
         if isinstance(t, dict)
         and (_is_dry_record(t) if dry_run_mode else not _is_dry_record(t))
-        and _ist_calendar_date(
+        and _in_trading_day(
             t.get("entry_date") or t.get("date", ""),
             t.get("entry_time") or t.get("entry_time_utc", ""),
-        ) == today_ist
+            window,
+        )
     ]
     # Include any open slot position as a live row with real-time mark & P&L
     for slot in SLOTS:
         s = _load_json(_slot_file(slot, dry_run=dry_run_mode), {})
         if (s.get("status") == "OPEN"
                 and (_is_dry_record(s) if dry_run_mode else not _is_dry_record(s))
-                and _ist_calendar_date(
+                and _in_trading_day(
                     s.get("entry_date", ""), s.get("entry_time_utc", ""),
-                ) == today_ist):
+                    window,
+                )):
             s["_live"] = True
             s["slot"]  = slot
             s = _enrich_dry_state(s) if dry_run_mode else _enrich_live(s)
@@ -5768,22 +5816,24 @@ def api_dry_run_trades():
 
 @app.route("/api/dry-run/today-trades")
 def api_dry_run_today_trades():
-    today_ist = datetime.now(_IST_TIMEZONE).strftime("%Y-%m-%d")
+    window = _trading_day_window()
     rows = [
         row for row in _dry_run_trades()
-        if _ist_calendar_date(
+        if _in_trading_day(
             row.get("entry_date") or row.get("date", ""),
             row.get("entry_time") or row.get("entry_time_utc", ""),
-        ) == today_ist
+            window,
+        )
     ]
     for slot in SLOTS:
         state = _load_json(_slot_file(slot, dry_run=True), {})
         if (str(state.get("status") or "").upper() == "OPEN"
                 and _is_dry_record(state)
-                and _ist_calendar_date(
+                and _in_trading_day(
                     state.get("entry_date", ""),
                     state.get("entry_time_utc", ""),
-                ) == today_ist):
+                    window,
+                )):
             live = _enrich_dry_state(state)
             live.update({"_live": True, "slot": slot})
             rows.insert(0, live)
