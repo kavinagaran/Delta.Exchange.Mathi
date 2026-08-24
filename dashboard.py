@@ -2921,10 +2921,10 @@ def api_status():
 
 
 # Delta delists each day's contract at 17:30 IST, so the bot's trading day
-# runs 17:31 IST one day to 17:30 IST the next, not IST midnight to midnight.
+# runs 17:30 IST one day to 17:29 IST the next, not IST midnight to midnight.
 # "Today's trades" means that window: an evening entry and its next-morning
 # exit belong to one dashboard day instead of being split across two.
-_TRADING_DAY_START_IST = (17, 31)
+_TRADING_DAY_START_IST = (17, 30)
 
 _ENTRY_STAMP_FORMATS = ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d")
 
@@ -2933,8 +2933,8 @@ def _trading_day_window(
         now: datetime | None = None) -> tuple[datetime, datetime]:
     """Half-open [start, end) in UTC of the trading day ``now`` falls in.
 
-    The day pivots at 17:31 IST (12:01 UTC): a trade stamped 17:30 IST still
-    belongs to the day that is ending, and 17:31 IST opens the next one, so
+    The day pivots at 17:30 IST (12:00 UTC): a trade stamped 17:30 IST
+    belongs to the new trading day, so
     every trade lands in exactly one window."""
     current = now or datetime.now(timezone.utc)
     if current.tzinfo is None:

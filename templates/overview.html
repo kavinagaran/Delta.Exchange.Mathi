@@ -42,7 +42,7 @@
       </span>
       <div class="lbl">Trades today</div>
       <div class="val" id="today-trade-total">—</div>
-      <div class="sub">Entries since the last 5:31 pm IST rollover</div>
+      <div class="sub">Entries since the last 5:30 pm IST rollover</div>
     </div>
     <div class="stat performance-stat neutral" data-metric="open">
       <span class="today-stat-icon" aria-hidden="true">
@@ -83,12 +83,12 @@
     <div class="card-hd">
       <span aria-hidden="true">◉</span>
       Today's Trades
-      <span class="hint today-window-note">Trading day: 5:31 pm IST → 5:30 pm IST next day</span>
+      <span class="hint today-window-note">Trading day: 5:30 pm IST → 5:30 pm IST next day</span>
       <span class="spacer"></span>
       <span class="hint" id="today-table-count">Loading…</span>
     </div>
     <div class="tbl-wrap">
-      <table class="today-trades-table" aria-label="All trades opened in the trading day since the last 5:31 pm IST rollover">
+      <table class="today-trades-table" aria-label="All trades opened in the trading day since the last 5:30 pm IST rollover">
         <thead><tr>
           <th>Opened</th><th>Closed</th><th>Contract</th><th>Direction</th><th class="numeric">Lots</th>
           <th class="numeric">Entry</th><th class="numeric">Exit / Mark</th>
@@ -338,7 +338,7 @@ function renderTodayTrades(rows) {
   if (!trades.length) {
     body.innerHTML = `<tr class="today-ledger-empty"><td colspan="11"><div>
       <span>◇</span><strong>No trades this trading day</strong>
-      <small>Nothing opened since the last 5:31 pm IST rollover. The next completed or open trade will appear here.</small>
+      <small>Nothing opened since the last 5:30 pm IST rollover. The next completed or open trade will appear here.</small>
     </div></td></tr>`;
     return;
   }
