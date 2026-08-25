@@ -9654,7 +9654,10 @@ def _cockpit_prepare_manual_entry(
             quote,
             enforce_min_tte=False,
             enforce_min_premium=False,
-            enforce_time_restrictions=(setup_id != COCKPIT_OVERRIDE_SETUP),
+            enforce_time_restrictions=(
+                str(setup_id or "").strip().lower()
+                != COCKPIT_OVERRIDE_SETUP
+            ),
         )
         prepared = {
             **selection,
