@@ -169,9 +169,8 @@ TREND_SCORE_MANUAL_TRIGGERS = {
 # the identical execution seam as any other Cockpit trade (contract
 # selection, fresh-quote check, wallet-affordable sizing, IOC submission,
 # and the standard TP/SL/TSL protection spawn), and it does not relax the
-# structural safety rails -- one open Trend position at a time, today's
-# expiry only, and the strategy-wide SHORT MOVE weekday blackout all still
-# apply.
+# structural safety rails -- one open Trend position at a time and today's
+# expiry only still apply. Lemme Risk also bypasses MOVE time restrictions.
 COCKPIT_OVERRIDE_SETUP = "lemme_risk"
 COCKPIT_SETUP_ACTIONS = {
     "trend_bullish": {"buy_ce", "sell_pe"},
@@ -9195,6 +9194,7 @@ def _trend_score_auto_short_move_eligibility(
     now: datetime | None = None,
     enforce_min_tte: bool = True,
     enforce_min_premium: bool = True,
+    enforce_time_restrictions: bool = True,
 ) -> dict:
     """Validate the explicit SHORT MOVE contract-entry rules.
 
@@ -9216,7 +9216,7 @@ def _trend_score_auto_short_move_eligibility(
         current = current.replace(tzinfo=timezone.utc)
     current = current.astimezone(timezone.utc)
     current_ist = current.astimezone(_IST_TIMEZONE)
-    if (
+    if enforce_time_restrictions and (
         current_ist.weekday() < 5
         and (current_ist.hour, current_ist.minute)
         >= SHORT_MOVE_WEEKDAY_BLACKOUT_START_IST
@@ -9529,6 +9529,7 @@ def _cockpit_prepare_manual_entry(
     snapshot: dict,
     *,
     dry_run: bool = False,
+    setup_id: str | None = None,
 ) -> dict:
     """Resolve and wallet-size the exact contract for one Cockpit trade type.
 
@@ -9653,6 +9654,7 @@ def _cockpit_prepare_manual_entry(
             quote,
             enforce_min_tte=False,
             enforce_min_premium=False,
+            enforce_time_restrictions=(setup_id != COCKPIT_OVERRIDE_SETUP),
         )
         prepared = {
             **selection,
@@ -9805,7 +9807,7 @@ def _cockpit_enter_dry_run(
             _cockpit_require_eligible_setup(setup_id, action)
             snapshot = _cockpit_market_snapshot(dry_run=True)
             prepared = _cockpit_prepare_manual_entry(
-                action, snapshot, dry_run=True,
+                action, snapshot, dry_run=True, setup_id=setup_id,
             )
             signal = _cockpit_manual_signal(action, snapshot)
             signal["zone"] = prepared["zone"]
@@ -14838,7 +14840,9 @@ def api_cockpit_enter():
             except RuntimeError as exc:
                 return jsonify({"ok": False, "error": str(exc)}), 409
             snapshot = _cockpit_market_snapshot()
-            prepared = _cockpit_prepare_manual_entry(action, snapshot)
+            prepared = _cockpit_prepare_manual_entry(
+                action, snapshot, setup_id=setup_id,
+            )
             signal = _cockpit_manual_signal(action, snapshot)
             signal["zone"] = prepared["zone"]
             signal["mode"] = dict(initial_mode)
@@ -14976,11 +14980,13 @@ def api_cockpit_preview():
         if dry_run:
             snapshot = _cockpit_market_snapshot(dry_run=True)
             prepared = _cockpit_prepare_manual_entry(
-                action, snapshot, dry_run=True,
+                action, snapshot, dry_run=True, setup_id=setup_id,
             )
         else:
             snapshot = _cockpit_market_snapshot()
-            prepared = _cockpit_prepare_manual_entry(action, snapshot)
+            prepared = _cockpit_prepare_manual_entry(
+                action, snapshot, setup_id=setup_id,
+            )
     except ValueError as exc:
         return jsonify({"ok": False, "error": str(exc)}), 400
     except Exception as exc:
