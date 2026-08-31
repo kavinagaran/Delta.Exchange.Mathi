@@ -230,7 +230,7 @@ function renderTable(trades) {
     return `<tr>
       <td>${esc(tableTime(trade.entry_time_ist))}</td>
       <td>${isOpen ? '—' : esc(tableTime(trade.exit_time_ist))}</td>
-      <td><strong>${esc(trade.symbol || 'Not reported')}</strong></td>
+      <td>${originBadge(trade)}<strong>${esc(trade.symbol || 'Not reported')}</strong></td>
       <td>${side ? `<span class="badge ${side === 'short' ? 'short' : 'long'}">${esc(side.toUpperCase())}</span>` : '—'}</td>
       <td class="numeric">${fN(isOpen ? trade.open_lots : trade.lots, 6)}</td>
       <td class="numeric">${fN(trade.entry_price, 8)}</td>

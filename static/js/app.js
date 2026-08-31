@@ -142,6 +142,18 @@ const f$ = v => (v == null || isNaN(+v)) ? '—' : (v < 0 ? '-$' : '+$') + Math.
 const pnlCls = v => v == null ? 'c-muted' : (+v >= 0 ? 'c-pos' : 'c-neg');
 const esc = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
+/* Trade origin chip: M = manual, A = automated, E = external/adopted. */
+const ORIGIN_BADGE_META = {
+  M: ['manual', 'Manual trade — opened from the Cockpit or outside this dashboard'],
+  A: ['auto', 'Automated trade — opened by the Trend Engine / bot'],
+  E: ['external', 'External position — detected on the exchange and adopted'],
+};
+function originBadge(trade) {
+  const meta = ORIGIN_BADGE_META[String(trade?.origin_label || '').trim()];
+  if (!meta) return '';
+  return `<span class="badge origin ${meta[0]}" title="${esc(meta[1])}">${esc(meta[0] === 'manual' ? 'M' : meta[0] === 'auto' ? 'A' : 'E')}</span> `;
+}
+
 function toast(msg, type = 'ok') {
   let el = document.getElementById('toast');
   if (!el) {

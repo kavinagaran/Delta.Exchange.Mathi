@@ -778,6 +778,15 @@ tr:hover td { background: var(--surface-hover); }
 .badge.long  { background: var(--pos-soft); color: var(--pos); }
 .badge.short { background: var(--neg-soft); color: var(--neg); }
 
+/* Trade origin: M = manual, A = automated, E = external/adopted. */
+.badge.origin {
+  padding: 2px 7px; font-size: 10px; letter-spacing: .05em;
+  vertical-align: 1px; cursor: help;
+}
+.badge.origin.manual   { background: var(--warn-soft); color: var(--warn); }
+.badge.origin.auto     { background: var(--pos-soft); color: var(--pos); }
+.badge.origin.external { background: var(--surface-subtle); color: var(--muted); }
+
 /* ── Slot cards ─────────────────────────────────────────── */
 .slot-hd { display: flex; align-items: center; gap: 9px; }
 .slot-hd .when { margin-left: auto; font-weight: 500; color: var(--muted); font-size: 12px; }

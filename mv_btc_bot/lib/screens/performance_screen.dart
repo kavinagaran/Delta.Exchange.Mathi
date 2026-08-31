@@ -314,6 +314,10 @@ class _TradeListCard extends StatelessWidget {
               child: Row(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
+                  if ('${trade['origin_label'] ?? ''}'.trim().isNotEmpty) ...[
+                    OriginChip.forTrade(trade),
+                    const SizedBox(width: Gap.sm),
+                  ],
                   Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,

@@ -162,6 +162,63 @@ TREND_SCORE_MANUAL_TRIGGERS = {
     "sell_pe": "manual_cockpit_sell_pe",
     "sell_move": "manual_cockpit_sell_move",
 }
+
+# Display classification of how a trade was opened: M = manual (Cockpit or
+# placed outside this dashboard), A = automated (engine/bot), E = externally
+# detected and adopted, "—" = unknown (record predates origin tagging).
+ORIGIN_MANUAL = "M"
+ORIGIN_AUTO = "A"
+ORIGIN_EXTERNAL = "E"
+ORIGIN_UNKNOWN = "—"
+_TREND_AUTO_ENTRY_TRIGGERS = {
+    TREND_SCORE_AUTO_TRIGGER,
+    "trend_engine_phase1_confirmed",
+    "trend_auto",
+    "trend_alignment",
+}
+_TREND_AUTO_OWNERSHIPS = {
+    "trend_bot",
+    "trend_engine_dry_run",
+    TREND_SCORE_AUTO_OWNERSHIP,
+    TREND_SCORE_AUTO_LIVE_OWNERSHIP,
+}
+_EXTERNAL_ENTRY_TRIGGERS = {"exchange_sync", "trend_recovered"}
+_MANUAL_OWNERSHIPS = {
+    TREND_SCORE_MANUAL_LIVE_OWNERSHIP,
+    TREND_SCORE_MANUAL_DRY_OWNERSHIP,
+}
+
+
+def _trade_origin_label(record: dict | None) -> str:
+    """Classify how a trade was opened so any table can show an M/A badge.
+
+    Works for LIVE and dry-run records alike; both entry paths tag the slot
+    state with ``entry_trigger``/``ownership`` before the close is journaled.
+    Untagged MOVE records predate origin tagging and were all written by the
+    legacy MV straddle bot, so they are reported as automated.
+    """
+    if not isinstance(record, dict):
+        return ORIGIN_UNKNOWN
+    trigger = str(record.get("entry_trigger") or "").strip().lower()
+    classification = str(record.get("entry_classification") or "").strip().lower()
+    ownership = str(record.get("ownership") or "").strip().lower()
+    signal_key = str(record.get("signal_key") or "")
+    if (
+        trigger.startswith("manual_cockpit")
+        or classification == "manual_cockpit"
+        or ownership in _MANUAL_OWNERSHIPS
+        or signal_key.startswith("manual-cockpit|")
+    ):
+        return ORIGIN_MANUAL
+    if trigger in _TREND_AUTO_ENTRY_TRIGGERS or ownership in _TREND_AUTO_OWNERSHIPS:
+        return ORIGIN_AUTO
+    if trigger in _EXTERNAL_ENTRY_TRIGGERS or ownership == "external":
+        return ORIGIN_EXTERNAL
+    if str(record.get("symbol") or "").upper().startswith("MV-BTC"):
+        return ORIGIN_AUTO
+    return ORIGIN_UNKNOWN
+
+
 # "Lemme Risk": the operator's explicit manual override setup. Unlike every
 # other Cockpit setup it is gated by no engine evidence at all -- it is
 # always eligible, and every Cockpit trade type is selectable under it. It
@@ -3010,6 +3067,8 @@ def api_today_trades():
             s["slot"]  = slot
             s = _enrich_dry_state(s) if dry_run_mode else _enrich_live(s)
             today_t = [s] + today_t
+    for row in today_t:
+        row.setdefault("origin_label", _trade_origin_label(row))
     return jsonify(today_t)
 
 
@@ -5182,12 +5241,72 @@ def _reconstruct_delta_trades(fills: list[dict], *,
     return sorted(completed, key=lambda row: row.get("sort_timestamp", 0))
 
 
+def _performance_origin_index() -> dict:
+    """Tracked LIVE trades keyed by (symbol, entry date).
+
+    Each value is a list of ``(entry_clock_seconds, origin_label)`` pairs so
+    an exchange-ledger row can be matched to the record that opened it.
+    Legacy records store only a clock string plus ``entry_date`` — never a
+    full timestamp — so the clock is matched, not the instant.
+    """
+    records = [
+        row for row in _load_json(_hist_file(), [])
+        if isinstance(row, dict) and not _is_dry_record(row)
+    ]
+    for slot in SLOTS:
+        state = _load_json(_slot_file(slot), {})
+        if (isinstance(state, dict)
+                and str(state.get("status") or "").upper() == "OPEN"
+                and not _is_dry_record(state)):
+            records.append(state)
+    index: dict = {}
+    for record in records:
+        symbol = str(record.get("symbol") or "").strip()
+        clock = _trade_clock_seconds(record, "entry")
+        date = str(record.get("entry_date")
+                   or record.get("date") or "").strip()
+        if not date:
+            stamp = _parse_utc_stamp(record.get("entry_time_utc"))
+            date = stamp.date().isoformat() if stamp else ""
+        if not symbol or clock is None or not date:
+            continue
+        index.setdefault((symbol, date), []).append(
+            (clock, _trade_origin_label(record)))
+    return index
+
+
+def _delta_row_origin_label(row: dict, index: dict) -> str:
+    """Best-effort M/A attribution for one exchange-ledger trade row.
+
+    The ledger itself has no origin metadata. A row matching a locally
+    tracked trade by symbol, date and entry clock inherits that record's
+    label; unmatched MOVE rows belong to the legacy MV straddle bot, and
+    anything else was placed outside this dashboard's automation, i.e.
+    manually.
+    """
+    symbol = str(row.get("symbol") or "").strip()
+    date = str(row.get("date") or "").strip()
+    stamp = _parse_utc_stamp(row.get("entry_at_utc"))
+    if symbol and date and stamp is not None:
+        clock = stamp.hour * 3600 + stamp.minute * 60 + stamp.second
+        for candidate, label in index.get((symbol, date), []):
+            distance = abs(candidate - clock)
+            if min(distance, 86_400 - distance) <= 5:
+                return label
+    if symbol.upper().startswith("MV-BTC"):
+        return ORIGIN_AUTO
+    return ORIGIN_MANUAL
+
+
 @app.route("/api/performance/delta-trades")
 @app.route("/api/performance/delta-fills")
 def api_performance_delta_trades():
     """Complete trade-level Delta history for the signed-in account."""
     try:
         rows = _reconstruct_delta_trades(_fetch_complete_delta_fills())
+        origin_index = _performance_origin_index()
+        for row in rows:
+            row["origin_label"] = _delta_row_origin_label(row, origin_index)
         return jsonify({
             "ok": True,
             "source": "delta_exchange",
@@ -5345,6 +5464,12 @@ def _all_trades_merged() -> list:
         if not any(_trades_represent_same_round_trip(tracked, reconstructed)
                    for tracked in mv_trades)
     ]
+    for t in other:
+        # A round trip the bot never tracked was placed outside this
+        # dashboard's automation (e.g. directly on Delta) — show it as manual
+        # rather than an unexplained blank.
+        if _trade_origin_label(t) == ORIGIN_UNKNOWN:
+            t["origin_label"] = ORIGIN_MANUAL
     merged = mv_trades + other
     for t in merged:
         # Older records (square-offs, resumed states) carry only entry_date /
@@ -5353,6 +5478,7 @@ def _all_trades_merged() -> list:
         t.setdefault("date", t.get("entry_date", ""))
         t.setdefault("entry_time", t.get("entry_time_utc", ""))
         t.setdefault("exit_time", t.get("exit_time_utc", ""))
+        t.setdefault("origin_label", _trade_origin_label(t))
     merged.sort(key=lambda t: (t.get("entry_date") or t.get("date", ""),
                                 t.get("entry_time", "")))
     return merged
@@ -5389,6 +5515,7 @@ def _dry_run_trades() -> list[dict]:
         row.setdefault("date", row.get("entry_date", ""))
         row.setdefault("entry_time", row.get("entry_time_utc", ""))
         row.setdefault("exit_time", row.get("exit_time_utc", ""))
+        row.setdefault("origin_label", _trade_origin_label(row))
     rows.sort(key=lambda row: (
         row.get("entry_date") or row.get("date", ""),
         row.get("entry_time") or row.get("entry_time_utc", ""),
@@ -5836,6 +5963,8 @@ def api_dry_run_today_trades():
             live = _enrich_dry_state(state)
             live.update({"_live": True, "slot": slot})
             rows.insert(0, live)
+    for row in rows:
+        row.setdefault("origin_label", _trade_origin_label(row))
     return jsonify(rows)
 
 

@@ -484,6 +484,61 @@ class StatusPill extends StatelessWidget {
   }
 }
 
+/// Trade-origin chip shared by every trade list, mirroring the web badges:
+/// M = manual (Cockpit / placed outside the dashboard), A = automated
+/// (Trend Engine / bot), E = external position adopted from the exchange.
+/// Untagged records render nothing rather than a misleading blank chip.
+class OriginChip extends StatelessWidget {
+  const OriginChip.forTrade(this.trade, {super.key});
+
+  final Map<String, dynamic>? trade;
+
+  @override
+  Widget build(BuildContext context) {
+    final (letter, tone, tooltip) = switch (
+        '${trade?['origin_label'] ?? ''}'.trim()) {
+      'M' => (
+          'M',
+          kWarning,
+          'Manual trade — opened from the Cockpit or outside this dashboard',
+        ),
+      'A' => (
+          'A',
+          kPositive,
+          'Automated trade — opened by the Trend Engine / bot',
+        ),
+      'E' => (
+          'E',
+          kNeutral,
+          'External position — detected on the exchange and adopted',
+        ),
+      _ => ('', kNeutral, ''),
+    };
+    if (letter.isEmpty) return const SizedBox.shrink();
+    return Tooltip(
+      message: tooltip,
+      child: Container(
+        margin: const EdgeInsets.only(top: 1),
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+        decoration: BoxDecoration(
+          color: tone.withValues(alpha: .13),
+          borderRadius: BorderRadius.circular(Radii.pill),
+          border: Border.all(color: tone.withValues(alpha: .38)),
+        ),
+        child: Text(
+          letter,
+          style: AppText.caption.copyWith(
+            color: tone,
+            fontWeight: FontWeight.w800,
+            fontSize: 10,
+            height: 1.1,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 /// Compact view of the committed 5-minute ADX policy shared by Today and the
 /// full Trend Engine screen. Execution remains server-owned; this widget only
 /// makes the exact evidence and boundary visible on the phone.

@@ -384,6 +384,10 @@ class _TradeRow extends StatelessWidget {
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
+        if ('${trade['origin_label'] ?? ''}'.trim().isNotEmpty) ...[
+          OriginChip.forTrade(trade),
+          const SizedBox(width: Gap.sm),
+        ],
         StatusPill(
           _zoneShort(trade),
           colour: zoneColour(

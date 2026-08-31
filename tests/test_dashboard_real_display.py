@@ -287,6 +287,12 @@ global.f$ = value => {
 global.pnlCls = value => Number(value) < 0 ? 'c-neg' : 'c-pos';
 global.esc = value => String(value ?? '').replace(/&/g, '&amp;')
   .replace(/</g, '&lt;').replace(/>/g, '&gt;');
+global.originBadge = trade => {
+  const label = String(trade?.origin_label || '').trim();
+  const cls = label === 'M' ? 'manual'
+    : label === 'A' ? 'auto' : label === 'E' ? 'external' : '';
+  return cls ? `<span class="badge origin ${cls}">${label}</span> ` : '';
+};
 global.confirm = () => true;
 global.toast = () => {};
 global.protectionDrawerFieldsHtml = record =>
@@ -303,12 +309,12 @@ global.jget = async url => {
     return [
       {symbol: 'C-BTC-65000', side: 'long', strike: 65000, lots: 1000,
        entry_mark: 500, _live: true, current_mark: 525, live_pnl: 25,
-       slot: 'trend'},
+       slot: 'trend', origin_label: 'M'},
       {symbol: 'P-BTC-64000', side: 'long', strike: 64000, lots: 1000,
        entry_mark: 450, exit_mark: 400, pnl_usd: -50, slot: 'trend',
        entry_date: '2026-08-02', entry_time_utc: '02:11:00',
        exit_date: '2026-08-02', exit_time_utc: '02:31:00',
-       exit_trigger: 'trailing_stop'},
+       exit_trigger: 'trailing_stop', origin_label: 'A'},
     ];
   }
   if (url === '/api/tp-monitor') {
@@ -364,6 +370,10 @@ vm.runInThisContext(source.slice(start, end));
     'C-BTC-65000', 'P-BTC-64000', 'OPEN', 'CLOSED', '-$50.00',
   ]) {
     if (!todayTable.includes(detail)) throw new Error(`missing Today table detail: ${detail}`);
+  }
+  if (!todayTable.includes('badge origin manual') ||
+      !todayTable.includes('badge origin auto')) {
+    throw new Error(`Today table is missing M/A origin badges: ${todayTable}`);
   }
   if (todayTable.includes(' IST')) throw new Error('Today table still prints IST');
   const decisionCard = elements['today-engine-decision'].innerHTML;

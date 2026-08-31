@@ -1134,6 +1134,10 @@ class _TradeHistoryRow extends StatelessWidget {
             padding: const EdgeInsets.only(top: 5),
             child: Row(
               children: [
+                if ('${trade['origin_label'] ?? ''}'.trim().isNotEmpty) ...[
+                  OriginChip.forTrade(trade),
+                  const SizedBox(width: Gap.sm),
+                ],
                 StatusPill(
                   _tradeType(trade),
                   colour: zoneColour(switch (_tradeType(trade)) {

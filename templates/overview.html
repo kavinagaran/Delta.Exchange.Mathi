@@ -357,7 +357,7 @@ function renderTodayTrades(rows) {
     return `<tr>
       <td>${esc(todayTableTimestamp(trade))}</td>
       <td>${open ? '—' : esc(todayTableTimestamp(trade, 'exit'))}</td>
-      <td><strong>${esc(trade.symbol || '—')}</strong></td>
+      <td>${originBadge(trade)}<strong>${esc(trade.symbol || '—')}</strong></td>
       <td><span class="badge ${directionClass}">${esc(direction)}</span></td>
       <td class="numeric">${fN(trade.lots, 6)}</td>
       <td class="numeric">${fN(trade.entry_mark, 8)}</td>

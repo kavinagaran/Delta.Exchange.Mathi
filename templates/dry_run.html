@@ -662,7 +662,7 @@ function renderDryHistory(trades) {
       <td>${esc(entryIst.time)}</td>
       <td>${esc(exitIst.time)}</td>
       <td>${esc(dryScoreZoneLabel(trade))}</td>
-      <td>${esc(trade.symbol || '—')}</td>
+      <td>${originBadge(trade)}${esc(trade.symbol || '—')}</td>
       <td>${trade.side ? `<span class="badge ${String(trade.side).toLowerCase() === 'short' ? 'short' : 'long'}">${esc(String(trade.side).toUpperCase())}</span>` : '—'}</td>
       <td>${fN(trade.lots)}</td>
       <td>$${fN(trade.entry_mark, 4)}</td>
@@ -783,7 +783,7 @@ function renderDryToday(rows) {
       <td>${esc(entryIst.time)}</td>
       <td>${live ? '—' : esc(exitIst.time)}</td>
       <td>${esc(dryScoreZoneLabel(trade))}</td>
-      <td>${esc(trade.symbol || '—')}</td>
+      <td>${originBadge(trade)}${esc(trade.symbol || '—')}</td>
       <td>${trade.side ? `<span class="badge ${String(trade.side).toLowerCase() === 'short' ? 'short' : 'long'}">${esc(String(trade.side).toUpperCase())}</span>` : '—'}</td>
       <td>${fN(trade.lots)}</td>
       <td>$${fN(trade.entry_mark, 4)}</td>
