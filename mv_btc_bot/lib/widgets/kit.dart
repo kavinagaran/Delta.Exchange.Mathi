@@ -539,6 +539,97 @@ class OriginChip extends StatelessWidget {
   }
 }
 
+/// Whether a trade row passes the origin filter. The empty filter ("All")
+/// keeps every row, including legacy records with no origin label.
+bool originMatches(Map<String, dynamic>? trade, String filter) {
+  final key = filter.trim();
+  if (key.isEmpty) return true;
+  return '${trade?['origin_label'] ?? ''}'.trim() == key;
+}
+
+/// All / Manual / Auto / External filter chips shared by every trade list,
+/// mirroring the web origin filter. [value] is '' for All or one of M/A/E.
+class OriginFilterBar extends StatelessWidget {
+  const OriginFilterBar({
+    super.key,
+    required this.value,
+    required this.onChanged,
+  });
+
+  final String value;
+  final ValueChanged<String> onChanged;
+
+  static const _options = <(String, String, Color?)>[
+    ('', 'All', null),
+    ('M', 'Manual', kWarning),
+    ('A', 'Auto', kPositive),
+    ('E', 'External', kNeutral),
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Wrap(
+      spacing: Gap.sm,
+      runSpacing: Gap.xs,
+      children: [
+        for (final (key, label, tone) in _options)
+          _FilterChip(
+            label: label,
+            selected: value == key,
+            tone: tone ?? scheme.primary,
+            onTap: () => onChanged(key),
+          ),
+      ],
+    );
+  }
+}
+
+class _FilterChip extends StatelessWidget {
+  const _FilterChip({
+    required this.label,
+    required this.selected,
+    required this.tone,
+    required this.onTap,
+  });
+
+  final String label;
+  final bool selected;
+  final Color tone;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Material(
+      color: selected ? tone.withValues(alpha: .14) : Colors.transparent,
+      borderRadius: BorderRadius.circular(Radii.pill),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(Radii.pill),
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 4),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(Radii.pill),
+            border: Border.all(
+              color: selected
+                  ? tone.withValues(alpha: .55)
+                  : scheme.outline.withValues(alpha: .5),
+            ),
+          ),
+          child: Text(
+            label,
+            style: AppText.caption.copyWith(
+              color: selected ? tone : scheme.onSurfaceVariant,
+              fontWeight: selected ? FontWeight.w800 : FontWeight.w500,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 /// Compact view of the committed 5-minute ADX policy shared by Today and the
 /// full Trend Engine screen. Execution remains server-owned; this widget only
 /// makes the exact evidence and boundary visible on the phone.

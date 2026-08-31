@@ -787,6 +787,21 @@ tr:hover td { background: var(--surface-hover); }
 .badge.origin.auto     { background: var(--pos-soft); color: var(--pos); }
 .badge.origin.external { background: var(--surface-subtle); color: var(--muted); }
 
+/* Origin filter chips (All / Manual / Auto / External) in trade table heads.
+ * Active tints mirror the matching badge colour family. */
+.origin-filters { display: inline-flex; gap: 6px; margin-left: 10px; flex-wrap: wrap; }
+.origin-filter {
+  padding: 3px 10px; border-radius: 999px; font-size: 11px; letter-spacing: .04em;
+  font-family: inherit; border: 1px solid var(--border); background: transparent;
+  color: var(--muted); cursor: pointer;
+  transition: color .15s ease, background-color .15s ease, border-color .15s ease;
+}
+.origin-filter:hover { color: var(--text); border-color: var(--muted); }
+.origin-filter.active { color: var(--accent-dark); border-color: var(--accent); background: var(--accent-soft); }
+.origin-filter[data-origin="M"].active { color: var(--warn); border-color: var(--warn); background: var(--warn-soft); }
+.origin-filter[data-origin="A"].active { color: var(--pos); border-color: var(--pos); background: var(--pos-soft); }
+.origin-filter[data-origin="E"].active { color: var(--text); border-color: var(--muted); background: var(--surface-subtle); }
+
 /* ── Slot cards ─────────────────────────────────────────── */
 .slot-hd { display: flex; align-items: center; gap: 9px; }
 .slot-hd .when { margin-left: auto; font-weight: 500; color: var(--muted); font-size: 12px; }

@@ -154,6 +154,47 @@ function originBadge(trade) {
   return `<span class="badge origin ${meta[0]}" title="${esc(meta[1])}">${esc(meta[0] === 'manual' ? 'M' : meta[0] === 'auto' ? 'A' : 'E')}</span> `;
 }
 
+/* Origin filter chips: narrow a trade table to manual / automated / external
+ * rows. '' (All) keeps every row, including legacy records with no label. */
+const ORIGIN_FILTERS = [
+  ['', 'All', 'Show every trade regardless of origin'],
+  ['M', 'Manual', 'Show only manual trades — Cockpit or placed outside this dashboard'],
+  ['A', 'Auto', 'Show only automated trades — opened by the Trend Engine / bot'],
+  ['E', 'External', 'Show only positions detected on the exchange and adopted'],
+];
+function originFilterChipsHtml(active) {
+  const current = String(active || '').trim();
+  return ORIGIN_FILTERS.map(([key, label, title]) =>
+    `<button type="button" class="origin-filter${current === key ? ' active' : ''}"` +
+    ` data-origin="${esc(key)}" title="${esc(title)}"` +
+    ` aria-pressed="${current === key}">${esc(label)}</button>`).join('');
+}
+function matchesOriginFilter(trade, origin) {
+  const key = String(origin || '').trim();
+  if (!key) return true;
+  return String(trade?.origin_label || '').trim() === key;
+}
+function filterByOrigin(trades, origin) {
+  return (Array.isArray(trades) ? trades : []).filter(trade => matchesOriginFilter(trade, origin));
+}
+/* Renders the chips into #containerId and wires click handling. Returns a
+ * getter for the currently active filter so async reloads (polling, refresh
+ * buttons) can keep honouring the selection. */
+function mountOriginFilter(containerId, onChange) {
+  let active = '';
+  const container = document.getElementById(containerId);
+  const render = () => { if (container) container.innerHTML = originFilterChipsHtml(active); };
+  container?.addEventListener('click', event => {
+    const chip = event.target.closest('.origin-filter');
+    if (!chip) return;
+    active = String(chip.dataset.origin || '');
+    render();
+    onChange(active);
+  });
+  render();
+  return () => active;
+}
+
 function toast(msg, type = 'ok') {
   let el = document.getElementById('toast');
   if (!el) {

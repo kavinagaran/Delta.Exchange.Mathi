@@ -266,6 +266,7 @@ function element(id) {
     const classes = new Set();
     elements[id] = {
       innerHTML: '', textContent: '', className: '',
+      addEventListener() {},
       closest(selector) { return selector === '.stat' ? card : null; },
       classList: {
         add(value) { classes.add(value); },
@@ -292,6 +293,12 @@ global.originBadge = trade => {
   const cls = label === 'M' ? 'manual'
     : label === 'A' ? 'auto' : label === 'E' ? 'external' : '';
   return cls ? `<span class="badge origin ${cls}">${label}</span> ` : '';
+};
+global.mountOriginFilter = () => () => '';
+global.filterByOrigin = (trades, origin) => {
+  const key = String(origin || '').trim();
+  if (!key) return trades;
+  return trades.filter(trade => String(trade?.origin_label || '').trim() === key);
 };
 global.confirm = () => true;
 global.toast = () => {};

@@ -86,6 +86,7 @@
 <div class="card">
   <div class="card-hd">
     Today's Dry Run Trades
+    <div class="origin-filters" id="dry-today-origin-filter" role="group" aria-label="Filter today's dry-run trades by origin"></div>
     <span class="spacer"></span>
     <span class="hint" id="dry-today-count"></span>
   </div>
@@ -108,6 +109,7 @@
 <div class="card">
   <div class="card-hd">
     Dry Run Trade History
+    <div class="origin-filters" id="dry-history-origin-filter" role="group" aria-label="Filter dry-run trade history by origin"></div>
     <span class="spacer"></span>
     <span class="hint" id="dry-trade-count"></span>
   </div>
@@ -136,9 +138,15 @@ let dryTrendScoreAutoStatus = null;
 let dryTrendScoreAutoReachable = false;
 let dryRunChart = null;
 let dryHistory = [];
+let dryTodayRows = [];
 let dryStatusRefreshPending = false;
 let dryStatusRefreshQueued = false;
 const dryProtectionSaving = new Set();
+
+const dryTodayOrigin = mountOriginFilter('dry-today-origin-filter', origin =>
+  renderDryToday(filterByOrigin(dryTodayRows, origin)));
+const dryHistoryOrigin = mountOriginFilter('dry-history-origin-filter', origin =>
+  renderDryHistory(filterByOrigin(dryHistory, origin)));
 
 function dryEntryUtcClock(state) {
   const clock = String(state?.entry_time_utc || state?.entry_time || '').trim();
@@ -755,7 +763,7 @@ async function loadDryResults() {
   }
   dryHistory = Array.isArray(trades) ? trades : [];
   renderDryStats(summary);
-  renderDryHistory(dryHistory);
+  renderDryHistory(filterByOrigin(dryHistory, dryHistoryOrigin()));
   drawDryChart(dryHistory);
 }
 
@@ -797,7 +805,8 @@ function renderDryToday(rows) {
 async function loadDryToday() {
   try {
     const rows = await jget('/api/dry-run/today-trades');
-    renderDryToday(Array.isArray(rows) ? rows : []);
+    dryTodayRows = Array.isArray(rows) ? rows : [];
+    renderDryToday(filterByOrigin(dryTodayRows, dryTodayOrigin()));
   } catch (_) {
     document.getElementById('dry-today-body').innerHTML =
       '<tr class="empty-row"><td colspan="10">Today’s dry-run results are unavailable</td></tr>';

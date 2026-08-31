@@ -26,7 +26,11 @@
 </div>
 
 <div class="card performance-history-card">
-  <div class="card-hd">Trade History <span class="spacer"></span><span class="hint" id="trade-count"></span></div>
+  <div class="card-hd">
+    Trade History
+    <div class="origin-filters" id="history-origin-filter" role="group" aria-label="Filter trade history by origin"></div>
+    <span class="spacer"></span><span class="hint" id="trade-count"></span>
+  </div>
   <div class="tbl-wrap">
     <table class="exchange-history-table">
       <thead><tr>
@@ -45,6 +49,9 @@
 let chart = null, latestTrades = [];
 
 document.getElementById('refresh-history').addEventListener('click', () => load(true));
+
+const historyOrigin = mountOriginFilter('history-origin-filter', origin =>
+  renderTable(filterByOrigin(latestTrades, origin)));
 
 function dailyTradeSeries(trades) {
   const byDay = new Map();
@@ -265,7 +272,7 @@ async function load(manual = false) {
       : 'just now';
     setSourceStatus(`${payload.count.toLocaleString()} trade${payload.count === 1 ? '' : 's'} loaded from Delta Exchange · updated ${localTime}`, 'ready');
     drawChart(latestTrades);
-    renderTable(latestTrades);
+    renderTable(filterByOrigin(latestTrades, historyOrigin()));
     renderStats(latestTrades);
   } catch (error) {
     latestTrades = [];

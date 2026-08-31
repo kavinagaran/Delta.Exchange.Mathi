@@ -1,5 +1,7 @@
 """M/A/E trade-origin labeling across tracked, paper and exchange trades."""
 import json
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -7,6 +9,7 @@ import pytest
 import dashboard
 
 ROOT = Path(__file__).resolve().parents[1]
+NODE = shutil.which("node")
 
 
 @pytest.fixture
@@ -191,13 +194,87 @@ def test_web_surfaces_render_origin_badges():
         assert "originBadge(trade)" in html, template
 
 
+def test_web_origin_filter_helpers_and_wiring():
+    app_js = (ROOT / "static" / "js" / "app.js").read_text(encoding="utf-8")
+    app_css = (ROOT / "static" / "css" / "app.css").read_text(encoding="utf-8")
+    for helper in ("function originFilterChipsHtml", "function matchesOriginFilter",
+                   "function filterByOrigin", "function mountOriginFilter",
+                   "const ORIGIN_FILTERS"):
+        assert helper in app_js, helper
+    assert ".origin-filter" in app_css
+    assert '.origin-filter[data-origin="M"].active' in app_css
+    assert '.origin-filter[data-origin="A"].active' in app_css
+
+    expected = {
+        "trades.html": ["history-origin-filter"],
+        "dry_run.html": ["dry-today-origin-filter", "dry-history-origin-filter"],
+        "overview.html": ["today-origin-filter"],
+    }
+    for template, container_ids in expected.items():
+        html = (ROOT / "templates" / template).read_text(encoding="utf-8")
+        for container_id in container_ids:
+            assert f'id="{container_id}"' in html, (template, container_id)
+            assert f"mountOriginFilter('{container_id}'" in html, container_id
+        assert "filterByOrigin(" in html, template
+
+
+@pytest.mark.skipif(NODE is None, reason="Node.js is required for frontend JavaScript tests")
+def test_origin_filter_helpers_behaviour():
+    script = r"""
+const fs = require('fs');
+const vm = require('vm');
+const source = fs.readFileSync('static/js/app.js', 'utf8');
+const start = source.indexOf('const ORIGIN_FILTERS');
+const end = source.indexOf('function toast');
+if (start < 0 || end <= start) throw new Error('origin filter helpers not found');
+global.esc = value => String(value ?? '').replace(/&/g, '&amp;')
+  .replace(/</g, '&lt;').replace(/>/g, '&gt;');
+vm.runInThisContext(source.slice(start, end));
+
+const trades = [
+  {symbol: 'C-BTC-1', origin_label: 'M'},
+  {symbol: 'C-BTC-2', origin_label: 'A'},
+  {symbol: 'C-BTC-3', origin_label: 'E'},
+  {symbol: 'C-BTC-4'},
+];
+if (filterByOrigin(trades, '').length !== 4) throw new Error('All must keep every row');
+if (filterByOrigin(trades, 'M').map(t => t.symbol).join() !== 'C-BTC-1') throw new Error('M filter wrong');
+if (filterByOrigin(trades, 'A').map(t => t.symbol).join() !== 'C-BTC-2') throw new Error('A filter wrong');
+if (filterByOrigin(trades, 'E').map(t => t.symbol).join() !== 'C-BTC-3') throw new Error('E filter wrong');
+if (!matchesOriginFilter({origin_label: 'A'}, 'A')) throw new Error('matchesOriginFilter true case');
+if (matchesOriginFilter({origin_label: 'M'}, 'A')) throw new Error('matchesOriginFilter false case');
+if (!matchesOriginFilter({}, '')) throw new Error('empty filter must match everything');
+
+const chips = originFilterChipsHtml('A');
+for (const label of ['All', 'Manual', 'Auto', 'External']) {
+  if (!chips.includes(`>${label}</button>`)) throw new Error(`missing chip: ${label}`);
+}
+if (!chips.includes('class="origin-filter active" data-origin="A"')) {
+  throw new Error('Auto chip not marked active');
+}
+if (chips.includes('class="origin-filter active" data-origin="M"')) {
+  throw new Error('Manual chip wrongly active');
+}
+if (!originFilterChipsHtml('').includes('class="origin-filter active" data-origin=""')) {
+  throw new Error('All chip not active by default');
+}
+"""
+    result = subprocess.run([NODE, "-e", script], cwd=ROOT, text=True,
+                            capture_output=True, check=False)
+    assert result.returncode == 0, result.stderr
+
+
 def test_flutter_surfaces_render_origin_chips():
     kit = (ROOT / "mv_btc_bot" / "lib" / "widgets" / "kit.dart") \
         .read_text(encoding="utf-8")
     assert "class OriginChip" in kit
+    assert "class OriginFilterBar" in kit
+    assert "bool originMatches" in kit
     assert "origin_label" in kit
     for screen in ("performance_screen.dart", "today_screen.dart",
                    "dry_run_screen.dart"):
         dart = (ROOT / "mv_btc_bot" / "lib" / "screens" / screen) \
             .read_text(encoding="utf-8")
         assert "OriginChip.forTrade" in dart, screen
+        assert "OriginFilterBar(" in dart, screen
+        assert "originMatches(" in dart, screen

@@ -313,7 +313,7 @@ class _DryRunPositionCard extends StatelessWidget {
   }
 }
 
-class _DryRunTradesCard extends StatelessWidget {
+class _DryRunTradesCard extends StatefulWidget {
   const _DryRunTradesCard({
     required this.title,
     required this.rows,
@@ -324,26 +324,40 @@ class _DryRunTradesCard extends StatelessWidget {
   final List<Map<String, dynamic>> rows;
   final int limit;
 
+  @override
+  State<_DryRunTradesCard> createState() => _DryRunTradesCardState();
+}
+
+class _DryRunTradesCardState extends State<_DryRunTradesCard> {
+  String _originFilter = '';
+
   // "Today" is the bot's trading day (Delta delists each day's contract at
   // 17:30 IST), not the IST calendar day — matches the web Today panel.
   static const _windowNote = 'Trading day: 5:31 pm IST → 5:30 pm IST next day';
 
   @override
   Widget build(BuildContext context) {
-    // The API returns rows oldest-first; sort newest-first before capping to
-    // `limit` so a long History list shows its most recent trades instead of
-    // silently truncating to whatever entered first.
-    final ordered = List<Map<String, dynamic>>.from(rows)
+    // The API returns rows oldest-first; filter by origin first, then sort
+    // newest-first before capping to `limit` so a long History list shows its
+    // most recent matching trades instead of whatever entered first.
+    final filtered = widget.rows
+        .where((row) => originMatches(row, _originFilter))
+        .toList()
       ..sort((a, b) => _entryMoment(b).compareTo(_entryMoment(a)));
-    final shown = ordered.take(limit).toList();
-    final isToday = title == "Today's trades";
+    final shown = filtered.take(widget.limit).toList();
+    final isToday = widget.title == "Today's trades";
     final onSurfaceVariant = Theme.of(context).colorScheme.onSurfaceVariant;
     return AppCard(
       kicker: 'Dry Run',
-      title: '$title · ${rows.length}',
+      title: '${widget.title} · ${widget.rows.length}',
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          OriginFilterBar(
+            value: _originFilter,
+            onChanged: (value) => setState(() => _originFilter = value),
+          ),
+          const SizedBox(height: Gap.sm),
           if (isToday) ...[
             Text(
               _windowNote,
@@ -353,7 +367,9 @@ class _DryRunTradesCard extends StatelessWidget {
           ],
           if (shown.isEmpty)
             Text(
-              'No dry-run trades.',
+              widget.rows.isEmpty
+                  ? 'No dry-run trades.'
+                  : 'No trades match this filter.',
               style: AppText.body.copyWith(color: onSurfaceVariant),
             )
           else

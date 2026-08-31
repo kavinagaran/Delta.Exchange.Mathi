@@ -1037,16 +1037,24 @@ class _CockpitButton extends StatelessWidget {
 /// delists each day's contract at 17:30 IST, so the window the server
 /// returns (and this card labels) runs 5:31 pm IST to 5:30 pm IST the next
 /// day — matching the web Today panel.
-class _TodayTradesCard extends StatelessWidget {
+class _TodayTradesCard extends StatefulWidget {
   const _TodayTradesCard({required this.trades});
 
   final List<Map<String, dynamic>> trades;
+
+  @override
+  State<_TodayTradesCard> createState() => _TodayTradesCardState();
+}
+
+class _TodayTradesCardState extends State<_TodayTradesCard> {
+  String _originFilter = '';
 
   static const _windowNote = 'Trading day: 5:31 pm IST → 5:30 pm IST next day';
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    final trades = widget.trades;
     if (trades.isEmpty) {
       return AppCard(
         kicker: "Today's activity",
@@ -1067,6 +1075,9 @@ class _TodayTradesCard extends StatelessWidget {
         ),
       );
     }
+    final filtered = trades
+        .where((trade) => originMatches(trade, _originFilter))
+        .toList();
     return AppCard(
       kicker: "Today's activity",
       title: '${trades.length} ${trades.length == 1 ? 'trade' : 'trades'}',
@@ -1082,9 +1093,21 @@ class _TodayTradesCard extends StatelessWidget {
               style: AppText.caption.copyWith(color: scheme.onSurfaceVariant),
             ),
           ),
-          for (var index = 0; index < trades.length; index++) ...[
-            _TradeHistoryRow(trade: trades[index]),
-            if (index != trades.length - 1)
+          Padding(
+            padding: const EdgeInsets.only(bottom: Gap.sm),
+            child: OriginFilterBar(
+              value: _originFilter,
+              onChanged: (value) => setState(() => _originFilter = value),
+            ),
+          ),
+          if (filtered.isEmpty)
+            Text(
+              'No trades match this filter.',
+              style: AppText.caption.copyWith(color: scheme.onSurfaceVariant),
+            ),
+          for (var index = 0; index < filtered.length; index++) ...[
+            _TradeHistoryRow(trade: filtered[index]),
+            if (index != filtered.length - 1)
               Divider(height: 1, color: scheme.outline),
           ],
         ],

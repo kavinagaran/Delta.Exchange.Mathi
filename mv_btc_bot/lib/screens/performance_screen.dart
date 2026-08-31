@@ -292,22 +292,50 @@ class _EquityPainter extends CustomPainter {
       old.values != values || old.line != line;
 }
 
-class _TradeListCard extends StatelessWidget {
+class _TradeListCard extends StatefulWidget {
   const _TradeListCard({required this.trades});
 
   final List<Map<String, dynamic>> trades;
 
   @override
+  State<_TradeListCard> createState() => _TradeListCardState();
+}
+
+class _TradeListCardState extends State<_TradeListCard> {
+  String _originFilter = '';
+
+  @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final shown = trades.reversed.take(40).toList();
+    final filtered = widget.trades
+        .where((trade) => originMatches(trade, _originFilter))
+        .toList();
+    final shown = filtered.reversed.take(40).toList();
 
     return AppCard(
       kicker: 'History',
-      title: '${trades.length} trade cycles',
+      title: '${widget.trades.length} trade cycles',
       padding: const EdgeInsets.fromLTRB(Gap.lg, Gap.lg, Gap.lg, Gap.sm),
       child: Column(
         children: [
+          Align(
+            alignment: Alignment.centerLeft,
+            child: OriginFilterBar(
+              value: _originFilter,
+              onChanged: (value) => setState(() => _originFilter = value),
+            ),
+          ),
+          const SizedBox(height: Gap.sm),
+          if (shown.isEmpty)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: Gap.sm),
+              child: Text(
+                'No trades match this filter.',
+                style: AppText.caption.copyWith(
+                  color: scheme.onSurfaceVariant,
+                ),
+              ),
+            ),
           for (final trade in shown)
             Padding(
               padding: const EdgeInsets.symmetric(vertical: 7),
@@ -354,11 +382,11 @@ class _TradeListCard extends StatelessWidget {
                 ],
               ),
             ),
-          if (trades.length > shown.length)
+          if (filtered.length > shown.length)
             Padding(
               padding: const EdgeInsets.symmetric(vertical: Gap.sm),
               child: Text(
-                '+ ${trades.length - shown.length} older — open Performance '
+                '+ ${filtered.length - shown.length} older — open Performance '
                 'on the web for the full ledger',
                 textAlign: TextAlign.center,
                 style: AppText.caption.copyWith(color: scheme.onSurfaceVariant),

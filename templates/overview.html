@@ -84,6 +84,7 @@
       <span aria-hidden="true">◉</span>
       Today's Trades
       <span class="hint today-window-note">Trading day: 5:30 pm IST → 5:30 pm IST next day</span>
+      <div class="origin-filters" id="today-origin-filter" role="group" aria-label="Filter today's trades by origin"></div>
       <span class="spacer"></span>
       <span class="hint" id="today-table-count">Loading…</span>
     </div>
@@ -111,6 +112,9 @@ const todayClosing = new Set();
 let todayProtectionEvents = null;
 let todayRows = [];
 let todayCurrentIndex = -1;
+
+const todayOrigin = mountOriginFilter('today-origin-filter', origin =>
+  renderTodayTrades(filterByOrigin(todayRows, origin)));
 
 function todayTradePnl(trade) {
   return +(trade?._live ? trade.live_pnl : trade?.pnl_usd) || 0;
@@ -525,7 +529,7 @@ async function loadToday() {
   const currentProtection = currentTrade?.dry_run
     ? currentTrade.dry_protection : currentSlot ? protectionStatus?.[currentSlot] : null;
   renderTodayCurrentTrade(currentTrade, currentIndex, currentProtection);
-  renderTodayTrades(rows);
+  renderTodayTrades(filterByOrigin(todayRows, todayOrigin()));
   renderTodayEngineDecision(engineStatus, engineSnapshot, engineLive);
   return rows;
 }
@@ -545,7 +549,7 @@ function applyTodayProtectionEvent(payload) {
   }
   window._todayLiveTrades[todayCurrentIndex] = { ...trade, controlSlot: slot };
   renderTodayCurrentTrade(trade, todayCurrentIndex, protection);
-  renderTodayTrades(todayRows);
+  renderTodayTrades(filterByOrigin(todayRows, todayOrigin()));
   updateTodaySummary(todayRows);
 }
 
