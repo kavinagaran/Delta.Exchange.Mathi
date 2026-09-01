@@ -8932,6 +8932,22 @@ def _trend_score_auto_ledger(data_dir: Path) -> dict:
     setup_lock = ledger.get("setup_lock")
     if setup_lock is not None and not isinstance(setup_lock, dict):
         raise RuntimeError("Trend score-auto setup lock ledger is invalid")
+    # Manual Cockpit orders must never own the automated score-zone lock.
+    # Older versions wrote a COCKPIT_* lock after a manual fill; discard that
+    # stale marker on read so it cannot block bot entries or expose a misleading
+    # Reset Zone Lock control in Bot Config.
+    if isinstance(setup_lock, dict):
+        lock_action = str(setup_lock.get("source_action") or "").strip().upper()
+        lock_ownership = str(setup_lock.get("ownership") or "").strip().lower()
+        if (
+            lock_action.startswith("COCKPIT_")
+            or lock_ownership in {
+                TREND_SCORE_MANUAL_LIVE_OWNERSHIP,
+                TREND_SCORE_MANUAL_DRY_OWNERSHIP,
+            }
+        ):
+            ledger["setup_lock"] = None
+            setup_lock = None
     migration_checked = ledger.get("legacy_setup_lock_migration_v1", False)
     if not isinstance(migration_checked, bool):
         raise RuntimeError("Trend score-auto setup-lock migration marker is invalid")
@@ -10051,14 +10067,6 @@ def _cockpit_enter_dry_run(
                 _atomic_write_json(
                     _slot_file("trend", dry_run=True), opened,
                 )
-                ledger = _trend_score_auto_ledger(data_dir)
-                _trend_score_auto_lock_setup(
-                    ledger,
-                    signal,
-                    transition_id=transition_id,
-                    action=f"COCKPIT_{action.upper()}",
-                )
-                _trend_score_auto_write_ledger(data_dir, ledger)
 
         _trend_audit("cockpit_manual_dry_run_entry", {
             "action": action,
@@ -10573,7 +10581,13 @@ def _trend_score_auto_lock_setup(
     transition_id: str,
     action: str,
 ) -> None:
-    """Persist that this zone setup has already opened one position."""
+    """Persist that an automated bot setup has already opened a position.
+
+    Manual Cockpit entries are intentionally excluded: their lifecycle must
+    not arm or release the Bot Config Reset Zone Lock control.
+    """
+    if str(action or "").strip().upper().startswith("COCKPIT_"):
+        return
     ledger["setup_lock"] = {
         "recorded_at_utc": datetime.now(timezone.utc).isoformat(),
         "target_zone": signal["zone"],
@@ -15017,27 +15031,6 @@ def api_cockpit_enter():
                     ].get("exchange_rejected_lots"),
                     "retried_lots": margin_retry["lots"],
                 }
-            cockpit_opened = (
-                bool(result.get("ok"))
-                and str(result.get("status") or "").upper() == "OPEN"
-            )
-            if cockpit_opened:
-                # Cockpit entries use the same one-trade-per-setup safety as
-                # automated entries, but deliberately do not add their
-                # synthetic signal key to ``ledger["signals"]``. This makes
-                # Reset Zone Lock available after every confirmed manual
-                # fill without consuming a real completed-candle signal.
-                data_dir = _mode_data_dir(False)
-                # ``account_entry_lock`` is the controller/reset mutation
-                # boundary, so this read-modify-write cannot race either.
-                ledger = _trend_score_auto_ledger(data_dir)
-                _trend_score_auto_lock_setup(
-                    ledger,
-                    signal,
-                    transition_id=transition_id,
-                    action=f"COCKPIT_{action.upper()}",
-                )
-                _trend_score_auto_write_ledger(data_dir, ledger)
     except Exception as exc:
         return jsonify({"ok": False, "error": str(exc)[:300]}), 400
 

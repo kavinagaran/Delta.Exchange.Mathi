@@ -447,11 +447,11 @@ def test_cockpit_enter_tags_manual_ownership_for_every_trade_type(
     dashboard._trend_score_auto_notify.assert_called_once()
 
 
-def test_cockpit_enter_records_setup_lock_without_consuming_engine_signal(
+def test_cockpit_enter_does_not_record_setup_lock_or_consume_engine_signal(
     live_account, monkeypatch,
 ):
-    """A confirmed manual fill activates Reset Zone Lock without adding its
-    synthetic key to the completed engine-signal ledger."""
+    """A confirmed manual fill does not arm the bot's zone lock or consume
+    its synthetic key in the completed engine-signal ledger."""
     monkeypatch.setattr(
         dashboard, "_cockpit_market_snapshot", lambda: {"market": {"spot": 65_000}},
     )
@@ -472,11 +472,7 @@ def test_cockpit_enter_records_setup_lock_without_consuming_engine_signal(
     ledger_path = live_account / dashboard.TREND_SCORE_AUTO_LEDGER_FILE
     ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
     assert ledger["signals"] == {}
-    assert ledger["setup_lock"]["target_zone"] == dashboard.TREND_SCORE_CE_ZONE
-    assert ledger["setup_lock"]["source_action"] == "COCKPIT_BUY_CE"
-    assert ledger["setup_lock"]["source_signal_key"].startswith(
-        "manual-cockpit|buy_ce|"
-    )
+    assert ledger["setup_lock"] is None
 
 
 def test_cockpit_entry_preserves_bot_setting_after_open_and_close(
