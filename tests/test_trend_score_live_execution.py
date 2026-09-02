@@ -341,13 +341,14 @@ def test_filled_premium_policy_uses_exact_percentages_and_actual_fill_basis():
     requested = premium_percent_protection_policy(
         300.0, 0.001, LIVE_SCORE_LOTS, poll_secs=15,
         tp_percent=80, sl_percent=40,
-        tsl_arm_percent=20, tsl_trail_percent=10,
+        tsl_trail_percent=10,
     )
     assert requested["entry_premium_usd"] == 300.0
     assert requested["tp_target_pnl"] == 240.0
     assert requested["sl_target_pnl"] == 120.0
-    assert requested["tsl_arm_pnl"] == 60.0
+    assert requested["tsl_arm_pnl"] == 0.0
     assert requested["tsl_trail_pnl"] == 30.0
+    assert requested["tsl_pct"] == 10.0
     assert requested["poll_secs"] == 15
 
     # The selected quote was $300, but Delta filled at $220. The durable OPEN
@@ -359,12 +360,13 @@ def test_filled_premium_policy_uses_exact_percentages_and_actual_fill_basis():
     assert policy["entry_premium_usd"] == 220.0
     assert policy["tp_target_pnl"] == 176.0
     assert policy["sl_target_pnl"] == 88.0
-    assert policy["tsl_arm_pnl"] == 44.0
+    assert policy["tsl_arm_pnl"] == 0.0
     assert policy["tsl_trail_pnl"] == 22.0
     assert policy["tp_percent_of_entry_premium"] == 80.0
     assert policy["sl_percent_of_entry_premium"] == 40.0
-    assert policy["tsl_arm_percent_of_entry_premium"] == 20.0
     assert policy["tsl_trail_percent_of_entry_premium"] == 10.0
+    assert policy["tsl_pct"] == 10.0
+    assert policy["protection_mode"] == "filled_premium_percent_peak_trail_v2"
     assert policy["protection_source"] == "automatic_filled_premium"
 
 

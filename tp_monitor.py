@@ -3680,20 +3680,31 @@ def main():
     except (TypeError, ValueError):
         poll_secs = POLL_SECS
     local_fallback_poll = max(10, min(poll_secs, LOCAL_FALLBACK_POLL_SECS))
-    tsl_enabled = tsl_arm_pnl > 0 and tsl_trail_pnl > 0
+    # v2 mirrors Nimmathi: the trail arms as soon as the position has a
+    # positive P&L percentage, then protects ``peak_pct - tsl_pct``.  Older
+    # snapshots deliberately keep their original dollar arm/trail policy.
+    nimmathi_tsl = (
+        str(configured.get("protection_mode") or "")
+        == "filled_premium_percent_peak_trail_v2"
+    )
+    tsl_pct = _configured_number("tsl_pct", 0.0) if nimmathi_tsl else 0.0
+    tsl_enabled = tsl_pct > 0 if nimmathi_tsl else (tsl_arm_pnl > 0 and tsl_trail_pnl > 0)
 
     log.info("=" * 56)
     log.info(
         "TP/SL Monitor [%s/%s] started  tp=+$%.2f  sl=%s  "
-        "tsl=arm +$%.2f / trail $%.2f  poll=%ds  state=%s",
+        "tsl=%s  poll=%ds  state=%s",
         USER, SLOT, target_pnl, f"-${sl_pnl:.2f}" if sl_pnl > 0 else "off",
-        tsl_arm_pnl, tsl_trail_pnl, poll_secs, STATE_FILE,
+        (f"peak giveback {tsl_pct:.2f}%" if nimmathi_tsl
+         else f"arm +${tsl_arm_pnl:.2f} / trail ${tsl_trail_pnl:.2f}"),
+        poll_secs, STATE_FILE,
     )
     save_state_fields(protection_config_resolved={
         "tp_target_pnl": target_pnl,
         "sl_target_pnl": sl_pnl,
         "tsl_arm_pnl": tsl_arm_pnl,
         "tsl_trail_pnl": tsl_trail_pnl,
+        "tsl_pct": tsl_pct,
         "tsl_lock_min_pnl": tsl_lock_min_pnl,
         "poll_secs": poll_secs,
     })
@@ -3702,6 +3713,7 @@ def main():
     entry_mark = float(state["entry_mark"])
     lots = abs(int(float(state["lots"])))
     cv = float(state.get("contract_value", 0.001))
+    entry_premium_usd = abs(entry_mark * cv * lots)
     sign = -1 if str(state.get("side", "")).lower() == "short" else 1
     product_id = state["product_id"]
     close_side = "buy" if sign < 0 else "sell"
@@ -4470,6 +4482,12 @@ def main():
             stop_loss = abs(float(policy.get("sl_target_pnl") or sl_pnl))
             arm = abs(float(policy.get("tsl_arm_pnl") or tsl_arm_pnl))
             trail = abs(float(policy.get("tsl_trail_pnl") or tsl_trail_pnl))
+            policy_is_nimmathi_tsl = (
+                str(policy.get("protection_mode") or "")
+                == "filled_premium_percent_peak_trail_v2"
+            )
+            trail_pct = abs(float(policy.get("tsl_pct") or 0))
+            basis = abs(float(policy.get("entry_premium_usd") or entry_premium_usd))
             lock_min = abs(float(
                 policy.get("tsl_lock_min_pnl") or tsl_lock_min_pnl
             ))
@@ -4477,18 +4495,32 @@ def main():
             return
 
         stored_peak = _finite_float(preview.get("tsl_peak"), 0.0)
-        stored_floor = _finite_float(preview.get("tsl_floor"), 0.0)
+        stored_floor_raw = preview.get("tsl_floor")
+        stored_floor = _finite_float(stored_floor_raw, 0.0)
+        has_stored_floor = stored_floor_raw not in (None, "")
         was_armed = bool(preview.get("tsl_armed"))
         next_peak = max(stored_peak, preview_pnl)
-        next_armed = was_armed or (arm > 0 and trail > 0 and next_peak >= arm)
+        next_armed = (
+            was_armed or (next_peak > 0 and trail_pct > 0 and basis > 0)
+            if policy_is_nimmathi_tsl
+            else was_armed or (arm > 0 and trail > 0 and next_peak >= arm)
+        )
         next_floor = stored_floor
         if next_armed:
-            next_floor = max(stored_floor, lock_min, next_peak - trail)
+            nimmathi_floor = max(
+                -stop_loss, next_peak - basis * trail_pct / 100.0,
+            )
+            next_floor = (
+                nimmathi_floor if policy_is_nimmathi_tsl else
+                max(stored_floor, lock_min, next_peak - trail)
+            )
         ratchet = max(1.0, trail * 0.05)
         state_change = (
             next_armed != was_armed
             or next_peak >= stored_peak + ratchet
-            or next_floor > stored_floor + 1e-8
+            or (next_armed and (
+                not has_stored_floor or next_floor > stored_floor + 1e-8
+            ))
         )
         tp_trigger = bool(
             health.get("local_tp_fallback_active") and preview_pnl >= target
@@ -4518,14 +4550,27 @@ def main():
             ):
                 return
             current_peak = _finite_float(current.get("tsl_peak"), 0.0)
-            current_floor = _finite_float(current.get("tsl_floor"), 0.0)
+            current_floor_raw = current.get("tsl_floor")
+            current_floor = _finite_float(current_floor_raw, 0.0)
+            has_current_floor = current_floor_raw not in (None, "")
             current_armed = bool(current.get("tsl_armed"))
             resolved_peak = max(current_peak, next_peak)
             resolved_armed = current_armed or next_armed
-            resolved_floor = (
-                max(current_floor, lock_min, resolved_peak - trail)
-                if resolved_armed else current_floor
-            )
+            if resolved_armed:
+                proposed_floor = (
+                    max(
+                        -stop_loss,
+                        resolved_peak - basis * trail_pct / 100.0,
+                    )
+                    if policy_is_nimmathi_tsl else
+                    max(lock_min, resolved_peak - trail)
+                )
+                resolved_floor = (
+                    max(current_floor, proposed_floor)
+                    if has_current_floor else proposed_floor
+                )
+            else:
+                resolved_floor = current_floor
             current.update({
                 "tsl_peak": round(resolved_peak, 8),
                 "tsl_armed": resolved_armed,
@@ -5225,16 +5270,34 @@ def main():
                     persist_pk = peak_pnl
                     save_state_fields(tsl_peak=round(peak_pnl, 2), tsl_armed=tsl_armed)
 
-                if tsl_enabled and not tsl_armed and peak_pnl >= tsl_arm_pnl:
+                peak_pct = (
+                    peak_pnl / entry_premium_usd * 100.0
+                    if entry_premium_usd > 0 else 0.0
+                )
+                should_arm_tsl = (
+                    peak_pct > 0 if nimmathi_tsl else peak_pnl >= tsl_arm_pnl
+                )
+                if tsl_enabled and not tsl_armed and should_arm_tsl:
                     tsl_armed = True
                     save_state_fields(tsl_peak=round(peak_pnl, 2), tsl_armed=True,
                                       tsl_armed_utc=_utc_now())
-                    log.info("TSL armed at peak $%.2f; arm=$%.2f, trail=$%.2f.",
-                             peak_pnl, tsl_arm_pnl, tsl_trail_pnl)
+                    if nimmathi_tsl:
+                        log.info("TSL armed at peak $%.2f (%.2f%%); giveback=%.2f%%.",
+                                 peak_pnl, peak_pct, tsl_pct)
+                    else:
+                        log.info("TSL armed at peak $%.2f; arm=$%.2f, trail=$%.2f.",
+                                 peak_pnl, tsl_arm_pnl, tsl_trail_pnl)
 
                 active_tsl = tsl_enabled and tsl_armed
-                tsl_floor = (max(tsl_lock_min_pnl, peak_pnl - tsl_trail_pnl)
-                             if active_tsl else None)
+                tsl_floor = (
+                    max(
+                        -sl_pnl,
+                        peak_pnl - entry_premium_usd * tsl_pct / 100.0,
+                    )
+                    if active_tsl and nimmathi_tsl else
+                    max(tsl_lock_min_pnl, peak_pnl - tsl_trail_pnl)
+                    if active_tsl else None
+                )
                 if active_tsl:
                     if (stop_id is None or stop_lots != lots
                             or not stop_complete

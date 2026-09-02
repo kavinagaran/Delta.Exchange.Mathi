@@ -549,8 +549,7 @@ CONFIG_KEYS = [
     "SL_TARGET_PNL_TREND", "TSL_TARGET_PNL_TREND", "TSL_ARM_PNL_TREND",
     "TSL_TRAIL_PNL_TREND", "TSL_LOCK_MIN_PNL_TREND",
     "TREND_SCORE_AUTO_LOTS", "TREND_TP_PREMIUM_PCT",
-    "TREND_SL_PREMIUM_PCT", "TREND_TSL_ARM_PREMIUM_PCT",
-    "TREND_TSL_TRAIL_PREMIUM_PCT",
+    "TREND_SL_PREMIUM_PCT", "TREND_TSL_PCT",
     "TREND_AUTO_ENTRY_ENABLED", "TREND_AUTO_ENTRY_MODE",
     "TREND_EMA_GAP_PCT", "TREND_RSI_UP", "TREND_RSI_DOWN",
     "TREND_15M_SLOPE_BARS", "TREND_MIN_15M_SLOPE_PCT", "TREND_ADX_MIN",
@@ -600,8 +599,9 @@ CONFIG_PAGE_DEFAULTS = {
     # Score-zone protection targets are derived from each filled premium.
     "TREND_TP_PREMIUM_PCT": "100",
     "TREND_SL_PREMIUM_PCT": "50",
-    "TREND_TSL_ARM_PREMIUM_PCT": "25",
-    "TREND_TSL_TRAIL_PREMIUM_PCT": "25",
+    # Nimmathi-style trailing: once P&L is positive, exit only after it
+    # gives back this percentage from its own peak.
+    "TREND_TSL_PCT": "25",
     "TP_POLL_SECS_TREND": "30",
     # Account-wide risk limits
     "MAX_TRADES_PER_DAY_GLOBAL": "3",
@@ -1471,8 +1471,7 @@ def _trend_score_auto_config_error(config: dict | None = None) -> str | None:
     for key, label, default in (
         ("TREND_TP_PREMIUM_PCT", "Take-profit percentage", 100),
         ("TREND_SL_PREMIUM_PCT", "Stop-loss percentage", 50),
-        ("TREND_TSL_ARM_PREMIUM_PCT", "Trailing-arm percentage", 25),
-        ("TREND_TSL_TRAIL_PREMIUM_PCT", "Trailing percentage", 25),
+        ("TREND_TSL_PCT", "Trailing percentage", 25),
     ):
         value = number(key, default)
         if not math.isfinite(value) or not 0 < value <= 1_000:
@@ -4259,8 +4258,7 @@ def _trend_score_auto_premium_protection_policy(
         poll_secs=poll_secs,
         tp_percent=cfg.get("TREND_TP_PREMIUM_PCT") or 100,
         sl_percent=cfg.get("TREND_SL_PREMIUM_PCT") or 50,
-        tsl_arm_percent=cfg.get("TREND_TSL_ARM_PREMIUM_PCT") or 25,
-        tsl_trail_percent=cfg.get("TREND_TSL_TRAIL_PREMIUM_PCT") or 25,
+        tsl_trail_percent=cfg.get("TREND_TSL_PCT") or 25,
     )
 
 
@@ -4376,6 +4374,9 @@ def _tp_monitor_payload():
                      "poll_secs": poll, "sl_pnl": sl, "tsl_pnl": tsl,
                      "tsl_arm_pnl": policy["tsl_arm_pnl"],
                      "tsl_trail_pnl": policy["tsl_trail_pnl"],
+                     "tsl_pct": policy["tsl_pct"],
+                     "nimmathi_tsl": policy["protection_mode"]
+                                      == "filled_premium_percent_peak_trail_v2",
                      "tsl_lock_min_pnl": policy["tsl_lock_min_pnl"],
                      "protection_source": policy["protection_source"],
                      "entry_premium_usd": policy["entry_premium_usd"],
@@ -5578,6 +5579,7 @@ def _dry_protection_policy(state: dict) -> dict:
             "tsl_arm_percent_of_entry_premium"),
         "tsl_trail_percent_of_entry_premium": nonnegative(
             "tsl_trail_percent_of_entry_premium"),
+        "tsl_pct": nonnegative("tsl_pct"),
         "manual_override_allowed": bool(policy.get("manual_override_allowed")),
     }
 
@@ -15366,8 +15368,7 @@ _CONFIG_NUMERIC_BOUNDS = {
     "TREND_SCORE_AUTO_LOTS": (1, 5_000),
     "TREND_TP_PREMIUM_PCT": (0.01, 1_000),
     "TREND_SL_PREMIUM_PCT": (0.01, 1_000),
-    "TREND_TSL_ARM_PREMIUM_PCT": (0.01, 1_000),
-    "TREND_TSL_TRAIL_PREMIUM_PCT": (0.01, 1_000),
+    "TREND_TSL_PCT": (0.01, 1_000),
     "TREND_MAX_SLIPPAGE_PCT": (0.01, 20), "TREND_ORDER_CHUNK_LOTS": (1, 5000),
     "MAX_ORDER_LOTS": (1, 5000),
     "TREND_REENTRY_COOLDOWN_MIN": (0, 1440),
@@ -15940,8 +15941,28 @@ def _dry_run_protection_cycle(
         arm = policy["tsl_arm_pnl"]
         trail = policy["tsl_trail_pnl"]
         locked = policy["tsl_lock_min_pnl"]
-        tsl_armed = bool(arm and trail and peak >= arm)
-        tsl_floor = max(peak - trail, locked) if tsl_armed else None
+        nimmathi_tsl = (
+            policy["protection_mode"]
+            == "filled_premium_percent_peak_trail_v2"
+        )
+        entry_basis = policy["entry_premium_usd"]
+        if entry_basis <= 0:
+            entry_basis = abs(
+                _as_float(state.get("entry_mark"), 0)
+                * _as_float(state.get("contract_value"), 0.001)
+                * abs(_as_float(state.get("lots"), 0))
+            )
+        tsl_pct = policy["tsl_pct"]
+        peak_pct = peak / entry_basis * 100.0 if entry_basis > 0 else 0.0
+        tsl_armed = bool(
+            peak_pct > 0 and tsl_pct > 0
+            if nimmathi_tsl else arm and trail and peak >= arm
+        )
+        tsl_floor = (
+            max(-sl, peak - entry_basis * tsl_pct / 100.0)
+            if tsl_armed and nimmathi_tsl else
+            max(peak - trail, locked) if tsl_armed else None
+        )
         trigger = None
         if tp and pnl >= tp:
             trigger = "take_profit_simulated"

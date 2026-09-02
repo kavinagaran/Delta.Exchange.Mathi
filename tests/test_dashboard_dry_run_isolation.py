@@ -585,12 +585,12 @@ def test_mode_and_revision_mismatch_fail_before_move_or_trend_strategy_work(
         ),
         (
             "trend",
-            14.0,
+            8.0,
             {"dry_peak_pnl_usd": 20},
             {
-                "tsl_arm_pnl": 10,
-                "tsl_trail_pnl": 5,
-                "tsl_lock_min_pnl": 0,
+                "protection_mode": "filled_premium_percent_peak_trail_v2",
+                "entry_premium_usd": 100,
+                "tsl_pct": 10,
             },
             "trailing_stop_simulated",
         ),

@@ -238,7 +238,7 @@ def test_config_reset_profile_covers_every_page_field_and_is_fail_safe():
         encoding="utf-8")
     page_keys = set(re.findall(r'id="c-([A-Z0-9_]+)"', html))
     preserved = set(dashboard.CONFIG_PAGE_PRESERVED_KEYS)
-    assert len(page_keys) == 29
+    assert len(page_keys) == 28
     assert preserved == {"TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"}
     assert page_keys - preserved == set(dashboard.CONFIG_PAGE_DEFAULTS)
     assert set(dashboard.CONFIG_PAGE_DEFAULTS) <= set(dashboard.CONFIG_KEYS)
@@ -265,8 +265,7 @@ def test_config_reset_profile_covers_every_page_field_and_is_fail_safe():
     assert defaults["TREND_SCORE_AUTO_LOTS"] == "1000"
     assert defaults["TREND_TP_PREMIUM_PCT"] == "100"
     assert defaults["TREND_SL_PREMIUM_PCT"] == "50"
-    assert defaults["TREND_TSL_ARM_PREMIUM_PCT"] == "25"
-    assert defaults["TREND_TSL_TRAIL_PREMIUM_PCT"] == "25"
+    assert defaults["TREND_TSL_PCT"] == "25"
     assert "MORNING_SIDE" not in page_keys
     assert "EVENING_SIDE" not in page_keys
     assert "MORNING_ENABLED" not in page_keys

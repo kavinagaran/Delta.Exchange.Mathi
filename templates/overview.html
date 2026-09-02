@@ -269,6 +269,7 @@ function todayInlineProtectionHtml(protection) {
   const coverageHtml = coverage
     ? ` · <strong class="today-telemetry-coverage">${esc(coverage)}</strong>`
     : '';
+  const nimmathiTsl = protection.nimmathi_tsl === true;
   return `<section class="dry-protection-box today-inline-protection" aria-label="Live TP, SL and TSL monitor">
     <div class="dry-protection-hd">
       <div><span>Live protection</span><strong>TP / SL / TSL Monitor</strong></div>
@@ -279,10 +280,10 @@ function todayInlineProtectionHtml(protection) {
         <strong>${value(protection.target_pnl ?? protection.tp_target_pnl)}</strong></div>
       <div class="today-protection-metric tone-sl"><span>Stop loss $</span>
         <strong>${value(protection.sl_pnl ?? protection.sl_target_pnl)}</strong></div>
-      <div class="today-protection-metric tone-tsl-arm"><span>TSL arm P&amp;L $</span>
-        <strong>${value(protection.tsl_arm_pnl)}</strong></div>
-      <div class="today-protection-metric tone-tsl-trail"><span>TSL trail $</span>
-        <strong>${value(protection.tsl_trail_pnl)}</strong></div>
+      <div class="today-protection-metric tone-tsl-arm"><span>${nimmathiTsl ? 'TSL arms at' : 'TSL arm P&amp;L $'}</span>
+        <strong>${nimmathiTsl ? 'Positive P&amp;L' : value(protection.tsl_arm_pnl)}</strong></div>
+      <div class="today-protection-metric tone-tsl-trail"><span>${nimmathiTsl ? 'TSL giveback' : 'TSL trail $'}</span>
+        <strong>${nimmathiTsl ? `${fN(protection.tsl_pct)}%` : value(protection.tsl_trail_pnl)}</strong></div>
       <div class="today-protection-metric tone-lock"><span>Minimum locked $</span>
         <strong>${value(protection.tsl_lock_min_pnl)}</strong></div>
       <div class="today-protection-metric tone-poll"><span>Price feed</span>

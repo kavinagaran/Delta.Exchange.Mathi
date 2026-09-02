@@ -27,8 +27,7 @@ class _ConfigScreenState extends State<ConfigScreen> {
     'Position protection': [
       _FieldSpec('TREND_TP_PREMIUM_PCT', 'Take profit', suffix: '%'),
       _FieldSpec('TREND_SL_PREMIUM_PCT', 'Stop loss', suffix: '%'),
-      _FieldSpec('TREND_TSL_ARM_PREMIUM_PCT', 'TSL arm', suffix: '%'),
-      _FieldSpec('TREND_TSL_TRAIL_PREMIUM_PCT', 'TSL trail', suffix: '%'),
+      _FieldSpec('TREND_TSL_PCT', 'Trailing stop', suffix: '%'),
       _FieldSpec('TP_POLL_SECS_TREND', 'Check interval', suffix: 'sec'),
     ],
     'Risk limits': [

@@ -63,8 +63,7 @@
       <div class="form-grid">
         <label class="fld"><span>Take profit %</span><input id="c-TREND_TP_PREMIUM_PCT" type="number" min="0.01" max="1000" step="0.01"></label>
         <label class="fld"><span>Stop loss %</span><input id="c-TREND_SL_PREMIUM_PCT" type="number" min="0.01" max="1000" step="0.01"></label>
-        <label class="fld"><span>Trailing stop arm %</span><input id="c-TREND_TSL_ARM_PREMIUM_PCT" type="number" min="0.01" max="1000" step="0.01"></label>
-        <label class="fld"><span>Trailing distance %</span><input id="c-TREND_TSL_TRAIL_PREMIUM_PCT" type="number" min="0.01" max="1000" step="0.01"></label>
+        <label class="fld"><span>Trailing stop %</span><input id="c-TREND_TSL_PCT" type="number" min="0.01" max="1000" step="0.01"></label>
         <label class="fld"><span>Protection check seconds</span><input id="c-TP_POLL_SECS_TREND" type="number" min="10" max="300" step="1"></label>
       </div>
       <p class="config-copy">Open trades keep their saved values; manual overrides remain available.</p>
@@ -156,7 +155,7 @@
 const KEYS = [
   'DRY_RUN', 'TREND_ENGINE_SCORE_AUTO_MODE', 'TREND_SCORE_AUTO_LOTS',
   'TREND_TP_PREMIUM_PCT', 'TREND_SL_PREMIUM_PCT',
-  'TREND_TSL_ARM_PREMIUM_PCT', 'TREND_TSL_TRAIL_PREMIUM_PCT',
+  'TREND_TSL_PCT',
   'TP_POLL_SECS_TREND',
   'TREND_RISK_BUDGET_USD', 'TREND_DRY_RUN_CAPITAL_USD', 'SHORT_MAX_RISK_USD',
   'MAX_TRADES_PER_DAY_GLOBAL', 'MAX_DAILY_LOSS_USD', 'MAX_OPEN_RISK_USD',

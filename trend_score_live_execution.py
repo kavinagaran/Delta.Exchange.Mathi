@@ -43,7 +43,10 @@ from typing import Any, Callable, Mapping
 
 
 LIVE_SCORE_LOTS = 1_000
-PREMIUM_PERCENT_PROTECTION_MODE = "filled_premium_percent_v1"
+# Version the policy saved with a position.  Existing positions retain the
+# old dollar arm/trail behaviour; only new entries use the Nimmathi peak-P&L
+# percentage trail below.
+PREMIUM_PERCENT_PROTECTION_MODE = "filled_premium_percent_peak_trail_v2"
 
 
 def premium_percent_protection_policy(
@@ -54,7 +57,6 @@ def premium_percent_protection_policy(
     poll_secs: Any = 30,
     tp_percent: Any = 100,
     sl_percent: Any = 50,
-    tsl_arm_percent: Any = 25,
     tsl_trail_percent: Any = 25,
 ) -> dict[str, Any]:
     """Build the score-zone protection snapshot from an entry premium.
@@ -86,12 +88,14 @@ def premium_percent_protection_policy(
         return result
     tp_pct = percentage(tp_percent, "take-profit percentage")
     sl_pct = percentage(sl_percent, "stop-loss percentage")
-    arm_pct = percentage(tsl_arm_percent, "trailing-arm percentage")
     trail_pct = percentage(tsl_trail_percent, "trailing percentage")
     return {
         "tp_target_pnl": round(premium * tp_pct / 100.0, 8),
         "sl_target_pnl": round(premium * sl_pct / 100.0, 8),
-        "tsl_arm_pnl": round(premium * arm_pct / 100.0, 8),
+        # Compatibility fields for older status clients.  v2 does not use a
+        # dollar arm or a fixed-dollar trail: it arms above 0% P&L and trails
+        # by ``tsl_pct`` from the peak P&L percentage.
+        "tsl_arm_pnl": 0.0,
         "tsl_trail_pnl": round(premium * trail_pct / 100.0, 8),
         "tsl_lock_min_pnl": 0.0,
         "tsl_target_pnl": round(premium * trail_pct / 100.0, 8),
@@ -101,8 +105,8 @@ def premium_percent_protection_policy(
         "entry_premium_usd": round(premium, 8),
         "tp_percent_of_entry_premium": tp_pct,
         "sl_percent_of_entry_premium": sl_pct,
-        "tsl_arm_percent_of_entry_premium": arm_pct,
         "tsl_trail_percent_of_entry_premium": trail_pct,
+        "tsl_pct": trail_pct,
         "manual_override_allowed": True,
     }
 
@@ -566,12 +570,13 @@ def build_pending_entry_state(
         raise LiveScoreExecutionError("entry payload size differs from the requested lots")
     if not isinstance(protection_config, Mapping):
         raise LiveScoreExecutionError("protection configuration is required")
-    for key in (
-        "tp_target_pnl",
-        "sl_target_pnl",
-        "tsl_arm_pnl",
-        "tsl_trail_pnl",
-    ):
+    required_policy_fields = ("tp_target_pnl", "sl_target_pnl", "tsl_pct")
+    if protection_config.get("protection_mode") != PREMIUM_PERCENT_PROTECTION_MODE:
+        # A journaled pre-v2 entry must remain recoverable after deployment.
+        required_policy_fields = (
+            "tp_target_pnl", "sl_target_pnl", "tsl_arm_pnl", "tsl_trail_pnl",
+        )
+    for key in required_policy_fields:
         _finite(protection_config.get(key), key, positive=True)
 
     decision = signal.get("decision")
@@ -1053,12 +1058,7 @@ def _open_state_from_fill(
             sl_percent=configured_protection.get(
                 "sl_percent_of_entry_premium", 50
             ),
-            tsl_arm_percent=configured_protection.get(
-                "tsl_arm_percent_of_entry_premium", 25
-            ),
-            tsl_trail_percent=configured_protection.get(
-                "tsl_trail_percent_of_entry_premium", 25
-            ),
+            tsl_trail_percent=configured_protection.get("tsl_pct", 25),
         )
     state.update(
         {

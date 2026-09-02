@@ -482,13 +482,21 @@ class _ProtectionPanel extends StatelessWidget {
                 colour: kNegative,
               ),
               MetricTile(
-                label: 'TSL arm',
-                value: value('tsl_arm_pnl'),
+                label: protection['nimmathi_tsl'] == true
+                    ? 'TSL arms at'
+                    : 'TSL arm',
+                value: protection['nimmathi_tsl'] == true
+                    ? 'Positive P&L'
+                    : value('tsl_arm_pnl'),
                 colour: kWarning,
               ),
               MetricTile(
-                label: 'TSL trail',
-                value: value('tsl_trail_pnl'),
+                label: protection['nimmathi_tsl'] == true
+                    ? 'TSL giveback'
+                    : 'TSL trail',
+                value: protection['nimmathi_tsl'] == true
+                    ? '${protection['tsl_pct'] ?? '—'}%'
+                    : value('tsl_trail_pnl'),
                 colour: const Color(0xFF70B8FF),
               ),
               MetricTile(
