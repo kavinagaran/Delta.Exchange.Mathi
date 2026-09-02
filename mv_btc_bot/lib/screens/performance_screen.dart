@@ -92,6 +92,8 @@ class _PerformanceScreenState extends State<PerformanceScreen> {
           else ...[
             _SummaryCard(stats: stats),
             const SizedBox(height: Gap.md),
+            _DailyPnlCard(stats: stats),
+            const SizedBox(height: Gap.md),
             _EquityCard(stats: stats),
             const SizedBox(height: Gap.md),
             _TradeListCard(trades: _trades),
@@ -206,6 +208,121 @@ class _EquityCard extends StatelessWidget {
       ),
     );
   }
+}
+
+class _DailyPnlCard extends StatelessWidget {
+  const _DailyPnlCard({required this.stats});
+
+  final _PerformanceStats stats;
+
+  @override
+  Widget build(BuildContext context) {
+    if (stats.dailyPnl.isEmpty) return const SizedBox.shrink();
+    final last = stats.dailyPnl.last.pnl;
+    return AppCard(
+      kicker: 'Daily performance',
+      title: 'Daily P&L',
+      trailing: Text(
+        _money(last),
+        style: AppText.number.copyWith(color: signedColour(last)),
+      ),
+      child: SizedBox(
+        height: 158,
+        child: CustomPaint(
+          painter: _DailyPnlPainter(
+            points: stats.dailyPnl,
+            grid: Theme.of(context).colorScheme.outline,
+          ),
+          size: Size.infinite,
+        ),
+      ),
+    );
+  }
+}
+
+/// Raised, colour-coded daily P&L line.  The dark offset beneath each segment
+/// is intentionally a visual depth cue only; values remain on the true line.
+class _DailyPnlPainter extends CustomPainter {
+  const _DailyPnlPainter({required this.points, required this.grid});
+
+  final List<({String day, double pnl})> points;
+  final Color grid;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (points.isEmpty) return;
+    final values = points.map((point) => point.pnl).toList();
+    final lowest = values.reduce(math.min);
+    final highest = values.reduce(math.max);
+    final low = lowest < 0 ? lowest : 0.0;
+    final high = highest > 0 ? highest : 0.0;
+    final span = (high - low).abs() < 1e-9 ? 1.0 : high - low;
+    final pad = span * .14;
+    double y(double value) =>
+        size.height - ((value - low + pad) / (span + pad * 2)) * size.height;
+    double x(int index) => points.length == 1
+        ? size.width / 2
+        : index / (points.length - 1) * size.width;
+
+    final zeroY = y(0);
+    canvas.drawLine(
+      Offset.zero.translate(0, zeroY),
+      Offset(size.width, zeroY),
+      Paint()
+        ..color = grid.withValues(alpha: .62)
+        ..strokeWidth = 1,
+    );
+
+    if (points.length > 1) {
+      final depth = Path()..moveTo(x(0), y(points.first.pnl));
+      for (var index = 1; index < points.length; index++) {
+        depth.lineTo(x(index), y(points[index].pnl));
+      }
+      canvas.save();
+      canvas.translate(3, 5);
+      canvas.drawPath(
+        depth,
+        Paint()
+          ..color = const Color(0xD9091728)
+          ..strokeWidth = 8
+          ..style = PaintingStyle.stroke
+          ..strokeJoin = StrokeJoin.round
+          ..strokeCap = StrokeCap.round,
+      );
+      canvas.restore();
+    }
+
+    for (var index = 1; index < points.length; index++) {
+      final positive = points[index].pnl >= 0;
+      canvas.drawLine(
+        Offset(x(index - 1), y(points[index - 1].pnl)),
+        Offset(x(index), y(points[index].pnl)),
+        Paint()
+          ..color = positive ? kPositive : kNegative
+          ..strokeWidth = 3
+          ..strokeCap = StrokeCap.round,
+      );
+    }
+    for (var index = 0; index < points.length; index++) {
+      final positive = points[index].pnl >= 0;
+      final point = Offset(x(index), y(points[index].pnl));
+      canvas.drawCircle(
+        point.translate(1.5, 2.5),
+        5,
+        Paint()..color = const Color(0xC9091728),
+      );
+      canvas.drawCircle(
+        point,
+        4,
+        Paint()..color = positive ? kPositive : kNegative,
+      );
+      canvas.drawCircle(point, 1.6, Paint()..color = const Color(0xFFE5FBFF));
+    }
+  }
+
+  @override
+  bool shouldRepaint(_DailyPnlPainter old) =>
+      old.points != points || old.grid != grid;
 }
 
 /// Cumulative P&L with the drawdown from peak shaded underneath.
@@ -331,9 +448,7 @@ class _TradeListCardState extends State<_TradeListCard> {
               padding: const EdgeInsets.symmetric(vertical: Gap.sm),
               child: Text(
                 'No trades match this filter.',
-                style: AppText.caption.copyWith(
-                  color: scheme.onSurfaceVariant,
-                ),
+                style: AppText.caption.copyWith(color: scheme.onSurfaceVariant),
               ),
             ),
           for (final trade in shown)
@@ -415,6 +530,7 @@ class _PerformanceStats {
     required this.winRate,
     required this.maxDrawdown,
     required this.equity,
+    required this.dailyPnl,
     required this.fees,
   });
 
@@ -485,6 +601,22 @@ class _PerformanceStats {
       peak = math.max(peak, running);
       maxDrawdown = math.max(maxDrawdown, peak - running);
     }
+    final dailyTotals = <String, double>{};
+    for (final trade in valued) {
+      final rawDate = '${trades[trade.order]['date'] ?? ''}'.trim();
+      final date = rawDate.isNotEmpty
+          ? rawDate
+          : DateTime.fromMillisecondsSinceEpoch(
+              trade.closedAt.toInt(),
+              isUtc: true,
+            ).toIso8601String().substring(0, 10);
+      dailyTotals[date] = (dailyTotals[date] ?? 0) + trade.pnl;
+    }
+    final dailyPnl =
+        dailyTotals.entries
+            .map((entry) => (day: entry.key, pnl: entry.value))
+            .toList()
+          ..sort((left, right) => left.day.compareTo(right.day));
 
     return _PerformanceStats(
       total: trades.length,
@@ -502,6 +634,7 @@ class _PerformanceStats {
       winRate: valued.isEmpty ? null : wins.length / valued.length * 100,
       maxDrawdown: maxDrawdown,
       equity: equity,
+      dailyPnl: dailyPnl,
       fees: fees,
     );
   }
@@ -521,6 +654,7 @@ class _PerformanceStats {
   final double? winRate;
   final double maxDrawdown;
   final List<double> equity;
+  final List<({String day, double pnl})> dailyPnl;
   final Map<String, double> fees;
 
   String get feeLabel {

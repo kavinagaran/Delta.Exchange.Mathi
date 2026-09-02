@@ -36,7 +36,8 @@ def test_page_has_complete_exchange_history_disclosure_without_filters():
     assert "performance-metrics" in TEMPLATE
     assert "Daily P/L" in TEMPLATE
     assert "Green = profit" not in TEMPLATE
-    assert "pnlBarColors" in TEMPLATE
+    assert "dailyPnlDepth" in TEMPLATE
+    assert "type: 'line'" in TEMPLATE
     assert "performance-history-card" in TEMPLATE
     assert 'class="numeric">Lots</th>' in TEMPLATE
     assert 'class="numeric ${pnlCls(trade.net_pnl_usd)}"' in TEMPLATE
@@ -52,7 +53,7 @@ def test_page_has_complete_exchange_history_disclosure_without_filters():
 
 
 @pytest.mark.skipif(NODE is None, reason="Node.js is required for frontend JavaScript tests")
-def test_daily_trade_series_and_bar_density_reflect_daily_pnl():
+def test_daily_trade_series_aggregates_daily_pnl_for_the_line_chart():
     script = r"""
 const fs = require('fs');
 const vm = require('vm');
@@ -79,17 +80,6 @@ if (JSON.stringify(lots) !== JSON.stringify([14, 2, 7])) {
   throw new Error(`lot totals mismatch: ${JSON.stringify(lots)}`);
 }
 
-const colorStart = source.indexOf('function pnlBarColors');
-const colorEnd = source.indexOf('function drawChart');
-if (colorStart < 0 || colorEnd <= colorStart) throw new Error('pnlBarColors not found');
-vm.runInThisContext(source.slice(colorStart, colorEnd));
-const colors = pnlBarColors([10, -100, 50, null]);
-if (!colors[0].startsWith('hsla(155,')) throw new Error(`profit is not green: ${colors[0]}`);
-if (!colors[1].startsWith('hsla(352,')) throw new Error(`loss is not red: ${colors[1]}`);
-if (!(parseFloat(colors[1].match(/, ([.\d]+)\)$/)[1]) > parseFloat(colors[0].match(/, ([.\d]+)\)$/)[1]))) {
-  throw new Error(`larger magnitude should have denser colour: ${JSON.stringify(colors)}`);
-}
-if (colors[3] !== 'rgba(140, 160, 180, .32)') throw new Error('unvalued P/L should remain neutral');
 """
     result = subprocess.run([NODE, "-e", script], cwd=ROOT, text=True,
                             capture_output=True, check=False)

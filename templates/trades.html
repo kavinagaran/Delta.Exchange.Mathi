@@ -75,22 +75,6 @@ function dailyTradeSeries(trades) {
   };
 }
 
-function pnlBarColors(values) {
-  const valued = values.filter(value => value != null && Number.isFinite(+value));
-  const maximum = Math.max(...valued.map(value => Math.abs(+value)), 0);
-  return values.map(value => {
-    if (value == null || !Number.isFinite(+value)) return 'rgba(140, 160, 180, .32)';
-    // Saturation, darkness and opacity all scale with the day's P/L magnitude.
-    // This keeps a small gain/loss readable while making material days denser.
-    const magnitude = maximum ? Math.abs(+value) / maximum : 0;
-    const saturation = Math.round(45 + magnitude * 42);
-    const lightness = Math.round(69 - magnitude * 27);
-    const opacity = (0.38 + magnitude * 0.58).toFixed(2);
-    const hue = +value >= 0 ? 155 : 352;
-    return `hsla(${hue}, ${saturation}%, ${lightness}%, ${opacity})`;
-  });
-}
-
 function drawChart(trades) {
   const { labels, pnl } = dailyTradeSeries(trades);
   if (!labels.length) { if (chart) { chart.destroy(); chart = null; } return; }
@@ -98,15 +82,53 @@ function drawChart(trades) {
   const css = getComputedStyle(document.documentElement);
   const MUTED = css.getPropertyValue('--muted').trim();
   const GRID = css.getPropertyValue('--chart-grid').trim();
-  const backgroundColor = pnlBarColors(pnl);
-  const borderColor = pnl.map(value => value == null ? MUTED : value >= 0 ? '#38d99a' : '#ff6172');
+  const positive = '#38d99a';
+  const negative = '#ff6172';
   const ctx = document.getElementById('pnl-chart').getContext('2d');
   if (chart) chart.destroy();
+  if (!Chart.registry.plugins.get('dailyPnlDepth')) {
+    Chart.register({
+      id: 'dailyPnlDepth',
+      beforeDatasetDraw(instance, args) {
+        // A recessed, offset stroke gives the daily line depth without
+        // obscuring the exact P/L value on dark themes.
+        if (args.index !== 1) return;
+        const canvas = instance.ctx;
+        canvas.save();
+        canvas.shadowColor = 'rgba(0, 0, 0, .72)';
+        canvas.shadowBlur = 10;
+        canvas.shadowOffsetX = 3;
+        canvas.shadowOffsetY = 5;
+      },
+      afterDatasetDraw(instance, args) {
+        if (args.index === 1) instance.ctx.restore();
+      },
+    });
+  }
   chart = new Chart(ctx, {
-    data: { labels, datasets: [{
-      type: 'bar', label: 'Estimated net P/L', data: pnl, backgroundColor, borderColor,
-      borderWidth: 1, borderRadius: 4, maxBarThickness: 46,
-    }] },
+    data: { labels, datasets: [
+      // Surface beneath the raised line.
+      { type: 'line', label: 'Daily net P/L depth', data: pnl,
+        borderColor: 'rgba(5, 16, 31, .86)', borderWidth: 8,
+        pointRadius: 0, tension: .32, fill: false, order: 2 },
+      { type: 'line', label: 'Daily net P/L', data: pnl,
+        borderWidth: 3, pointRadius: 4, pointHoverRadius: 6,
+        pointBorderWidth: 2, pointBorderColor: '#dff8ff',
+        pointBackgroundColor: context => +context.raw >= 0 ? positive : negative,
+        segment: { borderColor: context =>
+          +(context.p1.parsed.y || 0) >= 0 ? positive : negative },
+        tension: .32, cubicInterpolationMode: 'monotone', fill: 'origin',
+        backgroundColor: context => {
+          const area = context.chart.chartArea;
+          if (!area) return 'rgba(56, 217, 154, .14)';
+          const gradient = context.chart.ctx.createLinearGradient(0, area.top, 0, area.bottom);
+          gradient.addColorStop(0, 'rgba(56, 217, 154, .28)');
+          gradient.addColorStop(.52, 'rgba(72, 139, 214, .08)');
+          gradient.addColorStop(1, 'rgba(255, 97, 114, .20)');
+          return gradient;
+        },
+        order: 1 },
+    ] },
     options: {
       responsive: true, maintainAspectRatio: false,
       plugins: {
