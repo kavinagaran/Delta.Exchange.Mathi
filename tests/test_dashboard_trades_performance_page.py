@@ -36,8 +36,9 @@ def test_page_has_complete_exchange_history_disclosure_without_filters():
     assert "performance-metrics" in TEMPLATE
     assert "Daily P/L" in TEMPLATE
     assert "Green = profit" not in TEMPLATE
-    assert "dailyPnlDepth" in TEMPLATE
-    assert "type: 'line'" in TEMPLATE
+    assert "Daily net P/L" in TEMPLATE
+    assert "Cumulative net P/L" in TEMPLATE
+    assert "type: 'bar'" in TEMPLATE
     assert "performance-history-card" in TEMPLATE
     assert 'class="numeric">Lots</th>' in TEMPLATE
     assert 'class="numeric ${pnlCls(trade.net_pnl_usd)}"' in TEMPLATE

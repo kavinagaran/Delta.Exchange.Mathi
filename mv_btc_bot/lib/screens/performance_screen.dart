@@ -218,30 +218,80 @@ class _DailyPnlCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (stats.dailyPnl.isEmpty) return const SizedBox.shrink();
-    final last = stats.dailyPnl.last.pnl;
+    final cumulative = stats.dailyPnl.fold<double>(
+      0,
+      (total, point) => total + point.pnl,
+    );
     return AppCard(
       kicker: 'Daily performance',
-      title: 'Daily P&L',
+      title: 'Daily P/L — day-wise',
       trailing: Text(
-        _money(last),
-        style: AppText.number.copyWith(color: signedColour(last)),
+        _money(cumulative),
+        style: AppText.number.copyWith(color: signedColour(cumulative)),
       ),
-      child: SizedBox(
-        height: 158,
-        child: CustomPaint(
-          painter: _DailyPnlPainter(
-            points: stats.dailyPnl,
-            grid: Theme.of(context).colorScheme.outline,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              _ChartLegend(
+                label: 'Daily net P&L',
+                colour: kPositive,
+                bar: true,
+              ),
+              const SizedBox(width: Gap.md),
+              _ChartLegend(label: 'Cumulative net P&L', colour: kWarning),
+            ],
           ),
-          size: Size.infinite,
-        ),
+          const SizedBox(height: Gap.md),
+          SizedBox(
+            height: 158,
+            child: CustomPaint(
+              painter: _DailyPnlPainter(
+                points: stats.dailyPnl,
+                grid: Theme.of(context).colorScheme.outline,
+              ),
+              size: Size.infinite,
+            ),
+          ),
+        ],
       ),
     );
   }
 }
 
-/// Raised, colour-coded daily P&L line.  The dark offset beneath each segment
-/// is intentionally a visual depth cue only; values remain on the true line.
+class _ChartLegend extends StatelessWidget {
+  const _ChartLegend({
+    required this.label,
+    required this.colour,
+    this.bar = false,
+  });
+
+  final String label;
+  final Color colour;
+  final bool bar;
+
+  @override
+  Widget build(BuildContext context) => Row(
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      Container(
+        width: 18,
+        height: bar ? 10 : 3,
+        decoration: BoxDecoration(
+          color: colour.withValues(alpha: bar ? .45 : 1),
+          border: bar ? Border.all(color: colour) : null,
+          borderRadius: BorderRadius.circular(2),
+        ),
+      ),
+      const SizedBox(width: 5),
+      Text(label, style: AppText.caption),
+    ],
+  );
+}
+
+/// The compact native counterpart of the web's Dry Run graph: day-wise P&L
+/// columns on the left scale and an amber cumulative path on its own scale.
 class _DailyPnlPainter extends CustomPainter {
   const _DailyPnlPainter({required this.points, required this.grid});
 
@@ -251,32 +301,65 @@ class _DailyPnlPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     if (points.isEmpty) return;
-    final values = points.map((point) => point.pnl).toList();
-    final lowest = values.reduce(math.min);
-    final highest = values.reduce(math.max);
-    final low = lowest < 0 ? lowest : 0.0;
-    final high = highest > 0 ? highest : 0.0;
-    final span = (high - low).abs() < 1e-9 ? 1.0 : high - low;
-    final pad = span * .14;
-    double y(double value) =>
-        size.height - ((value - low + pad) / (span + pad * 2)) * size.height;
+    final daily = points.map((point) => point.pnl).toList();
+    final cumulative = <double>[];
+    var running = 0.0;
+    for (final value in daily) {
+      running += value;
+      cumulative.add(running);
+    }
+    double plotY(double value, List<double> values) {
+      final lowest = values.reduce(math.min);
+      final highest = values.reduce(math.max);
+      final low = lowest < 0 ? lowest : 0.0;
+      final high = highest > 0 ? highest : 0.0;
+      final span = (high - low).abs() < 1e-9 ? 1.0 : high - low;
+      final pad = span * .14;
+      return size.height -
+          ((value - low + pad) / (span + pad * 2)) * size.height;
+    }
+
+    final dailyZero = plotY(0, daily);
     double x(int index) => points.length == 1
         ? size.width / 2
         : index / (points.length - 1) * size.width;
 
-    final zeroY = y(0);
     canvas.drawLine(
-      Offset.zero.translate(0, zeroY),
-      Offset(size.width, zeroY),
+      Offset(0, dailyZero),
+      Offset(size.width, dailyZero),
       Paint()
         ..color = grid.withValues(alpha: .62)
         ..strokeWidth = 1,
     );
 
+    final barWidth = math.max(
+      5.0,
+      math.min(22.0, size.width / (points.length * 1.8)),
+    );
+    for (var index = 0; index < daily.length; index++) {
+      final value = daily[index];
+      final y = plotY(value, daily);
+      final top = math.min(y, dailyZero);
+      final height = math.max(1.0, (y - dailyZero).abs());
+      final colour = value >= 0 ? kPositive : kNegative;
+      final rect = RRect.fromRectAndRadius(
+        Rect.fromLTWH(x(index) - barWidth / 2, top, barWidth, height),
+        const Radius.circular(3),
+      );
+      canvas.drawRRect(rect, Paint()..color = colour.withValues(alpha: .42));
+      canvas.drawRRect(
+        rect,
+        Paint()
+          ..color = colour
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1,
+      );
+    }
+
     if (points.length > 1) {
-      final depth = Path()..moveTo(x(0), y(points.first.pnl));
-      for (var index = 1; index < points.length; index++) {
-        depth.lineTo(x(index), y(points[index].pnl));
+      final depth = Path()..moveTo(x(0), plotY(cumulative.first, cumulative));
+      for (var index = 1; index < cumulative.length; index++) {
+        depth.lineTo(x(index), plotY(cumulative[index], cumulative));
       }
       canvas.save();
       canvas.translate(3, 5);
@@ -284,7 +367,7 @@ class _DailyPnlPainter extends CustomPainter {
         depth,
         Paint()
           ..color = const Color(0xD9091728)
-          ..strokeWidth = 8
+          ..strokeWidth = 7
           ..style = PaintingStyle.stroke
           ..strokeJoin = StrokeJoin.round
           ..strokeCap = StrokeCap.round,
@@ -292,30 +375,24 @@ class _DailyPnlPainter extends CustomPainter {
       canvas.restore();
     }
 
-    for (var index = 1; index < points.length; index++) {
-      final positive = points[index].pnl >= 0;
+    for (var index = 1; index < cumulative.length; index++) {
       canvas.drawLine(
-        Offset(x(index - 1), y(points[index - 1].pnl)),
-        Offset(x(index), y(points[index].pnl)),
+        Offset(x(index - 1), plotY(cumulative[index - 1], cumulative)),
+        Offset(x(index), plotY(cumulative[index], cumulative)),
         Paint()
-          ..color = positive ? kPositive : kNegative
+          ..color = kWarning
           ..strokeWidth = 3
           ..strokeCap = StrokeCap.round,
       );
     }
-    for (var index = 0; index < points.length; index++) {
-      final positive = points[index].pnl >= 0;
-      final point = Offset(x(index), y(points[index].pnl));
+    for (var index = 0; index < cumulative.length; index++) {
+      final point = Offset(x(index), plotY(cumulative[index], cumulative));
       canvas.drawCircle(
         point.translate(1.5, 2.5),
-        5,
+        4.5,
         Paint()..color = const Color(0xC9091728),
       );
-      canvas.drawCircle(
-        point,
-        4,
-        Paint()..color = positive ? kPositive : kNegative,
-      );
+      canvas.drawCircle(point, 3.5, Paint()..color = kWarning);
       canvas.drawCircle(point, 1.6, Paint()..color = const Color(0xFFE5FBFF));
     }
   }

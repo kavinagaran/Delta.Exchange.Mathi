@@ -18,7 +18,8 @@
 
 <div class="card">
   <div class="card-hd">
-    <span>Daily P/L</span>
+    Daily P/L — day-wise
+    <span class="spacer"></span><span class="badge closed">REAL TRADES</span>
   </div>
   <div class="card-bd">
     <div class="chart-box"><canvas id="pnl-chart"></canvas></div>
@@ -82,62 +83,33 @@ function drawChart(trades) {
   const css = getComputedStyle(document.documentElement);
   const MUTED = css.getPropertyValue('--muted').trim();
   const GRID = css.getPropertyValue('--chart-grid').trim();
-  const positive = '#38d99a';
-  const negative = '#ff6172';
+  let running = 0;
+  const cumulative = pnl.map(value => value == null ? null : Number((running += value).toFixed(2)));
+  const POS = css.getPropertyValue('--pos').trim();
+  const NEG = css.getPropertyValue('--neg').trim();
+  const WARN = css.getPropertyValue('--warn').trim();
   const ctx = document.getElementById('pnl-chart').getContext('2d');
   if (chart) chart.destroy();
-  if (!Chart.registry.plugins.get('dailyPnlDepth')) {
-    Chart.register({
-      id: 'dailyPnlDepth',
-      beforeDatasetDraw(instance, args) {
-        // A recessed, offset stroke gives the daily line depth without
-        // obscuring the exact P/L value on dark themes.
-        if (args.index !== 1) return;
-        const canvas = instance.ctx;
-        canvas.save();
-        canvas.shadowColor = 'rgba(0, 0, 0, .72)';
-        canvas.shadowBlur = 10;
-        canvas.shadowOffsetX = 3;
-        canvas.shadowOffsetY = 5;
-      },
-      afterDatasetDraw(instance, args) {
-        if (args.index === 1) instance.ctx.restore();
-      },
-    });
-  }
   chart = new Chart(ctx, {
     data: { labels, datasets: [
-      // Surface beneath the raised line.
-      { type: 'line', label: 'Daily net P/L depth', data: pnl,
-        borderColor: 'rgba(5, 16, 31, .86)', borderWidth: 8,
-        pointRadius: 0, tension: .32, fill: false, order: 2 },
-      { type: 'line', label: 'Daily net P/L', data: pnl,
-        borderWidth: 3, pointRadius: 4, pointHoverRadius: 6,
-        pointBorderWidth: 2, pointBorderColor: '#dff8ff',
-        pointBackgroundColor: context => +context.raw >= 0 ? positive : negative,
-        segment: { borderColor: context =>
-          +(context.p1.parsed.y || 0) >= 0 ? positive : negative },
-        tension: .32, cubicInterpolationMode: 'monotone', fill: 'origin',
-        backgroundColor: context => {
-          const area = context.chart.chartArea;
-          if (!area) return 'rgba(56, 217, 154, .14)';
-          const gradient = context.chart.ctx.createLinearGradient(0, area.top, 0, area.bottom);
-          gradient.addColorStop(0, 'rgba(56, 217, 154, .28)');
-          gradient.addColorStop(.52, 'rgba(72, 139, 214, .08)');
-          gradient.addColorStop(1, 'rgba(255, 97, 114, .20)');
-          return gradient;
-        },
-        order: 1 },
+      { type: 'bar', label: 'Daily net P/L', data: pnl, yAxisID: 'daily',
+        backgroundColor: pnl.map(value => value == null ? 'rgba(140,160,180,.25)' : value >= 0 ? 'rgba(8,135,93,.5)' : 'rgba(217,45,32,.45)'),
+        borderColor: pnl.map(value => value == null ? MUTED : value >= 0 ? POS : NEG),
+        borderWidth: 1, borderRadius: 4, maxBarThickness: 44 },
+      { type: 'line', label: 'Cumulative net P/L', data: cumulative, yAxisID: 'cumulative',
+        borderColor: WARN, backgroundColor: 'rgba(180,83,9,.07)', borderWidth: 2.5,
+        pointRadius: 3, pointBackgroundColor: WARN, tension: .3, fill: true },
     ] },
     options: {
       responsive: true, maintainAspectRatio: false,
       plugins: {
-        legend: { display: false },
-        tooltip: { callbacks: { label: context => ` Estimated net P/L: ${f$(context.raw)}` } },
+        legend: { labels: { color: MUTED, font: { size: 12 } } },
+        tooltip: { callbacks: { label: context => ` ${context.dataset.label}: ${f$(context.raw)}` } },
       },
       scales: {
         x: { ticks: { color: MUTED, font: { size: 11 } }, grid: { color: GRID } },
-        y: { ticks: { color: MUTED, callback: value => f$(value) }, grid: { color: GRID } },
+        daily: { position: 'left', ticks: { color: MUTED, callback: value => f$(value) }, grid: { color: GRID } },
+        cumulative: { position: 'right', ticks: { color: WARN, callback: value => f$(value) }, grid: { drawOnChartArea: false } },
       },
     },
   });
