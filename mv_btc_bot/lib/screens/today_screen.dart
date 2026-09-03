@@ -442,9 +442,7 @@ class _ProtectionPanel extends StatelessWidget {
         protection['tsl_armed'] == true;
     final health = protection['health'] is Map
         ? Map<String, dynamic>.from(protection['health'] as Map)
-        : <String, dynamic>{
-            'peak_pnl': protection['peak_pnl_usd'],
-          };
+        : <String, dynamic>{'peak_pnl': protection['peak_pnl_usd']};
     final peak =
         _number(protection['stream_tsl_peak']) ?? _number(health['peak_pnl']);
     final floor = _number(
@@ -454,7 +452,9 @@ class _ProtectionPanel extends StatelessWidget {
           health['stop_floor'],
     );
     final nimmathiTsl = protection['nimmathi_tsl'] == true;
-    final rawGiveback = armed && peak != null && floor != null ? peak - floor : null;
+    final rawGiveback = armed && peak != null && floor != null
+        ? peak - floor
+        : null;
     final giveback = rawGiveback == null
         ? null
         : (rawGiveback > 0 ? rawGiveback : 0.0);
@@ -500,11 +500,9 @@ class _ProtectionPanel extends StatelessWidget {
                 colour: kNegative,
               ),
               MetricTile(
-                label: nimmathiTsl
-                    ? 'Peak P&L'
-                    : 'TSL arm',
+                label: nimmathiTsl ? 'Peak P&L' : 'TSL arm',
                 value: nimmathiTsl
-                    ? (peak == null ? '—' : '$${peak.toStringAsFixed(2)}')
+                    ? (peak == null ? '—' : '\$${peak.toStringAsFixed(2)}')
                     : value('tsl_arm_pnl'),
                 colour: kWarning,
                 big: nimmathiTsl,
@@ -513,8 +511,8 @@ class _ProtectionPanel extends StatelessWidget {
                 label: nimmathiTsl ? 'TSL giveback' : 'TSL trail',
                 value: nimmathiTsl
                     ? (giveback != null
-                        ? '$${giveback.toStringAsFixed(2)}'
-                        : '—')
+                          ? '\$${giveback.toStringAsFixed(2)}'
+                          : '—')
                     : value('tsl_trail_pnl'),
                 colour: const Color(0xFF70B8FF),
                 big: nimmathiTsl,
@@ -523,8 +521,8 @@ class _ProtectionPanel extends StatelessWidget {
                 label: nimmathiTsl ? 'TSL floor' : 'Minimum lock',
                 value: nimmathiTsl
                     ? (armed && floor != null
-                        ? '$${floor.toStringAsFixed(2)}'
-                        : '—')
+                          ? '\$${floor.toStringAsFixed(2)}'
+                          : '—')
                     : value('tsl_lock_min_pnl'),
                 colour: const Color(0xFFC58CFF),
                 big: nimmathiTsl,
@@ -537,81 +535,6 @@ class _ProtectionPanel extends StatelessWidget {
                 colour: scheme.secondary,
               ),
             ],
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-/// Trailing-stop telemetry, called out on its own line at the bottom of the
-/// monitor rather than folded into the metric grid above -- whether the
-/// trail has actually armed (and at what floor) is the one fact that changes
-/// the risk on an open position without the operator touching anything.
-class _TslArmedLine extends StatelessWidget {
-  const _TslArmedLine({required this.protection, required this.armed});
-
-  final Map<String, dynamic> protection;
-  final bool armed;
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    // Same fallback chains the web Today panel uses
-    // (`todayInlineProtectionHtml`). The `stream_*` fields are populated
-    // only while a matching live stream is attached, so on the watchdog
-    // path they are always null -- without the fallbacks the line reads
-    // "not armed / peak pending" while the pill says TSL ARMED.
-    final health = protection['health'] is Map
-        ? Map<String, dynamic>.from(protection['health'] as Map)
-        : <String, dynamic>{
-            'heartbeat_utc': protection['last_check_utc'],
-            'peak_pnl': protection['peak_pnl_usd'],
-          };
-    final floor = _number(
-      protection['stream_tsl_floor'] ??
-          protection['tsl_floor'] ??
-          protection['tsl_floor_usd'] ??
-          health['stop_floor'],
-    );
-    final peak =
-        _number(protection['stream_tsl_peak']) ?? _number(health['peak_pnl']);
-    final floorText = armed && floor != null
-        ? 'floor \$${floor.toStringAsFixed(2)}'
-        : 'not armed';
-    final peakText = peak == null
-        ? 'peak pending'
-        : 'peak \$${peak.toStringAsFixed(2)}';
-    final coverage = '${protection['coverage_status'] ?? ''}'
-        .trim()
-        .toLowerCase();
-    final coverageText = coverage.isEmpty || coverage == 'local_fallback'
-        ? ''
-        : ' · ${coverage.replaceAll('_', ' ').toUpperCase()}';
-    final tone = armed ? kWarning : scheme.onSurfaceVariant;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: Gap.sm, vertical: 7),
-      decoration: BoxDecoration(
-        color: tone.withValues(alpha: .09),
-        borderRadius: BorderRadius.circular(Radii.sm),
-        border: Border(left: BorderSide(color: tone, width: 2)),
-      ),
-      child: Row(
-        children: [
-          Icon(
-            armed ? Icons.gpp_good_rounded : Icons.gpp_maybe_outlined,
-            size: 14,
-            color: tone,
-          ),
-          const SizedBox(width: 6),
-          Expanded(
-            child: Text(
-              'TSL ${armed ? 'Armed' : 'Not Armed'} · $floorText · $peakText$coverageText',
-              style: AppText.caption.copyWith(
-                color: tone,
-                fontWeight: FontWeight.w700,
-              ),
-            ),
           ),
         ],
       ),
