@@ -152,7 +152,7 @@ def test_today_protection_footer_is_bold_colored_and_hides_local_fallback():
     assert "today-telemetry-negative" in source
     assert "today-telemetry-warn" in source
     assert ".today-inline-protection .dry-protection-telemetry" in styles
-    assert ".today-inline-protection > p" in styles
+    assert ".today-protection-metric.is-trail-value strong" in styles
 
 
 def test_today_summary_cards_use_meaningful_svg_icons_not_empty_boxes():

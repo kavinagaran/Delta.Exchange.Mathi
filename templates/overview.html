@@ -270,6 +270,12 @@ function todayInlineProtectionHtml(protection) {
     ? ` · <strong class="today-telemetry-coverage">${esc(coverage)}</strong>`
     : '';
   const nimmathiTsl = protection.nimmathi_tsl === true;
+  const peakCard = peakValue !== null ? esc(f$(peakValue)) : '—';
+  const floorCard = armed && todayKnownNumber(floorValue)
+    ? esc(f$(Number(floorValue))) : '—';
+  const givebackValue = armed && peakValue !== null && todayKnownNumber(floorValue)
+    ? Math.max(peakValue - Number(floorValue), 0) : null;
+  const givebackCard = givebackValue !== null ? esc(f$(givebackValue)) : '—';
   return `<section class="dry-protection-box today-inline-protection" aria-label="Live TP, SL and TSL monitor">
     <div class="dry-protection-hd">
       <div><span>Live protection</span><strong>TP / SL / TSL Monitor</strong></div>
@@ -280,19 +286,18 @@ function todayInlineProtectionHtml(protection) {
         <strong>${value(protection.target_pnl ?? protection.tp_target_pnl)}</strong></div>
       <div class="today-protection-metric tone-sl"><span>Stop loss $</span>
         <strong>${value(protection.sl_pnl ?? protection.sl_target_pnl)}</strong></div>
-      <div class="today-protection-metric tone-tsl-arm"><span>${nimmathiTsl ? 'TSL arms at' : 'TSL arm P&amp;L $'}</span>
-        <strong>${nimmathiTsl ? 'Positive P&amp;L' : value(protection.tsl_arm_pnl)}</strong></div>
-      <div class="today-protection-metric tone-tsl-trail"><span>${nimmathiTsl ? 'TSL giveback' : 'TSL trail $'}</span>
-        <strong>${nimmathiTsl ? `${fN(protection.tsl_pct)}%` : value(protection.tsl_trail_pnl)}</strong></div>
-      <div class="today-protection-metric tone-lock"><span>Minimum locked $</span>
-        <strong>${value(protection.tsl_lock_min_pnl)}</strong></div>
+      <div class="today-protection-metric tone-tsl-arm ${nimmathiTsl ? 'is-trail-value' : ''}"><span>${nimmathiTsl ? 'Peak P&amp;L $' : 'TSL arm P&amp;L $'}</span>
+        <strong>${nimmathiTsl ? peakCard : value(protection.tsl_arm_pnl)}</strong></div>
+      <div class="today-protection-metric tone-tsl-trail ${nimmathiTsl ? 'is-trail-value' : ''}"><span>${nimmathiTsl ? 'TSL giveback $' : 'TSL trail $'}</span>
+        <strong>${nimmathiTsl ? givebackCard : value(protection.tsl_trail_pnl)}</strong></div>
+      <div class="today-protection-metric tone-lock ${nimmathiTsl ? 'is-trail-value' : ''}"><span>${nimmathiTsl ? 'TSL floor $' : 'Minimum locked $'}</span>
+        <strong>${nimmathiTsl ? floorCard : value(protection.tsl_lock_min_pnl)}</strong></div>
       <div class="today-protection-metric tone-poll"><span>Price feed</span>
         <strong>${streaming ? `LIVE · ~${fN(cadence)}s` : `WATCHDOG · ${fN(every || 0)}s`}</strong></div>
     </div>
     <div class="dry-protection-telemetry">
-      <span>${timing}</span><span>${peak} · ${floor}${coverageHtml}</span>
+      <span>${timing}</span><span>${nimmathiTsl ? coverageHtml.replace(/^ · /, '') : `${peak} · ${floor}${coverageHtml}`}</span>
     </div>
-    <p>Automatic protection from the filled premium. Values are read-only on Today.</p>
   </section>`;
 }
 

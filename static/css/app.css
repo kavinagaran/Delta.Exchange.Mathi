@@ -2861,6 +2861,9 @@ body:has(.overview-page) .nav a.active {
   font-variant-numeric: tabular-nums;
   text-shadow: 0 0 10px color-mix(in srgb, var(--te-score-tone) 46%, transparent);
 }
+.today-protection-metric.is-trail-value strong {
+  font-size: 17px; line-height: 1.15; letter-spacing: -.02em;
+}
 .today-protection-metric.tone-tp { color: var(--pos); }
 .today-protection-metric.tone-sl { color: #ff6172; }
 .today-protection-metric.tone-tsl-arm { color: #ffc267; }
@@ -2871,7 +2874,6 @@ body:has(.overview-page) .nav a.active {
   color: var(--text); font-weight: 750;
 }
 .today-inline-protection .dry-protection-telemetry strong { font-weight: 850; }
-.today-inline-protection > p { color: var(--text); font-weight: 700; }
 .today-telemetry-time,
 .today-telemetry-tsl { color: #70b8ff; }
 .today-telemetry-positive { color: var(--pos); }

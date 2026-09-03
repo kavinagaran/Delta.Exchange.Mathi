@@ -440,6 +440,24 @@ class _ProtectionPanel extends StatelessWidget {
     final armed =
         protection['stream_tsl_armed'] == true ||
         protection['tsl_armed'] == true;
+    final health = protection['health'] is Map
+        ? Map<String, dynamic>.from(protection['health'] as Map)
+        : <String, dynamic>{
+            'peak_pnl': protection['peak_pnl_usd'],
+          };
+    final peak =
+        _number(protection['stream_tsl_peak']) ?? _number(health['peak_pnl']);
+    final floor = _number(
+      protection['stream_tsl_floor'] ??
+          protection['tsl_floor'] ??
+          protection['tsl_floor_usd'] ??
+          health['stop_floor'],
+    );
+    final nimmathiTsl = protection['nimmathi_tsl'] == true;
+    final rawGiveback = armed && peak != null && floor != null ? peak - floor : null;
+    final giveback = rawGiveback == null
+        ? null
+        : (rawGiveback > 0 ? rawGiveback : 0.0);
     String value(String key, [String? fallback]) {
       final raw =
           protection[key] ?? (fallback == null ? null : protection[fallback]);
@@ -482,27 +500,34 @@ class _ProtectionPanel extends StatelessWidget {
                 colour: kNegative,
               ),
               MetricTile(
-                label: protection['nimmathi_tsl'] == true
-                    ? 'TSL arms at'
+                label: nimmathiTsl
+                    ? 'Peak P&L'
                     : 'TSL arm',
-                value: protection['nimmathi_tsl'] == true
-                    ? 'Positive P&L'
+                value: nimmathiTsl
+                    ? (peak == null ? '—' : '$${peak.toStringAsFixed(2)}')
                     : value('tsl_arm_pnl'),
                 colour: kWarning,
+                big: nimmathiTsl,
               ),
               MetricTile(
-                label: protection['nimmathi_tsl'] == true
-                    ? 'TSL giveback'
-                    : 'TSL trail',
-                value: protection['nimmathi_tsl'] == true
-                    ? '${protection['tsl_pct'] ?? '—'}%'
+                label: nimmathiTsl ? 'TSL giveback' : 'TSL trail',
+                value: nimmathiTsl
+                    ? (giveback != null
+                        ? '$${giveback.toStringAsFixed(2)}'
+                        : '—')
                     : value('tsl_trail_pnl'),
                 colour: const Color(0xFF70B8FF),
+                big: nimmathiTsl,
               ),
               MetricTile(
-                label: 'Minimum lock',
-                value: value('tsl_lock_min_pnl'),
+                label: nimmathiTsl ? 'TSL floor' : 'Minimum lock',
+                value: nimmathiTsl
+                    ? (armed && floor != null
+                        ? '$${floor.toStringAsFixed(2)}'
+                        : '—')
+                    : value('tsl_lock_min_pnl'),
                 colour: const Color(0xFFC58CFF),
+                big: nimmathiTsl,
               ),
               MetricTile(
                 label: 'Price feed',
@@ -513,8 +538,6 @@ class _ProtectionPanel extends StatelessWidget {
               ),
             ],
           ),
-          const SizedBox(height: Gap.md),
-          _TslArmedLine(protection: protection, armed: armed),
         ],
       ),
     );
