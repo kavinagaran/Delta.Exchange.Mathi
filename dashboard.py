@@ -14946,6 +14946,69 @@ def api_cockpit_setups():
     })
 
 
+def _cockpit_reverse_partial_live_fill(result: dict) -> dict:
+    """Reject a partial Cockpit IOC fill after proving the residual is flat.
+
+    Delta's bounded IOC endpoint can accept the visible slice and cancel the
+    remainder.  That is acceptable for automatic execution, where a protected
+    partial position is a valid risk-managed outcome, but it is not what an
+    operator means by a manual Cockpit quantity.  Cockpit therefore requires
+    an all-or-nothing *outcome*: a partial is immediately closed through the
+    same verified reduce-only path used for other emergency reversals.
+    """
+    if (
+        not isinstance(result, dict)
+        or str(result.get("status") or "").upper() != "OPEN"
+        or not result.get("partial_fill")
+    ):
+        return result
+    state = result.get("state")
+    if not isinstance(state, dict):
+        return {
+            **result,
+            "ok": False,
+            "status": "PARTIAL_FILL_STATE_UNVERIFIED",
+            "error": "Cockpit partial fill has no durable position state",
+        }
+    try:
+        filled = int(float(result.get("filled_lots") or state.get("lots") or 0))
+        requested = int(float(state.get("requested_lots") or 0))
+    except (TypeError, ValueError, OverflowError):
+        filled, requested = 0, 0
+    if filled <= 0 or requested <= filled:
+        return {
+            **result,
+            "ok": False,
+            "status": "PARTIAL_FILL_STATE_UNVERIFIED",
+            "error": "Cockpit partial-fill quantity is inconsistent",
+        }
+    try:
+        closed = _trend_score_auto_live_emergency_flatten(
+            state, "cockpit_partial_fill_rejected",
+        )
+    except Exception as exc:
+        return {
+            **result,
+            "ok": False,
+            "status": "PARTIAL_FILL_UNWIND_FAILED",
+            "error": (
+                f"Cockpit filled only {filled}/{requested} lots and the "
+                f"safety close could not be verified: {exc}"
+            )[:500],
+        }
+    return {
+        **result,
+        "ok": False,
+        "status": "PARTIAL_FILL_REVERSED",
+        "state": closed,
+        "flat_verified": bool(closed.get("flat_verified")),
+        "error": (
+            f"Cockpit filled only {filled}/{requested} lots; the partial "
+            "position was immediately closed. No position remains open."
+        ),
+    }
+
+
 @app.route("/api/cockpit/enter", methods=["POST"])
 def api_cockpit_enter():
     """Place one manually chosen Cockpit trade in the account's active mode.
@@ -15101,6 +15164,7 @@ def api_cockpit_enter():
                     ].get("exchange_rejected_lots"),
                     "retried_lots": margin_retry["lots"],
                 }
+            result = _cockpit_reverse_partial_live_fill(result)
     except Exception as exc:
         return jsonify({"ok": False, "error": str(exc)[:300]}), 400
 

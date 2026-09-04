@@ -579,6 +579,47 @@ def test_cockpit_enter_surfaces_a_failed_execution_without_a_500(
     assert not ledger_path.exists()
 
 
+def test_cockpit_reverses_a_partial_ioc_fill(live_account, monkeypatch):
+    monkeypatch.setattr(
+        dashboard, "_cockpit_market_snapshot", lambda: {"market": {"spot": 65_000}},
+    )
+    monkeypatch.setattr(
+        dashboard, "_cockpit_prepare_manual_entry",
+        lambda action, snapshot, **kwargs: {
+            "zone": dashboard.TREND_SCORE_CE_ZONE, "side": "long",
+            "symbol": "C-BTC-80800-040926", "product_id": 151005,
+            "lots": 250,
+        },
+    )
+    partial_state = {
+        "status": "OPEN", "symbol": "C-BTC-80800-040926",
+        "product_id": 151005, "lots": 10, "requested_lots": 250,
+        "position_cycle_id": "partial-cycle",
+    }
+    monkeypatch.setattr(
+        dashboard, "_trend_score_auto_live_execute",
+        Mock(return_value={
+            "ok": True, "status": "OPEN", "order_submitted": True,
+            "filled_lots": 10, "partial_fill": True, "state": partial_state,
+        }),
+    )
+    flatten = Mock(return_value={
+        **partial_state, "status": "CLOSED", "flat_verified": True,
+    })
+    monkeypatch.setattr(dashboard, "_trend_score_auto_live_emergency_flatten", flatten)
+
+    response, status = _post_cockpit_enter("buy_ce")
+
+    assert status == 409
+    payload = response.get_json()
+    assert payload["ok"] is False
+    assert payload["status"] == "PARTIAL_FILL_REVERSED"
+    assert payload["state"]["status"] == "CLOSED"
+    assert "10/250" in payload["error"]
+    flatten.assert_called_once_with(partial_state, "cockpit_partial_fill_rejected")
+    dashboard._trend_score_auto_notify.assert_not_called()
+
+
 def test_cockpit_retries_once_with_delta_affordable_lots_after_margin_rejection(
     live_account, monkeypatch,
 ):
