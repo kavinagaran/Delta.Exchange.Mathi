@@ -187,6 +187,69 @@ _MANUAL_OWNERSHIPS = {
     TREND_SCORE_MANUAL_LIVE_OWNERSHIP,
     TREND_SCORE_MANUAL_DRY_OWNERSHIP,
 }
+_MANUAL_COCKPIT_AUDIT_CACHE: dict[str, tuple[tuple[int, int], frozenset[str]]] = {}
+
+
+def _manual_cockpit_order_ids_from_audit() -> frozenset[str]:
+    """Return durable order identities previously opened through Cockpit.
+
+    Older TP-monitor history rows omitted their origin fields.  The strategy
+    audit remains authoritative for those rows because the entry intent and
+    opened events contain both the manual signal key and client order ID.
+    Cache by file signature so the frequently-polled Today endpoint does not
+    repeatedly parse the audit log.
+    """
+    path = _user_dir() / "strategy_audit.jsonl"
+    try:
+        stat = path.stat()
+    except OSError:
+        return frozenset()
+    signature = (stat.st_mtime_ns, stat.st_size)
+    key = str(path)
+    cached = _MANUAL_COCKPIT_AUDIT_CACHE.get(key)
+    if cached and cached[0] == signature:
+        return cached[1]
+
+    identities: set[str] = set()
+    try:
+        with path.open("r", encoding="utf-8") as stream:
+            for line in stream:
+                try:
+                    event = json.loads(line)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    continue
+                if not isinstance(event, dict):
+                    continue
+                signal_key = str(event.get("signal_key") or "")
+                if not signal_key.startswith("manual-cockpit|"):
+                    continue
+                for field in ("client_order_id", "entry_client_order_id"):
+                    value = str(event.get(field) or "").strip()
+                    if value:
+                        identities.add(value)
+                for value in event.get("client_order_ids") or []:
+                    value = str(value or "").strip()
+                    if value:
+                        identities.add(value)
+    except OSError:
+        return frozenset()
+
+    result = frozenset(identities)
+    _MANUAL_COCKPIT_AUDIT_CACHE[key] = (signature, result)
+    return result
+
+
+def _trade_client_order_ids(record: dict) -> set[str]:
+    identities = {
+        str(record.get(field) or "").strip()
+        for field in ("client_order_id", "entry_client_order_id")
+    }
+    identities.update(
+        str(value or "").strip()
+        for value in (record.get("client_order_ids") or [])
+    )
+    identities.discard("")
+    return identities
 
 
 def _trade_origin_label(record: dict | None) -> str:
@@ -208,6 +271,11 @@ def _trade_origin_label(record: dict | None) -> str:
         or classification == "manual_cockpit"
         or ownership in _MANUAL_OWNERSHIPS
         or signal_key.startswith("manual-cockpit|")
+    ):
+        return ORIGIN_MANUAL
+    if (
+        _trade_client_order_ids(record)
+        & _manual_cockpit_order_ids_from_audit()
     ):
         return ORIGIN_MANUAL
     if trigger in _TREND_AUTO_ENTRY_TRIGGERS or ownership in _TREND_AUTO_OWNERSHIPS:

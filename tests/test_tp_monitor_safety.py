@@ -727,6 +727,28 @@ class TpMonitorSafetyTests(unittest.TestCase):
         self.assertEqual(row["externally_added_lots_adopted"], 3)
         self.assertEqual(tp_monitor._owned_close_lots(self.read_state()), 6)
 
+    def test_closed_history_preserves_manual_cockpit_origin(self):
+        self.write_state(
+            status="CLOSED", exit_mark=2.0, gross_pnl_usd=3.0,
+            pnl_usd=2.8, exit_time_utc="01:10:00", closed_lots=10,
+            ownership="manual_cockpit_live",
+            entry_trigger="manual_cockpit_sell_move",
+            entry_classification="manual_cockpit",
+            strategy="manual_cockpit",
+            manual_cockpit_action="sell_move",
+            score_auto_signal_key="manual-cockpit|sell_move|abc123",
+        )
+
+        self.assertTrue(tp_monitor.append_history(self.read_state()))
+        row = json.loads(self.history_file.read_text(encoding="utf-8"))[0]
+        self.assertEqual(row["ownership"], "manual_cockpit_live")
+        self.assertEqual(row["entry_trigger"], "manual_cockpit_sell_move")
+        self.assertEqual(row["entry_classification"], "manual_cockpit")
+        self.assertEqual(row["manual_cockpit_action"], "sell_move")
+        self.assertEqual(
+            row["signal_key"], "manual-cockpit|sell_move|abc123",
+        )
+
     def test_sigterm_handler_keeps_open_exchange_orders(self):
         self.write_state(tsl_stop_order_id="sl-1", tp_stop_order_id="tp-1")
         with patch.object(tp_monitor.signal, "signal") as register:

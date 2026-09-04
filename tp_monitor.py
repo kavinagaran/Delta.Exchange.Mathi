@@ -2521,6 +2521,16 @@ def append_history(state):
             "unreconciled_partial_exit_lots": state.get(
                 "unreconciled_partial_exit_lots", 0),
             "position_cycle_id": state.get("position_cycle_id"),
+            # Preserve the entry origin through TP/SL/TSL reconciliation so a
+            # manually opened Cockpit trade never becomes an automatic trade
+            # merely because the protection monitor wrote its closed row.
+            "ownership": state.get("ownership"),
+            "entry_trigger": state.get("entry_trigger"),
+            "entry_classification": state.get("entry_classification"),
+            "strategy": state.get("strategy"),
+            "manual_cockpit_action": state.get("manual_cockpit_action"),
+            "signal_key": state.get("signal_key")
+                          or state.get("score_auto_signal_key"),
         }
         rec["accounting_status"] = str(state.get("accounting_status") or "") or (
             "complete" if _history_accounting_complete(rec) else "pending"

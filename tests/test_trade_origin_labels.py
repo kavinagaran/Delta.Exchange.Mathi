@@ -56,6 +56,27 @@ def test_trade_origin_label(record, label):
     assert dashboard._trade_origin_label(record) == label
 
 
+def test_legacy_cockpit_move_recovers_manual_origin_from_audit(isolated_user):
+    client_id = "trend-alice-bdf4843c0a677b28-e"
+    audit = isolated_user / "strategy_audit.jsonl"
+    audit.write_text(json.dumps({
+        "event": "trend_score_live_entry_opened",
+        "signal_key": "manual-cockpit|sell_move|abc123",
+        "client_order_id": client_id,
+    }) + "\n", encoding="utf-8")
+
+    # Mirrors historical TP-monitor rows: the MOVE fallback would have
+    # labelled this A before the durable Cockpit audit was consulted.
+    assert dashboard._trade_origin_label({
+        "symbol": "MV-BTC-78800-040926",
+        "entry_client_order_id": client_id,
+    }) == "M"
+    assert dashboard._trade_origin_label({
+        "symbol": "MV-BTC-79000-040926",
+        "entry_client_order_id": "unrelated-order",
+    }) == "A"
+
+
 # ── API injection ──────────────────────────────────────────────────────
 
 
