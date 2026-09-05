@@ -1,7 +1,7 @@
 """Score -> action zone mapping against the operator spec (2026-07-29):
 
     score > +40 buys CE · score < -40 buys PE (both ADX-independent)
-    -30..+30 sells ATM MOVE with 5m ADX at or below 25 · all other gaps HOLD
+    -30..+30 sells ATM MOVE with 15m ADX at or below 25 · all other gaps HOLD
 """
 
 from __future__ import annotations
@@ -96,7 +96,7 @@ def test_selling_move_is_refused_when_adx_does_not_confirm_calm():
 
 @pytest.mark.parametrize("score", [40.1, -40.1])
 @pytest.mark.parametrize("adx", [None, 0.0, 24.9, 25.0, 80.0])
-def test_directional_entry_is_independent_of_5m_adx(score, adx):
+def test_directional_entry_is_independent_of_15m_adx(score, adx):
     regime = "TREND_UP" if score > 0 else "TREND_DOWN"
     assert _decide(
         score, regime=regime, directional_adx=adx

@@ -630,7 +630,7 @@ class _FilterChip extends StatelessWidget {
   }
 }
 
-/// Compact view of the committed 5-minute ADX policy shared by Today and the
+/// Compact view of the committed 15-minute ADX policy shared by Today and the
 /// full Trend Engine screen. Execution remains server-owned; this widget only
 /// makes the exact evidence and boundary visible on the phone.
 class CommittedAdxPill extends StatelessWidget {
@@ -643,15 +643,15 @@ class CommittedAdxPill extends StatelessWidget {
   Widget build(BuildContext context) {
     final value = adx;
     if (value == null || !value.isFinite) {
-      return const StatusPill('5M ADX —', colour: kNeutral, dot: false);
+      return const StatusPill('15M ADX —', colour: kNeutral, dot: false);
     }
     final calm = value <= 25;
     final invalidatesMove = !calm && zone == 'SHORT_MOVE';
     final label = invalidatesMove
-        ? '5M ADX ${value.toStringAsFixed(1)} · EXIT MOVE'
+        ? '15M ADX ${value.toStringAsFixed(1)} · EXIT MOVE'
         : calm
-        ? '5M ADX ${value.toStringAsFixed(1)} · CALM'
-        : '5M ADX ${value.toStringAsFixed(1)} · TREND';
+        ? '15M ADX ${value.toStringAsFixed(1)} · CALM'
+        : '15M ADX ${value.toStringAsFixed(1)} · TREND';
     final tone = invalidatesMove
         ? kNegative
         : calm
@@ -886,7 +886,7 @@ String tradeDecisionLabel(
       return 'WAIT — EXPIRY TOO CLOSE';
     }
     if (key == 'SHORT_MOVE' && blocker.toUpperCase().contains('ADX')) {
-      return 'WAIT — 5M ADX NOT CALM';
+      return 'WAIT — 15M ADX NOT CALM';
     }
     if (key == 'SHORT_MOVE' && blocker.toLowerCase().contains('stop loss')) {
       return 'WAIT — STOP REQUIRED';

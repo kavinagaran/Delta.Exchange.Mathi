@@ -436,7 +436,7 @@ def test_quantile_interpolates_between_neighbours():
 # ── the live calm test (ADX), which replaced the confirmation window ────
 
 def test_gate_profile_applies_the_live_adx_calm_test():
-    """zones.decide refuses SHORT_MOVE unless the 5m ADX is calm, so the
+    """zones.decide refuses SHORT_MOVE unless the 15m ADX is calm, so the
     profile must replay that rather than a retired approximation."""
     calm = [_obs(5 * i, 0.0, excursion=0.001, adx=15.0) for i in range(10)]
     trending = [_obs(5 * (10 + i), 0.0, excursion=0.02, adx=45.0)

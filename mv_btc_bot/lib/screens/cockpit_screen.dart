@@ -600,7 +600,7 @@ class _CockpitScreenState extends State<CockpitScreen> {
                 colour: scoreColour(score),
               ),
               MetricTile(
-                label: '5M ADX',
+                label: '15M ADX',
                 value: adx?.toStringAsFixed(1) ?? '—',
                 colour: adx != null && adx <= 20 ? kPositive : kWarning,
               ),

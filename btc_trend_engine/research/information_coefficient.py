@@ -90,7 +90,7 @@ class Observation:
     # ScoreResult.max_abs_component, on the display scale (0..100). Retained
     # for research: the live gate no longer uses a component ceiling.
     max_abs_component: float | None = None
-    # 5-minute ADX. This is the production calm test for SHORT_MOVE
+    # 15-minute ADX. This is the production calm test for SHORT_MOVE
     # (`zones.decide` requires it below `regime.CALM_ADX_MAX`), so the gate
     # profile replays it. None means the indicator was not yet defined.
     adx: float | None = None
@@ -266,9 +266,9 @@ def collect_observations(
             forward_max_excursion=excursion,
             regime=decision.regime.value,
             max_abs_component=result.max_abs_component,
-            # The 5m ADX is the live SHORT_MOVE calm test (zones.decide), so
+            # The 15m ADX is the live SHORT_MOVE calm test (zones.decide), so
             # the gate profile has to replay it rather than approximate it.
-            adx=features[ROLES[3]].get("adx")))
+            adx=features[ROLES[2]].get("adx")))
     return observations
 
 
@@ -451,12 +451,12 @@ def sideways_gate_profile(
         (f"|score| <= {active.sideways_max_abs:g}",
          lambda obs, flag: abs(obs.score) <= active.sideways_max_abs),
     ]
-    # The live calm test. `zones.decide` refuses SHORT_MOVE unless the 5m ADX
+    # The live calm test. `zones.decide` refuses SHORT_MOVE unless the 15m ADX
     # is at or below CALM_ADX_MAX, so it belongs in the cumulative profile; a bar
     # whose ADX was never computed cannot have passed it.
     if calm_adx_max is not None:
         stages.append((
-            f"+ 5m ADX <= {calm_adx_max:g}",
+            f"+ 15m ADX <= {calm_adx_max:g}",
             lambda obs, flag: obs.adx is not None and obs.adx <= calm_adx_max,
         ))
     # Superseded 2026-07-29: the engine replaced the N-bar confirmation window

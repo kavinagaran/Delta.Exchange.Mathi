@@ -414,7 +414,7 @@ def test_non_calm_short_move_signal_does_not_close_or_replace_a_live_ce_position
         0.0,
         suffix="10:10:00Z",
         zone_action_allowed=False,
-        zone_reason="5m ADX 40.0 must be at or below 25 before selling MOVE",
+        zone_reason="15m ADX 40.0 must be at or below 25 before selling MOVE",
         trigger_adx=40.0,
     )
     prepare = Mock(side_effect=AssertionError("blocked MOVE must not prepare"))
@@ -446,7 +446,7 @@ def test_committed_non_calm_adx_closes_an_open_live_short_move(
         0.0,
         suffix="10:15:00Z",
         zone_action_allowed=False,
-        zone_reason="5m ADX 25.1 must be at or below 25 before selling MOVE",
+        zone_reason="15m ADX 25.1 must be at or below 25 before selling MOVE",
         trigger_adx=25.1,
     )
     prepare = Mock(side_effect=AssertionError("ADX exit must not prepare an entry"))

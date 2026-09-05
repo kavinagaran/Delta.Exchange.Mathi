@@ -9,6 +9,13 @@ mismatched major with `CONTRACT_VERSION_MISMATCH`.
 
 ## Changelog
 
+**Model v1.7.0 (2026-09-05)** — ADX evidence now comes exclusively from the
+latest completed 15-minute setup candle for score strength, regime, MOVE
+eligibility and SHORT_MOVE exits in LIVE and DRY RUN. `trigger_adx` remains
+the compatibility field, with additive `adx_timeframe: "15m"` metadata.
+Signals still commit every five minutes. Missing 15m ADX never falls back
+to 5m ADX. This changes the timeframe, not the configured threshold values.
+
 **v1.1.0 (2026-07-26)** — additive only, no consumer changes required. Adds
 the zone decision surface (`zone`, `zone_action_allowed`, `zone_reason`,
 `zone_option_type`, `zone_itm_steps`) for the operator score-band spec; see
@@ -105,7 +112,8 @@ committed 5-minute ADX. The execution controller uses it to close an open
 | `direction` | `-1` \| `0` \| `+1` |
 | `trend_score` | `-100.0 … +100.0`, `100·tanh(raw)` |
 | `confidence` | `0.0 … 1.0` |
-| `trigger_adx` | raw ADX from the committed 5-minute trigger candle, or `null` when unavailable |
+| `trigger_adx` | legacy field name for raw ADX from the latest completed 15-minute setup candle, or `null` when unavailable |
+| `adx_timeframe` | `15m`; identifies the source of `trigger_adx` |
 | `invalidation_price` | **string**, parsed with `Decimal`. Never a float |
 | `entry_allowed` | `false` whenever `data_quality != "OK"` — invariant, tested |
 | `zone` | `CE_2_ITM` \| `PE_2_ITM` \| `SHORT_MOVE` \| `HOLD` (v1.1.0) |
@@ -174,12 +182,12 @@ All bind `127.0.0.1:5055` and require `X-Engine-Token` except `/health`.
 |---:|---|---|
 | `+40 … +100` | `CE_2_ITM` | Buy a 2-step ITM call |
 | `+30 < score < +40` | `HOLD` | Keep the existing position |
-| `−30 … +30` with 5m ADX at or below 20 | `SHORT_MOVE` | Sell the ATM MOVE straddle |
+| `−30 … +30` with 15m ADX at or below the calm threshold | `SHORT_MOVE` | Sell the ATM MOVE straddle |
 | `−40 < score < −30` | `HOLD` | Keep the existing position |
 | `−100 … −40` | `PE_2_ITM` | Buy a 2-step ITM put |
 
 At exactly ±30 the score is a `SHORT_MOVE` candidate. The current closed
-5m score is actionable when its 5m ADX is at or below 20, subject to the remaining
+5m score is actionable when the latest completed 15m ADX is at or below the calm threshold, subject to the remaining
 execution safeguards. There is no multi-candle confirmation wait.
 
 `HOLD` prevents a new entry and normally preserves the open position. The

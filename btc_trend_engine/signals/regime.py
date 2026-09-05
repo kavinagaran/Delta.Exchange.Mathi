@@ -124,10 +124,9 @@ class RegimeClassifier:
                 and volume_ratio <= config.low_liquidity_volume_ratio):
             return Regime.LOW_LIQUIDITY, f"volume_ratio={volume_ratio:.2f}"
 
-        # The 5m ADX is the current-market calm/trend-strength reading.  The
-        # optional fallback retains compatibility with direct classifier users
-        # that predate the 5m trigger argument; production always supplies it.
-        adx = (trigger or setup).get("adx")
+        # Calm/trend strength always uses the completed 15m setup candle.
+        # Keep the trigger argument for caller compatibility, not as a fallback.
+        adx = setup.get("adx")
         if adx is None:
             return Regime.RANGE, "ADX is unavailable; direction is unconfirmed"
         if is_calm_adx(adx, threshold=config.calm_adx_max):

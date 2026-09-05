@@ -426,11 +426,11 @@ def test_breakout_requires_body():
 
 def test_adx_at_or_below_25_is_a_calm_sideways_regime_and_can_confirm_move():
     setup = _tf({"vol_ratio": 1.0, "volume_ratio": 1.0,
-                 "adx": 62.0, "rsi": 72.0})
+                 "adx": 25.0, "rsi": 72.0})
     decision = RegimeClassifier().classify(
         data_quality_ok=True, trend_score=85.0,
         setup=setup,
-        trigger=_tf({"adx": 25.0}),
+        trigger=_tf({"adx": 62.0}),
     )
     assert decision.regime is Regime.RANGE
     assert "calm-zone" in decision.reason
@@ -481,10 +481,11 @@ def test_the_hold_band_is_asymmetric_between_entering_and_holding():
 # ── snapshot invariants (contract §invariants, §23.4) ───────────────────
 def _snapshot(regime=Regime.TREND_UP, data_quality="OK", direction=1,
               gates_ok=True, score_value=80.0, gates=None,
-              trigger_adx=None):
+              trigger_adx=45.0, adx_5m=45.0):
     inputs = _full_bull_inputs()
-    if trigger_adx is not None:
-        inputs["trigger"].features["adx"] = trigger_adx
+    # trigger_adx is the legacy snapshot field, now sourced from 15m.
+    inputs["setup"].features["adx"] = trigger_adx
+    inputs["trigger"].features["adx"] = adx_5m
     score = compute_score(**inputs)
     if score_value is not None:
         object.__setattr__(score, "trend_score", score_value)
@@ -504,6 +505,50 @@ def _snapshot(regime=Regime.TREND_UP, data_quality="OK", direction=1,
                   "expected_absolute_move_bps": 43.0,
                   "forecast_volatility_bps": 39.0, "jump_probability": 0.02},
         )
+
+
+@pytest.mark.parametrize("adx_15m, adx_5m, calm, exit_move", [
+    (18.0, 60.0, True, False),
+    (40.0, 10.0, False, True),
+    (25.0, 60.0, True, False),
+    (25.1, 10.0, False, True),
+    (None, 10.0, False, False),
+])
+def test_move_entry_and_exit_use_only_completed_15m_adx(
+    adx_15m, adx_5m, calm, exit_move,
+):
+    from trend_score_auto import short_move_adx_exit_required
+
+    snapshot = _snapshot(
+        regime=Regime.RANGE, direction=0, score_value=0.0,
+        trigger_adx=adx_15m, adx_5m=adx_5m,
+    )
+    assert snapshot["adx_timeframe"] == "15m"
+    assert snapshot["trigger_adx"] == adx_15m
+    assert snapshot["zone_action_allowed"] is calm
+    assert short_move_adx_exit_required(snapshot["trigger_adx"]) is exit_move
+
+
+@pytest.mark.parametrize("adx_15m, adx_5m, expected", [
+    (25.0, 60.0, 0.0), (45.0, 10.0, 100.0), (None, 60.0, None),
+])
+def test_adx_score_component_uses_only_15m(adx_15m, adx_5m, expected):
+    inputs = _full_bull_inputs()
+    inputs["setup"].features["adx"] = adx_15m
+    inputs["trigger"].features["adx"] = adx_5m
+    component = next(c for c in compute_score(**inputs).components
+                     if c.name == "adx_trend_strength")
+    assert component.score == expected
+
+
+def test_regime_does_not_fall_back_to_5m_adx():
+    setup = _tf({"vol_ratio": 1.0, "volume_ratio": 1.0, "rsi": 72.0})
+    decision = RegimeClassifier().classify(
+        data_quality_ok=True, trend_score=85.0, setup=setup,
+        trigger=_tf({"adx": 60.0}),
+    )
+    assert decision.regime is Regime.RANGE
+    assert "unavailable" in decision.reason
 
 
 def test_snapshot_matches_contract_shape():
@@ -573,7 +618,7 @@ def test_sideways_zone_ignores_only_directional_entry_gates():
     assert all(gate["passed"] for gate in snapshot["gates"])
 
 
-def test_short_move_is_immediately_actionable_once_5m_adx_is_calm():
+def test_short_move_is_immediately_actionable_once_15m_adx_is_calm():
     snapshot = _snapshot(
         regime=Regime.RANGE,
         direction=0,
@@ -654,7 +699,7 @@ def test_directional_zone_requires_its_own_confidence_gate():
 
 @pytest.mark.parametrize("score", [60.0, -60.0])
 @pytest.mark.parametrize("adx", [None, 24.9, 25.0, 60.0])
-def test_directional_zone_is_independent_of_5m_adx(score, adx):
+def test_directional_zone_is_independent_of_15m_adx(score, adx):
     snapshot = _snapshot(
         # RANGE proves a calm-ADX classification cannot indirectly block the
         # strict directional score zone.

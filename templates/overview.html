@@ -451,7 +451,7 @@ function todayTradeDecisionPill(status, snapshot) {
   else if (!allowed && zone === 'SHORT_MOVE' && /5:30\s*PM|midnight|entry window/i.test(reason)) label = 'WAIT — WEEKDAY ENTRY WINDOW';
   else if (!allowed && /today(?:'s|-expiry).*expiry|today's-expiry/i.test(reason)) label = "WAIT — TODAY'S EXPIRY UNAVAILABLE";
   else if (!allowed && zone === 'SHORT_MOVE' && /90 minutes|expiry too close/i.test(reason)) label = 'WAIT — EXPIRY TOO CLOSE';
-  else if (!allowed && zone === 'SHORT_MOVE' && /ADX/i.test(reason)) label = 'WAIT — 5M ADX NOT CALM';
+  else if (!allowed && zone === 'SHORT_MOVE' && /ADX/i.test(reason)) label = 'WAIT — 15M ADX NOT CALM';
   else if (!allowed) label = 'WAIT — CHECKS BLOCKED';
   else if (zone === 'CE_2_ITM') label = 'BUY 2-STEP ITM CE';
   else if (zone === 'PE_2_ITM' || zone === 'PE_3_ITM') label = 'BUY 2-STEP ITM PE';

@@ -21,14 +21,13 @@ from . import zones
 from .regime import CALM_ADX_MAX, NON_TRADEABLE, Regime, is_calm_adx
 from .score import ScoreResult
 
-# 1.4.0 adds the raw committed 5-minute trigger ADX.  The trading controller
-# consumes it for an explicit SHORT_MOVE invalidation exit; exposing the
-# numeric evidence avoids brittle parsing of human-readable gate text.
+# trigger_adx is the legacy field consumed for SHORT_MOVE invalidation exits.
+# Its source is now the completed 15m setup candle (see adx_timeframe).
 SCHEMA_VERSION = "1.4.0"
-# The model version participates in signal_id. v1.6.0 defines Calm ADX as an
-# inclusive 5-minute reading at or below 20. Directional CE/PE entries remain
-# independent of ADX.
-MODEL_VERSION = "trend-rules-v1.6.0"
+# The model version participates in signal_id. v1.7.0 uses completed 15m ADX
+# for strength, regime, MOVE entry and exit. trigger_adx is retained as the
+# compatibility field; adx_timeframe explicitly identifies its new source.
+MODEL_VERSION = "trend-rules-v1.7.0"
 
 # These two v1 gates describe whether a *directional* entry is available. They
 # remain in the public gate matrix for backward compatibility, but they are not
@@ -225,11 +224,11 @@ def _zone_entry_gates(
             "label": "CALM ADX",
             "passed": short_move_calm,
             "detail": (
-                f"5m ADX {trigger_adx:.1f} is at or below {CALM_ADX_MAX:.0f}; calm market confirms SHORT_MOVE"
+                f"15m ADX {trigger_adx:.1f} is at or below {CALM_ADX_MAX:.0f}; calm market confirms SHORT_MOVE"
                 if short_move_calm else
-                (f"5m ADX {trigger_adx:.1f} must be at or below {CALM_ADX_MAX:.0f} before selling MOVE"
+                (f"15m ADX {trigger_adx:.1f} must be at or below {CALM_ADX_MAX:.0f} before selling MOVE"
                  if trigger_adx is not None else
-                 "5m ADX is unavailable; calm-market confirmation is required before selling MOVE")
+                 "15m ADX is unavailable; calm-market confirmation is required before selling MOVE")
             ),
         },
         {
@@ -339,7 +338,7 @@ def build_snapshot(
     # RANGE blocks it, whereas RANGE is precisely the sell-MOVE setup.
     score_value = score.trend_score if score.trend_score is not None else 0.0
     zone = zones.zone_for_score(score_value)
-    trigger_adx = trigger.get("adx")
+    trigger_adx = setup.get("adx")
     short_move_calm = is_calm_adx(trigger_adx)
     zone_gates = _zone_entry_gates(
         gates,
@@ -376,7 +375,7 @@ def build_snapshot(
             }
         ]
     elif zone in {zones.CE_2_ITM, zones.PE_2_ITM}:
-        # RANGE may mean only that 5m ADX is calm.  Directional entries are
+        # RANGE may mean only that 15m ADX is calm.  Directional entries are
         # now score-driven, so the legacy regime gate is not a failure in the
         # zone policy and must not be reported as if it blocked the trade.
         reason_codes = [
@@ -409,6 +408,7 @@ def build_snapshot(
         "zone_option_type": zone_decision.option_type,
         "zone_itm_steps": zone_decision.itm_steps,
         "trigger_adx": trigger_adx,
+        "adx_timeframe": "15m",
         "signal_ttl_seconds": config.ttl_seconds,
         "components": [
             {"name": c.name, "weight": c.weight, "score": c.score,

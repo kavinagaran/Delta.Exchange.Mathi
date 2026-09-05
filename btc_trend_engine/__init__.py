@@ -6,5 +6,5 @@ computation, regime classification and TrendSnapshot generation.  It holds no
 trading credentials, never touches ``users/``, and cannot place an order.
 """
 
-__version__ = "0.6.3"  # Calm ADX is now the inclusive 5m boundary <= 20
+__version__ = "0.6.4"  # ADX evidence uses the completed 15m setup candle.
 ENGINE_SCHEMA_VERSION = "1.4.0"  # docs/trend-snapshot-contract.md

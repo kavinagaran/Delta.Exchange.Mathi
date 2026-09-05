@@ -309,7 +309,7 @@ def test_one_committed_trade_decision_is_centered_below_the_circles():
     assert "BUY 2-STEP ITM PE" in TEMPLATE
     assert "SELL ATM MOVE" in TEMPLATE
     assert "HOLD — NO NEW TRADE" in TEMPLATE
-    assert "WAIT — 5M ADX NOT CALM" in TEMPLATE
+    assert "WAIT — 15M ADX NOT CALM" in TEMPLATE
     assert "WAIT — MOVE PREMIUM BELOW $300" in TEMPLATE
     assert "entry_blocked_reason" in TEMPLATE
     assert "jget('/api/trend-engine/score-auto/status')" in TEMPLATE
@@ -393,7 +393,7 @@ vm.runInThisContext(source.slice(start, end) + `
     'SHORT_MOVE', false,
     'ADX is above 25; calm-market confirmation is required before selling MOVE',
   );
-  if (calmBlock.label !== 'WAIT — 5M ADX NOT CALM' ||
+  if (calmBlock.label !== 'WAIT — 15M ADX NOT CALM' ||
       !calmBlock.detail.includes('ADX is above 25')) {
     throw new Error('ADX blocker is mislabeled: ' + JSON.stringify(calmBlock));
   }

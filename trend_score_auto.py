@@ -109,7 +109,7 @@ def score_zone(score: Any) -> str:
         |score| > 40    directional (CE_2_ITM / PE_2_ITM, both 2-step ITM),
                         independent of ADX
         |score| <= 30   SHORT_MOVE candidate (the engine must also confirm
-                        5m ADX is at or below 25)
+                        15m ADX is at or below 25)
         otherwise       HOLD (no new action; any open position, directional
                         or SHORT_MOVE, is kept until a real zone change)
 
@@ -128,7 +128,7 @@ def score_zone(score: Any) -> str:
 
 
 def short_move_adx_exit_required(adx: Any) -> bool:
-    """Whether a committed 5-minute ADX invalidates an open SHORT_MOVE.
+    """Whether a committed 15-minute ADX invalidates an open SHORT_MOVE.
 
     SHORT_MOVE entry requires a calm reading at or below ``CALM_ADX_MAX``.
     An open MOVE is therefore no longer a calm-market trade as soon as the
@@ -139,7 +139,7 @@ def short_move_adx_exit_required(adx: Any) -> bool:
     if adx is None:
         return False
     try:
-        value = _finite(adx, "5m ADX")
+        value = _finite(adx, "15m ADX")
     except TrendScoreAutoInputError:
         return False
     return value > CALM_ADX_MAX

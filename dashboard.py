@@ -9235,7 +9235,7 @@ def _trend_score_auto_engine_action_ready(
     """Do not mutate a position until the engine has approved this zone.
 
     A SHORT_MOVE entry is actionable only when the engine confirms the current
-    closed 5m score is neutral and its 5m ADX is at or below 25. A committed
+    closed 5m score is neutral and its 15m ADX is at or below 25. A committed
     ADX above 25 is nevertheless allowed through so an already-open SHORT_MOVE
     can be flattened once it is no longer a calm-market trade. The planner
     guarantees that this exception cannot open or switch a position.
@@ -13859,7 +13859,7 @@ def _maybe_auto_trend_score_live_cycle(
                     _trend_score_auto_health_update(
                         user, status="flat",
                         last_action=(
-                            "exited SHORT MOVE because committed 5-minute ADX "
+                            "exited SHORT MOVE because committed 15-minute ADX "
                             "is no longer calm"
                             if plan.get("reason")
                             == "SHORT_MOVE_ADX_NO_LONGER_CALM"
@@ -13873,7 +13873,7 @@ def _maybe_auto_trend_score_live_cycle(
                             f"🤖 <b>TREND ENGINE LIVE — {user.upper()}</b>\n"
                             f"Exited <code>{closed_state.get('symbol', '')}</code> "
                             + (
-                                f"because committed 5-minute ADX reached "
+                                f"because committed 15-minute ADX reached "
                                 f"<code>{current_signal.get('trigger_adx')}</code> "
                                 "(calm requires ADX at or below 25). "
                                 if plan.get("reason")
@@ -14400,7 +14400,7 @@ def _maybe_auto_trend_score_cycle() -> bool:
                     _trend_score_auto_health_update(
                         user, status="flat",
                         last_action=(
-                            "exited SHORT MOVE because committed 5-minute ADX "
+                            "exited SHORT MOVE because committed 15-minute ADX "
                             "is no longer calm"
                             if plan.get("reason")
                             == "SHORT_MOVE_ADX_NO_LONGER_CALM"
@@ -14414,7 +14414,7 @@ def _maybe_auto_trend_score_cycle() -> bool:
                             f"🤖 <b>TREND ENGINE DRY RUN — {user.upper()}</b>\n"
                             f"Exited <code>{closed.get('symbol', '')}</code> after "
                             + (
-                                f"committed 5-minute ADX reached "
+                                f"committed 15-minute ADX reached "
                                 f"<code>{signal.get('trigger_adx')}</code> "
                                 "(calm requires ADX at or below 25). "
                                 if plan.get("reason")

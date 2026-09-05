@@ -219,17 +219,17 @@ def _rsi_momentum(structural: TimeframeFeatures, primary: TimeframeFeatures,
     return _clamp(weighted / available) if available else None
 
 
-def _adx_trend_strength(trigger: TimeframeFeatures,
+def _adx_trend_strength(setup: TimeframeFeatures,
                         rsi_score: float | None,
                         direction_hint: float | None) -> float | None:
-    """Signed ADX evidence from the 5m trigger timeframe.
+    """Signed ADX evidence from the completed 15m setup timeframe.
 
     ADX at or below 25 intentionally contributes a neutral score: that is the
     calm-zone threshold shared with the regime classifier.  Above 30, strength
     is signed only when RSI or higher-timeframe structure has an opinion;
     ADX itself never invents a direction.
     """
-    adx = trigger.get("adx")
+    adx = setup.get("adx")
     if adx is None:
         return None
     strength = _clamp((adx - CALM_ADX_MAX) / 20.0, 0.0, 1.0)
@@ -315,7 +315,7 @@ def compute_score(
         "lower_timeframe_momentum": _lower_timeframe_momentum(trigger),
         "rsi_momentum": rsi_score,
         "adx_trend_strength": _adx_trend_strength(
-            trigger, rsi_score, direction_hint),
+            setup, rsi_score, direction_hint),
         "order_flow": None,  # ADR 0004: not computed in v1
         "breakout_quality": _breakout_quality(setup),
         "derivatives_context": _derivatives_context(

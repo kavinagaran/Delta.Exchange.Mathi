@@ -2,7 +2,7 @@
 
     > +40         BULLISH    buy 2-step ITM CE (ADX-independent)
     < -40         BEARISH    buy 2-step ITM PE (ADX-independent)
-    -30 .. +30    SIDEWAYS   sell ATM MOVE when 5m ADX is at or below 25
+    -30 .. +30    SIDEWAYS   sell ATM MOVE when 15m ADX is at or below 25
     all other gaps HOLD      no new action
 
 **The gaps are deliberate, not an oversight in the spec.** The only neutral
@@ -20,7 +20,7 @@ silently:
    spec. Legacy was asymmetric — CE at ATM-2, PE at ATM+3. This is symmetric.
 2. **Legacy switches hard at |25|.** It will disagree with this model for
    every non-action gap. This model uses the current closed 5m score plus a
-   calm 5m ADX reading for the SHORT_MOVE policy.
+   calm 15m ADX reading for the SHORT_MOVE policy.
 
 A "step" is an index offset in the expiry's sorted strike list, matching
 ``trend_score_auto.select_policy_contract``: ITM for a call is a *lower*
@@ -149,7 +149,7 @@ def decide(
             return ZoneDecision(zone, False, "one or more execution gates failed")
         return ZoneDecision(
             zone, True,
-            "calm 5-minute ADX confirms SHORT_MOVE: sell ATM MOVE (stop required)")
+            "calm 15-minute ADX confirms SHORT_MOVE: sell ATM MOVE (stop required)")
     # ``directional_adx`` remains in the signature for callers pinned to the
     # v1.4 API, but it deliberately does not gate CE/PE.  ADX is now solely a
     # SHORT_MOVE calm-entry / non-calm-exit input; the strict score threshold

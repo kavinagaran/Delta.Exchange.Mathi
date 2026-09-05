@@ -516,7 +516,7 @@ def test_cockpit_sell_move_never_evaluates_the_automated_adx_gate(
     live_account, monkeypatch,
 ):
     """Manual Sell MOVE deliberately bypasses the automated calm-market
-    (5m ADX <= 25) gate -- the operator substitutes their own judgement.
+    (15m ADX <= 25) gate -- the operator substitutes their own judgement.
     That gate is applied only inside plan_score_transition, which the
     manual path must never call."""
     monkeypatch.setattr(

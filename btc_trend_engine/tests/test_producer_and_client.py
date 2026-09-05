@@ -74,7 +74,8 @@ def test_produces_schema_valid_snapshot_from_closed_candles():
                   "data_quality", "feature_set_version", "model_version"):
         assert field in snapshot, field
     assert snapshot["schema_version"] == "1.4.0"
-    assert snapshot["model_version"] == "trend-rules-v1.6.0"
+    assert snapshot["model_version"] == "trend-rules-v1.7.0"
+    assert snapshot["adx_timeframe"] == "15m"
     assert [row["timeframe"] for row in snapshot["timeframes"]] == [
         "1h", "30m", "15m", "5m",
     ]

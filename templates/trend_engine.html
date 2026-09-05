@@ -435,9 +435,9 @@ function tradeDecisionMeta(zone, actionAllowed = true, reason = '') {
     }
     if (key === 'SHORT_MOVE' && /\bADX\b/i.test(blocker)) {
       return {
-        label: 'WAIT — 5M ADX NOT CALM',
+        label: 'WAIT — 15M ADX NOT CALM',
         tone: 'is-blocked',
-        detail: blocker || 'The latest completed 5-minute ADX must be 20 or below before an ATM MOVE straddle can be sold.',
+        detail: blocker || 'The latest completed 15-minute ADX must be 20 or below before an ATM MOVE straddle can be sold.',
       };
     }
     if (key === 'SHORT_MOVE' && /stop loss/i.test(blocker)) {
