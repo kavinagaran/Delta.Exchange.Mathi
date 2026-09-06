@@ -18,6 +18,7 @@ from pathlib import Path
 from urllib.parse import quote, urlencode
 from dotenv import load_dotenv
 from risk_controls import account_file_lock, audit_event
+from manual_exit_zone_lock import apply_manual_exit_zone_lock
 
 # Force IPv4 — Delta's whitelist holds our IPv4; IPv6 rotates and gets rejected
 import socket
@@ -2571,6 +2572,9 @@ def append_history(state):
         if complete:
             history_fields["history_logged_at_utc"] = _utc_now()
         save_state_fields(**history_fields)
+        # All live close paths converge here. The helper no-ops for automated
+        # and external positions and idempotently evaluates each Cockpit cycle.
+        apply_manual_exit_zone_lock(USER_DIR, state)
         return True
     except Exception as e:
         log.warning("History append failed: %s", e)

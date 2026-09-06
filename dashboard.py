@@ -31,6 +31,7 @@ from flask import (Flask, jsonify, request, abort, session, Response,
                    send_file, stream_with_context)
 
 import trend_engine_client
+from manual_exit_zone_lock import apply_manual_exit_zone_lock
 from risk_controls import (account_entry_lock, account_file_lock, audit_event,
                            decision_dict, evaluate_entry, risk_based_lots)
 from trend_engine import DEFAULT_CONFIG as TREND_ENGINE_DEFAULT_CONFIG, evaluate_trend
@@ -3917,6 +3918,11 @@ def _close_move_state_locked(
     appended = _append_trade_history(state, f"dashboard-squareoff:{slot}")
     state["history_pending"] = not (appended and accounting_complete)
     _atomic_write_json(state_file, state)
+    # The caller owns account_entry_lock across this close boundary. A lock
+    # evaluation failure is deliberately non-fatal to an already-flat trade.
+    apply_manual_exit_zone_lock(
+        _mode_data_dir(False), state, account_lock_held=True,
+    )
     audit_event(_user_dir(), "dashboard_move_close_verified", {
         "slot": slot, "client_order_id": client_id, "order_id": order.get("id"),
         "filled_lots": filled_lots, "flat_verified": True,
@@ -4039,10 +4045,14 @@ def _close_dry_simulation_locked(
     _queue_closed_dry_trade(slot, state, owner=recovery_owner)
     _atomic_write_json(state_file, state)
     _recover_closed_dry_trade_outbox(owner=recovery_owner)
+    closed = _load_json(state_file, state)
+    apply_manual_exit_zone_lock(
+        _mode_data_dir(True), closed, account_lock_held=True,
+    )
     # A history/audit failure intentionally leaves the CLOSED state and its
     # journal entry in place.  The score controller will fail closed before it
     # can reuse the slot, while startup/protection cycles keep retrying it.
-    return _load_json(state_file, state)
+    return closed
 
 
 @app.route("/api/square-off", methods=["POST"])
@@ -9002,10 +9012,10 @@ def _trend_score_auto_ledger(data_dir: Path) -> dict:
     setup_lock = ledger.get("setup_lock")
     if setup_lock is not None and not isinstance(setup_lock, dict):
         raise RuntimeError("Trend score-auto setup lock ledger is invalid")
-    # Manual Cockpit orders must never own the automated score-zone lock.
+    # Manual Cockpit *entries* must never own the automated score-zone lock.
     # Older versions wrote a COCKPIT_* lock after a manual fill; discard that
-    # stale marker on read so it cannot block bot entries or expose a misleading
-    # Reset Zone Lock control in Bot Config.
+    # stale marker. A MANUAL_EXIT_MATCH lock is different: it is intentionally
+    # armed only when the position closes with a same-direction decision.
     if isinstance(setup_lock, dict):
         lock_action = str(setup_lock.get("source_action") or "").strip().upper()
         lock_ownership = str(setup_lock.get("ownership") or "").strip().lower()
@@ -10653,8 +10663,9 @@ def _trend_score_auto_lock_setup(
 ) -> None:
     """Persist that an automated bot setup has already opened a position.
 
-    Manual Cockpit entries are intentionally excluded: their lifecycle must
-    not arm or release the Bot Config Reset Zone Lock control.
+    Manual Cockpit entries are intentionally excluded. Their separately
+    evaluated exit may arm a MANUAL_EXIT_MATCH lock when its direction still
+    matches the committed engine decision.
     """
     if str(action or "").strip().upper().startswith("COCKPIT_"):
         return
