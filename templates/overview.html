@@ -438,6 +438,14 @@ function todayEngineScoreDials(snapshot, liveView, status) {
   </div>`;
 }
 
+function todayAdxPill(snapshot) {
+  const raw = snapshot?.trigger_adx;
+  const available = raw !== null && raw !== undefined && raw !== '' && Number.isFinite(Number(raw));
+  const value = available ? Number(raw).toFixed(1) : '—';
+  return `<div class="dial-adx-row"><div class="dial-adx-pill" title="Latest completed 15-minute ADX" aria-label="15-minute ADX ${value}">
+    <span>ADX <small>15M</small></span><strong>${value}</strong></div></div>`;
+}
+
 function todayTradeDecisionPill(status, snapshot) {
   const score = Number(snapshot?.trend_score ?? status?.direction_score);
   const tone = todayScoreColor(Number.isFinite(score) ? score : null, snapshot?.data_quality);
@@ -467,7 +475,7 @@ function renderTodayEngineDecision(status, snapshot, liveView) {
       <div class="dry-engine-hd"><div><span>TREND SCORE AUTOMATION</span>
       <strong>Decision status is unavailable</strong></div><span class="dry-engine-decision">WAITING</span></div>
       ${todayEngineScoreDials(snapshot, liveView, status)}
-      <p>The latest controller state could not be loaded. It will refresh automatically.</p>
+      ${todayAdxPill(snapshot)}
     </section>`;
     return;
   }
@@ -479,7 +487,7 @@ function renderTodayEngineDecision(status, snapshot, liveView) {
       <strong>Entries, exits and trade transitions happen automatically</strong></div></div>
     ${todayEngineScoreDials(snapshot, liveView, status)}
     ${todayTradeDecisionPill(status, snapshot)}
-    ${status.last_error ? `<p class="dry-engine-action-copy c-neg">Latest controller error: ${esc(status.last_error)}</p>` : ''}
+    ${todayAdxPill(snapshot)}
   </section>`;
 }
 

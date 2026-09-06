@@ -340,7 +340,7 @@ global.jget = async url => {
       last_action: 'this completed LIVE signal was already handled; waiting for the next one'};
   }
   if (url === '/api/engine/snapshot') {
-    return {trend_score: 43.2, data_quality: 'OK'};
+    return {trend_score: 43.2, trigger_adx: 19.7, data_quality: 'OK'};
   }
   if (url === '/api/engine/live') {
     return {available: true, live_score: 47.8, data_quality: 'OK'};
@@ -385,15 +385,22 @@ vm.runInThisContext(source.slice(start, end));
   if (todayTable.includes(' IST')) throw new Error('Today table still prints IST');
   const decisionCard = elements['today-engine-decision'].innerHTML;
   for (const detail of ['Live preview', 'Committed decision', 'today-score-dial',
-                        'today-trade-decision-pill']) {
+                        'today-trade-decision-pill', 'dial-adx-pill', '19.7', '15M']) {
     if (!decisionCard.includes(detail)) throw new Error(`missing engine dial detail: ${detail}`);
   }
   if (decisionCard.includes('View Trend Engine')) {
     throw new Error('obsolete Trend Engine link is still present');
   }
+  if (decisionCard.includes('Latest controller error')) {
+    throw new Error('retired information text is still shown below the dials');
+  }
+  if (!todayAdxPill({trigger_adx: 0}).includes('<strong>0.0</strong>') ||
+      !todayAdxPill({trigger_adx: null}).includes('<strong>—</strong>')) {
+    throw new Error('ADX pill confuses missing ADX with zero');
+  }
   // The automation text block (current action / regime / trade type /
   // contract / last action / signal bar closed / last cycle) was retired
-  // with the Cockpit redesign -- the dials and decision pill remain, the
+  // with the Cockpit redesign -- the dials, decision and ADX pills remain, the
   // per-field automation prose does not.
   if (decisionCard.includes('Current automatic action')) {
     throw new Error('retired automation detail block is still present');
