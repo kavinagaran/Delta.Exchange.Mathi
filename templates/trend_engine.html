@@ -5,7 +5,7 @@
 
   <div class="te-page-head">
     <div>
-      <span class="te-kicker">RULES-BASED MARKET DIRECTION</span>
+      <span class="te-kicker">BTC TREND ENGINE</span>
       <h2>Trend Engine</h2>
     </div>
     <button class="btn secondary te-refresh" id="te-refresh" type="button">
@@ -14,15 +14,10 @@
     </button>
   </div>
 
-  <div class="te-readonly-notice" role="note">
-    <strong>Decision engine</strong>
-    <span>Produces a validated signal — direction, contract, entry/stop/target and risk plan. Execution is a separate, authorized step.</span>
-  </div>
-
   <div class="te-alert" id="te-error" role="alert" hidden>
     <div>
-      <strong>Engine unavailable</strong>
-      <p id="te-error-copy">The latest decision could not be loaded.</p>
+      <strong>Snapshot degraded</strong>
+      <p id="te-error-copy">The latest snapshot could not be loaded.</p>
     </div>
     <button class="btn secondary sm" id="te-retry" type="button">Retry</button>
   </div>
@@ -31,45 +26,69 @@
     <div class="te-hero-copy">
       <div class="te-hero-topline">
         <span class="te-decision-dot" aria-hidden="true"></span>
-        <span class="te-kicker">DECISION</span>
+        <span class="te-kicker">REGIME</span>
         <span class="te-freshness is-unknown" id="te-freshness">Checking…</span>
       </div>
       <h3 id="te-decision">Evaluating…</h3>
       <div class="te-hero-facts" aria-label="Context">
         <div><span>Underlying</span><strong id="te-underlying">—</strong></div>
-        <div><span>Bias</span><strong id="te-bias">—</strong></div>
+        <div><span>Direction</span><strong id="te-direction">—</strong></div>
         <div><span>Confidence</span><strong id="te-confidence">—</strong></div>
-        <div><span>Regime</span><strong id="te-regime">—</strong></div>
+        <div class="te-quality-fact">
+          <span>Data quality</span>
+          <strong id="te-data-quality">—</strong>
+          <small id="te-data-quality-detail">Waiting for market data.</small>
+        </div>
       </div>
       <p class="te-asof" id="te-asof"></p>
     </div>
     <div class="te-score-wrap" id="te-score-wrap">
-      <div class="te-score-gauge" id="te-score-gauge" role="meter" aria-label="Direction score" aria-valuemin="-100" aria-valuemax="100" aria-valuenow="0">
-        <div class="te-score-core">
-          <strong id="te-direction-score">—</strong>
-          <span>Direction</span>
+      <div class="te-score-pair">
+        <div class="te-score-item">
+          <div class="te-score-gauge" id="te-live-score-gauge" role="meter" aria-label="Live preview score" aria-valuemin="-100" aria-valuemax="100" aria-valuenow="0">
+            <div class="te-score-core">
+              <span>Live preview</span>
+              <strong id="te-live-score">—</strong>
+            </div>
+          </div>
+        </div>
+        <div class="te-score-item">
+          <div class="te-score-gauge" id="te-committed-score-gauge" role="meter" aria-label="Committed decision score" aria-valuemin="-100" aria-valuemax="100" aria-valuenow="0">
+            <div class="te-score-core">
+              <span>Committed decision</span>
+              <strong id="te-committed-score">—</strong>
+            </div>
+          </div>
         </div>
       </div>
-      <div class="te-score-foot"><span>PE −100</span><span>CE +100</span></div>
-      <div class="te-valid-trades" id="te-valid-trades" aria-label="Valid trades"></div>
+      <div class="te-trade-decision-row te-hero-decision-row">
+        <div class="te-decision-capsule is-waiting" id="te-hero-trade-decision">
+          <strong>Waiting</strong>
+        </div>
+      </div>
+      <div class="dial-adx-row">
+        <div class="dial-adx-pill" title="Latest completed 15-minute ADX">
+          <span>ADX <small>15M</small></span><strong id="te-hero-adx">—</strong>
+        </div>
+      </div>
     </div>
   </section>
 
   <div class="te-two-col">
     <section class="card" aria-labelledby="te-components-title">
       <div class="card-hd">
-        <div><span class="te-kicker">DIRECTIONAL EVIDENCE</span><strong id="te-components-title">Component scores</strong></div>
+        <div><span class="te-kicker">WEIGHTED EVIDENCE</span><strong id="te-components-title">Component scores</strong></div>
       </div>
       <div class="card-bd">
         <div class="te-component-grid" id="te-components">
-          <div class="te-empty-state">Waiting for data…</div>
+          <div class="te-empty-state">Waiting for a snapshot…</div>
         </div>
       </div>
     </section>
 
     <section class="card" aria-labelledby="te-timeframes-title">
       <div class="card-hd">
-        <div><span class="te-kicker">TIMEFRAME CONVICTION</span><strong id="te-timeframes-title">Weighted signals</strong></div>
+        <div><span class="te-kicker">MULTI-TIMEFRAME</span><strong id="te-timeframes-title">Closed-candle bias</strong></div>
       </div>
       <div class="card-bd">
         <div class="te-timeframes" id="te-timeframes">
@@ -82,7 +101,7 @@
   <div class="te-two-col">
     <section class="card" aria-labelledby="te-gates-title">
       <div class="card-hd">
-        <div><span class="te-kicker">SAFETY GATES</span><strong id="te-gates-title">Hard-gate matrix</strong></div>
+        <div><span class="te-kicker">FAIL-CLOSED GATES</span><strong id="te-gates-title">Entry gate matrix</strong></div>
         <span class="te-gate-tally" id="te-gate-tally">—</span>
       </div>
       <div class="card-bd">
@@ -92,111 +111,95 @@
       </div>
     </section>
 
-    <section class="card" aria-labelledby="te-setup-title">
+    <section class="card" aria-labelledby="te-reasons-title">
       <div class="card-hd">
-        <div><span class="te-kicker">MARKET STRUCTURE</span><strong id="te-setup-title">Detected setup</strong></div>
-        <span class="badge sim" id="te-pattern-state">UNCONFIRMED</span>
+        <div><span class="te-kicker">REASON CODES</span><strong id="te-reasons-title">Why this reading</strong></div>
       </div>
       <div class="card-bd">
-        <p class="te-structure-copy" id="te-market-structure">No validated structure.</p>
-        <dl class="te-fact-list">
-          <div><dt>Pattern</dt><dd id="te-pattern">—</dd></div>
-          <div><dt>Support</dt><dd id="te-support">—</dd></div>
-          <div><dt>Resistance</dt><dd id="te-resistance">—</dd></div>
-          <div><dt>Invalidation</dt><dd id="te-invalidation">—</dd></div>
-        </dl>
+        <div class="te-reason-codes" id="te-reason-codes">
+          <div class="te-empty-state">Waiting…</div>
+        </div>
       </div>
     </section>
   </div>
 
   <div class="te-two-col">
-    <section class="card te-contract-card" id="te-contract-card" aria-labelledby="te-contract-title">
+    <section class="card" aria-labelledby="te-forecast-title">
       <div class="card-hd">
-        <div><span class="te-kicker">SELECTED CONTRACT</span><strong id="te-contract-title">Contract evaluation</strong></div>
-        <span class="te-contract-score" id="te-contract-score">Score —</span>
+        <div><span class="te-kicker">RESEARCH ONLY · NOT AN ORDER PLAN</span><strong id="te-forecast-title">Forecast</strong></div>
       </div>
       <div class="card-bd">
-        <div class="te-contract-head">
-          <div>
-            <span class="te-contract-type" id="te-contract-type">NO CONTRACT</span>
-            <h3 class="mono" id="te-contract-symbol">No eligible contract</h3>
-          </div>
-          <span class="te-contract-expiry" id="te-contract-expiry">—</span>
-        </div>
-        <dl class="te-metric-grid" id="te-contract-metrics">
-          <div><dt>Strike</dt><dd id="te-contract-strike">—</dd></div>
-          <div><dt>Bid / Ask</dt><dd id="te-contract-quote">—</dd></div>
-          <div><dt>Mid</dt><dd id="te-contract-mid">—</dd></div>
-          <div><dt>Spread</dt><dd id="te-contract-spread">—</dd></div>
-          <div><dt>Volume</dt><dd id="te-contract-volume">—</dd></div>
-          <div><dt>OI</dt><dd id="te-contract-oi">—</dd></div>
-          <div><dt>Delta / Theta</dt><dd id="te-contract-greeks">—</dd></div>
-          <div><dt>IV</dt><dd id="te-contract-iv">—</dd></div>
+        <dl class="te-fact-list">
+          <div><dt>Horizon</dt><dd id="te-forecast-horizon">—</dd></div>
+          <div><dt>Expected return</dt><dd id="te-expected-return">—</dd></div>
+          <div><dt>Expected abs. move</dt><dd id="te-expected-abs-move">—</dd></div>
+          <div><dt>Forecast volatility</dt><dd id="te-forecast-vol">—</dd></div>
+          <div><dt>Jump probability</dt><dd id="te-jump-probability">—</dd></div>
+          <div><dt>Invalidation price</dt><dd id="te-invalidation-price">—</dd></div>
+          <div><dt>Suggested stop</dt><dd id="te-suggested-stop">—</dd></div>
         </dl>
-        <div class="te-quality-list" id="te-contract-components"></div>
-        <p class="te-empty-copy" id="te-contract-empty">Contract appears once direction and all gates pass.</p>
       </div>
     </section>
 
-    <section class="card" aria-labelledby="te-plan-title">
+    <section class="card" aria-labelledby="te-engine-title">
       <div class="card-hd">
-        <div><span class="te-kicker">EXECUTION PLAN</span><strong id="te-plan-title">Order &amp; risk</strong></div>
-        <span class="badge sim" id="te-kill-switch">RISK CHECKING</span>
+        <div><span class="te-kicker">SERVICE HEALTH</span><strong id="te-engine-title">Engine status</strong></div>
+        <span class="pill idle" id="te-engine-pill"><span class="dot"></span>Checking…</span>
       </div>
       <div class="card-bd">
-        <div class="te-plan-banner" id="te-plan-banner">
-          <span>PLAN</span>
-          <strong id="te-plan-primary">No order proposed</strong>
-          <small id="te-plan-secondary">Zero sizing until all gates pass.</small>
-        </div>
-        <div class="te-plan-columns">
+        <dl class="te-fact-list">
+          <div><dt>Version</dt><dd id="te-engine-version">—</dd></div>
+          <div><dt>Uptime</dt><dd id="te-engine-uptime">—</dd></div>
+          <div><dt>Snapshots produced</dt><dd id="te-engine-snapshots">—</dd></div>
+          <div><dt>Order book</dt><dd id="te-engine-book">—</dd></div>
+        </dl>
+        <details class="te-technical-details">
+          <summary>Raw snapshot metadata</summary>
           <dl class="te-fact-list">
-            <div><dt>Order type</dt><dd id="te-order-type">—</dd></div>
-            <div><dt>Entry / Max</dt><dd id="te-entry-price">—</dd></div>
-            <div><dt>Stop / Target</dt><dd id="te-option-levels">—</dd></div>
-            <div><dt>Underlying invalidation</dt><dd id="te-underlying-invalidation">—</dd></div>
-            <div><dt>Underlying target</dt><dd id="te-underlying-target">—</dd></div>
-            <div><dt>Time exit</dt><dd id="te-time-exit">—</dd></div>
-            <div><dt>Costs</dt><dd id="te-costs">—</dd></div>
+            <div><dt>Schema version</dt><dd id="te-meta-schema">—</dd></div>
+            <div><dt>Feature set</dt><dd id="te-meta-features">—</dd></div>
+            <div><dt>Model version</dt><dd id="te-meta-model">—</dd></div>
+            <div><dt>Signal id</dt><dd id="te-meta-signal-id">—</dd></div>
+            <div><dt>Candle close (IST)</dt><dd id="te-meta-candle-close">—</dd></div>
           </dl>
-          <dl class="te-fact-list te-risk-list">
-            <div><dt>Equity</dt><dd id="te-account-equity">—</dd></div>
-            <div><dt>Risk budget</dt><dd id="te-risk-budget">—</dd></div>
-            <div><dt>Max loss</dt><dd id="te-maximum-loss">—</dd></div>
-            <div><dt>R / R</dt><dd id="te-reward-risk">—</dd></div>
-            <div><dt>Daily P&amp;L</dt><dd id="te-daily-pnl">—</dd></div>
-            <div><dt>Consec. losses</dt><dd id="te-consecutive-losses">—</dd></div>
-          </dl>
-        </div>
+        </details>
       </div>
     </section>
   </div>
 
-  <section class="card te-reasons-card" aria-labelledby="te-reasons-title">
+  <section class="card te-preview-chart-card" aria-labelledby="te-preview-chart-title">
     <div class="card-hd">
-      <div><span class="te-kicker">WHY THIS DECISION</span><strong id="te-reasons-title">Explanation</strong></div>
+      <div>
+        <span class="te-kicker">TRADE INPUT · COMMITTED DECISIONS</span>
+        <strong id="te-preview-chart-title">Committed Decision · 5-minute score line</strong>
+      </div>
+      <div class="te-trade-decision-row">
+        <div class="te-decision-capsule is-waiting" id="te-trade-decision">
+          <strong>Waiting</strong>
+        </div>
+      </div>
+      <span class="te-preview-chart-badge">24H · 5M</span>
     </div>
     <div class="card-bd">
-      <div class="te-reason-overview is-waiting" id="te-reason-overview">
-        <span class="te-reason-symbol" id="te-reason-symbol" aria-hidden="true">…</span>
-        <div>
-          <span>PLAIN ENGLISH</span>
-          <strong id="te-reason-headline">Waiting for the engine</strong>
-          <p id="te-reason-explanation">The result and its meaning will appear here.</p>
+      <div class="te-preview-chart-intro">
+        <p>Each point is the committed score from a completed five-minute decision. Line colour shows the active score zone used by automation.</p>
+        <div class="te-preview-chart-legend" aria-label="Committed score zones and trade markers">
+          <span class="is-ce"><i></i>Buy CE &gt; +40</span>
+          <span class="is-hold"><i></i>Hold +30…+40 / −40…−30</span>
+          <span class="is-move"><i></i>Short MOVE −30 to +30 · ADX ≤ 20</span>
+          <span class="is-pe"><i></i>Buy PE &lt; −40</span>
+          <span><b aria-hidden="true">+</b>Entry</span>
+          <span><b aria-hidden="true">×</b>Exit</span>
         </div>
       </div>
-
-      <div class="te-reason-cards" id="te-reason-cards">
-        <div class="te-reason-card is-muted">
-          <div class="te-reason-card-head"><span>STATUS</span><strong>Evaluation pending</strong></div>
-          <p>No reasons available yet.</p>
-          <small><b>Next:</b> Wait for the current evaluation.</small>
-        </div>
+      <div class="te-preview-chart-controls" id="te-preview-chart-controls">
+        <span>Move the pointer for score/time crosshairs. Drag to pan, use an axis or mouse wheel to zoom, and double-click to reset.</span>
+        <span class="te-preview-chart-window" id="te-preview-chart-window">24-hour history · automatic score range</span>
+        <button class="te-preview-chart-reset" id="te-preview-chart-reset" type="button">Reset view</button>
       </div>
-
-      <div class="te-next-step" id="te-next-step">
-        <span>WHAT TO DO</span>
-        <p id="te-next-step-copy">Wait for the current evaluation.</p>
+      <div class="te-preview-chart-stage">
+        <canvas id="te-preview-score-chart" role="img" aria-label="Five-minute committed-decision score line with colour-coded zones and trade entry and exit markers"></canvas>
+        <div class="te-preview-chart-empty" id="te-preview-chart-empty">Collecting committed decision scores. The first completed five-minute decision will appear here.</div>
       </div>
     </div>
   </section>
@@ -206,716 +209,1397 @@
 
 {% block scripts %}
 <script>
-(() => {
-  'use strict';
+/* TrendSnapshot v1.1.0 (docs/trend-snapshot-contract.md). This page only
+ * ever reads /api/engine/* — a thin proxy onto trend_engine_client.py, which
+ * never raises and substitutes a DEGRADED/entry_allowed=false snapshot for
+ * every committed-decision failure mode. /live is display-only and has no
+ * signal_id, gates, or entry permission fields. There is no write path here. */
 
-  const endpoint = '/api/trend-engine';
-  const allowedDecisions = new Set(['BUY_CE', 'BUY_PE', 'NO_TRADE', 'HOLD', 'EXIT']);
-  const components = [
-    ['price_action', 'Price action', 25],
-    ['candlestick', 'Candlestick', 10],
-    ['trend', 'Trend', 15],
-    ['momentum', 'Momentum', 10],
-    ['volume_vwap', 'Volume & VWAP', 10],
-    ['volatility_catalyst', 'Volatility', 10],
-  ];
-  const timeframes = [
-    ['60m', '60 min', 40],
-    ['15m', '15 min', 35],
-    ['5m', '5 min', 25],
-  ];
-  const gates = [
-    ['data_valid', 'Data valid'],
-    ['direction_pass', 'Direction'],
-    ['price_action_pass', 'Price action'],
-    ['spread_pass', 'Bid–ask spread'],
-    ['expiry_pass', 'Time to expiry'],
-    ['event_pass', 'Event window'],
-    ['expected_value_pass', 'Edge'],
-    ['reward_risk_pass', 'Reward / risk'],
-    ['portfolio_risk_pass', 'Portfolio risk'],
-  ];
-  const positionEntryOnlyGates = new Set([
-    'direction_pass', 'price_action_pass', 'spread_pass',
-    'expiry_pass', 'expected_value_pass', 'reward_risk_pass',
-  ]);
-  const reasonCatalog = Object.freeze({
-    ALL_ENTRY_GATES_PASSED: {
-      title: 'Every required check passed',
-      explanation: 'Direction, price action, contract quality, edge and risk limits all meet the rules.',
-      action: 'Review the proposed plan. Placing an order is a separate action.',
+const hasValue = value => value !== null && value !== undefined && value !== '';
+const finite = value => hasValue(value) && Number.isFinite(Number(value));
+const IST_TIME_ZONE = 'Asia/Kolkata';
+
+const DATA_QUALITY_COPY = {
+  OK: {
+    label: 'Good',
+    detail: 'Live price and order-book data passed all freshness checks.',
+  },
+  CLOCK_DRIFT: {
+    label: 'Exchange time mismatch',
+    detail: 'Exchange event time differs from engine time by more than five seconds.',
+  },
+  CLOCK_SKEW: {
+    label: 'Decision time mismatch',
+    detail: 'The committed decision timestamp is more than five seconds ahead.',
+  },
+  STALE_L1: {
+    label: 'Price feed delayed',
+    detail: 'The latest traded-price update is too old to trade safely.',
+  },
+  STALE_L2: {
+    label: 'Order book delayed',
+    detail: 'The latest bid-and-ask update is too old to trade safely.',
+  },
+  BOOK_INVALID: {
+    label: 'Order book unavailable',
+    detail: 'A reliable bid-and-ask view is not available yet.',
+  },
+  FEATURES_INCOMPLETE: {
+    label: 'Building history',
+    detail: 'The engine needs more completed candles before it can decide.',
+  },
+  ENGINE_UNREACHABLE: {
+    label: 'Engine offline',
+    detail: 'The dashboard cannot currently reach the Trend Engine.',
+  },
+  ENGINE_HTTP_ERROR: {
+    label: 'Engine request failed',
+    detail: 'The Trend Engine returned an unsuccessful response.',
+  },
+  SCHEMA_MISMATCH: {
+    label: 'Data format mismatch',
+    detail: 'The dashboard rejected an incomplete or incompatible engine response.',
+  },
+  CONTRACT_VERSION_MISMATCH: {
+    label: 'Version mismatch',
+    detail: 'The dashboard and Trend Engine data versions do not match.',
+  },
+  SIGNAL_EXPIRED: {
+    label: 'Decision expired',
+    detail: 'The last committed decision is too old to use.',
+  },
+  PRIVATE_FEED_DOWN: {
+    label: 'Account feed offline',
+    detail: 'Private account updates are not currently available.',
+  },
+};
+
+function heroTone(snapshot) {
+  if (!snapshot || snapshot.data_quality !== 'OK') return 'is-error';
+  if (snapshot.direction > 0) return 'is-bullish';
+  if (snapshot.direction < 0) return 'is-bearish';
+  return 'is-neutral';
+}
+
+function directionLabel(direction) {
+  if (direction > 0) return 'UP';
+  if (direction < 0) return 'DOWN';
+  return 'FLAT';
+}
+
+function regimeLabel(regime) {
+  const key = String(regime || '').toUpperCase();
+  const labels = {
+    TREND_UP: 'Bullish Trend',
+    TREND_DOWN: 'Bearish Trend',
+    RANGE: 'Sideways Market',
+    BREAKOUT_UP: 'Bullish Breakout',
+    BREAKOUT_DOWN: 'Bearish Breakout',
+    HIGH_VOL_SHOCK: 'Volatility Spike',
+    LOW_LIQUIDITY: 'Low Liquidity',
+    DEGRADED: 'Waiting for Reliable Data',
+    TRANSITION: 'Market Transition',
+    UNCLEAR: 'Direction Unclear',
+  };
+  return labels[key] || String(regime || '—').replace(/_/g, ' ');
+}
+
+function formatCode(name) {
+  const fixed = {
+    rsi_momentum: 'RSI Momentum',
+    adx_trend_strength: 'ADX Trend Strength',
+  };
+  const key = String(name || '').toLowerCase();
+  return fixed[key] || String(name || '').replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+}
+
+function dataQualityCopy(code) {
+  const key = String(code || '').toUpperCase();
+  return DATA_QUALITY_COPY[key] || {
+    label: key ? formatCode(key) : 'Unknown',
+    detail: key
+      ? 'A market-data safety check needs attention before trading.'
+      : 'The engine did not report a data-quality result.',
+  };
+}
+
+function formatIstTimestamp(value) {
+  if (!hasValue(value)) return '—';
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return String(value);
+  const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', {
+    timeZone: IST_TIME_ZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: true,
+  }).formatToParts(parsed).filter(part => part.type !== 'literal')
+    .map(part => [part.type, part.value]));
+  return `${parts.year}-${parts.month}-${parts.day}:${parts.hour}:${parts.minute} ${parts.dayPeriod} IST`;
+}
+
+function scoreColor(value, quality) {
+  if (!finite(value)) return 'var(--muted)';
+  const score = Math.max(-100, Math.min(100, Number(value)));
+  // Shading strength (how vivid vs. how washed-out the tone reads) scales
+  // with |score| -- a near-zero score blends toward a neutral slate, and
+  // only an extreme score reaches the fully saturated red/green endpoint.
+  const strength = Math.abs(score) / 100;
+  const pure = score < 0 ? [255, 97, 114] : [0, 194, 110];
+  const weak = [143, 163, 188];
+  const red = Math.round(weak[0] + (pure[0] - weak[0]) * strength);
+  const green = Math.round(weak[1] + (pure[1] - weak[1]) * strength);
+  const blue = Math.round(weak[2] + (pure[2] - weak[2]) * strength);
+  return `rgb(${red}, ${green}, ${blue})`;
+}
+
+function scoreFillAngles(score) {
+  // The gauge always starts its fill at 12 o'clock (0deg in conic-gradient
+  // terms) and sweeps clockwise for a positive score. A negative score
+  // sweeps anti-clockwise from 12 instead -- expressed here as colouring
+  // the *last* `magnitude` degrees before completing the circle, which is
+  // the same visual arc as going backward from 12 (conic-gradient itself
+  // can only paint in the increasing/clockwise direction).
+  const magnitude = Math.abs(score) * 3.6;
+  return score < 0
+    ? { start: 360 - magnitude, end: 360 }
+    : { start: 0, end: magnitude };
+}
+
+function updateScoreGauge(id, value, quality) {
+  const gauge = document.getElementById(id);
+  const available = finite(value);
+  const score = available ? Math.max(-100, Math.min(100, Number(value))) : 0;
+  gauge.setAttribute('aria-valuenow', String(score));
+  const fill = scoreFillAngles(score);
+  gauge.style.setProperty('--te-score-fill-start', `${fill.start}deg`);
+  gauge.style.setProperty('--te-score-fill-end', `${fill.end}deg`);
+  gauge.style.setProperty('--te-score-tone', scoreColor(value, quality));
+  const readout = gauge.querySelector('.te-score-core strong');
+  if (readout) {
+    readout.textContent = available ? signedScore(score) : '—';
+    readout.setAttribute(
+      'aria-label', available ? signedScore(score) : 'unavailable');
+  }
+}
+
+function signedScore(value) {
+  if (!finite(value)) return '—';
+  const score = Number(value);
+  return `${score > 0 ? '+' : ''}${score.toFixed(1)}`;
+}
+
+function tradeDecisionMeta(zone, actionAllowed = true, reason = '') {
+  const key = String(zone || '').toUpperCase();
+  if (key === 'HOLD') {
+    return {
+      label: 'HOLD — NO NEW TRADE',
+      tone: 'is-hold',
+      detail: 'The score is in the transition band, so no new position is opened.',
+    };
+  }
+  if (!key) {
+    return {
+      label: 'NO DECISION',
+      tone: 'is-waiting',
+      detail: 'The engine has not produced a score-zone decision yet.',
+    };
+  }
+  if (actionAllowed === false) {
+    const blocker = String(reason || '').trim();
+    if (key === 'SHORT_MOVE' && /premium/i.test(blocker)) {
+      return {
+        label: 'WAIT — MOVE PREMIUM BELOW $300',
+        tone: 'is-blocked',
+        detail: blocker,
+      };
+    }
+    if (key === 'SHORT_MOVE' && /5:30\s*PM|midnight|entry window/i.test(blocker)) {
+      return {
+        label: 'WAIT — WEEKDAY ENTRY WINDOW',
+        tone: 'is-blocked',
+        detail: blocker,
+      };
+    }
+    if (/today(?:'s|-expiry).*expiry|today's-expiry/i.test(blocker)) {
+      return {
+        label: "WAIT — TODAY'S EXPIRY UNAVAILABLE",
+        tone: 'is-blocked',
+        detail: blocker,
+      };
+    }
+    if (key === 'SHORT_MOVE' && /90 minutes|expiry too close/i.test(blocker)) {
+      return {
+        label: 'WAIT — EXPIRY TOO CLOSE',
+        tone: 'is-blocked',
+        detail: blocker,
+      };
+    }
+    if (key === 'SHORT_MOVE' && /\bADX\b/i.test(blocker)) {
+      return {
+        label: 'WAIT — 15M ADX NOT CALM',
+        tone: 'is-blocked',
+        detail: blocker || 'The latest completed 15-minute ADX must be 20 or below before an ATM MOVE straddle can be sold.',
+      };
+    }
+    if (key === 'SHORT_MOVE' && /stop loss/i.test(blocker)) {
+      return {
+        label: 'WAIT — STOP REQUIRED',
+        tone: 'is-blocked',
+        detail: blocker,
+      };
+    }
+    return {
+      label: 'WAIT — CHECKS BLOCKED',
+      tone: 'is-blocked',
+      detail: blocker || 'One or more safety checks block trading.',
+    };
+  }
+  const decisions = {
+    CE_2_ITM: {
+      label: 'BUY 2-STEP ITM CE',
+      tone: 'is-ce',
+      detail: 'Bullish score zone: buy a two-step in-the-money call.',
     },
-    EXISTING_POSITION_THESIS_VALID: {
-      title: 'Position still follows its plan',
-      explanation: 'Direction, stop, target, time limit and edge are valid. No exit rule is active.',
-      action: 'Monitor against the defined stop, target and time exit.',
+    PE_2_ITM: {
+      label: 'BUY 2-STEP ITM PE',
+      tone: 'is-pe',
+      detail: 'Bearish score zone: buy a two-step in-the-money put.',
     },
-    INVALID_OR_STALE_DATA: {
-      title: 'Required data is missing or stale',
-      explanation: 'The engine stopped instead of guessing from incomplete information.',
-      action: 'Refresh the analysis. Check market, account and position feeds.',
+    SHORT_MOVE: {
+      label: 'SELL ATM MOVE',
+      tone: 'is-move',
+      detail: 'Sideways score zone: sell the at-the-money MOVE contract.',
     },
-    QUOTE_REVALIDATION_FAILED: {
-      title: 'Price moved during confirmation',
-      explanation: 'The contract, direction or entry price no longer matched the setup on re-check.',
-      action: 'Refresh the analysis.',
-    },
-    EVENT_DATA_UNAVAILABLE: {
-      title: 'Event risk could not be verified',
-      explanation: 'The engine could not confirm whether a scheduled event is inside the restricted window.',
-      action: 'Verify the event calendar before entering.',
-      exitAction: 'Review the position immediately. Verify event risk, then manage manually.',
-    },
-    EVENT_BLACKOUT: {
-      title: 'Trading paused around a scheduled event',
-      explanation: 'A restricted market-moving event is inside the configured blackout window.',
-      action: 'Wait for the blackout to end, then refresh.',
-      exitAction: 'Review and manage the position manually now.',
-    },
-    KILL_SWITCH_ACTIVE: {
-      title: 'Emergency kill switch is active',
-      explanation: 'The safety switch is active. No additional risk will be approved.',
-      action: 'Investigate and clear only after conditions are safe.',
-      exitAction: 'Manage the position manually. Do not add risk.',
-    },
-    DAILY_LOSS_LIMIT: {
-      title: 'Daily loss limit reached',
-      explanation: 'Maximum daily loss reached. New exposure is blocked.',
-      action: 'Stop entries. Review the session before resuming.',
-      exitAction: 'Follow the manual EXIT recommendation.',
-    },
-    CONSECUTIVE_LOSS_LIMIT: {
-      title: 'Consecutive loss limit reached',
-      explanation: 'The configured losing-streak limit has been reached.',
-      action: 'Pause and review recent trades.',
-      exitAction: 'Follow the EXIT recommendation, then review.',
-    },
-    BROKER_CONNECTION_UNRELIABLE: {
-      title: 'Broker connection is unreliable',
-      explanation: 'Account, position or order information may be stale.',
-      action: 'Restore the connection and refresh.',
-      exitAction: 'Confirm the actual position, then manage manually.',
-    },
-    BROKER_OR_EXCHANGE_ERROR: {
-      title: 'Broker or exchange error',
-      explanation: 'The venue is not operating normally. Prices cannot be trusted.',
-      action: 'Wait for recovery and refresh.',
-      exitAction: 'Confirm venue recovery, then manage the position.',
-    },
-    POSITION_STATE_MISMATCH: {
-      title: 'Saved positions do not match the account',
-      explanation: 'Inconsistent position records detected.',
-      action: 'Reconcile dashboard and exchange positions.',
-      exitAction: 'Reconcile immediately, then manage the position.',
-    },
-    ORDER_STATE_UNKNOWN: {
-      title: 'Open-order status unknown',
-      explanation: 'Cannot confirm whether an order is active, filled or cancelled.',
-      action: 'Reconcile open orders before proceeding.',
-      exitAction: 'Reconcile orders, then manage the position.',
-    },
-    ACCOUNT_RISK_STATE_UNKNOWN: {
-      title: 'Account risk could not be verified',
-      explanation: 'Balance, P&L or exposure information is incomplete.',
-      action: 'Restore missing values and refresh.',
-      exitAction: 'Verify account state, then manage the position.',
-    },
-    ABNORMAL_SPREAD_OR_VOLATILITY: {
-      title: 'Market conditions outside safe range',
-      explanation: 'Spread or volatility exceeds configured limits.',
-      action: 'Wait for normalization.',
-      exitAction: 'Follow the EXIT recommendation with appropriate order type.',
-    },
-    EXPOSURE_LIMIT: {
-      title: 'Portfolio exposure limit reached',
-      explanation: 'Current positions exceed the configured cap.',
-      action: 'Reduce exposure or wait for a position to close.',
-      exitAction: 'Reduce or close the position.',
-    },
-    PENDING_ORDER_EXISTS: {
-      title: 'Another order is pending',
-      explanation: 'Approving another entry could duplicate exposure.',
-      action: 'Resolve the pending order, then refresh.',
-    },
-    TIMEFRAME_CONFLICT: {
-      title: 'Timeframe signals disagree',
-      explanation: 'Short-term and higher-timeframe signals are opposed.',
-      action: 'Wait for alignment before entering.',
-    },
-    DIRECTION_SCORE_TOO_LOW: {
-      title: 'No strong direction yet',
-      explanation: 'Combined directional evidence is below the minimum threshold.',
-      action: 'Wait for a clearer signal.',
-    },
-    PRICE_ACTION_NOT_CONFIRMED: {
-      title: 'Price action not confirmed',
-      explanation: 'A bias exists, but the required trigger is not confirmed.',
-      action: 'Wait for confirmation.',
-    },
-    DIRECTION_REVERSAL: {
-      title: 'Direction reversed against position',
-      explanation: 'The score now opposes the held CE or PE thesis.',
-      action: 'Exit the position.',
-    },
-    WRONG_OPTION_TYPE: {
-      title: 'Contract does not match direction',
-      explanation: 'This contract is the opposite option type from the current bias.',
-      action: 'Evaluate a matching contract instead.',
-    },
-    INSUFFICIENT_LIQUIDITY: {
-      title: 'Contract not liquid enough',
-      explanation: 'Quote, depth, volume or OI is below the safe minimum.',
-      action: 'Wait or use a more liquid contract.',
-    },
-    SPREAD_TOO_WIDE: {
-      title: 'Bid–ask spread too wide',
-      explanation: 'Expected cost exceeds the maximum allowed.',
-      action: 'Wait for a tighter spread.',
-    },
-    EXPIRY_RESTRICTION: {
-      title: 'Not enough time before settlement',
-      explanation: 'Contracts with less than 1h 30m remaining are excluded.',
-      action: 'Let the engine evaluate the next expiry.',
-    },
-    ENTRY_PRICE_DEVIATION: {
-      title: 'Entry price moved too far',
-      explanation: 'Current ask exceeds the maximum permitted deviation.',
-      action: 'Refresh the quote.',
-    },
-    NO_ELIGIBLE_CONTRACT: {
-      title: 'No suitable contract available',
-      explanation: 'No contract passed every mandatory quality filter.',
-      action: 'Wait for an eligible contract.',
-    },
-    CONTRACT_SCORE_TOO_LOW: {
-      title: 'Contract quality below minimum',
-      explanation: 'Combined liquidity, spread, delta and cost score is too low.',
-      action: 'Choose a stronger contract.',
-    },
-    TRADE_SCORE_TOO_LOW: {
-      title: 'Setup not strong enough',
-      explanation: 'Combined direction and contract score is below the entry threshold.',
-      action: 'Wait for a stronger setup.',
-    },
-    RISK_CALCULATION_FAILED: {
-      title: 'Safe trade plan could not be calculated',
-      explanation: 'Could not produce valid size, stop, target or timing values.',
-      action: 'Do not trade until sizing is verified.',
-    },
-    BREAKEVEN_UNREALISTIC: {
-      title: 'Forecast does not clear breakeven',
-      explanation: 'Expected move is too small to overcome premium and costs.',
-      action: 'Skip this setup.',
-    },
-    EXPECTED_VALUE_UNAVAILABLE: {
-      title: 'Expected value could not be verified',
-      explanation: 'Edge method could not complete from verified inputs.',
-      action: 'Restore required inputs.',
-    },
-    NEGATIVE_EXPECTED_VALUE: {
-      title: 'Estimated edge is not positive',
-      explanation: 'Edge method shows no positive value after costs.',
-      action: 'Skip a new entry.',
-    },
-    REWARD_RISK_TOO_LOW: {
-      title: 'Reward does not justify risk',
-      explanation: 'Expected reward is below the minimum ratio.',
-      action: 'Skip this contract.',
-    },
-    MINIMUM_LOT_EXCEEDS_RISK_LIMIT: {
-      title: 'One lot exceeds risk limit',
-      explanation: 'The smallest position is too large for available funds.',
-      action: 'Use a lower-risk contract.',
-    },
-    NAKED_OPTION_SELLING_PROHIBITED: {
-      title: 'Short options not supported',
-      explanation: 'This engine manages long options only.',
-      action: 'Manage the short position outside this model.',
-    },
-    UNDERLYING_INVALIDATION_REACHED: {
-      title: 'Market thesis invalidated',
-      explanation: 'Underlying crossed the level that defined the trade idea as wrong.',
-      action: 'Exit the position.',
-    },
-    EMERGENCY_OPTION_STOP_REACHED: {
-      title: 'Option emergency stop reached',
-      explanation: 'Option price touched the maximum-loss stop.',
-      action: 'Exit promptly.',
-    },
-    TARGET_REACHED: {
-      title: 'Profit target reached',
-      explanation: 'Option price reached the planned target.',
-      action: 'Secure the exit.',
-    },
-    TIME_STOP_REACHED: {
-      title: 'Holding time ended',
-      explanation: 'Position reached its time-based exit.',
-      action: 'Close the position.',
-    },
+  };
+  return decisions[key] || {
+    label: formatCode(key),
+    tone: 'is-waiting',
+    detail: 'The engine reported an unrecognized decision zone.',
+  };
+}
+
+function renderTradeDecision(id, zone, actionAllowed, reason = '', score = null, quality = null) {
+  const element = document.getElementById(id);
+  const meta = tradeDecisionMeta(zone, actionAllowed, reason);
+  element.className = `te-decision-capsule ${meta.tone}`;
+  element.querySelector('strong').textContent = meta.label;
+  element.style.setProperty('--te-decision-tone', scoreColor(score, quality));
+  element.title = meta.detail;
+}
+
+function freshnessState(snapshot, now) {
+  const stamp = Date.parse(snapshot?.timestamp || '');
+  const ttl = Number(snapshot?.signal_ttl_seconds) || 0;
+  if (!Number.isFinite(stamp) || ttl <= 0) return { cls: 'is-stale', text: 'No live signal' };
+  const ageSecs = (now - stamp) / 1000;
+  const remainingFrac = 1 - ageSecs / ttl;
+  if (remainingFrac > 0.5) return { cls: 'is-fresh', text: `Fresh · ${Math.max(0, Math.round(ttl - ageSecs))}s left` };
+  if (remainingFrac > 0) return { cls: 'is-delayed', text: `Ageing · ${Math.max(0, Math.round(ttl - ageSecs))}s left` };
+  return { cls: 'is-stale', text: 'Expired' };
+}
+
+function renderHero(snapshot, liveView, controllerStatus = null) {
+  const now = Date.now();
+  const hero = document.getElementById('te-hero');
+  hero.className = `te-hero ${heroTone(snapshot)}`;
+  document.getElementById('te-decision').textContent = regimeLabel(snapshot.regime);
+  document.getElementById('te-underlying').textContent = snapshot.symbol || '—';
+  document.getElementById('te-direction').textContent = directionLabel(snapshot.direction);
+  document.getElementById('te-confidence').textContent = finite(snapshot.confidence)
+    ? `${Math.round(snapshot.confidence * 100)}%` : '—';
+  const quality = dataQualityCopy(snapshot.data_quality);
+  const qualityEl = document.getElementById('te-data-quality');
+  qualityEl.textContent = quality.label;
+  qualityEl.title = snapshot.data_quality || '';
+  document.getElementById('te-data-quality-detail').textContent = quality.detail;
+  document.getElementById('te-asof').textContent = snapshot.timestamp
+    ? `Latest engine update · ${formatIstTimestamp(snapshot.timestamp)}` : '';
+
+  const fresh = freshnessState(snapshot, now);
+  const freshEl = document.getElementById('te-freshness');
+  freshEl.className = `te-freshness ${fresh.cls}`;
+  freshEl.textContent = fresh.text;
+
+  const liveAvailable = liveView?.available !== false && finite(liveView?.live_score);
+  const liveScore = liveAvailable ? Number(liveView.live_score) : null;
+  const committedScore = finite(snapshot.trend_score)
+    ? Number(snapshot.trend_score) : null;
+  const controllerReason = String(controllerStatus?.entry_blocked_reason || '').trim();
+  document.getElementById('te-live-score').textContent = signedScore(liveScore);
+  document.getElementById('te-committed-score').textContent = signedScore(committedScore);
+  renderTradeDecision(
+    'te-trade-decision',
+    snapshot.zone,
+    snapshot.zone_action_allowed === true && !controllerReason,
+    controllerReason || snapshot.zone_reason,
+    committedScore,
+    snapshot.data_quality,
+  );
+  renderTradeDecision(
+    'te-hero-trade-decision',
+    snapshot.zone,
+    snapshot.zone_action_allowed === true && !controllerReason,
+    controllerReason || snapshot.zone_reason,
+    committedScore,
+    snapshot.data_quality,
+  );
+  document.getElementById('te-hero-adx').textContent = finite(snapshot.trigger_adx)
+    ? Number(snapshot.trigger_adx).toFixed(1) : '—';
+  updateScoreGauge(
+    'te-live-score-gauge',
+    liveScore,
+    liveView?.data_quality || snapshot.data_quality,
+  );
+  updateScoreGauge(
+    'te-committed-score-gauge',
+    committedScore,
+    snapshot.data_quality,
+  );
+}
+
+const COMMITTED_SCORE_ZONE_LEVELS = [
+  { value: 40, label: 'BUY CE >+40', color: '#39f0ad' },
+  { value: 30, label: 'SHORT MOVE +30', color: '#d9e1ea' },
+  { value: -30, label: 'SHORT MOVE −30', color: '#d9e1ea' },
+  { value: -40, label: 'BUY PE <−40', color: '#ff5f7e' },
+];
+
+const COMMITTED_ZONE_COLOURS = {
+  CE: '#39f0ad',
+  HOLD: '#aeb7c2',
+  MV: '#d9e1ea',
+  PE: '#ff5f7e',
+};
+
+function normaliseCommittedZone(value, score) {
+  const raw = String(value || '').trim().toUpperCase().replaceAll('-', '_');
+  if (raw === 'CE' || raw.startsWith('CE_')
+      || raw.includes('BUY_CE') || raw.includes('CALL')) return 'CE';
+  if (raw === 'PE' || raw.startsWith('PE_')
+      || raw.includes('BUY_PE') || raw.includes('PUT')) return 'PE';
+  if (raw === 'MV' || raw.includes('MOVE') || raw.includes('STRADDLE')) return 'MV';
+  if (raw.includes('HOLD')) return 'HOLD';
+  if (score > 40) return 'CE';
+  if (score < -40) return 'PE';
+  if (score >= -30 && score <= 30) return 'MV';
+  return 'HOLD';
+}
+
+function formatPreviewChartTime(value, includeDate = false) {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return '—';
+  const options = {
+    timeZone: IST_TIME_ZONE,
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: true,
+  };
+  if (includeDate) {
+    options.day = '2-digit';
+    options.month = 'short';
+  }
+  const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', options)
+    .formatToParts(parsed).filter(part => part.type !== 'literal')
+    .map(part => [part.type, part.value]));
+  const time = `${parts.hour}:${parts.minute} ${parts.dayPeriod}`;
+  return includeDate
+    ? `${String(parts.day || '').padStart(2, '0')} ${String(parts.month || '').toUpperCase()} · ${time}`
+    : time;
+}
+
+function renderCommittedDecisionChart(history) {
+  const canvas = document.getElementById('te-preview-score-chart');
+  const empty = document.getElementById('te-preview-chart-empty');
+  const candidates = Array.isArray(history?.decisions)
+    ? history.decisions
+    : Array.isArray(history?.committed_decisions)
+      ? history.committed_decisions : [];
+  // Prefer the dedicated committed-decision payload. Aliases keep the chart
+  // readable during a rolling deployment without changing any engine data.
+  const decisionsByTime = new Map();
+  candidates.forEach((raw, index) => {
+    const scoreValue = raw?.committed_score ?? raw?.trend_score
+      ?? raw?.score;
+    if (!finite(scoreValue)) return;
+    const rawScore = Number(scoreValue);
+    const score = boundedPreviewScore(rawScore);
+    const time = String(raw?.time_utc || raw?.candle_close_utc
+      || raw?.timestamp || raw?.end_utc || raw?.start_utc || '');
+    const timeMillis = Date.parse(time);
+    if (!Number.isFinite(timeMillis)) return;
+    const decision = {
+      ...raw,
+      score,
+      raw_score: rawScore,
+      zone: normaliseCommittedZone(raw?.zone, score),
+      time_utc: time,
+      _sortKey: timeMillis,
+    };
+    // Prefer the latest copy if a refresh overlaps an existing decision.
+    decisionsByTime.set(time, decision);
+  });
+  const decisions = [...decisionsByTime.values()].sort((left, right) =>
+    left._sortKey - right._sortKey);
+  const trades = (Array.isArray(history?.trade_markers)
+    ? history.trade_markers : []).map(raw => {
+      const timeMillis = Date.parse(raw?.time_utc);
+      const rawCode = String(raw?.code || raw?.trade_type || raw?.zone || '')
+        .trim().toUpperCase();
+      const code = rawCode.includes('CE') || rawCode.includes('CALL') ? 'CE'
+        : rawCode.includes('PE') || rawCode.includes('PUT') ? 'PE'
+        : rawCode === 'MV' || rawCode.includes('MOVE') || rawCode.includes('STRADDLE')
+          ? 'MV' : rawCode;
+      const rawAction = String(raw?.action || raw?.event || raw?.kind
+        || raw?.marker_type || 'ENTRY').trim().toUpperCase();
+      const action = rawAction.includes('EXIT') || rawAction.includes('CLOSE')
+        ? 'EXIT' : 'ENTRY';
+      return { timeMillis, code, action };
+    }).filter(marker =>
+      Number.isFinite(marker.timeMillis)
+      && ['CE', 'PE', 'MV'].includes(marker.code));
+
+  if (!history?.available || !decisions.length) {
+    canvas.hidden = true;
+    empty.hidden = false;
+    empty.textContent = history?.available === false
+      ? 'Committed decision history is temporarily unavailable. The score dials will continue to refresh.'
+      : 'Collecting committed decision scores. The first completed five-minute decision will appear here.';
+    return;
+  }
+
+  canvas.hidden = false;
+  empty.hidden = true;
+  const latest = decisions[decisions.length - 1];
+  canvas.setAttribute(
+    'aria-label',
+    `Five-minute committed-decision score line covering up to 24 hours. Latest score ${signedScore(latest.score)} in the ${latest.zone} zone. Entry markers use a plus sign and exit markers use a multiplication sign.`,
+  );
+  drawCommittedDecisionChart(canvas, decisions, trades);
+}
+
+const previewScoreChartStates = new WeakMap();
+
+function previewScoreChartState(canvas) {
+  let state = previewScoreChartStates.get(canvas);
+  if (!state) {
+    state = {
+      visibleBars: 48,
+      rightOffset: 0,
+      yZoom: 1,
+      yPan: 0,
+      manualY: false,
+      hover: null,
+      decisions: [],
+      trades: [],
+      geometry: null,
+      drag: null,
+      interactionsInstalled: false,
+    };
+    previewScoreChartStates.set(canvas, state);
+  }
+  return state;
+}
+
+function clampPreviewChart(value, minimum, maximum) {
+  return Math.min(maximum, Math.max(minimum, value));
+}
+
+function boundedPreviewScore(value) {
+  return clampPreviewChart(Number(value) || 0, -100, 100);
+}
+
+function nicePreviewScoreStep(rawStep) {
+  const safe = Math.max(.1, Number(rawStep) || 1);
+  const power = 10 ** Math.floor(Math.log10(safe));
+  const fraction = safe / power;
+  const niceFraction = fraction <= 1 ? 1
+    : fraction <= 2 ? 2
+    : fraction <= 2.5 ? 2.5
+    : fraction <= 5 ? 5 : 10;
+  return niceFraction * power;
+}
+
+function previewChartPointer(canvas, event) {
+  const rect = canvas.getBoundingClientRect();
+  return {
+    x: event.clientX - rect.left,
+    y: event.clientY - rect.top,
+  };
+}
+
+function previewChartAxisAt(state, point) {
+  const geometry = state.geometry;
+  if (!geometry) return null;
+  const { plot } = geometry;
+  if (point.y >= plot.bottom && point.y <= geometry.height
+      && point.x >= plot.left && point.x <= plot.right) {
+    return 'x';
+  }
+  if (point.x >= 0 && point.x <= plot.left
+      && point.y >= plot.top && point.y <= plot.bottom) {
+    return 'y';
+  }
+  if (point.x >= plot.left && point.x <= plot.right
+      && point.y >= plot.top && point.y <= plot.bottom) {
+    return 'plot';
+  }
+  return null;
+}
+
+function redrawPreviewChartFromState(canvas, state) {
+  if (Array.isArray(state.decisions) && state.decisions.length) {
+    drawCommittedDecisionChart(canvas, state.decisions, state.trades);
+  }
+}
+
+function resetPreviewScoreChart(canvas, axes = 'both') {
+  const state = previewScoreChartState(canvas);
+  if (axes === 'both' || axes === 'x') {
+    state.visibleBars = 48;
+    state.rightOffset = 0;
+  }
+  if (axes === 'both' || axes === 'y') {
+    state.yZoom = 1;
+    state.yPan = 0;
+    state.manualY = false;
+  }
+  redrawPreviewChartFromState(canvas, state);
+}
+
+function installPreviewScoreChartInteractions(canvas, state) {
+  if (state.interactionsInstalled) return;
+  state.interactionsInstalled = true;
+  canvas.style.touchAction = 'none';
+
+  canvas.addEventListener('pointerdown', event => {
+    const point = previewChartPointer(canvas, event);
+    const axis = previewChartAxisAt(state, point);
+    if (!axis) return;
+    event.preventDefault();
+    state.hover = null;
+    state.drag = {
+      axis,
+      pointerId: event.pointerId,
+      startX: point.x,
+      startY: point.y,
+      initialVisibleBars: state.visibleBars,
+      initialRightOffset: state.rightOffset,
+      initialYZoom: state.yZoom,
+      initialYPan: state.yPan,
+      slot: state.geometry?.slot || 12,
+      pixelsPerScore: state.geometry?.pixelsPerScore || 1,
+    };
+    canvas.setPointerCapture?.(event.pointerId);
+    canvas.dataset.axisDrag = axis;
+    canvas.style.cursor = axis === 'x' ? 'ew-resize'
+      : axis === 'y' ? 'ns-resize' : 'grabbing';
   });
 
-  const byId = id => document.getElementById(id);
-  const hasValue = value => value !== null && value !== undefined && value !== '';
-  const finite = value => hasValue(value) && Number.isFinite(Number(value));
-  const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
-  const humanize = value => hasValue(value)
-    ? String(value).replace(/_/g, ' ').replace(/\b\w/g, char => char.toUpperCase())
-    : '—';
-  const naturalList = values => {
-    if (!values.length) return '';
-    if (values.length === 1) return values[0];
-    if (values.length === 2) return `${values[0]} and ${values[1]}`;
-    return `${values.slice(0, -1).join(', ')}, and ${values.at(-1)}`;
-  };
-  const safeText = value => String(value ?? '')
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-  const number = (value, digits = 0) => finite(value)
-    ? Number(value).toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits })
-    : '—';
-  const money = (value, digits = 2) => finite(value)
-    ? `${Number(value) < 0 ? '−' : ''}$${number(Math.abs(Number(value)), digits)}`
-    : '—';
-  const signed = (value, digits = 0) => finite(value)
-    ? `${Number(value) > 0 ? '+' : ''}${number(value, digits)}`
-    : '—';
-  const impliedVolatility = value => {
-    if (!finite(value)) return '—';
-    const numeric = Number(value);
-    const percent = Math.abs(numeric) <= 5 ? numeric * 100 : numeric;
-    return `${number(percent, 2)}%`;
-  };
-  const scoreTone = value => !finite(value) || Number(value) === 0
-    ? 'is-neutral' : (Number(value) > 0 ? 'is-positive' : 'is-negative');
-  const displayTimestamp = value => {
-    if (!hasValue(value)) return '—';
-    const parsed = new Date(value);
-    return Number.isNaN(parsed.getTime()) ? String(value)
-      : parsed.toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'medium' });
-  };
-  const displayExpiryTimestamp = value => {
-    if (!hasValue(value)) return '—';
-    const parsed = new Date(value);
-    return Number.isNaN(parsed.getTime()) ? String(value)
-      : parsed.toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' });
-  };
-  const contractTimeToExpiryHours = (contract, decision) => {
-    const expiryMs = hasValue(contract?.expiry) ? new Date(contract.expiry).getTime() : Number.NaN;
-    const reference = decision?.timestamp || decision?.market_data_timestamp;
-    const referenceMs = hasValue(reference) ? new Date(reference).getTime() : Number.NaN;
-    if (Number.isFinite(expiryMs) && Number.isFinite(referenceMs)) return (expiryMs - referenceMs) / 3_600_000;
-    if (finite(contract?.time_to_expiry_hours)) return Number(contract.time_to_expiry_hours);
-    if (finite(contract?.days_to_expiry)) return Number(contract.days_to_expiry) * 24;
-    return null;
-  };
-  const formatTimeToExpiry = value => {
-    if (!finite(value)) return '—';
-    const totalMinutes = Math.floor(Number(value) * 60 + 1e-9);
-    if (totalMinutes < 0) return 'Expired';
-    if (totalMinutes === 0) return '< 1m';
-    const hours = Math.floor(totalMinutes / 60);
-    const minutes = totalMinutes % 60;
-    return hours ? `${hours}h ${minutes}m` : `${minutes}m`;
-  };
-  const contractExpiryLabel = (contract, decision) => {
-    const settlement = displayExpiryTimestamp(contract?.expiry);
-    const remaining = formatTimeToExpiry(contractTimeToExpiryHours(contract || {}, decision || {}));
-    return settlement === '—' ? remaining : `${settlement} · ${remaining}`;
-  };
-  const joinValues = (first, second, formatter = number, separator = ' / ') => {
-    const left = formatter(first); const right = formatter(second);
-    return left === '—' && right === '—' ? '—' : `${left}${separator}${right}`;
-  };
-
-  let latestDecision = null;
-  let requestController = null;
-
-  function unwrap(payload) {
-    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return payload;
-    for (const key of ['data', 'result', 'trend_engine', 'engine']) {
-      if (payload[key] && typeof payload[key] === 'object' && !Array.isArray(payload[key])) return payload[key];
+  canvas.addEventListener('pointermove', event => {
+    const point = previewChartPointer(canvas, event);
+    const drag = state.drag;
+    if (!drag || drag.pointerId !== event.pointerId) {
+      const axis = previewChartAxisAt(state, point);
+      canvas.style.cursor = axis === 'x' ? 'ew-resize'
+        : axis === 'y' ? 'ns-resize'
+        : axis === 'plot' ? 'crosshair' : 'default';
+      const nextHover = axis === 'plot' ? point : null;
+      const changed = !state.hover !== !nextHover
+        || (state.hover && nextHover
+          && (Math.abs(state.hover.x - nextHover.x) > .25
+            || Math.abs(state.hover.y - nextHover.y) > .25));
+      state.hover = nextHover;
+      if (changed) redrawPreviewChartFromState(canvas, state);
+      return;
     }
-    if (payload.decision && typeof payload.decision === 'object' && !Array.isArray(payload.decision)) return payload.decision;
-    return payload;
+    event.preventDefault();
+    if (drag.axis === 'x') {
+      state.visibleBars = clampPreviewChart(
+        drag.initialVisibleBars * Math.exp((drag.startX - point.x) / 210),
+        12,
+        Math.max(12, Math.min(288, state.decisions.length)),
+      );
+    } else if (drag.axis === 'y') {
+      state.yZoom = clampPreviewChart(
+        drag.initialYZoom * Math.exp((drag.startY - point.y) / 190),
+        .35,
+        8,
+      );
+      state.manualY = true;
+    } else {
+      const maximumOffset = Math.max(
+        0,
+        state.decisions.length - Math.min(state.visibleBars, state.decisions.length),
+      );
+      state.rightOffset = clampPreviewChart(
+        drag.initialRightOffset + (point.x - drag.startX) / drag.slot,
+        0,
+        maximumOffset,
+      );
+      state.yPan = clampPreviewChart(
+        drag.initialYPan + (point.y - drag.startY) / drag.pixelsPerScore,
+        -200,
+        200,
+      );
+      state.manualY = Math.abs(state.yPan) > .001 || state.yZoom !== 1;
+    }
+    redrawPreviewChartFromState(canvas, state);
+  });
+
+  const stopDragging = event => {
+    if (!state.drag || state.drag.pointerId !== event.pointerId) return;
+    try { canvas.releasePointerCapture?.(event.pointerId); } catch (_) { /* already released */ }
+    state.drag = null;
+    delete canvas.dataset.axisDrag;
+    const axis = previewChartAxisAt(state, previewChartPointer(canvas, event));
+    canvas.style.cursor = axis === 'x' ? 'ew-resize'
+      : axis === 'y' ? 'ns-resize'
+      : axis === 'plot' ? 'crosshair' : 'default';
+  };
+  canvas.addEventListener('pointerup', stopDragging);
+  canvas.addEventListener('pointercancel', stopDragging);
+  canvas.addEventListener('pointerleave', () => {
+    if (state.drag || !state.hover) return;
+    state.hover = null;
+    redrawPreviewChartFromState(canvas, state);
+  });
+
+  canvas.addEventListener('dblclick', event => {
+    const axis = previewChartAxisAt(state, previewChartPointer(canvas, event));
+    if (!axis) return;
+    event.preventDefault();
+    resetPreviewScoreChart(canvas, axis === 'plot' ? 'both' : axis);
+  });
+
+  canvas.addEventListener('wheel', event => {
+    const point = previewChartPointer(canvas, event);
+    const axis = previewChartAxisAt(state, point);
+    if (!axis) return;
+    event.preventDefault();
+    if (axis === 'y' || event.shiftKey) {
+      state.yZoom = clampPreviewChart(
+        state.yZoom * Math.exp(-event.deltaY * .0015),
+        .35,
+        8,
+      );
+      state.manualY = true;
+    } else {
+      const oldBars = state.visibleBars;
+      const maximumBars = Math.max(12, Math.min(288, state.decisions.length));
+      const newBars = clampPreviewChart(
+        oldBars * Math.exp(event.deltaY * .0015),
+        12,
+        maximumBars,
+      );
+      const plot = state.geometry?.plot;
+      const fromRight = plot
+        ? clampPreviewChart((plot.right - point.x) / (plot.right - plot.left), 0, 1)
+        : .5;
+      state.rightOffset = clampPreviewChart(
+        state.rightOffset + (oldBars - newBars) * fromRight,
+        0,
+        Math.max(0, state.decisions.length - newBars),
+      );
+      state.visibleBars = newBars;
+    }
+    redrawPreviewChartFromState(canvas, state);
+  }, { passive: false });
+
+  window.addEventListener('resize', () =>
+    redrawPreviewChartFromState(canvas, state));
+}
+
+function previewChartRoundedPath(ctx, x, y, width, height, radius) {
+  const r = Math.min(radius, Math.abs(width) / 2, Math.abs(height) / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + width - r, y);
+  ctx.quadraticCurveTo(x + width, y, x + width, y + r);
+  ctx.lineTo(x + width, y + height - r);
+  ctx.quadraticCurveTo(
+    x + width,
+    y + height,
+    x + width - r,
+    y + height,
+  );
+  ctx.lineTo(x + r, y + height);
+  ctx.quadraticCurveTo(x, y + height, x, y + height - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
+}
+
+function drawCommittedTradeMarker(ctx, x, anchorY, code, action, stack, plot) {
+  const palette = {
+    CE: { fill: '#20d991', glow: '#45f7b7' },
+    PE: { fill: '#ff4f72', glow: '#ff7891' },
+    MV: { fill: '#a9b3bf', glow: '#e2e9f0' },
+  };
+  const tone = palette[code];
+  if (!tone) return;
+  const radius = 12;
+  // Multiple lifecycle events can land in the same five-minute decision.
+  // Keep the first dot directly on the line and offset later dots just enough
+  // to leave every marker legible, with a short connector to the true point.
+  const direction = stack % 2 === 0 ? -1 : 1;
+  const ring = Math.ceil(stack / 2);
+  const markerX = clampPreviewChart(
+    x + direction * ring * 28,
+    plot.left + radius + 2,
+    plot.right - radius - 2,
+  );
+  const markerY = clampPreviewChart(
+    anchorY,
+    plot.top + radius + 2,
+    plot.bottom - radius - 2,
+  );
+  ctx.save();
+  if (Math.abs(markerX - x) > 1 || Math.abs(markerY - anchorY) > 1) {
+    ctx.strokeStyle = tone.glow;
+    ctx.globalAlpha = .72;
+    ctx.lineWidth = 1.25;
+    ctx.beginPath();
+    ctx.moveTo(x, anchorY);
+    ctx.lineTo(markerX, markerY);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+  ctx.shadowColor = tone.glow;
+  ctx.shadowBlur = 17;
+  ctx.fillStyle = tone.fill;
+  ctx.strokeStyle = 'rgba(255, 255, 255, .92)';
+  ctx.lineWidth = 1.8;
+  ctx.beginPath();
+  ctx.arc(markerX, markerY, radius, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = '#fff';
+  ctx.font = '900 17px Inter, Segoe UI, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(action === 'EXIT' ? '×' : '+', markerX, markerY - .2);
+
+  const label = code;
+  ctx.font = '900 9px Inter, Segoe UI, sans-serif';
+  const labelWidth = Math.max(26, ctx.measureText(label).width + 12);
+  const labelHeight = 16;
+  const labelTop = action === 'EXIT'
+    ? Math.min(plot.bottom - labelHeight - 2, markerY + radius + 5 + stack * 2)
+    : Math.max(plot.top + 2, markerY - radius - labelHeight - 5 - stack * 2);
+  const labelLeft = clampPreviewChart(
+    markerX - labelWidth / 2,
+    plot.left + 2,
+    plot.right - labelWidth - 2,
+  );
+  previewChartRoundedPath(ctx, labelLeft, labelTop, labelWidth, labelHeight, 6);
+  ctx.fillStyle = 'rgba(4, 20, 39, .94)';
+  ctx.fill();
+  ctx.strokeStyle = tone.glow;
+  ctx.lineWidth = 1;
+  ctx.stroke();
+  ctx.fillStyle = tone.glow;
+  ctx.fillText(label, labelLeft + labelWidth / 2, labelTop + labelHeight / 2 + .3);
+  ctx.restore();
+}
+
+function previewScoreViewport(scores, yZoom = 1, yPan = 0) {
+  const bounded = scores.map(boundedPreviewScore);
+  const visibleLow = Math.min(...bounded);
+  const visibleHigh = Math.max(...bounded);
+  const rawRange = Math.max(.5, visibleHigh - visibleLow);
+  const padding = Math.max(1, rawRange * .08);
+  const autoTick = nicePreviewScoreStep((rawRange + padding * 2) / 6);
+  let paddedMinimum = Math.floor((visibleLow - padding) / autoTick) * autoTick;
+  let paddedMaximum = Math.ceil((visibleHigh + padding) / autoTick) * autoTick;
+  let autoSpan = clampPreviewChart(
+    Math.max(8, paddedMaximum - paddedMinimum), 2, 200,
+  );
+  let autoCenter = (paddedMaximum + paddedMinimum) / 2;
+  autoCenter = clampPreviewChart(
+    autoCenter,
+    -100 + autoSpan / 2,
+    100 - autoSpan / 2,
+  );
+  const scoreSpan = clampPreviewChart(autoSpan / yZoom, 2, 200);
+  const scoreCenter = clampPreviewChart(
+    autoCenter + yPan,
+    -100 + scoreSpan / 2,
+    100 - scoreSpan / 2,
+  );
+  return {
+    scoreMinimum: scoreCenter - scoreSpan / 2,
+    scoreMaximum: scoreCenter + scoreSpan / 2,
+    scoreSpan,
+  };
+}
+
+function drawPreviewChartCrosshair(
+  ctx, hover, geometry, visibleDecisions, decisionOffset, includeDate,
+) {
+  if (!hover || !visibleDecisions.length) return;
+  const { plot, slot, scoreMinimum, scoreMaximum } = geometry;
+  if (hover.x < plot.left || hover.x > plot.right
+      || hover.y < plot.top || hover.y > plot.bottom) return;
+  const plotHeight = plot.bottom - plot.top;
+  const score = scoreMaximum
+    - ((hover.y - plot.top) / plotHeight) * (scoreMaximum - scoreMinimum);
+  const decisionIndex = Math.round(
+    (hover.x - plot.left - decisionOffset) / slot - .5,
+  );
+  const boundedIndex = clampPreviewChart(
+    decisionIndex, 0, visibleDecisions.length - 1,
+  );
+  const timeLabel = formatPreviewChartTime(
+    visibleDecisions[boundedIndex].time_utc, includeDate,
+  );
+  const scoreLabel = `${score >= 0 ? '+' : ''}${score.toFixed(1)}`;
+
+  ctx.save();
+  ctx.strokeStyle = 'rgba(229, 237, 245, .76)';
+  ctx.lineWidth = .65;
+  ctx.setLineDash([3, 4]);
+  ctx.beginPath();
+  ctx.moveTo(hover.x, plot.top);
+  ctx.lineTo(hover.x, plot.bottom);
+  ctx.moveTo(plot.left, hover.y);
+  ctx.lineTo(plot.right, hover.y);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  ctx.font = '900 10px Inter, Segoe UI, sans-serif';
+  ctx.textBaseline = 'middle';
+  const yLabelWidth = Math.max(44, ctx.measureText(scoreLabel).width + 14);
+  const yLabelLeft = Math.max(2, plot.left - yLabelWidth - 5);
+  previewChartRoundedPath(
+    ctx, yLabelLeft, hover.y - 10, yLabelWidth, 20, 4,
+  );
+  ctx.fillStyle = 'rgba(9, 22, 37, .98)';
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(229, 237, 245, .78)';
+  ctx.lineWidth = .7;
+  ctx.stroke();
+  ctx.fillStyle = '#f4f8fb';
+  ctx.textAlign = 'center';
+  ctx.fillText(scoreLabel, yLabelLeft + yLabelWidth / 2, hover.y + .3);
+
+  const xLabelWidth = Math.min(
+    plot.right - plot.left,
+    Math.max(94, ctx.measureText(timeLabel).width + 16),
+  );
+  const xLabelLeft = clampPreviewChart(
+    hover.x - xLabelWidth / 2,
+    plot.left,
+    plot.right - xLabelWidth,
+  );
+  previewChartRoundedPath(
+    ctx, xLabelLeft, plot.bottom + 4, xLabelWidth, 21, 4,
+  );
+  ctx.fillStyle = 'rgba(9, 22, 37, .98)';
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(229, 237, 245, .78)';
+  ctx.stroke();
+  ctx.fillStyle = '#f4f8fb';
+  ctx.fillText(timeLabel, xLabelLeft + xLabelWidth / 2, plot.bottom + 14.7);
+  ctx.restore();
+}
+
+function drawCommittedDecisionChart(canvas, decisions, trades = []) {
+  const state = previewScoreChartState(canvas);
+  state.decisions = decisions;
+  state.trades = trades;
+  installPreviewScoreChartInteractions(canvas, state);
+  const rect = canvas.getBoundingClientRect();
+  const width = Math.max(320, Math.floor(rect.width || canvas.clientWidth || 320));
+  const height = Math.max(250, Math.floor(rect.height || canvas.clientHeight || 292));
+  const pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
+  if (canvas.width !== Math.floor(width * pixelRatio)
+      || canvas.height !== Math.floor(height * pixelRatio)) {
+    canvas.width = Math.floor(width * pixelRatio);
+    canvas.height = Math.floor(height * pixelRatio);
+  }
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+  ctx.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+  ctx.clearRect(0, 0, width, height);
+
+  // Keep a dedicated label lane so the latest decision is never obscured by
+  // the score-zone annotations.
+  const zoneLabelLane = clampPreviewChart(width * .135, 92, 132);
+  const plot = { left: 62, top: 22, right: width - zoneLabelLane - 12, bottom: height - 44 };
+  const plotWidth = Math.max(1, plot.right - plot.left);
+  const plotHeight = Math.max(1, plot.bottom - plot.top);
+
+  // A 24-hour buffer contains 288 five-minute decisions. Horizontal zoom and
+  // pan expose the full day without aggregating or discarding any point.
+  const maximumVisibleBars = Math.max(12, Math.min(288, decisions.length));
+  state.visibleBars = clampPreviewChart(state.visibleBars, 12, maximumVisibleBars);
+  const visibleCount = Math.max(
+    1,
+    Math.min(decisions.length, Math.round(state.visibleBars)),
+  );
+  const maximumRightOffset = Math.max(0, decisions.length - visibleCount);
+  state.rightOffset = clampPreviewChart(
+    state.rightOffset,
+    0,
+    maximumRightOffset,
+  );
+  const endIndex = Math.max(
+    visibleCount,
+    decisions.length - Math.round(state.rightOffset),
+  );
+  const startIndex = Math.max(0, endIndex - visibleCount);
+  const visibleDecisions = decisions.slice(startIndex, endIndex);
+  const slotCount = Math.max(
+    1,
+    Math.min(Math.round(state.visibleBars), decisions.length),
+  );
+  const slot = plotWidth / slotCount;
+  const visiblePlotWidth = slot * visibleDecisions.length;
+  const decisionOffset = Math.max(0, plotWidth - visiblePlotWidth);
+
+  // Fit only the values visible on screen, but honour the Trend Engine's
+  // absolute score contract at every zoom and pan level.
+  const { scoreMinimum, scoreMaximum, scoreSpan } = previewScoreViewport(
+    visibleDecisions.map(decision => decision.score),
+    state.yZoom,
+    state.yPan,
+  );
+  const scoreY = value =>
+    plot.top + ((scoreMaximum - value) / scoreSpan) * plotHeight;
+  const scoreLabel = value => {
+    const rounded = Math.abs(value) < 10 && Math.abs(value % 1) > .001
+      ? value.toFixed(1) : value.toFixed(0);
+    return `${value > 0 ? '+' : ''}${rounded}`;
+  };
+  state.geometry = {
+    width,
+    height,
+    plot,
+    slot,
+    scoreMinimum,
+    scoreMaximum,
+    pixelsPerScore: plotHeight / scoreSpan,
+  };
+
+  const backdrop = ctx.createLinearGradient(0, plot.top, 0, plot.bottom);
+  backdrop.addColorStop(0, 'rgba(18, 77, 122, .32)');
+  backdrop.addColorStop(.52, 'rgba(6, 28, 55, .46)');
+  backdrop.addColorStop(1, 'rgba(65, 12, 45, .30)');
+  ctx.fillStyle = backdrop;
+  ctx.fillRect(plot.left, plot.top, plotWidth, plotHeight);
+  const glow = ctx.createRadialGradient(plot.right, plot.top, 2, plot.right, plot.top, plotWidth * .62);
+  glow.addColorStop(0, 'rgba(55, 166, 255, .18)');
+  glow.addColorStop(1, 'rgba(55, 166, 255, 0)');
+  ctx.fillStyle = glow;
+  ctx.fillRect(plot.left, plot.top, plotWidth, plotHeight);
+
+  // Zone shading makes the action bands readable at a glance without turning
+  // the chart into an execution surface.  The boundaries themselves are
+  // drawn below as deliberately thin dotted lines.
+  const fillScoreBand = (upper, lower, colour) => {
+    const clippedUpper = clampPreviewChart(upper, scoreMinimum, scoreMaximum);
+    const clippedLower = clampPreviewChart(lower, scoreMinimum, scoreMaximum);
+    if (clippedUpper <= clippedLower) return;
+    const top = scoreY(clippedUpper);
+    ctx.fillStyle = colour;
+    ctx.fillRect(plot.left, top, plotWidth, scoreY(clippedLower) - top);
+  };
+  fillScoreBand(100, 40, 'rgba(57, 240, 173, .075)');
+  fillScoreBand(40, 30, 'rgba(142, 153, 166, .14)');
+  fillScoreBand(30, -30, 'rgba(217, 225, 234, .075)');
+  fillScoreBand(-30, -40, 'rgba(142, 153, 166, .14)');
+  fillScoreBand(-40, -100, 'rgba(255, 95, 126, .075)');
+
+  const preferredTick = nicePreviewScoreStep(scoreSpan / 6);
+  const firstTick = Math.ceil(scoreMinimum / preferredTick) * preferredTick;
+  const scoreTicks = [];
+  for (let value = firstTick; value <= scoreMaximum + .001; value += preferredTick) {
+    scoreTicks.push(Math.round(value * 100) / 100);
+  }
+  if (!scoreTicks.includes(0) && scoreMinimum < 0 && scoreMaximum > 0) scoreTicks.push(0);
+  ctx.font = '800 11px Inter, Segoe UI, sans-serif';
+  ctx.textBaseline = 'middle';
+  for (const level of scoreTicks.sort((a, b) => a - b)) {
+    const y = scoreY(level);
+    ctx.setLineDash(level === 0 ? [] : [2, 5]);
+    ctx.lineWidth = level === 0 ? 1 : .55;
+    ctx.strokeStyle = level === 0 ? 'rgba(185, 194, 205, .58)' : 'rgba(171, 181, 193, .22)';
+    ctx.beginPath();
+    ctx.moveTo(plot.left, y);
+    ctx.lineTo(plot.right, y);
+    ctx.stroke();
+    ctx.fillStyle = level === 0 ? '#edf1f5' : '#c4cbd3';
+    ctx.textAlign = 'right';
+    ctx.fillText(scoreLabel(level), plot.left - 10, y);
   }
 
-  function decisionMeta(rawDecision) {
-    const decision = String(rawDecision || 'NO_TRADE').toUpperCase();
-    const map = {
-      BUY_CE: ['BUY CE', 'is-bullish'],
-      BUY_PE: ['BUY PE', 'is-bearish'],
-      NO_TRADE: ['NO TRADE', 'is-neutral'],
-      HOLD: ['HOLD', 'is-hold'],
-      EXIT: ['EXIT', 'is-exit'],
-    };
-    return map[decision] || ['NO TRADE', 'is-neutral'];
+  for (const zone of COMMITTED_SCORE_ZONE_LEVELS) {
+    if (zone.value < scoreMinimum || zone.value > scoreMaximum) continue;
+    const y = scoreY(zone.value);
+    ctx.save();
+    ctx.setLineDash([1, 6]);
+    ctx.lineWidth = .6;
+    ctx.strokeStyle = zone.color;
+    ctx.globalAlpha = .9;
+    ctx.beginPath();
+    ctx.moveTo(plot.left, y);
+    ctx.lineTo(plot.right, y);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.globalAlpha = 1;
+    ctx.font = '800 9px Inter, Segoe UI, sans-serif';
+    const labelWidth = Math.min(zoneLabelLane - 8, ctx.measureText(zone.label).width + 12);
+    const labelX = plot.right + 6;
+    ctx.fillStyle = 'rgba(4, 20, 39, .88)';
+    ctx.fillRect(labelX, y - 8, labelWidth, 16);
+    ctx.fillStyle = zone.color;
+    ctx.textAlign = 'left';
+    ctx.fillText(zone.label, labelX + 6, y);
+    ctx.restore();
+  }
+  ctx.setLineDash([]);
+
+  // Strong, neutral-grey axes distinguish the frame from the zone and grid
+  // guides without competing with the committed-score line.
+  ctx.save();
+  ctx.strokeStyle = 'rgba(168, 178, 190, .94)';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(plot.left, plot.top);
+  ctx.lineTo(plot.left, plot.bottom);
+  ctx.lineTo(plot.right, plot.bottom);
+  ctx.stroke();
+  ctx.restore();
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(plot.left, plot.top, plotWidth, plotHeight);
+  ctx.clip();
+  const decisionX = index =>
+    plot.left + decisionOffset + slot * (index + .5);
+
+  // Draw one segment per committed interval so the line itself carries the
+  // zone colour. The destination decision owns the segment colour because it
+  // is the value that became committed at that timestamp.
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  for (let index = 1; index < visibleDecisions.length; index += 1) {
+    const previous = visibleDecisions[index - 1];
+    const decision = visibleDecisions[index];
+    const colour = COMMITTED_ZONE_COLOURS[decision.zone]
+      || COMMITTED_ZONE_COLOURS.HOLD;
+    ctx.save();
+    ctx.strokeStyle = colour;
+    ctx.shadowColor = colour;
+    ctx.shadowBlur = 7;
+    ctx.globalAlpha = .98;
+    ctx.lineWidth = 2.8;
+    ctx.beginPath();
+    ctx.moveTo(decisionX(index - 1), scoreY(previous.score));
+    ctx.lineTo(decisionX(index), scoreY(decision.score));
+    ctx.stroke();
+    ctx.restore();
   }
 
-  function freshness(decision) {
-    const value = decision?.market_data_timestamp;
-    if (!hasValue(value)) return { label: 'No timestamp', tone: 'is-unknown', age: null };
-    const stamp = new Date(value).getTime();
-    if (!Number.isFinite(stamp)) return { label: 'Invalid timestamp', tone: 'is-stale', age: null };
-    const seconds = Math.max(0, Math.floor((Date.now() - stamp) / 1000));
-    let age;
-    if (seconds < 10) age = 'just now';
-    else if (seconds < 60) age = `${seconds}s ago`;
-    else if (seconds < 3600) age = `${Math.floor(seconds / 60)}m ago`;
-    else age = `${Math.floor(seconds / 3600)}h ago`;
-    const dataGate = decision?.hard_gates?.data_valid;
-    if (dataGate === false || seconds > 300) return { label: `Stale · ${age}`, tone: 'is-stale', age };
-    if (seconds > 120) return { label: `Delayed · ${age}`, tone: 'is-delayed', age };
-    return { label: `Fresh · ${age}`, tone: 'is-fresh', age };
-  }
+  // Small committed points keep exact samples visible; the latest point is
+  // larger and glowing so recency is obvious without a forming-candle state.
+  visibleDecisions.forEach((decision, index) => {
+    const colour = COMMITTED_ZONE_COLOURS[decision.zone]
+      || COMMITTED_ZONE_COLOURS.HOLD;
+    const latest = index === visibleDecisions.length - 1;
+    ctx.save();
+    ctx.fillStyle = colour;
+    ctx.strokeStyle = latest ? '#eef8ff' : 'rgba(5, 24, 43, .9)';
+    ctx.lineWidth = latest ? 1.4 : 1;
+    if (latest) {
+      ctx.shadowColor = colour;
+      ctx.shadowBlur = 13;
+    }
+    ctx.beginPath();
+    ctx.arc(
+      decisionX(index),
+      scoreY(decision.score),
+      latest ? 4.8 : 2.4,
+      0,
+      Math.PI * 2,
+    );
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+  });
 
-  function updateFreshness() {
-    if (!latestDecision) return;
-    const state = freshness(latestDecision);
-    const el = byId('te-freshness');
-    el.textContent = state.label;
-    el.className = `te-freshness ${state.tone}`;
-    byId('te-asof').textContent = `Data ${displayTimestamp(latestDecision.market_data_timestamp)} · Evaluated ${displayTimestamp(latestDecision.timestamp)}`;
-  }
+  const nearestVisibleDecision = timeMillis => {
+    let best = null;
+    visibleDecisions.forEach((decision, index) => {
+      const distance = Math.abs(decision._sortKey - timeMillis);
+      if (!best || distance < best.distance) best = { decision, index, distance };
+    });
+    return best && best.distance <= 300_000 ? best : null;
+  };
+  const markerStacks = new Map();
+  trades.forEach(marker => {
+    const match = nearestVisibleDecision(marker.timeMillis);
+    if (!match) return;
+    const stack = markerStacks.get(match.index) || 0;
+    markerStacks.set(match.index, stack + 1);
+    const x = decisionX(match.index);
+    const anchorY = scoreY(match.decision.score);
+    drawCommittedTradeMarker(
+      ctx,
+      x,
+      anchorY,
+      marker.code,
+      marker.action,
+      stack,
+      plot,
+    );
+  });
+  ctx.restore();
 
-  function scoreMeter(value, max) {
-    const numeric = finite(value) ? clamp(Number(value), -max, max) : 0;
-    const width = Math.abs(numeric) / max * 50;
-    return `<div class="te-score-track ${scoreTone(value)}" role="meter" aria-valuemin="${-max}" aria-valuemax="${max}" aria-valuenow="${numeric}">
-      <span style="width:${width.toFixed(2)}%"></span>
+  const labelCount = Math.min(6, visibleDecisions.length);
+  const labelIndexes = new Set();
+  if (labelCount === 1) {
+    labelIndexes.add(0);
+  } else {
+    for (let position = 0; position < labelCount; position += 1) {
+      labelIndexes.add(Math.round(
+        position * (visibleDecisions.length - 1) / (labelCount - 1),
+      ));
+    }
+  }
+  ctx.font = '800 10px Inter, Segoe UI, sans-serif';
+  ctx.fillStyle = '#d6dce3';
+  ctx.textBaseline = 'top';
+  ctx.textAlign = 'center';
+  const visibleStartMillis = Date.parse(visibleDecisions[0].time_utc);
+  const visibleEndMillis = Date.parse(
+    visibleDecisions[visibleDecisions.length - 1].time_utc,
+  );
+  const includeDate = Number.isFinite(visibleStartMillis)
+    && Number.isFinite(visibleEndMillis)
+    && (
+      visibleEndMillis - visibleStartMillis >= 12 * 60 * 60 * 1000
+      || new Date(visibleStartMillis).toLocaleDateString('en-CA', {
+        timeZone: IST_TIME_ZONE,
+      }) !== new Date(visibleEndMillis).toLocaleDateString('en-CA', {
+        timeZone: IST_TIME_ZONE,
+      })
+  );
+  [...labelIndexes].sort((a, b) => a - b).forEach(index => {
+    const x = decisionX(index);
+    ctx.fillText(
+      formatPreviewChartTime(visibleDecisions[index].time_utc, includeDate),
+      x,
+      plot.bottom + 12,
+    );
+  });
+  ctx.fillStyle = '#c2cbd5';
+  ctx.textAlign = 'left';
+  ctx.font = '800 9px Inter, Segoe UI, sans-serif';
+  ctx.fillText('COMMITTED DECISION SCORE', plot.left, 5);
+  drawPreviewChartCrosshair(
+    ctx,
+    state.hover,
+    state.geometry,
+    visibleDecisions,
+    decisionOffset,
+    includeDate,
+  );
+  const windowLabel = document.getElementById('te-preview-chart-window');
+  if (windowLabel) {
+    const rangeLabel =
+      `${scoreLabel(scoreMinimum)} to ${scoreLabel(scoreMaximum)}`;
+    const positionLabel = state.rightOffset < .5 ? 'latest'
+      : `${Math.round(state.rightOffset)} decisions back`;
+    windowLabel.textContent =
+      `${visibleDecisions.length} of ${decisions.length} decisions · score ${rangeLabel} · ${positionLabel}`;
+  }
+}
+
+function renderComponents(components) {
+  const el = document.getElementById('te-components');
+  if (!Array.isArray(components) || !components.length) {
+    el.innerHTML = '<div class="te-empty-state">No components reported.</div>';
+    return;
+  }
+  el.innerHTML = components.map(c => {
+    const available = c.available !== false && finite(c.score);
+    const score = available ? Number(c.score) : null;
+    const cls = !available ? '' : score >= 0 ? 'is-positive' : 'is-negative';
+    return `<div class="te-component ${cls}">
+      <div class="te-component-head">
+        <span>${esc(formatCode(c.name))}</span>
+        <strong>${available ? score.toFixed(1) : 'N/A'}</strong>
+      </div>
+      <small>weight ${fN((c.weight || 0) * 100, 0)}%</small>
     </div>`;
-  }
+  }).join('');
+}
 
-  function renderHero(decision) {
-    const [label, tone] = decisionMeta(decision.decision);
-    byId('te-hero').className = `te-hero ${tone}`;
-    byId('te-decision').textContent = label;
-    byId('te-underlying').textContent = decision.underlying || '—';
-    const rawScore = finite(decision.direction_score) ? clamp(Number(decision.direction_score), -100, 100) : null;
-    const biasLabel = rawScore === null ? '—' : rawScore >= 25 ? 'Bullish' : rawScore <= -25 ? 'Bearish' : 'Sideways';
-    byId('te-bias').textContent = biasLabel;
-    byId('te-confidence').textContent = humanize(decision.confidence);
-    byId('te-regime').textContent = humanize(decision.market_regime);
-    const magnitude = rawScore === null ? 0 : Math.abs(rawScore);
-    const gauge = byId('te-score-gauge');
-    gauge.style.setProperty('--te-score-angle', `${magnitude * 3.6}deg`);
-    gauge.setAttribute('aria-valuenow', rawScore === null ? '0' : String(rawScore));
-    if (rawScore !== null) {
-      const t = clamp((rawScore + 100) / 200, 0, 1);
-      const r = Math.round(255 * (1 - t) + 0 * t);
-      const g = Math.round(97 * (1 - t) + 194 * t);
-      const b = Math.round(114 * (1 - t) + 110 * t);
-      gauge.style.setProperty('--te-tone', `rgb(${r}, ${g}, ${b})`);
-      byId('te-score-wrap').style.setProperty('--te-tone', `rgb(${r}, ${g}, ${b})`);
+function renderTimeframes(timeframes) {
+  const el = document.getElementById('te-timeframes');
+  if (!Array.isArray(timeframes) || !timeframes.length) {
+    el.innerHTML = '<div class="te-empty-state">No timeframes reported.</div>';
+    return;
+  }
+  el.innerHTML = timeframes.map(t => {
+    const cls = t.bias > 0 ? 'is-positive' : t.bias < 0 ? 'is-negative' : '';
+    return `<div class="te-timeframe ${cls}">
+      <div class="te-timeframe-top">
+        <div><span>${esc(String(t.timeframe || '').toUpperCase())}</span>
+          <strong>${esc(directionLabel(t.bias))}</strong></div>
+        <b>${finite(t.score) ? Number(t.score).toFixed(1) : '—'}</b>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function renderGates(gates) {
+  const el = document.getElementById('te-gates');
+  const tally = document.getElementById('te-gate-tally');
+  if (!Array.isArray(gates) || !gates.length) {
+    el.innerHTML = '<div class="te-empty-state">No gates reported.</div>';
+    tally.textContent = '—';
+    tally.className = 'te-gate-tally';
+    return;
+  }
+  const required = gates.filter(g => g.required !== false);
+  const passed = required.filter(g => g.passed).length;
+  const deferred = gates.filter(g => g.status === 'DEFERRED').length;
+  tally.textContent = `${passed}/${required.length} required passed${deferred ? ` · ${deferred} deferred` : ''}`;
+  tally.className = `te-gate-tally ${passed === required.length ? 'all-passed' : 'has-failures'}`;
+  el.innerHTML = gates.map(g => {
+    const deferredGate = g.status === 'DEFERRED';
+    const gateClass = deferredGate ? 'is-na' : (g.passed ? 'is-pass' : 'is-fail');
+    const icon = deferredGate ? '•' : (g.passed ? '✓' : '✕');
+    // The detail moves to a tooltip rather than a subtext line: as a third
+    // grid column it stole width from the label, which then wrapped one word
+    // per line and left the cells at wildly different heights. The reason a
+    // gate failed is still worth having, just not at the cost of the layout.
+    const label = g.label || formatCode(g.name);
+    // Label included in the tooltip as well as the detail: labels are
+    // ellipsised to keep every cell one line tall, so the tooltip has to be
+    // able to show what was cut off.
+    const tip = esc(g.detail ? `${label} — ${g.detail}` : label);
+    return `
+    <div class="te-gate ${gateClass}" title="${tip}">
+      <span class="te-gate-icon" aria-hidden="true">${icon}</span>
+      <strong>${esc(label)}</strong>
+    </div>`;
+  }).join('');
+}
+
+function renderReasonCodes(codes) {
+  const el = document.getElementById('te-reason-codes');
+  if (!Array.isArray(codes) || !codes.length) {
+    el.innerHTML = '<div class="te-empty-state">No reason codes reported.</div>';
+    return;
+  }
+  el.innerHTML = codes.map(code => `<span class="badge sim">${esc(code)}</span>`).join(' ');
+}
+
+function bps(value) {
+  return finite(value) ? `${fN(value, 1)} bps` : '—';
+}
+
+function renderForecast(snapshot) {
+  document.getElementById('te-forecast-horizon').textContent = finite(snapshot.forecast_horizon_seconds)
+    ? `${fN(snapshot.forecast_horizon_seconds / 60, 0)} min` : '—';
+  document.getElementById('te-expected-return').textContent = bps(snapshot.expected_return_bps);
+  document.getElementById('te-expected-abs-move').textContent = bps(snapshot.expected_absolute_move_bps);
+  document.getElementById('te-forecast-vol').textContent = bps(snapshot.forecast_volatility_bps);
+  document.getElementById('te-jump-probability').textContent = finite(snapshot.jump_probability)
+    ? `${(Number(snapshot.jump_probability) * 100).toFixed(1)}%` : '—';
+  document.getElementById('te-invalidation-price').textContent = hasValue(snapshot.invalidation_price)
+    ? `$${fN(snapshot.invalidation_price, 2)}` : '—';
+  document.getElementById('te-suggested-stop').textContent = bps(snapshot.suggested_stop_bps);
+
+  document.getElementById('te-meta-schema').textContent = snapshot.schema_version || '—';
+  document.getElementById('te-meta-features').textContent = snapshot.feature_set_version || '—';
+  document.getElementById('te-meta-model').textContent = snapshot.model_version || '—';
+  document.getElementById('te-meta-signal-id').textContent = snapshot.signal_id || '—';
+  document.getElementById('te-meta-candle-close').textContent =
+    formatIstTimestamp(snapshot.candle_close_utc);
+}
+
+function renderError(snapshot) {
+  const box = document.getElementById('te-error');
+  const isDegraded = snapshot.data_quality !== 'OK';
+  // CLOCK_DRIFT already appears in the Data Quality fact and keeps every
+  // trading gate fail-closed. Repeating it as a page-wide alert is noisy,
+  // especially when the venue's event clock is offset from its REST clock.
+  const showAlert = isDegraded && snapshot.data_quality !== 'CLOCK_DRIFT';
+  box.hidden = !showAlert;
+  if (showAlert) {
+    const quality = dataQualityCopy(snapshot.data_quality);
+    const copy = document.getElementById('te-error-copy');
+    copy.textContent = quality.detail;
+    copy.title = snapshot.client_detail || snapshot.data_quality || '';
+  }
+}
+
+async function renderEngineHealth() {
+  const pill = document.getElementById('te-engine-pill');
+  try {
+    const status = await jget('/api/engine/status');
+    if (!status.available) {
+      _setPill(pill, 'idle', 'Unreachable');
+      document.getElementById('te-engine-version').textContent = '—';
+      document.getElementById('te-engine-uptime').textContent = '—';
+      document.getElementById('te-engine-snapshots').textContent = '—';
+      document.getElementById('te-engine-book').textContent = status.detail || '—';
+      return;
     }
-    byId('te-direction-score').textContent = signed(rawScore);
-    renderValidTrades(decision);
-    updateFreshness();
+    _setPill(pill, 'live', 'Reachable');
+    document.getElementById('te-engine-version').textContent = status.version || '—';
+    const uptime = Number(status.uptime_seconds) || 0;
+    document.getElementById('te-engine-uptime').textContent =
+      uptime >= 3600 ? `${(uptime / 3600).toFixed(1)} h` : `${Math.round(uptime / 60)} min`;
+    document.getElementById('te-engine-snapshots').textContent = fN(status.snapshots_produced);
+    const book = status.book || {};
+    document.getElementById('te-engine-book').textContent =
+      `${esc(book.state || '—')} · ${fN(book.bid_levels)} bid / ${fN(book.ask_levels)} ask levels`;
+  } catch (e) {
+    _setPill(pill, 'idle', 'Unreachable');
   }
+}
 
-  function renderValidTrades(decision) {
-    const el = byId('te-valid-trades');
-    if (!el) return;
-    const score = finite(decision.direction_score) ? Number(decision.direction_score) : 0;
-    const gates = decision.hard_gates || {};
-    const decisionCode = String(decision.decision || '').toUpperCase();
-    const allPass = gates.direction_pass && gates.price_action_pass
-      && gates.event_pass && gates.portfolio_risk_pass;
-    let trade = null;
-    if (decisionCode === 'BUY_CE' || (score >= 40 && allPass)) {
-      trade = { label: 'Buy CE', icon: '↑' };
-    } else if (decisionCode === 'BUY_PE' || (score <= -40 && allPass)) {
-      trade = { label: 'Buy PE', icon: '↓' };
-    } else if (decisionCode === 'NO_TRADE' || score > -40 && score < 40) {
-      trade = { label: 'Short MOVE', icon: '◆' };
-    }
-    if (!trade) { el.innerHTML = ''; return; }
-    el.innerHTML = `<span class="te-trade"><span class="te-trade-icon">${trade.icon}</span>${safeText(trade.label)}</span>`;
+async function load() {
+  document.getElementById('trend-engine-page').setAttribute('aria-busy', 'true');
+  try {
+    const [snapshot, liveView, decisionHistory, controllerStatus] = await Promise.all([
+      jget('/api/engine/snapshot'),
+      jget('/api/engine/live').catch(() => ({ available: false })),
+      jget('/api/engine/decision-history')
+        .catch(() => ({ available: false, decisions: [], trade_markers: [] })),
+      jget('/api/trend-engine/score-auto/status').catch(() => null),
+    ]);
+    renderError(snapshot);
+    renderHero(snapshot, liveView, controllerStatus);
+    renderCommittedDecisionChart(decisionHistory);
+    renderComponents(snapshot.components);
+    renderTimeframes(snapshot.timeframes);
+    renderGates(snapshot.gates);
+    renderReasonCodes(snapshot.reason_codes);
+    renderForecast(snapshot);
+  } catch (e) {
+    document.getElementById('te-error').hidden = false;
+    document.getElementById('te-error-copy').textContent = 'The snapshot request failed.';
+  } finally {
+    document.getElementById('trend-engine-page').setAttribute('aria-busy', 'false');
   }
+  renderEngineHealth();
+}
 
-  function renderComponents(decision) {
-    const values = decision.direction_components || {};
-    byId('te-components').innerHTML = components.map(([key, label, max]) => {
-      const value = values[key];
-      return `<article class="te-component ${scoreTone(value)}">
-        <div class="te-component-head">
-          <span>${safeText(label)}</span>
-          <strong>${signed(value, 1)}</strong>
-        </div>
-        ${scoreMeter(value, max)}
-        <small>±${max}</small>
-      </article>`;
-    }).join('');
-  }
-
-  function timeframeValue(scores, key) {
-    const aliases = key === '60m' ? ['60m', '1h', '60_minute'] : [key];
-    for (const alias of aliases) {
-      if (hasValue(scores?.[alias])) return scores[alias];
-    }
-    return null;
-  }
-
-  function renderTimeframes(decision) {
-    const scores = decision.timeframe_scores || {};
-    byId('te-timeframes').innerHTML = timeframes.map(([key, label, weight]) => {
-      const raw = timeframeValue(scores, key);
-      const value = raw && typeof raw === 'object' ? (raw.score ?? raw.value) : raw;
-      const suppliedContribution = raw && typeof raw === 'object' ? raw.contribution : null;
-      const contribution = finite(suppliedContribution)
-        ? Number(suppliedContribution)
-        : (finite(value) ? Number(value) * weight / 100 : null);
-      const direction = !finite(value) || Number(value) === 0 ? 'Neutral' : (Number(value) > 0 ? 'Bullish' : 'Bearish');
-      return `<article class="te-timeframe ${scoreTone(value)}">
-        <div class="te-timeframe-top">
-          <div><span>${safeText(label)}</span><strong>${direction}</strong></div>
-          <b>${signed(value)}</b>
-        </div>
-        ${scoreMeter(value, 100)}
-        <div class="te-timeframe-foot"><span>${weight}% weight</span><span>${signed(contribution, 1)} contrib</span></div>
-      </article>`;
-    }).join('');
-  }
-
-  function renderGates(decision) {
-    const values = decision.hard_gates || {};
-    const codes = Array.isArray(decision.reason_codes) ? decision.reason_codes : [];
-    const positionDecision = decision.decision === 'HOLD' || decision.decision === 'EXIT';
-    const invalidSnapshot = values.data_valid === false && codes.includes('INVALID_OR_STALE_DATA');
-    let passed = 0, failed = 0, notApplicable = 0;
-    const html = gates.map(([key, label]) => {
-      const value = values[key];
-      const isNotApplicable = (positionDecision && positionEntryOnlyGates.has(key))
-        || (invalidSnapshot && key !== 'data_valid');
-      const state = isNotApplicable ? 'is-na' : value === true ? 'is-pass' : value === false ? 'is-fail' : 'is-unknown';
-      const word = isNotApplicable ? 'N/A' : value === true ? 'Pass' : value === false ? 'Fail' : '—';
-      const symbol = isNotApplicable ? '–' : value === true ? '✓' : value === false ? '×' : '–';
-      if (isNotApplicable) notApplicable += 1;
-      else if (value === true) passed += 1;
-      else if (value === false) failed += 1;
-      return `<div class="te-gate ${state}">
-        <span class="te-gate-icon" aria-hidden="true">${symbol}</span>
-        <span>${safeText(label)}</span>
-        <strong>${word}</strong>
-      </div>`;
-    }).join('');
-    byId('te-gates').innerHTML = html;
-    const tally = byId('te-gate-tally');
-    tally.textContent = notApplicable
-      ? `${failed} fail · ${passed} pass · ${notApplicable} n/a`
-      : failed ? `${failed} fail · ${passed} pass` : `${passed}/${gates.length} pass`;
-    tally.className = `te-gate-tally ${failed ? 'has-failures' : passed === gates.length ? 'all-passed' : ''}`;
-  }
-
-  function renderSetup(decision) {
-    const setup = decision.detected_setup || {};
-    byId('te-market-structure').textContent = setup.market_structure || 'No validated structure.';
-    byId('te-pattern').textContent = humanize(setup.candlestick_pattern);
-    byId('te-support').textContent = number(setup.support, 2);
-    byId('te-resistance').textContent = number(setup.resistance, 2);
-    byId('te-invalidation').textContent = number(setup.invalidation_level, 2);
-    const state = byId('te-pattern-state');
-    if (setup.pattern_confirmed === true) { state.textContent = 'CONFIRMED'; state.className = 'badge win'; }
-    else if (setup.pattern_confirmed === false) { state.textContent = 'UNCONFIRMED'; state.className = 'badge sim'; }
-    else { state.textContent = '—'; state.className = 'badge live'; }
-  }
-
-  function renderContract(decision) {
-    const contract = decision.selected_contract || {};
-    const selected = hasValue(contract.symbol);
-    byId('te-contract-card').classList.toggle('has-contract', selected);
-    byId('te-contract-symbol').textContent = selected ? contract.symbol : 'No eligible contract';
-    byId('te-contract-type').textContent = selected ? humanize(contract.option_type) : 'NO CONTRACT';
-    byId('te-contract-expiry').textContent = selected ? contractExpiryLabel(contract, decision) : '—';
-    byId('te-contract-score').textContent = `Score ${number(contract.contract_score, 1)}`;
-    byId('te-contract-strike').textContent = number(contract.strike, 2);
-    byId('te-contract-quote').textContent = joinValues(contract.bid, contract.ask, v => money(v, 2));
-    byId('te-contract-mid').textContent = money(contract.mid, 2);
-    byId('te-contract-spread').textContent = finite(contract.spread_pct) ? `${number(contract.spread_pct, 2)}%` : '—';
-    byId('te-contract-volume').textContent = number(contract.volume);
-    byId('te-contract-oi').textContent = number(contract.open_interest);
-    byId('te-contract-greeks').textContent = joinValues(contract.delta, contract.theta, v => number(v, 3));
-    byId('te-contract-iv').textContent = impliedVolatility(contract.implied_volatility);
-    byId('te-contract-empty').hidden = selected;
-
-    const labels = {
-      liquidity: 'Liquidity', spread: 'Spread', delta: 'Delta', expiry: 'Expiry',
-      iv_value: 'IV value', breakeven: 'Breakeven', theta_efficiency: 'Theta eff.',
-    };
-    const quality = contract.contract_components || {};
-    const qualityItems = Object.keys(labels).filter(key => hasValue(quality[key]));
-    byId('te-contract-components').innerHTML = qualityItems.map(key => {
-      const max = ['liquidity'].includes(key) ? 20 : ['breakeven', 'theta_efficiency'].includes(key) ? 10 : 15;
-      const value = clamp(Number(quality[key]) || 0, 0, max);
-      return `<div class="te-quality-item">
-        <span>${safeText(labels[key])}</span>
-        <div role="meter" aria-label="${safeText(labels[key])}" aria-valuemin="0" aria-valuemax="${max}" aria-valuenow="${value}"><i style="width:${(value / max * 100).toFixed(1)}%"></i></div>
-        <strong>${number(quality[key], 1)}<small>/${max}</small></strong>
-      </div>`;
-    }).join('');
-  }
-
-  function renderPlan(decision) {
-    const plan = decision.order_plan || {};
-    const risk = decision.risk_state || {};
-    const lots = finite(plan.quantity_lots) ? Number(plan.quantity_lots) : 0;
-    const hasOrder = lots > 0 || hasValue(plan.entry_price) || hasValue(plan.order_type);
-    byId('te-plan-primary').textContent = hasOrder
-      ? `${number(lots)} lot${lots === 1 ? '' : 's'}${finite(plan.lot_size) ? ` × ${number(plan.lot_size)}` : ''}`
-      : 'No order proposed';
-    byId('te-plan-secondary').textContent = hasOrder
-      ? `${humanize(plan.order_type)} · revalidate before execution`
-      : 'Zero sizing until all gates pass.';
-    byId('te-plan-banner').classList.toggle('is-active', hasOrder);
-    byId('te-order-type').textContent = humanize(plan.order_type);
-    byId('te-entry-price').textContent = joinValues(plan.entry_price, plan.maximum_entry_price, v => money(v, 2));
-    byId('te-option-levels').textContent = joinValues(plan.stop_option_price, plan.target_option_price, v => money(v, 2));
-    byId('te-underlying-invalidation').textContent = number(plan.underlying_invalidation, 2);
-    byId('te-underlying-target').textContent = number(plan.underlying_target, 2);
-    byId('te-time-exit').textContent = displayTimestamp(plan.time_exit);
-    byId('te-costs').textContent = money(plan.estimated_total_costs, 2);
-    byId('te-account-equity').textContent = money(risk.account_equity, 2);
-    byId('te-risk-budget').textContent = money(risk.risk_budget, 2);
-    byId('te-maximum-loss').textContent = money(plan.maximum_estimated_loss, 2);
-    byId('te-reward-risk').textContent = finite(plan.reward_risk) ? `${number(plan.reward_risk, 2)}×` : '—';
-    const daily = byId('te-daily-pnl');
-    daily.textContent = finite(risk.daily_pnl) ? `${Number(risk.daily_pnl) >= 0 ? '+' : '−'}${money(Math.abs(Number(risk.daily_pnl)), 2)}` : '—';
-    daily.className = finite(risk.daily_pnl) ? (Number(risk.daily_pnl) >= 0 ? 'c-pos' : 'c-neg') : '';
-    byId('te-consecutive-losses').textContent = number(risk.consecutive_losses);
-    const kill = byId('te-kill-switch');
-    if (risk.kill_switch_active === true) { kill.textContent = 'KILL ACTIVE'; kill.className = 'badge loss'; }
-    else if (risk.kill_switch_active === false) { kill.textContent = 'RISK CLEAR'; kill.className = 'badge win'; }
-    else { kill.textContent = 'UNKNOWN'; kill.className = 'badge sim'; }
-  }
-
-  function positionLabel(decision) {
-    const audit = decision.audit && typeof decision.audit === 'object' ? decision.audit : {};
-    const context = audit.position_context && typeof audit.position_context === 'object' ? audit.position_context : {};
-    const mode = String(context.source || '').toLowerCase() === 'dry_run' ? 'DRY RUN ' : '';
-    const slot = hasValue(context.slot) ? `${humanize(context.slot)} position` : 'position';
-    const scopedPosition = `${mode}${slot}`;
-    return hasValue(context.symbol) ? `${scopedPosition} ${context.symbol}` : scopedPosition;
-  }
-
-  function reasonDetails(code, decision) {
-    const audit = decision.audit && typeof decision.audit === 'object' ? decision.audit : {};
-    if (code === 'INVALID_OR_STALE_DATA' && hasValue(audit.collection_error)) {
-      return { title: 'Live data could not be loaded', explanation: 'The feed did not provide a complete snapshot. The engine stopped instead of guessing.', action: 'Check connections and refresh.' };
-    }
-    if (code === 'INVALID_OR_STALE_DATA' && hasValue(audit.validation_error)) {
-      return { title: 'Data failed safety validation', explanation: 'A required value was missing, outdated or malformed. The snapshot was rejected.', action: 'Refresh the data.' };
-    }
-    if (reasonCatalog[code]) {
-      const item = reasonCatalog[code];
-      return decision.decision === 'EXIT' && item.exitAction ? { ...item, action: item.exitAction } : item;
-    }
-    return { title: humanize(code), explanation: 'This rule affected the decision but has no dedicated description yet.', action: 'Review technical details.' };
-  }
-
-  function decisionOutcome(decision) {
-    const outcomes = {
-      EXIT: { tone: 'is-exit', symbol: '!', sectionTitle: 'Why exit is recommended', headline: 'An exit rule is active', explanation: 'At least one mandatory safety condition no longer supports holding. Guidance only.' },
-      HOLD: { tone: 'is-hold', symbol: '✓', sectionTitle: 'Why holding is recommended', headline: 'The position still follows its plan', explanation: 'No mandatory exit rule is active. Continue monitoring.' },
-      NO_TRADE: { tone: 'is-no-trade', symbol: '–', sectionTitle: 'Why the engine is waiting', headline: 'No position should be opened now', explanation: 'One or more mandatory checks did not pass.' },
-      BUY_CE: { tone: 'is-buy', symbol: '↑', sectionTitle: 'Why this bullish setup qualifies', headline: 'Every rule supports a bullish call', explanation: 'Direction, price action, contract quality, edge and risk passed. Decision only; no order placed.' },
-      BUY_PE: { tone: 'is-buy', symbol: '↓', sectionTitle: 'Why this bearish setup qualifies', headline: 'Every rule supports a bearish put', explanation: 'Direction, price action, contract quality, edge and risk passed. Decision only; no order placed.' },
-    };
-    return outcomes[decision.decision] || { tone: 'is-waiting', symbol: '…', sectionTitle: 'Explanation', headline: 'Decision could not be interpreted', explanation: 'Refresh the analysis.' };
-  }
-
-  function renderReasons(decision) {
-    const codes = Array.isArray(decision.reason_codes) ? decision.reason_codes.filter(hasValue) : [];
-    const details = codes.map(code => ({ code, ...reasonDetails(code, decision) }));
-    const outcome = decisionOutcome(decision);
-    byId('te-reason-overview').className = `te-reason-overview ${outcome.tone}`;
-    byId('te-reason-symbol').textContent = outcome.symbol;
-    byId('te-reason-headline').textContent = outcome.headline;
-    byId('te-reason-explanation').textContent = outcome.explanation;
-    byId('te-reasons-title').textContent = outcome.sectionTitle;
-    const positiveCodes = new Set(['ALL_ENTRY_GATES_PASSED', 'EXISTING_POSITION_THESIS_VALID']);
-    byId('te-reason-cards').innerHTML = details.length
-      ? details.map((item, i) => `<article class="te-reason-card ${positiveCodes.has(item.code) ? 'is-positive' : ''}">
-          <div class="te-reason-card-head"><span>REASON ${String(i + 1).padStart(2, '0')}</span><strong>${safeText(item.title)}</strong></div>
-          <p>${safeText(item.explanation)}</p>
-          <small><b>Do:</b> ${safeText(item.action)}</small>
-        </article>`).join('')
-      : `<article class="te-reason-card is-muted">
-          <div class="te-reason-card-head"><span>STATUS</span><strong>No reasons returned</strong></div>
-          <p>The decision response did not contain a reason.</p>
-          <small><b>Do:</b> Refresh the analysis.</small>
-        </article>`;
-    const firstAction = details[0]?.action || 'Refresh the analysis.';
-    byId('te-next-step-copy').textContent = details.length > 1
-      ? `${firstAction} Also resolve the other ${details.length - 1} reason${details.length === 2 ? '' : 's'}.`
-      : firstAction;
-  }
-
-  function render(decision) {
-    latestDecision = decision;
-    renderHero(decision);
-    renderComponents(decision);
-    renderTimeframes(decision);
-    renderGates(decision);
-    renderSetup(decision);
-    renderContract(decision);
-    renderPlan(decision);
-    renderReasons(decision);
-  }
-
-  function showError(message, hasCachedDecision) {
-    byId('te-error').hidden = false;
-    byId('te-error-copy').textContent = hasCachedDecision
-      ? `Could not refresh. Last successful decision remains. ${message}` : message;
-    if (!hasCachedDecision) {
-      byId('te-hero').className = 'te-hero is-error';
-      byId('te-decision').textContent = 'UNAVAILABLE';
-      byId('te-summary').textContent = 'No decision could be retrieved.';
-      byId('te-freshness').textContent = 'No data';
-      byId('te-freshness').className = 'te-freshness is-stale';
-    }
-  }
-
-  async function load({ announce = false } = {}) {
-    if (requestController) requestController.abort();
-    const controller = new AbortController();
-    requestController = controller;
-    const button = byId('te-refresh');
-    const label = byId('te-refresh-label');
-    button.disabled = true;
-    label.textContent = 'Refreshing…';
-    byId('trend-engine-page').setAttribute('aria-busy', 'true');
-    try {
-      const url = announce ? `${endpoint}?refresh=1` : endpoint;
-      const response = await fetch(url, { cache: 'no-store', signal: controller.signal });
-      if (response.status === 401) { window.location.href = '/login'; return; }
-      let payload = null;
-      try { payload = await response.json(); } catch (_) { /* handled below */ }
-      if (!response.ok) throw new Error(payload?.error || payload?.message || `Request failed ${response.status}`);
-      const decision = unwrap(payload);
-      if (!decision || typeof decision !== 'object' || !allowedDecisions.has(String(decision.decision || '').toUpperCase())) {
-        throw new Error('Incomplete decision object.');
-      }
-      decision.decision = String(decision.decision).toUpperCase();
-      render(decision);
-      byId('te-error').hidden = true;
-      if (announce && typeof toast === 'function') toast('Trend Engine refreshed');
-    } catch (error) {
-      if (error?.name === 'AbortError') return;
-      showError(error?.message || 'Could not load the decision.', Boolean(latestDecision));
-    } finally {
-      if (requestController === controller) {
-        button.disabled = false;
-        label.textContent = 'Refresh';
-        byId('trend-engine-page').setAttribute('aria-busy', 'false');
-        requestController = null;
-      }
-    }
-  }
-
-  byId('te-refresh').addEventListener('click', () => load({ announce: true }));
-  byId('te-retry').addEventListener('click', () => load({ announce: true }));
-  load();
-  window.setInterval(updateFreshness, 15_000);
-  window.setInterval(() => { if (document.visibilityState === 'visible') load(); }, 60_000);
-})();
+document.getElementById('te-refresh').addEventListener('click', load);
+document.getElementById('te-retry').addEventListener('click', load);
+document.getElementById('te-preview-chart-reset').addEventListener('click', () =>
+  resetPreviewScoreChart(document.getElementById('te-preview-score-chart')));
+load();
+setInterval(load, 5_000);
 </script>
 {% endblock %}

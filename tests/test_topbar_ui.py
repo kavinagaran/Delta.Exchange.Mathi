@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 NODE = shutil.which("node")
 
 
-def test_android_embedded_pages_hide_web_chrome_and_accept_native_theme():
+def test_android_native_pages_use_compact_navigation_and_native_theme():
     template = (ROOT / "templates" / "base.html").read_text(encoding="utf-8")
     styles = (ROOT / "static" / "css" / "app.css").read_text(encoding="utf-8")
     flutter = (ROOT / "mv_btc_bot" / "lib" / "main.dart").read_text(
@@ -17,8 +17,18 @@ def test_android_embedded_pages_hide_web_chrome_and_accept_native_theme():
 
     assert "request.args.get('app') == '1'" in template
     assert "new URLSearchParams(window.location.search).get('theme')" in template
-    assert 'theme-red" aria-hidden="true">Red<' in template
-    assert 'theme-blue" aria-hidden="true">Blue<' in template
+    assert 'id="theme-picker"' in template
+    assert 'role="radiogroup"' in template
+    assert 'data-theme-choice="{{ name }}"' in template
+    assert "('red', 'blue', 'green', 'violet', 'amber')" in template
+    assert '.theme-swatch.is-red' in styles
+    assert '.theme-swatch.is-blue' in styles
+    assert '.theme-swatch.is-green' in styles
+    assert '.theme-swatch.is-violet' in styles
+    assert '.theme-swatch.is-amber' in styles
+    assert '#tb-btc.btc-market.up' in styles
+    assert '#tb-btc.btc-market.down' in styles
+    assert '#tb-btc small' in styles
     assert "body.native-app .sidebar" in styles
     assert "body.native-app .topbar" in styles
     assert "body.native-app .content" in styles
@@ -26,17 +36,18 @@ def test_android_embedded_pages_hide_web_chrome_and_accept_native_theme():
     assert "TabBar(" not in flutter
     assert "IndexedStack(" in flutter
     assert "NavigationBar(" in flutter
-    assert "setVerticalScrollBarEnabled(true)" in flutter
+    assert "NavigationRail(" in flutter
+    assert "primaryPageIndexes" in flutter
     assert "Switch.adaptive(" in flutter
     assert "'RED'" in flutter
     assert "'BLUE'" in flutter
     assert "kRedBackgroundAsset = 'assets/crimson-dashboard-bg.png'" in flutter
     assert "kBlueBackgroundAsset = 'assets/sparkling-blue-dashboard-bg.png'" in flutter
-    assert "label: 'Nithi Bot'" in flutter
+    assert "label: 'Today'" in flutter
     assert "label: 'Trend Engine'" in flutter
     assert "path: '/trend-engine'" in flutter
     assert "path: '/dry-run'" in flutter
-    assert "path: '/logs'" not in flutter
+    assert "path: '/logs'" in flutter
 
 
 @pytest.mark.skipif(NODE is None, reason="Node.js is required for frontend JavaScript tests")
@@ -80,8 +91,18 @@ const live = statusFromSlots({
   status: 'OPEN', live_pnl: -1.25,
   latest_closed_trade: {pnl_usd: 20, closed_at_utc: '2026-07-15T11:57:21Z'},
 });
-if (live.cls !== 'live' || live.text !== 'LIVE -$1.25') {
+if (live.cls !== 'live-loss' || live.text !== 'LIVE -$1.25') {
   throw new Error(`live position did not take precedence: ${JSON.stringify(live)}`);
+}
+
+const liveProfit = statusFromSlots({status: 'OPEN', live_pnl: 8.4});
+if (liveProfit.cls !== 'live-profit' || liveProfit.text !== 'LIVE +$8.40') {
+  throw new Error(`live profit was not color-coded: ${JSON.stringify(liveProfit)}`);
+}
+
+const liveFlat = statusFromSlots({status: 'OPEN', live_pnl: 0});
+if (liveFlat.cls !== 'live' || liveFlat.text !== 'LIVE +$0.00') {
+  throw new Error(`flat live position was not neutral: ${JSON.stringify(liveFlat)}`);
 }
 
 const overnight = _closedAtMs({
@@ -100,45 +121,51 @@ if (!(overnight > sameDay)) throw new Error('overnight close ordering failed');
 
 
 @pytest.mark.skipif(NODE is None, reason="Node.js is required for frontend JavaScript tests")
-def test_theme_toggle_persists_choice_and_updates_accessibility_state():
+def test_theme_picker_persists_five_colour_choices_and_updates_accessibility_state():
     script = r"""
 const fs = require('fs');
 const vm = require('vm');
-const root = { dataset: {} };
-const attributes = {};
-const toggle = {
-  title: '',
-  setAttribute(k, v) { attributes[k] = String(v); },
-  addEventListener(kind, handler) { if (kind === 'click') this.click = handler; },
+const root = { dataset: {palette: 'blue', theme: 'dark'} };
+function swatch(name) {
+  const attrs = {};
+  const classes = new Set();
+  return {
+    dataset: {themeChoice: name}, attrs, classes,
+    setAttribute(k, v) { attrs[k] = String(v); },
+    classList: { toggle(k, on) { if (on) classes.add(k); else classes.delete(k); } },
+    closest() { return this; },
+  };
+}
+const swatches = ['red', 'blue', 'green', 'violet', 'amber'].map(swatch);
+const picker = {
+  querySelectorAll() { return swatches; },
+  addEventListener(kind, handler) { if (kind === 'click') this.click = target => handler({target}); },
 };
 const storage = new Map();
 global.document = {
   documentElement: root,
   addEventListener() {},
-  getElementById(id) { return id === 'theme-toggle' ? toggle : null; },
+  getElementById(id) { return id === 'theme-picker' ? picker : null; },
   dispatchEvent() {},
 };
 global.localStorage = { setItem(k, v) { storage.set(k, v); } };
 global.CustomEvent = function(type, init) { this.type = type; this.detail = init.detail; };
 vm.runInThisContext(fs.readFileSync('static/js/app.js', 'utf8'));
 
-initThemeToggle();
-if (attributes['aria-pressed'] !== 'false' || !attributes['aria-label'].includes('Blue')) {
-  throw new Error('Red theme toggle state was not initialized');
+initThemePicker();
+if (swatches[1].attrs['aria-checked'] !== 'true' || !swatches[1].classes.has('is-selected')) {
+  throw new Error('Blue palette state was not initialized');
 }
-toggle.click();
-if (root.dataset.theme !== 'dark' || storage.get('nithi-theme') !== 'dark') {
-  throw new Error('Blue theme preference was not persisted');
+picker.click(swatches[2]);
+if (root.dataset.palette !== 'green' || root.dataset.theme !== 'dark' || storage.get('nithi-theme') !== 'green') {
+  throw new Error('Green palette preference was not persisted');
 }
-if (attributes['aria-pressed'] !== 'true' || !attributes['aria-label'].includes('Red')) {
-  throw new Error('Blue theme toggle accessibility state was not updated');
+if (swatches[2].attrs['aria-checked'] !== 'true' || !swatches[2].classes.has('is-selected')) {
+  throw new Error('Green palette accessibility state was not updated');
 }
-toggle.click();
-if ('theme' in root.dataset || storage.get('nithi-theme') !== 'light') {
-  throw new Error('Red theme preference was not restored');
-}
-if (attributes['aria-pressed'] !== 'false' || !attributes['aria-label'].includes('Blue')) {
-  throw new Error('Red theme toggle accessibility state was not restored');
+picker.click(swatches[0]);
+if (root.dataset.palette !== 'red' || 'theme' in root.dataset || storage.get('nithi-theme') !== 'red') {
+  throw new Error('Red palette preference was not restored');
 }
 """
     result = subprocess.run(
@@ -149,78 +176,49 @@ if (attributes['aria-pressed'] !== 'false' || !attributes['aria-label'].includes
 
 
 @pytest.mark.skipif(NODE is None, reason="Node.js is required for frontend JavaScript tests")
-def test_closed_cards_never_render_inactive_protection_controls():
+def test_btc_market_pill_shows_small_change_and_direction_class():
     script = r"""
 const fs = require('fs');
 const vm = require('vm');
-const source = fs.readFileSync('templates/overview.html', 'utf8');
-const start = source.indexOf('function liveMoveDisplaySlotFromUtc');
-const end = source.indexOf('function renderExternalOptions');
-if (start < 0 || end <= start) throw new Error('Overview card functions not found');
-
-global.manualBtns = () => '<button>MANUAL</button>';
-global.fN = value => String(value ?? '');
-global.f$ = value => '$' + String(value ?? '');
-global.esc = value => String(value ?? '');
-global.utcToIst = value => String(value ?? '');
-global.pnlCls = () => 'c-neg';
-vm.runInThisContext(source.slice(start, end));
-
-const html = slotHtml({
-  status: 'CLOSED',
-  dashboard_visible: false,
-  symbol: 'OLD-CONTRACT',
-  pnl_usd: -99,
-}, 'trend', {
-  trend: {
-    running: true,
-    protection_established: true,
-    protected_lots: 6,
-    bot_entry_lots: 3,
-    external_protected_lots: 3,
-    coverage_status: 'exchange_protected',
-    monitor_error: 'stale monitor error',
-  },
-});
-
-for (const stale of ['OLD-CONTRACT', '-99', 'aggregate lots targeted',
-                     'Full-size exchange coverage', 'stale monitor error']) {
-  if (html.includes(stale)) throw new Error(`stale detail remained: ${stale}`);
-}
-if (!html.includes('No position') || html.includes('Auto-starts on entry')) {
-  throw new Error(`clean idle state was not rendered: ${html}`);
-}
-
-const current = slotHtml({
-  status: 'CLOSED',
-  dashboard_visible: true,
-  symbol: 'TODAY-CONTRACT',
-  pnl_usd: 5,
-  exit_time_utc: '05:00:00',
-}, 'trend', {
-  trend: {
-    running: true,
-    protected_lots: 6,
-    bot_entry_lots: 3,
-    external_protected_lots: 3,
-    coverage_status: 'exchange_protected',
-    monitor_error: 'current reconciliation',
-  },
-});
-for (const currentDetail of ['TODAY-CONTRACT', 'Time of trade']) {
-  if (!current.includes(currentDetail)) {
-    throw new Error(`same-day detail was hidden: ${currentDetail}`);
-  }
-}
-for (const inactive of ['aggregate lots targeted', 'Full-size exchange coverage',
-                        'current reconciliation', 'Auto-starts on entry']) {
-  if (current.includes(inactive)) {
-    throw new Error(`inactive protection remained on closed card: ${inactive}`);
-  }
-}
+global.document = { addEventListener() {}, getElementById() { return null; }, dispatchEvent() {} };
+global.CustomEvent = function() {};
+vm.runInThisContext(fs.readFileSync('static/js/app.js', 'utf8'));
+global.fN = (value, decimals = 0) => Number(value).toFixed(decimals);
+const el = {className: '', innerHTML: '', attrs: {}, setAttribute(k, v) { this.attrs[k] = v; }};
+setBtcMarketPill(el, 63051, 1.245);
+if (!el.className.endsWith('up') || !el.innerHTML.includes('+1.25%')) throw new Error('positive movement not rendered');
+setBtcMarketPill(el, 62900, -0.4814);
+if (!el.className.endsWith('down') || !el.innerHTML.includes('-0.48%')) throw new Error('negative movement not rendered');
+setBtcMarketPill(el, 62900, 0);
+if (!el.className.endsWith('flat') || !el.innerHTML.includes('+0.00%')) throw new Error('flat movement not rendered');
 """
     result = subprocess.run(
         [NODE, "-e", script], cwd=ROOT, text=True, capture_output=True,
         check=False,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_today_page_has_contextual_live_actions_without_a_position_section():
+    source = (ROOT / "templates" / "overview.html").read_text(encoding="utf-8")
+
+    assert 'id="today-trades-body"' in source
+    assert "jget('/api/today-trades')" in source
+    assert "closeTodayLiveTrade(" in source
+    current_renderer = source.split(
+        "function renderTodayCurrentTrade", 1
+    )[1].split("function todayDecisionLabel", 1)[0]
+    assert '>Exit</button>' in current_renderer
+    for removed in (
+        'id="positions-body"',
+        "renderPositions",
+        "botPosRowHtml",
+        ">Close Position</button>",
+        ">Protection</button>",
+        ">Payoff</button>",
+        "openProtectionDrawer",
+        "saveDrawerProtection",
+        "showPayoff",
+        "squareOff(",
+    ):
+        assert removed not in source

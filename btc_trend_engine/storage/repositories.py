@@ -1,0 +1,161 @@
+"""Typed write/read helpers over the Phase 2 tables."""
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+
+from sqlalchemy import select
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.orm import Session, sessionmaker
+
+from ..market_data.messages import Candle
+from ..market_data.normalizer import decimal_str
+from .models import (
+    CandleRow,
+    HealthEvent,
+    MarketSnapshot,
+    ShadowComparisonRow,
+    TrendSnapshotRow,
+)
+
+
+def _utc_iso(moment: datetime) -> str:
+    return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+class Repositories:
+    def __init__(self, session_factory: sessionmaker[Session]) -> None:
+        self._sessions = session_factory
+
+    # ── health ───────────────────────────────────────────────────────────
+    def record_health_event(self, now: datetime, category: str, detail: str) -> None:
+        with self._sessions() as session:
+            session.add(HealthEvent(
+                occurred_at_utc=_utc_iso(now), category=category,
+                detail=detail[:2000], created_at_utc=_utc_iso(now)))
+            session.commit()
+
+    def recent_health_events(self, limit: int = 50) -> list[HealthEvent]:
+        with self._sessions() as session:
+            rows = session.execute(
+                select(HealthEvent).order_by(HealthEvent.id.desc()).limit(limit)
+            ).scalars().all()
+            return list(rows)
+
+    # ── candles ──────────────────────────────────────────────────────────
+    def upsert_candle(self, candle: Candle, source: str, now: datetime) -> None:
+        """Idempotent on (symbol, resolution, start): a re-bootstrap or replay
+        must not duplicate rows, and live never overwrites bootstrap silently —
+        identical identity means identical closed candle, so first write wins."""
+        with self._sessions() as session:
+            statement = sqlite_insert(CandleRow).values(
+                symbol=candle.symbol, resolution=candle.resolution,
+                start_utc=_utc_iso(candle.start),
+                open=decimal_str(candle.open), high=decimal_str(candle.high),
+                low=decimal_str(candle.low), close=decimal_str(candle.close),
+                volume=decimal_str(candle.volume),
+                trade_count=candle.trade_count, source=source,
+                created_at_utc=_utc_iso(now),
+            ).on_conflict_do_nothing(
+                index_elements=["symbol", "resolution", "start_utc"])
+            session.execute(statement)
+            session.commit()
+
+    def candle_count(self, symbol: str, resolution: str) -> int:
+        with self._sessions() as session:
+            rows = session.execute(
+                select(CandleRow.id).where(
+                    CandleRow.symbol == symbol,
+                    CandleRow.resolution == resolution)
+            ).all()
+            return len(rows)
+
+    # ── trend snapshots ──────────────────────────────────────────────────
+    def record_trend_snapshot(self, snapshot: dict, now: datetime) -> None:
+        """Idempotent on signal_id: the same closed candle re-evaluated (a
+        restart, a replay) must not create a second row."""
+        import json
+
+        with self._sessions() as session:
+            statement = sqlite_insert(TrendSnapshotRow).values(
+                signal_id=snapshot["signal_id"], symbol=snapshot["symbol"],
+                candle_close_utc=snapshot["candle_close_utc"],
+                snapshot_json=json.dumps(snapshot, separators=(",", ":")),
+                created_at_utc=_utc_iso(now),
+            ).on_conflict_do_nothing(index_elements=["signal_id"])
+            session.execute(statement)
+            session.commit()
+
+    def recent_trend_snapshots(self, symbol: str, limit: int = 100
+                               ) -> list[TrendSnapshotRow]:
+        with self._sessions() as session:
+            rows = session.execute(
+                select(TrendSnapshotRow)
+                .where(TrendSnapshotRow.symbol == symbol)
+                .order_by(TrendSnapshotRow.id.desc()).limit(limit)
+            ).scalars().all()
+            return list(rows)
+
+    def snapshot_for_candle(self, symbol: str, candle_close_utc: str
+                            ) -> dict | None:
+        """This engine's own snapshot for one candle close, or None if it
+        never produced one. Used to join a posted legacy decision."""
+        import json
+
+        with self._sessions() as session:
+            row = session.execute(
+                select(TrendSnapshotRow)
+                .where(TrendSnapshotRow.symbol == symbol,
+                       TrendSnapshotRow.candle_close_utc == candle_close_utc)
+                .limit(1)
+            ).scalars().first()
+        if row is None:
+            return None
+        try:
+            return json.loads(row.snapshot_json)
+        except ValueError:
+            return None
+
+    # ── shadow comparison (Phase 8a) ─────────────────────────────────────
+    def record_shadow_comparison(self, values: dict, now: datetime) -> None:
+        """Upsert on candle_close_utc: re-posting the same candle corrects the
+        row rather than double-counting it in the agreement rate."""
+        payload = {**values, "recorded_at_utc": _utc_iso(now)}
+        with self._sessions() as session:
+            statement = sqlite_insert(ShadowComparisonRow).values(**payload)
+            statement = statement.on_conflict_do_update(
+                index_elements=["candle_close_utc"],
+                set_={k: v for k, v in payload.items()
+                      if k != "candle_close_utc"},
+            )
+            session.execute(statement)
+            session.commit()
+
+    def recent_shadow_comparisons(self, limit: int = 200
+                                  ) -> list[ShadowComparisonRow]:
+        with self._sessions() as session:
+            rows = session.execute(
+                select(ShadowComparisonRow)
+                .order_by(ShadowComparisonRow.id.desc()).limit(limit)
+            ).scalars().all()
+            return list(rows)
+
+    def all_shadow_comparisons(self) -> list[ShadowComparisonRow]:
+        with self._sessions() as session:
+            return list(session.execute(
+                select(ShadowComparisonRow)
+                .order_by(ShadowComparisonRow.id)).scalars().all())
+
+    # ── market snapshots ─────────────────────────────────────────────────
+    def record_market_snapshot(self, snapshot: MarketSnapshot) -> None:
+        with self._sessions() as session:
+            session.add(snapshot)
+            session.commit()
+
+    def latest_market_snapshot(self, symbol: str) -> MarketSnapshot | None:
+        with self._sessions() as session:
+            return session.execute(
+                select(MarketSnapshot)
+                .where(MarketSnapshot.symbol == symbol)
+                .order_by(MarketSnapshot.id.desc()).limit(1)
+            ).scalars().first()

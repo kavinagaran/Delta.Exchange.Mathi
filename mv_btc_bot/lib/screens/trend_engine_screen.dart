@@ -1,0 +1,819 @@
+library;
+
+import 'dart:async';
+import 'dart:math' as math;
+
+import 'package:flutter/material.dart';
+
+import '../api/client.dart';
+import '../theme/design.dart';
+import '../widgets/kit.dart';
+
+class TrendEngineScreen extends StatefulWidget {
+  const TrendEngineScreen({
+    super.key,
+    required this.api,
+    required this.onUnauthorised,
+  });
+
+  final DashboardApi api;
+  final VoidCallback onUnauthorised;
+
+  @override
+  State<TrendEngineScreen> createState() => _TrendEngineScreenState();
+}
+
+class _TrendEngineScreenState extends State<TrendEngineScreen> {
+  Map<String, dynamic>? _snapshot;
+  Map<String, dynamic>? _live;
+  Map<String, dynamic>? _status;
+  Map<String, dynamic>? _controller;
+  Map<String, dynamic>? _history;
+  String? _error;
+  bool _loading = true;
+  Timer? _poll;
+
+  @override
+  void initState() {
+    super.initState();
+    _refresh();
+    _poll = Timer.periodic(
+      const Duration(seconds: 5),
+      (_) => _refresh(quiet: true),
+    );
+  }
+
+  @override
+  void dispose() {
+    _poll?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _refresh({bool quiet = false}) async {
+    if (!quiet && mounted) setState(() => _loading = true);
+    final results = await Future.wait([
+      widget.api.engineSnapshot(),
+      widget.api.engineLive(),
+      widget.api.engineStatus(),
+      widget.api.decisionHistory(),
+      widget.api.scoreAutoStatus(),
+    ]);
+    if (!mounted) return;
+    if (results.any((result) => result.unauthorised)) {
+      widget.onUnauthorised();
+      return;
+    }
+    setState(() {
+      _loading = false;
+      _snapshot = results[0].data;
+      _live = results[1].data;
+      _status = results[2].data;
+      _history = results[3].data;
+      _controller = results[4].data;
+      _error = results[0].ok ? null : results[0].error;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_loading && _snapshot == null) {
+      return const Center(child: CircularProgressIndicator(strokeWidth: 2));
+    }
+    if (_snapshot == null) {
+      return StatePlaceholder(
+        icon: Icons.insights_rounded,
+        message: 'Trend Engine unavailable',
+        detail: _error,
+        onRetry: _refresh,
+        tone: kNegative,
+      );
+    }
+    final snapshot = _snapshot!;
+    final components = _mapList(snapshot['components']);
+    final timeframes = _mapList(snapshot['timeframes']);
+    final gates = _mapList(snapshot['gates']);
+    final reasons = (snapshot['reason_codes'] as List<dynamic>? ?? const [])
+        .map((value) => '$value')
+        .toList();
+    return RefreshIndicator(
+      onRefresh: _refresh,
+      child: ListView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.fromLTRB(Gap.lg, Gap.md, Gap.lg, Gap.xxl),
+        children: [
+          _DecisionHero(
+            snapshot: snapshot,
+            live: _live,
+            controller: _controller,
+          ),
+          const SizedBox(height: Gap.md),
+          _DecisionChart(history: _history),
+          const SizedBox(height: Gap.md),
+          _ComponentsCard(components: components),
+          const SizedBox(height: Gap.md),
+          _TimeframesCard(timeframes: timeframes),
+          const SizedBox(height: Gap.md),
+          _GatesCard(gates: gates),
+          const SizedBox(height: Gap.md),
+          _ReasonCard(reasons: reasons),
+          const SizedBox(height: Gap.md),
+          _EngineStatusCard(status: _status, snapshot: snapshot),
+        ],
+      ),
+    );
+  }
+}
+
+class _DecisionHero extends StatelessWidget {
+  const _DecisionHero({
+    required this.snapshot,
+    required this.live,
+    required this.controller,
+  });
+
+  final Map<String, dynamic> snapshot;
+  final Map<String, dynamic>? live;
+  final Map<String, dynamic>? controller;
+
+  @override
+  Widget build(BuildContext context) {
+    final committed = _number(snapshot['trend_score']);
+    final preview = live?['available'] == false
+        ? null
+        : _number(
+            live?['live_score'] ?? live?['trend_score'] ?? live?['score'],
+          );
+    final zone = '${snapshot['zone'] ?? 'HOLD'}';
+    final quality = '${snapshot['data_quality'] ?? 'UNKNOWN'}';
+    final regime = _regimeLabel('${snapshot['regime'] ?? 'DEGRADED'}');
+    final controllerReason = controllerEntryBlock(controller, zone);
+    final decision = tradeDecisionLabel(
+      zone,
+      actionAllowed:
+          snapshot['zone_action_allowed'] == true && controllerReason == null,
+      reason: controllerReason ?? '${snapshot['zone_reason'] ?? ''}',
+    );
+    return AppCard(
+      kicker: 'BTC Trend Engine',
+      title: regime,
+      accent: zoneColour(zone),
+      trailing: StatusPill(
+        quality == 'OK' ? 'LIVE' : quality.replaceAll('_', ' '),
+        colour: quality == 'OK' ? kPositive : kNegative,
+      ),
+      child: Column(
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: DecisionScoreDial(
+                  label: 'Preview',
+                  score: preview,
+                  colour: zoneColour(_zoneForScore(preview)),
+                ),
+              ),
+              const SizedBox(width: Gap.md),
+              Expanded(
+                child: DecisionScoreDial(
+                  label: 'Committed',
+                  score: committed,
+                  colour: zoneColour(zone),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: Gap.sm),
+          ScoreDecisionPill(label: decision, score: committed),
+          const SizedBox(height: Gap.md),
+          ScoreMeter(score: committed ?? 0),
+        ],
+      ),
+    );
+  }
+}
+
+class _DecisionChart extends StatefulWidget {
+  const _DecisionChart({required this.history});
+  final Map<String, dynamic>? history;
+
+  @override
+  State<_DecisionChart> createState() => _DecisionChartState();
+}
+
+class _DecisionChartState extends State<_DecisionChart> {
+  final TransformationController _viewport = TransformationController();
+  int? _hoverIndex;
+
+  @override
+  void dispose() {
+    _viewport.dispose();
+    super.dispose();
+  }
+
+  void _resetViewport() => _viewport.value = Matrix4.identity();
+
+  void _updateHover(Offset local, Size size, int pointCount) {
+    if (pointCount < 2) return;
+    final index = _ChartGeometry.indexAt(
+      _ChartGeometry.plotRect(size),
+      local.dx,
+      pointCount,
+    );
+    if (index == _hoverIndex) return;
+    setState(() => _hoverIndex = index);
+  }
+
+  void _clearHover() {
+    if (_hoverIndex == null) return;
+    setState(() => _hoverIndex = null);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // decisions and points must stay index-aligned 1:1 -- the crosshair looks
+    // up decisions[hoverIndex] for the point at points[hoverIndex], so any
+    // entry without a usable score is dropped from both together rather than
+    // filtered independently, which would let the two lists drift apart.
+    final decisions = _mapList(widget.history?['decisions'])
+        .where((item) => _number(item['committed_score']) != null)
+        .toList();
+    final points = decisions
+        .map((item) => _number(item['committed_score'])!)
+        .toList();
+    final markers = _mapList(widget.history?['trade_markers']);
+    return AppCard(
+      kicker: '24H · 5M',
+      title: 'Committed score',
+      trailing: StatusPill('${points.length} points', dot: false),
+      child: points.length < 2
+          ? const StatePlaceholder(
+              icon: Icons.show_chart_rounded,
+              message: 'Collecting decisions…',
+            )
+          : Column(
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        'Pinch to zoom · long-press and drag for a '
+                        'crosshair · double-tap to reset',
+                        style: AppText.caption.copyWith(
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ),
+                    IconButton(
+                      visualDensity: VisualDensity.compact,
+                      tooltip: 'Reset chart',
+                      onPressed: _resetViewport,
+                      icon: const Icon(Icons.fit_screen_rounded, size: 18),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: Gap.xs),
+                LayoutBuilder(
+                  builder: (context, constraints) {
+                    final height = (constraints.maxWidth * .68).clamp(
+                      220.0,
+                      310.0,
+                    );
+                    final scheme = Theme.of(context).colorScheme;
+                    final hoverDecision =
+                        _hoverIndex != null && _hoverIndex! < decisions.length
+                        ? decisions[_hoverIndex!]
+                        : null;
+                    return SizedBox(
+                      height: height,
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(Radii.sm),
+                        child: GestureDetector(
+                          onDoubleTap: _resetViewport,
+                          child: InteractiveViewer(
+                            key: const ValueKey('committed-score-chart'),
+                            transformationController: _viewport,
+                            constrained: true,
+                            panAxis: PanAxis.horizontal,
+                            minScale: 1,
+                            maxScale: 8,
+                            scaleEnabled: true,
+                            panEnabled: true,
+                            clipBehavior: Clip.hardEdge,
+                            child: SizedBox(
+                              width: constraints.maxWidth,
+                              height: height,
+                              child: GestureDetector(
+                                behavior: HitTestBehavior.opaque,
+                                onLongPressStart: (details) => _updateHover(
+                                  details.localPosition,
+                                  Size(constraints.maxWidth, height),
+                                  points.length,
+                                ),
+                                onLongPressMoveUpdate: (details) =>
+                                    _updateHover(
+                                      details.localPosition,
+                                      Size(constraints.maxWidth, height),
+                                      points.length,
+                                    ),
+                                onLongPressEnd: (_) => _clearHover(),
+                                onLongPressCancel: _clearHover,
+                                child: CustomPaint(
+                                  painter: _ScoreChartPainter(
+                                    values: points,
+                                    markerCount: markers.length,
+                                    grid: scheme.outline,
+                                    label: scheme.onSurfaceVariant,
+                                  ),
+                                  foregroundPainter: hoverDecision == null
+                                      ? null
+                                      : _CrosshairPainter(
+                                          values: points,
+                                          index: _hoverIndex!,
+                                          decision: hoverDecision,
+                                          grid: scheme.outline,
+                                          surface: scheme.surface,
+                                          text: scheme.onSurface,
+                                        ),
+                                  size: Size.infinite,
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ],
+            ),
+    );
+  }
+}
+
+/// Score-domain -> pixel mapping shared by the background painter, the
+/// crosshair overlay, and the long-press hit test, so all three agree on
+/// exactly where a given index sits -- computing this once and threading it
+/// through avoids the crosshair drifting from the line it is pointing at.
+class _ChartGeometry {
+  const _ChartGeometry({required this.plot, required this.low, required this.high});
+
+  final Rect plot;
+  final double low;
+  final double high;
+
+  static const _left = 30.0;
+  static const _top = 8.0;
+  static const _bottom = 20.0;
+
+  static Rect plotRect(Size size) =>
+      Rect.fromLTRB(_left, _top, size.width, size.height - _bottom);
+
+  static _ChartGeometry compute({
+    required List<double> values,
+    required Size size,
+  }) {
+    final plot = plotRect(size);
+    if (values.isEmpty) return _ChartGeometry(plot: plot, low: -100, high: 100);
+    final minValue = values.reduce(math.min);
+    final maxValue = values.reduce(math.max);
+    final low = math.max(-100.0, math.min(minValue - 10, -30.0)).toDouble();
+    final high = math.min(100.0, math.max(maxValue + 10, 30.0)).toDouble();
+    return _ChartGeometry(plot: plot, low: low, high: high);
+  }
+
+  double y(double value) =>
+      plot.bottom - (value - low) / (high - low) * plot.height;
+
+  double x(int index, int pointCount) =>
+      plot.left + index / (pointCount - 1) * plot.width;
+
+  /// Nearest data index for a pixel x-position, clamped to the series.
+  static int indexAt(Rect plot, double dx, int pointCount) {
+    if (pointCount < 2) return 0;
+    final fraction = ((dx - plot.left) / plot.width).clamp(0.0, 1.0);
+    return (fraction * (pointCount - 1)).round().clamp(0, pointCount - 1);
+  }
+}
+
+class _ScoreChartPainter extends CustomPainter {
+  const _ScoreChartPainter({
+    required this.values,
+    required this.markerCount,
+    required this.grid,
+    required this.label,
+  });
+  final List<double> values;
+  final int markerCount;
+  final Color grid;
+  final Color label;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final geometry = _ChartGeometry.compute(values: values, size: size);
+    final plot = geometry.plot;
+    final low = geometry.low;
+    final high = geometry.high;
+    double y(double value) => geometry.y(value);
+    double x(int index) => geometry.x(index, values.length);
+
+    final zones = <(double, double, Color)>[
+      (math.max(40.0, low).toDouble(), high, kZoneCall),
+      (
+        math.max(30.0, low).toDouble(),
+        math.min(40.0, high).toDouble(),
+        kZoneHold,
+      ),
+      (
+        math.max(-30.0, low).toDouble(),
+        math.min(30.0, high).toDouble(),
+        kZoneMove,
+      ),
+      (
+        math.max(-40.0, low).toDouble(),
+        math.min(-30.0, high).toDouble(),
+        kZoneHold,
+      ),
+      (low, math.min(-40.0, high).toDouble(), kZonePut),
+    ];
+    for (final zone in zones) {
+      if (zone.$1 > zone.$2) continue;
+      canvas.drawRect(
+        Rect.fromLTRB(plot.left, y(zone.$2), plot.right, y(zone.$1)),
+        Paint()..color = zone.$3.withValues(alpha: .06),
+      );
+    }
+    for (final level in [-40.0, -30.0, 0.0, 30.0, 40.0]) {
+      if (level < low || level > high) continue;
+      canvas.drawLine(
+        Offset(plot.left, y(level)),
+        Offset(plot.right, y(level)),
+        Paint()
+          ..color = grid
+          ..strokeWidth = level == 0 ? 1.2 : .6,
+      );
+      final painter = TextPainter(
+        text: TextSpan(
+          text: level.toStringAsFixed(0),
+          style: TextStyle(
+            color: label,
+            fontSize: 8,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+        textDirection: TextDirection.ltr,
+      )..layout();
+      painter.paint(canvas, Offset(0, y(level) - painter.height / 2));
+    }
+    final path = Path()..moveTo(x(0), y(values.first));
+    for (var index = 1; index < values.length; index++) {
+      path.lineTo(x(index), y(values[index]));
+    }
+    canvas.drawPath(
+      path,
+      Paint()
+        ..shader = const LinearGradient(
+          colors: [kZonePut, kZoneMove, kZoneCall],
+        ).createShader(plot)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2.6
+        ..strokeJoin = StrokeJoin.round,
+    );
+    canvas.drawCircle(
+      Offset(x(values.length - 1), y(values.last)),
+      4,
+      Paint()..color = zoneColour(_zoneForScore(values.last)),
+    );
+    if (markerCount > 0) {
+      final text = TextPainter(
+        text: TextSpan(
+          text: '$markerCount trades marked',
+          style: TextStyle(
+            color: label,
+            fontSize: 8.5,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+        textDirection: TextDirection.ltr,
+      )..layout();
+      text.paint(canvas, Offset(plot.right - text.width, plot.bottom + 5));
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _ScoreChartPainter oldDelegate) =>
+      oldDelegate.values != values || oldDelegate.markerCount != markerCount;
+}
+
+/// Long-press-and-drag crosshair: a vertical + horizontal guide through the
+/// touched point plus a label box with its score, zone, and time -- the
+/// touch equivalent of the web chart's mouse-hover crosshair, since a phone
+/// has no hover event to key off.
+class _CrosshairPainter extends CustomPainter {
+  const _CrosshairPainter({
+    required this.values,
+    required this.index,
+    required this.decision,
+    required this.grid,
+    required this.surface,
+    required this.text,
+  });
+
+  final List<double> values;
+  final int index;
+  final Map<String, dynamic> decision;
+  final Color grid;
+  final Color surface;
+  final Color text;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final geometry = _ChartGeometry.compute(values: values, size: size);
+    final plot = geometry.plot;
+    final value = values[index];
+    final px = geometry.x(index, values.length);
+    final py = geometry.y(value);
+    final tone = zoneColour(_zoneForScore(value));
+
+    void dashedLine(Offset from, Offset to) {
+      const dash = 4.0, gap = 3.0;
+      final total = (to - from).distance;
+      final direction = (to - from) / total;
+      var travelled = 0.0;
+      final paint = Paint()
+        ..color = grid
+        ..strokeWidth = 1;
+      while (travelled < total) {
+        final segmentEnd = math.min(travelled + dash, total);
+        canvas.drawLine(
+          from + direction * travelled,
+          from + direction * segmentEnd,
+          paint,
+        );
+        travelled += dash + gap;
+      }
+    }
+
+    dashedLine(Offset(px, plot.top), Offset(px, plot.bottom));
+    dashedLine(Offset(plot.left, py), Offset(plot.right, py));
+    canvas.drawCircle(Offset(px, py), 5, Paint()..color = surface);
+    canvas.drawCircle(
+      Offset(px, py),
+      5,
+      Paint()
+        ..color = tone
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2,
+    );
+    canvas.drawCircle(Offset(px, py), 2.5, Paint()..color = tone);
+
+    final zone = '${decision['zone'] ?? ''}';
+    final time = _hoverTimeLabel('${decision['time_utc'] ?? ''}');
+    final scoreLabel = '${value > 0 ? '+' : ''}${value.toStringAsFixed(1)}';
+    final lines = [
+      TextSpan(
+        text: scoreLabel,
+        style: TextStyle(color: tone, fontSize: 12, fontWeight: FontWeight.w900),
+      ),
+      TextSpan(
+        text: '  ${_shortZone(zone)}',
+        style: TextStyle(color: text, fontSize: 9, fontWeight: FontWeight.w700),
+      ),
+    ];
+    final scorePainter = TextPainter(
+      text: TextSpan(children: lines),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    final timePainter = TextPainter(
+      text: TextSpan(
+        text: time,
+        style: TextStyle(color: text.withValues(alpha: .72), fontSize: 8),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout();
+
+    const padding = 6.0;
+    final boxWidth =
+        math.max(scorePainter.width, timePainter.width) + padding * 2;
+    final boxHeight = scorePainter.height + timePainter.height + padding * 2 + 2;
+    var boxLeft = px - boxWidth / 2;
+    boxLeft = boxLeft.clamp(plot.left, plot.right - boxWidth);
+    final boxTop = py - boxHeight - 10 < plot.top
+        ? py + 10
+        : py - boxHeight - 10;
+    final box = RRect.fromRectAndRadius(
+      Rect.fromLTWH(boxLeft, boxTop, boxWidth, boxHeight),
+      const Radius.circular(6),
+    );
+    canvas.drawRRect(box, Paint()..color = surface.withValues(alpha: .96));
+    canvas.drawRRect(
+      box,
+      Paint()
+        ..color = tone.withValues(alpha: .55)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1,
+    );
+    scorePainter.paint(canvas, Offset(boxLeft + padding, boxTop + padding));
+    timePainter.paint(
+      canvas,
+      Offset(boxLeft + padding, boxTop + padding + scorePainter.height + 2),
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant _CrosshairPainter oldDelegate) =>
+      oldDelegate.index != index || oldDelegate.values != values;
+}
+
+String _hoverTimeLabel(String iso) {
+  final parsed = DateTime.tryParse(iso);
+  if (parsed == null) return '—';
+  final ist = parsed.toUtc().add(const Duration(hours: 5, minutes: 30));
+  final hour = ist.hour % 12 == 0 ? 12 : ist.hour % 12;
+  final minute = ist.minute.toString().padLeft(2, '0');
+  return '$hour:$minute ${ist.hour < 12 ? 'AM' : 'PM'} IST';
+}
+
+String _shortZone(String zone) {
+  final upper = zone.toUpperCase();
+  if (upper.startsWith('CE')) return 'CE';
+  if (upper.startsWith('PE')) return 'PE';
+  if (upper.contains('MOVE')) return 'MV';
+  return 'HOLD';
+}
+
+class _ComponentsCard extends StatelessWidget {
+  const _ComponentsCard({required this.components});
+  final List<Map<String, dynamic>> components;
+
+  @override
+  Widget build(BuildContext context) => AppCard(
+    kicker: 'Weighted evidence',
+    title: 'Components',
+    child: components.isEmpty
+        ? const Text('No components.', style: AppText.body)
+        : MetricWrap(
+            children: [
+              for (final item in components)
+                MetricTile(
+                  label: _clean('${item['name'] ?? 'Component'}'),
+                  value:
+                      item['available'] == false ||
+                          _number(item['score']) == null
+                      ? 'N/A'
+                      : _signed(_number(item['score'])!, 1),
+                  colour: signedColour(_number(item['score'])),
+                  sub:
+                      '${((_number(item['weight']) ?? 0) * 100).round()}% weight',
+                ),
+            ],
+          ),
+  );
+}
+
+class _TimeframesCard extends StatelessWidget {
+  const _TimeframesCard({required this.timeframes});
+  final List<Map<String, dynamic>> timeframes;
+
+  @override
+  Widget build(BuildContext context) => AppCard(
+    kicker: 'Closed candles',
+    title: 'Multi-timeframe',
+    child: MetricWrap(
+      children: [
+        for (final item in timeframes)
+          MetricTile(
+            label: '${item['timeframe'] ?? '—'}'.toUpperCase(),
+            value: _number(item['score']) == null
+                ? '—'
+                : _signed(_number(item['score'])!, 1),
+            colour: signedColour(_number(item['score'])),
+            sub: _number(item['bias']) == null
+                ? null
+                : _number(item['bias'])! > 0
+                ? 'UP'
+                : _number(item['bias'])! < 0
+                ? 'DOWN'
+                : 'FLAT',
+          ),
+      ],
+    ),
+  );
+}
+
+class _GatesCard extends StatelessWidget {
+  const _GatesCard({required this.gates});
+  final List<Map<String, dynamic>> gates;
+
+  @override
+  Widget build(BuildContext context) {
+    final required = gates.where((gate) => gate['required'] != false).toList();
+    final passed = required.where((gate) => gate['passed'] == true).length;
+    return AppCard(
+      kicker: 'Entry gates',
+      title: '$passed/${required.length} passed',
+      accent: passed == required.length ? kPositive : kNegative,
+      child: Wrap(
+        spacing: Gap.sm,
+        runSpacing: Gap.sm,
+        children: [
+          for (final gate in gates)
+            StatusPill(
+              _clean('${gate['label'] ?? gate['name'] ?? 'Gate'}'),
+              colour: gate['status'] == 'DEFERRED'
+                  ? kNeutral
+                  : gate['passed'] == true
+                  ? kPositive
+                  : kNegative,
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ReasonCard extends StatelessWidget {
+  const _ReasonCard({required this.reasons});
+  final List<String> reasons;
+
+  @override
+  Widget build(BuildContext context) => AppCard(
+    title: 'Why this reading',
+    child: Wrap(
+      spacing: Gap.xs,
+      runSpacing: Gap.xs,
+      children: [
+        for (final reason in reasons) StatusPill(_clean(reason), dot: false),
+      ],
+    ),
+  );
+}
+
+class _EngineStatusCard extends StatelessWidget {
+  const _EngineStatusCard({required this.status, required this.snapshot});
+  final Map<String, dynamic>? status;
+  final Map<String, dynamic> snapshot;
+
+  @override
+  Widget build(BuildContext context) {
+    final available = status?['available'] == true;
+    final uptime = _number(status?['uptime_seconds']);
+    return AppCard(
+      title: 'Engine status',
+      trailing: StatusPill(
+        available ? 'REACHABLE' : 'OFFLINE',
+        colour: available ? kPositive : kNegative,
+      ),
+      child: Column(
+        children: [
+          StatRow(
+            'Version',
+            '${status?['version'] ?? snapshot['model_version'] ?? '—'}',
+          ),
+          StatRow(
+            'Uptime',
+            uptime == null ? '—' : '${(uptime / 3600).toStringAsFixed(1)} h',
+          ),
+          StatRow('Snapshots', '${status?['snapshots_produced'] ?? '—'}'),
+          StatRow('Signal', '${snapshot['signal_id'] ?? '—'}'),
+        ],
+      ),
+    );
+  }
+}
+
+List<Map<String, dynamic>> _mapList(Object? value) =>
+    (value as List<dynamic>? ?? const [])
+        .whereType<Map<String, dynamic>>()
+        .toList();
+
+double? _number(Object? value) =>
+    value is num ? value.toDouble() : double.tryParse('$value');
+
+String _signed(double value, int digits) =>
+    '${value > 0 ? '+' : ''}${value.toStringAsFixed(digits)}';
+
+String _clean(String value) => value
+    .replaceAll('_', ' ')
+    .split(' ')
+    .where((part) => part.isNotEmpty)
+    .map((part) => '${part[0].toUpperCase()}${part.substring(1).toLowerCase()}')
+    .join(' ');
+
+String _regimeLabel(String regime) => switch (regime) {
+  'TREND_UP' => 'Bullish trend',
+  'TREND_DOWN' => 'Bearish trend',
+  'RANGE' => 'Sideways market',
+  'BREAKOUT_UP' => 'Bullish breakout',
+  'BREAKOUT_DOWN' => 'Bearish breakout',
+  'HIGH_VOL_SHOCK' => 'High volatility',
+  'LOW_LIQUIDITY' => 'Thin market',
+  _ => 'Waiting for reliable data',
+};
+
+String _zoneForScore(double? score) {
+  if (score == null) return 'HOLD';
+  if (score > 40) return 'CE_2_ITM';
+  if (score < -40) return 'PE_2_ITM';
+  if (score.abs() <= 30) return 'SHORT_MOVE';
+  return 'HOLD';
+}

@@ -1,7 +1,7 @@
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -288,6 +288,41 @@ def test_dry_status_keeps_trend_ce_pe_in_third_frame(
     assert displayed["evening"]["status"] == "IDLE"
 
 
+def test_dry_status_exposes_one_score_zone_position_without_time_bucketing(
+        isolated_dashboard, monkeypatch):
+    account = isolated_dashboard
+    score_position = _dry_state(
+        "trend",
+        entry_time_utc="01:50:00",
+        symbol="MV-BTC-65800-230726",
+        option_type="MOVE",
+        instrument_kind="BTC_MOVE",
+        ownership=dashboard.TREND_SCORE_AUTO_OWNERSHIP,
+        trend_score_zone="SHORT_MOVE",
+    )
+    _write(account / "dry_run" / "trend_state.json", score_position)
+    _write(account / "dry_run" / "morning_state.json", {
+        **_dry_state("morning", symbol="MV-BTC-LEGACY"),
+        "status": "ENTRY_PENDING",
+    })
+    monkeypatch.setattr(
+        dashboard, "_enrich_dry_state", lambda value: dict(value),
+    )
+
+    with dashboard.app.test_request_context("/api/dry-run/status"):
+        payload = dashboard.api_dry_run_status().get_json()
+
+    position = payload["score_zone_position"]
+    assert position["symbol"] == score_position["symbol"]
+    assert position["source_slot"] == "trend"
+    assert position["control_slot"] == "trend"
+    assert position["display_slot"] == "score_zone"
+    assert position["display_instrument_group"] == "move"
+    assert payload["legacy_position_blockers"] == [
+        "legacy morning state is ENTRY_PENDING",
+    ]
+
+
 def test_open_dry_pnl_refreshes_from_mark_price_while_close_uses_book(
         isolated_dashboard, monkeypatch):
     state = _dry_state(
@@ -344,10 +379,8 @@ def test_manual_move_dry_entry_is_disabled_and_never_writes_or_posts(
     }
     quote = {"entry_price": 100.0, "limit_price": 101.0}
     plan = {"lots": 7, "proposed_risk_usd": 10.0}
-    monkeypatch.setattr(dashboard, "_current_atm_mv", lambda slot: contract)
-    monkeypatch.setattr(dashboard, "_move_execution_quote", lambda *a, **k: quote)
-    lot_plan = Mock(return_value=plan)
-    monkeypatch.setattr(dashboard, "_move_lot_plan", lot_plan)
+    contract_lookup = Mock(return_value=[contract])
+    monkeypatch.setattr(dashboard, "_fetch_live_mv_products", contract_lookup)
     monkeypatch.setattr(dashboard, "evaluate_entry", lambda *a, **k: _allowed_risk())
     monkeypatch.setattr(dashboard, "_tp_policy", lambda slot: {
         "tp_target_pnl": 10, "sl_target_pnl": 5,
@@ -371,16 +404,15 @@ def test_manual_move_dry_entry_is_disabled_and_never_writes_or_posts(
         "mode_revision": mode["mode_revision"],
     }
 
-    with dashboard.app.test_request_context(
-            "/api/manual-entry?slot=evening", method="POST", json=body):
-        payload, status = _result(dashboard.api_manual_entry())
+    monkeypatch.setattr(dashboard, "DASH_PASS", "")
+    monkeypatch.setattr(dashboard, "USERS_DIR", account / "no-accounts")
+    response = dashboard.app.test_client().post(
+        "/api/manual-entry?slot=evening", json=body)
 
-    assert status == 410
-    assert payload["ok"] is False
-    assert payload["code"] == "MANUAL_MOVE_DISABLED"
+    assert response.status_code == 404
     assert not (account / "dry_run" / "straddle_state.json").exists()
     assert not (account / "straddle_state.json").exists()
-    lot_plan.assert_not_called()
+    contract_lookup.assert_not_called()
     order_post.assert_not_called()
     raw_post.assert_not_called()
 
@@ -402,8 +434,8 @@ def test_dry_manual_exit_supports_every_strategy_and_appends_exactly_once(
         dashboard, "_dry_run_mark_and_pnl",
         lambda state: (125.0, 0.25, 0.25, 0.0),
     )
-    raw_post = Mock(side_effect=AssertionError("simulation used HTTP POST"))
-    monkeypatch.setattr(dashboard.req, "post", raw_post)
+    close_alert = Mock()
+    monkeypatch.setattr(dashboard, "_trend_score_auto_notify", close_alert)
     mode = dashboard._trading_mode_payload()
     body = {
         "expected_mode": "dry_run",
@@ -432,7 +464,9 @@ def test_dry_manual_exit_supports_every_strategy_and_appends_exactly_once(
     assert len(history) == 1
     assert history[0]["simulation_id"] == f"sim-{slot}-test"
     assert not (account / "trade_history.json").exists()
-    raw_post.assert_not_called()
+    close_alert.assert_called_once()
+    assert "DRY RUN TRADE CLOSED" in close_alert.call_args.args[0]
+    assert closed["telegram_close_alert_event_id"]
 
 
 def test_trend_dry_entry_writes_only_isolated_state_and_never_submits_order(
@@ -509,21 +543,22 @@ def test_mode_and_revision_mismatch_fail_before_move_or_trend_strategy_work(
     move_work = Mock(side_effect=AssertionError("MOVE work ran after mode mismatch"))
     trend_work = Mock(side_effect=AssertionError("Trend work ran after revision mismatch"))
     order_post = Mock(side_effect=AssertionError("mismatch reached order POST"))
-    monkeypatch.setattr(dashboard, "_current_atm_mv", move_work)
+    monkeypatch.setattr(dashboard, "_fetch_live_mv_products", move_work)
     monkeypatch.setattr(dashboard, "_trend_entry_preview_data", trend_work)
     monkeypatch.setattr(dashboard, "_post_dashboard_order", order_post)
 
-    with dashboard.app.test_request_context(
-            "/api/manual-entry?slot=evening", method="POST",
-            json={"side": "buy", "expected_mode": "live"}):
-        move_payload, move_status = _result(dashboard.api_manual_entry())
+    with patch.object(dashboard, "DASH_PASS", ""), \
+            patch.object(dashboard, "USERS_DIR",
+                         isolated_dashboard / "no-accounts"):
+        move_response = dashboard.app.test_client().post(
+            "/api/manual-entry?slot=evening",
+            json={"side": "buy", "expected_mode": "live"})
     with dashboard.app.test_request_context(
             "/api/trend-entry", method="POST",
             json={"expected_mode": "dry_run", "mode_revision": "stale"}):
         trend_payload, trend_status = _result(dashboard.api_trend_entry())
 
-    assert move_status == 410
-    assert move_payload["code"] == "MANUAL_MOVE_DISABLED"
+    assert move_response.status_code == 404
     assert trend_status == 409
     assert "Configuration changed" in trend_payload["error"]
     move_work.assert_not_called()
@@ -550,12 +585,12 @@ def test_mode_and_revision_mismatch_fail_before_move_or_trend_strategy_work(
         ),
         (
             "trend",
-            14.0,
+            8.0,
             {"dry_peak_pnl_usd": 20},
             {
-                "tsl_arm_pnl": 10,
-                "tsl_trail_pnl": 5,
-                "tsl_lock_min_pnl": 0,
+                "protection_mode": "filled_premium_percent_peak_trail_v2",
+                "entry_premium_usd": 100,
+                "tsl_pct": 10,
             },
             "trailing_stop_simulated",
         ),
@@ -574,6 +609,8 @@ def test_dry_protection_tp_sl_tsl_close_locally_and_append_once(
         dashboard, "_dry_run_mark_and_pnl",
         lambda record: (125.0, pnl, pnl, 0.0),
     )
+    close_alert = Mock()
+    monkeypatch.setattr(dashboard, "_trend_score_auto_notify", close_alert)
     raw_post = Mock(side_effect=AssertionError("protection used HTTP POST"))
     monkeypatch.setattr(dashboard.req, "post", raw_post)
 
@@ -592,6 +629,115 @@ def test_dry_protection_tp_sl_tsl_close_locally_and_append_once(
     assert history[0]["exit_trigger"] == expected_trigger
     assert not (account / "trade_history.json").exists()
     raw_post.assert_not_called()
+    close_alert.assert_called_once()
+    assert "DRY RUN TRADE CLOSED" in close_alert.call_args.args[0]
+    assert closed["telegram_close_alert_event_id"]
+
+
+def test_closed_dry_trade_is_journaled_and_recovered_before_slot_reuse(
+        isolated_dashboard, monkeypatch):
+    """A failed history append must not let a subsequent entry erase a close."""
+    account = isolated_dashboard
+    state_path = account / "dry_run" / "trend_state.json"
+    _write(state_path, _dry_state("trend"))
+    monkeypatch.setattr(
+        dashboard, "_dry_run_mark_and_pnl",
+        lambda record: (125.0, 12.0, 12.0, 0.0),
+    )
+    original_append = dashboard._append_trade_history
+    monkeypatch.setattr(dashboard, "_append_trade_history", lambda *args, **kwargs: False)
+
+    with dashboard.app.test_request_context("/api/dry-run/status"):
+        with dashboard.account_entry_lock(account, "test-durable-close") as entry_lock:
+            assert entry_lock
+            with dashboard.account_file_lock(
+                    account / "dry_run", "close-trend", "test-durable-close") as close_lock:
+                assert close_lock
+                closed = dashboard._close_dry_simulation_locked(
+                    "trend", _dry_state("trend"), trigger="take_profit_simulated",
+                )
+
+        assert closed["status"] == "CLOSED"
+        assert closed["history_pending"] is True
+        outbox_path = account / "dry_run" / dashboard.DRY_CLOSED_TRADE_OUTBOX_FILE
+        journal = json.loads(outbox_path.read_text(encoding="utf-8"))
+        assert list(journal["records"]) == ["sim-trend-test"]
+        assert not (account / "dry_run" / "trade_history.json").exists()
+
+        monkeypatch.setattr(dashboard, "_append_trade_history", original_append)
+        with dashboard.account_entry_lock(account, "test-durable-recovery") as entry_lock:
+            assert entry_lock
+            with dashboard.account_file_lock(
+                    account / "dry_run", "close-trend", "test-durable-recovery") as close_lock:
+                assert close_lock
+                assert dashboard._recover_closed_dry_trade_outbox(
+                    owner="test-durable-recovery") is True
+
+    recovered = json.loads(state_path.read_text(encoding="utf-8"))
+    history = json.loads(
+        (account / "dry_run" / "trade_history.json").read_text(encoding="utf-8"))
+    journal = json.loads(outbox_path.read_text(encoding="utf-8"))
+    assert recovered["status"] == "CLOSED"
+    assert recovered["history_pending"] is False
+    assert recovered["close_audit_event_id"] == "dry-run-close:sim-trend-test"
+    assert len(history) == 1
+    assert history[0]["simulation_id"] == "sim-trend-test"
+    assert journal["records"] == {}
+    audit_lines = (account / "strategy_audit.jsonl").read_text(encoding="utf-8")
+    assert '"event":"dry_run_trade_closed"' in audit_lines
+
+
+def test_close_journal_recovers_if_process_dies_before_closed_slot_write(
+        isolated_dashboard, monkeypatch):
+    """The journal restores a close even across the slot-write crash window."""
+    account = isolated_dashboard
+    state_path = account / "dry_run" / "trend_state.json"
+    open_state = _dry_state("trend")
+    _write(state_path, open_state)
+    monkeypatch.setattr(
+        dashboard, "_dry_run_mark_and_pnl",
+        lambda record: (125.0, 12.0, 12.0, 0.0),
+    )
+    original_write = dashboard._atomic_write_json
+
+    def crash_before_closed_slot(path, value):
+        if (Path(path) == state_path
+                and isinstance(value, dict)
+                and value.get("status") == "CLOSED"):
+            raise OSError("simulated process crash before slot commit")
+        return original_write(path, value)
+
+    monkeypatch.setattr(dashboard, "_atomic_write_json", crash_before_closed_slot)
+    with dashboard.app.test_request_context("/api/dry-run/status"):
+        with dashboard.account_entry_lock(account, "test-slot-crash") as entry_lock:
+            assert entry_lock
+            with dashboard.account_file_lock(
+                    account / "dry_run", "close-trend", "test-slot-crash") as close_lock:
+                assert close_lock
+                with pytest.raises(OSError, match="slot commit"):
+                    dashboard._close_dry_simulation_locked(
+                        "trend", open_state, trigger="take_profit_simulated",
+                    )
+
+        journal_path = account / "dry_run" / dashboard.DRY_CLOSED_TRADE_OUTBOX_FILE
+        assert json.loads(journal_path.read_text(encoding="utf-8"))["records"]
+        assert json.loads(state_path.read_text(encoding="utf-8"))["status"] == "OPEN"
+
+        monkeypatch.setattr(dashboard, "_atomic_write_json", original_write)
+        with dashboard.account_entry_lock(account, "test-slot-crash-recovery") as entry_lock:
+            assert entry_lock
+            with dashboard.account_file_lock(
+                    account / "dry_run", "close-trend", "test-slot-crash-recovery") as close_lock:
+                assert close_lock
+                assert dashboard._recover_closed_dry_trade_outbox(
+                    owner="test-slot-crash-recovery") is True
+
+    recovered = json.loads(state_path.read_text(encoding="utf-8"))
+    history = json.loads(
+        (account / "dry_run" / "trade_history.json").read_text(encoding="utf-8"))
+    assert recovered["status"] == "CLOSED"
+    assert recovered["history_pending"] is False
+    assert len(history) == 1
 
 
 def test_dry_protection_honors_each_positions_poll_interval_and_reports_health(
@@ -694,15 +840,17 @@ def test_saving_dry_protection_updates_open_snapshot_and_makes_check_due(
     assert saved["dry_protection_last_error"] == ""
 
 
-def test_topbar_contains_server_driven_trading_mode_next_to_theme():
+def test_topbar_contains_server_driven_trading_mode_next_to_palette_picker():
     root = Path(dashboard.__file__).resolve().parent
     template = (root / "templates" / "base.html").read_text(encoding="utf-8")
     script = (root / "static" / "js" / "app.js").read_text(encoding="utf-8")
 
-    theme_index = template.index('id="theme-toggle"')
+    theme_index = template.index('id="theme-picker"')
     mode_index = template.index('id="tb-mode"')
     spacer_index = template.index('class="topbar-spacer"')
     assert theme_index < mode_index < spacer_index
+    assert template.count('data-theme-choice="{{ name }}"') == 1
+    assert "('red', 'blue', 'green', 'violet', 'amber')" in template
     assert "Trading Mode" in template
     assert "setTradingModeIndicator(st.trading_mode, st.dry_run_mode)" in script
 
@@ -721,7 +869,7 @@ def test_dry_run_live_status_refresh_is_fast_uncached_and_non_overlapping():
     assert "setInterval(() => loadDryStatus(true), 20_000);" in template
 
 
-def test_dry_run_cards_are_equal_sized_and_every_open_slot_has_manual_exit():
+def test_dry_run_has_one_score_zone_position_and_manual_exit():
     root = Path(dashboard.__file__).resolve().parent
     template = (root / "templates" / "dry_run.html").read_text(
         encoding="utf-8")
@@ -730,19 +878,16 @@ def test_dry_run_cards_are_equal_sized_and_every_open_slot_has_manual_exit():
     styles = (root / "static" / "css" / "app.css").read_text(
         encoding="utf-8")
 
-    assert "grid-auto-rows: 1fr" in styles
-    assert ".dry-slot-grid > .card {" in styles
-    assert (
-        ".grid > .card, .dry-slot-grid > .card { margin-top: 0; }"
-        in styles
-    )
-    assert ".dry-slot-card {" in styles
-    assert "min-height: 420px; flex: 1 1 auto" in styles
+    assert ".score-zone-trade-card {" in styles
+    assert ".score-zone-trade-body {" in styles
+    assert ".grid > .card, .score-zone-trade-card { margin-top: 0; }" in styles
+    assert ".score-zone-position-pane" in styles
+    assert ".score-zone-decision-pane" in styles
+    assert "min-height: 365px" in styles
     assert "dry-slot-footer-panel" in template
-    assert "min-height: 86px" in styles
+    assert "height: 100%" in styles
     assert "\n          Exit\n" in template
-    assert ">Exit</button>" in overview
-    assert "endDrySimulation('${controlSlot}', '${slot}')" in template
+    assert "endDrySimulation('${controlSlot}')" in template
     assert (
         "function dryProtectionHtml(state, displaySlot, controlSlot = displaySlot)"
         in template
@@ -752,12 +897,17 @@ def test_dry_run_cards_are_equal_sized_and_every_open_slot_has_manual_exit():
         "function saveDryProtection(displaySlot, controlSlot = displaySlot)"
         in template
     )
-    assert "dryProtectionSaving.has(slot)" in template
+    assert "dryProtectionSaving.has('trend')" in template
     assert ".dry-protection-grid {" in styles
-    assert "Paper-only monitor · always active" in template
-    for slot in ("morning", "evening", "trend"):
-        assert f"dryPositionDetails(displaySlots.{slot} || {{}}, '{slot}'" in template
+    assert "Dry-run-only monitor · always active" in template
+    assert "dryStatus.score_zone_position || dryStatus.trend || {}" in template
+    assert "dryStatus.legacy_position_blockers || []" in template
+    for legacy_slot in ("dry-slot-morning", "dry-slot-evening", "dry-slot-trend"):
+        assert legacy_slot not in template
 
-    assert "squareOff('${controlSlot}', '${slot}', 'dry_run')" in overview
-    assert "squareOff('${controlSlot}', '${slot}', 'live')" in overview
-    assert "target_mode: targetMode" in overview
+    # Today is a daily ledger for the active account mode. Its only mutation is
+    # an explicitly mode-bound exit through the guarded square-off endpoint.
+    assert "squareOff(" not in overview
+    assert "target_mode: targetMode" not in overview
+    assert "closeTodayLiveTrade(" in overview
+    assert "target_mode: simulated ? 'dry_run' : 'live'" in overview

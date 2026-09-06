@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -31,12 +31,27 @@ def _safe_score_config(**updates) -> dict:
         "TSL_ARM_PNL_TREND": "100",
         "TSL_TRAIL_PNL_TREND": "50",
         "ALLOW_SHORT_MOVE": "false",
+        # The new DRY RUN preflight uses the exact same fixed-size risk caps
+        # as LIVE.  Make this fixture an intentionally funded 1,000-lot
+        # account rather than relying on unrelated environment defaults.
+        "TREND_RISK_BUDGET_USD": "500",
+        "SHORT_MAX_RISK_USD": "500",
+        "TREND_DRY_RUN_CAPITAL_USD": "1000",
     }
     config.update(updates)
     return config
 
 
-def _score_signal(mode: dict, *, score=60.0, zone=None, suffix="10:00:00Z"):
+def _score_signal(
+    mode: dict,
+    *,
+    score=60.0,
+    zone=None,
+    suffix="10:00:00Z",
+    trigger_adx=None,
+    zone_action_allowed=True,
+    zone_reason="test signal allowed",
+):
     zone = zone or dashboard.TREND_SCORE_CE_ZONE
     return {
         "mode": dict(mode),
@@ -48,6 +63,10 @@ def _score_signal(mode: dict, *, score=60.0, zone=None, suffix="10:00:00Z"):
         },
         "score": score,
         "zone": zone,
+        "zone_action_allowed": zone_action_allowed,
+        "zone_reason": zone_reason,
+        "trigger_adx": trigger_adx,
+        "engine_signal_id": f"engine-{suffix}",
         "signal_key": f"trend-score-auto|BTCUSD|5m|2026-07-22T{suffix}",
         "signal_bar_close_utc": f"2026-07-22T{suffix}",
         "market_regime": "TRENDING" if zone != dashboard.TREND_SCORE_MOVE_ZONE else "RANGE",
@@ -206,8 +225,7 @@ def test_score_auto_mode_is_persisted_only_and_accepts_explicit_live(
         ({"MOVE_AUTO_ENTRY_MODE": "shadow"}, "legacy MOVE"),
         ({"MORNING_ENABLED": "true"}, "Morning"),
         ({"EVENING_ENABLED": "true"}, "Evening"),
-        ({"MAX_ORDER_LOTS": "999"}, "1,000-lot"),
-        ({"SL_TARGET_PNL_TREND": "0"}, "positive Trend TP"),
+        ({"TREND_SCORE_AUTO_LOTS": "5001"}, "TREND_SCORE_AUTO_LOTS"),
     ],
 )
 def test_score_auto_config_rejects_live_or_competing_automation(
@@ -226,52 +244,6 @@ def test_score_auto_config_accepts_only_the_explicit_dry_isolated_profile():
     assert dashboard._validate_config_update(
         _safe_score_config(), current,
     ) is None
-
-
-def test_score_market_evaluation_removes_positions_and_rejects_invalid_zero(
-        monkeypatch):
-    snapshot = {
-        "positions": [{"symbol": "MV-BTC-65000-230726", "side": "short"}],
-        "pending_orders": [{"id": "pending"}],
-        "account": {"open_risk": 500, "current_exposure": 500},
-        "risk": {
-            "position_state_consistent": False,
-            "orders_state_known": False,
-        },
-    }
-    evaluated = {}
-
-    def valid_engine(market_only, config):
-        evaluated["snapshot"] = market_only
-        evaluated["config"] = config
-        return {
-            "direction_score": -55,
-            "hard_gates": {"data_valid": True},
-        }
-
-    monkeypatch.setattr(dashboard, "evaluate_trend", valid_engine)
-    result = dashboard._trend_score_auto_market_decision(snapshot, {})
-
-    assert result["direction_score"] == -55
-    assert evaluated["snapshot"]["positions"] == []
-    assert evaluated["snapshot"]["pending_orders"] == []
-    assert evaluated["snapshot"]["account"]["open_risk"] == 0
-    assert evaluated["snapshot"]["account"]["current_exposure"] == 0
-    assert evaluated["snapshot"]["risk"]["position_state_consistent"] is True
-    assert evaluated["snapshot"]["risk"]["orders_state_known"] is True
-    assert evaluated["config"]["allow_unknown_event_risk"] is True
-    # The caller's evidence is immutable.
-    assert snapshot["positions"]
-    assert snapshot["pending_orders"]
-
-    monkeypatch.setattr(dashboard, "evaluate_trend", lambda *args, **kwargs: {
-        # The core's invalid-input fallback score must never become permission
-        # for the neutral-zone short MOVE action.
-        "direction_score": 0,
-        "hard_gates": {"data_valid": False},
-    })
-    with pytest.raises(RuntimeError, match="invalid or stale"):
-        dashboard._trend_score_auto_market_decision(snapshot, {})
 
 
 def test_score_signal_collector_is_dry_public_only_and_never_authenticates(
@@ -299,22 +271,27 @@ def test_score_signal_collector_is_dry_public_only_and_never_authenticates(
     monkeypatch.setattr(dashboard, "_sign", sign)
     monkeypatch.setattr(dashboard.req, "post", raw_post)
     monkeypatch.setattr(dashboard.req, "delete", raw_delete)
+    # The score now comes from btc_trend_engine. Stubbed healthy so this test
+    # keeps testing what it is about -- that the collector never authenticates
+    # -- rather than the (separately tested) engine fail-closed guard.
+    monkeypatch.setattr(
+        dashboard.trend_engine_client, "get_snapshot",
+        lambda symbol="BTCUSD": {
+            "data_quality": "OK", "trend_score": 55.0, "zone": "CE_2_ITM",
+            "regime": "TREND_UP", "signal_id": "engine-public-only",
+            "candle_close_utc": "2026-07-22T10:00:00Z",
+            "zone_action_allowed": True, "zone_reason": "bullish",
+            "trigger_adx": 31.2,
+        })
     monkeypatch.setattr(dashboard, "_trend_engine_config_overrides", lambda: {})
     monkeypatch.setattr(dashboard, "_trend_engine_strategy_config", lambda: {})
-    monkeypatch.setattr(
-        dashboard, "_trend_score_auto_market_decision",
-        lambda evidence, config: {
-            "direction_score": 55,
-            "market_regime": "TRENDING",
-            "decision_id": "decision-public-only",
-        },
-    )
 
     signal = dashboard._collect_trend_score_auto_signal()
 
     assert signal["zone"] == dashboard.TREND_SCORE_CE_ZONE
     assert signal["signal_key"].endswith("2026-07-22T10:00:00Z")
     assert signal["signal_bar_close_utc"] == "2026-07-22T10:05:00Z"
+    assert signal["trigger_adx"] == pytest.approx(31.2)
     kwargs = collector.call_args.kwargs
     assert kwargs["dry_run"] is True
     assert kwargs["user_dir"] == isolated_score_account
@@ -324,6 +301,379 @@ def test_score_signal_collector_is_dry_public_only_and_never_authenticates(
     sign.assert_not_called()
     raw_post.assert_not_called()
     raw_delete.assert_not_called()
+
+
+def test_score_collector_rejects_a_different_engine_candle(
+        isolated_score_account, monkeypatch):
+    _write(isolated_score_account / "config.json", _safe_score_config())
+    market_snapshot = {
+        "underlying": "BTCUSD",
+        "market": {"spot": 65_850},
+        "candles": {"5m": [{
+            "timestamp": "2026-07-22T10:00:00Z",
+            "open": 65_800,
+            "high": 65_900,
+            "low": 65_750,
+            "close": 65_850,
+            "volume": 10,
+            "complete": True,
+        }]},
+        "option_contracts": [],
+    }
+    monkeypatch.setattr(
+        dashboard,
+        "collect_delta_trend_snapshot",
+        lambda **kwargs: copy.deepcopy(market_snapshot),
+    )
+    monkeypatch.setattr(
+        dashboard.trend_engine_client,
+        "get_snapshot",
+        lambda symbol="BTCUSD": {
+            "schema_version": "1.1.0",
+            "data_quality": "OK",
+            "trend_score": 55.0,
+            "zone": "CE_2_ITM",
+            "regime": "TREND_UP",
+            "signal_id": "engine-previous-candle",
+            "candle_close_utc": "2026-07-22T09:55:00Z",
+            "zone_action_allowed": True,
+            "zone_reason": "bullish",
+        },
+    )
+    monkeypatch.setattr(dashboard, "_trend_engine_config_overrides", lambda: {})
+    monkeypatch.setattr(dashboard, "_trend_engine_strategy_config", lambda: {})
+
+    with pytest.raises(
+        dashboard.TrendScoreDataSyncPending,
+        match="Waiting for market-data synchronization",
+    ):
+        dashboard._collect_trend_score_auto_signal()
+
+
+@pytest.mark.parametrize("quality", ("STALE_L1", "SIGNAL_EXPIRED"))
+def test_score_collector_defers_retryable_engine_freshness_states(
+        isolated_score_account, monkeypatch, quality):
+    _write(isolated_score_account / "config.json", _safe_score_config())
+    monkeypatch.setattr(
+        dashboard,
+        "collect_delta_trend_snapshot",
+        lambda **kwargs: {"candles": {"5m": []}},
+    )
+    monkeypatch.setattr(
+        dashboard.trend_engine_client,
+        "get_snapshot",
+        lambda symbol="BTCUSD": {"data_quality": quality},
+    )
+    monkeypatch.setattr(dashboard, "_trend_engine_strategy_config", lambda: {})
+
+    with pytest.raises(
+        dashboard.TrendScoreDataSyncPending,
+        match=f"fresh Trend Engine market data.*{quality}",
+    ):
+        dashboard._collect_trend_score_auto_signal()
+
+
+def test_dry_cycle_waits_for_data_sync_without_audit_or_order(score_cycle):
+    pending = dashboard.TrendScoreDataSyncPending(
+        "Waiting for market-data synchronization; retrying automatically"
+    )
+    score_cycle["collector"].side_effect = pending
+
+    assert dashboard._maybe_auto_trend_score_cycle() is False
+
+    health = dashboard._trend_score_auto_health["alice"]
+    assert health["status"] == "waiting_for_data_sync"
+    assert health["last_error"] is None
+    assert health["data_sync_pending"] is True
+    assert health["execution_mode"] == "dry run"
+    score_cycle["prepare"].assert_not_called()
+    score_cycle["audit"].assert_not_called()
+    score_cycle["notify"].assert_not_called()
+
+
+def test_score_collector_rejects_a_zone_that_disagrees_with_the_score(
+        isolated_score_account, monkeypatch):
+    _write(isolated_score_account / "config.json", _safe_score_config())
+    monkeypatch.setattr(
+        dashboard,
+        "collect_delta_trend_snapshot",
+        lambda **kwargs: {
+            "underlying": "BTCUSD",
+            "market": {"spot": 65_850},
+            "candles": {"5m": [{
+                "timestamp": "2026-07-22T10:00:00Z",
+                "open": 65_800,
+                "high": 65_900,
+                "low": 65_750,
+                "close": 65_850,
+                "volume": 10,
+                "complete": True,
+            }]},
+            "option_contracts": [],
+        },
+    )
+    monkeypatch.setattr(
+        dashboard.trend_engine_client,
+        "get_snapshot",
+        lambda symbol="BTCUSD": {
+            "data_quality": "OK",
+            "trend_score": 55.0,
+            "zone": "PE_2_ITM",
+            "regime": "TREND_UP",
+            "signal_id": "engine-inconsistent",
+            "candle_close_utc": "2026-07-22T10:00:00Z",
+            "zone_action_allowed": True,
+            "zone_reason": "inconsistent",
+        },
+    )
+    monkeypatch.setattr(dashboard, "_trend_engine_config_overrides", lambda: {})
+    monkeypatch.setattr(dashboard, "_trend_engine_strategy_config", lambda: {})
+
+    with pytest.raises(RuntimeError, match="score and zone disagree"):
+        dashboard._collect_trend_score_auto_signal()
+
+
+def test_contract_preparation_honours_engine_zone_action_gate():
+    with pytest.raises(RuntimeError, match="engine blocked entry.*book invalid"):
+        dashboard._prepare_trend_score_auto_entry({
+            "zone": dashboard.TREND_SCORE_CE_ZONE,
+            "zone_action_allowed": False,
+            "zone_reason": "book invalid",
+        })
+
+
+def test_prepare_directional_entry_restricts_to_today_without_a_floor_override(
+        isolated_score_account, monkeypatch):
+    """The automated controller must never roll to tomorrow's contract, but
+    it also must keep the standard 90-minute liquidity floor -- unlike
+    Cockpit (see test_dashboard_cockpit.py), it never overrides it to zero.
+    """
+    _write(isolated_score_account / "config.json", _safe_score_config())
+    selection = {
+        "zone": dashboard.TREND_SCORE_CE_ZONE, "symbol": "C-BTC-1",
+        "product_id": 1, "strike": 65_000, "expiry": "2026-08-06T12:00:00Z",
+        "executable_contract": {
+            "contract_value": "0.001", "ask_size": 5000,
+            "quote_timestamp": dashboard.datetime.now(
+                dashboard.timezone.utc,
+            ).isoformat(),
+        },
+    }
+    select = Mock(return_value=selection)
+    monkeypatch.setattr(dashboard, "select_directional_option", select)
+    monkeypatch.setattr(dashboard, "_fetch_live_vanilla_products", lambda: [])
+
+    dashboard._prepare_trend_score_auto_entry({
+        "zone": dashboard.TREND_SCORE_CE_ZONE,
+        "zone_action_allowed": True,
+        "snapshot": {"market": {"spot": 65_000.0}, "option_contracts": []},
+    })
+
+    assert select.call_args.kwargs["today_only"] is True
+    assert "min_time_to_expiry_seconds" not in select.call_args.kwargs
+
+
+def test_prepare_move_entry_restricts_to_today_without_a_floor_override(
+        isolated_score_account, monkeypatch):
+    _write(isolated_score_account / "config.json", _safe_score_config())
+    selection = {
+        "zone": dashboard.TREND_SCORE_MOVE_ZONE, "symbol": "MV-BTC-1",
+        "product_id": 2, "expiry": "2026-08-06T12:00:00Z",
+    }
+    select = Mock(return_value=selection)
+    monkeypatch.setattr(dashboard, "select_move_contract", select)
+    monkeypatch.setattr(dashboard, "_fetch_live_mv_products", lambda: [])
+    monkeypatch.setattr(
+        dashboard, "_trend_score_auto_move_quote",
+        Mock(return_value={
+            "entry_price": 350.0, "entry_depth": 5000, "side": "sell",
+        }),
+    )
+    monkeypatch.setattr(
+        dashboard, "_trend_score_auto_short_move_eligibility",
+        lambda *a, **k: {"quoted_premium_usd": 350.0},
+    )
+
+    dashboard._prepare_trend_score_auto_entry({
+        "zone": dashboard.TREND_SCORE_MOVE_ZONE,
+        "zone_action_allowed": True,
+        "snapshot": {"market": {"spot": 65_000.0}, "option_contracts": []},
+    })
+
+    assert select.call_args.kwargs["today_only"] is True
+    assert "min_time_to_expiry_seconds" not in select.call_args.kwargs
+
+
+def test_paper_directional_entry_does_not_gate_on_top_of_book_depth(
+        isolated_score_account, monkeypatch):
+    """DRY RUN must not skip an entry LIVE would have taken.
+
+    LIVE treats the touch quantity as observational because the bounded IOC
+    sweeps deeper levels (see ``_trend_score_auto_live_affordability``).  The
+    paper controller exists to proxy LIVE, so a book resting less than the
+    configured size at the touch -- the norm on Delta's daily strikes -- must
+    prepare here exactly as it does there.
+    """
+    _write(isolated_score_account / "config.json", _safe_score_config())
+    assert dashboard._trend_score_auto_mode() == "dry_run"
+    configured = dashboard._trend_score_auto_configured_lots()
+    thin = 955
+    assert thin < configured
+    selection = {
+        "zone": dashboard.TREND_SCORE_PE_ZONE, "symbol": "P-BTC-76800-230826",
+        "product_id": 1, "strike": 76_800, "expiry": "2026-08-23T12:00:00Z",
+        "lots": configured,
+        "executable_contract": {
+            "contract_value": "0.001", "ask": 205.0, "ask_size": thin,
+            "quote_timestamp": dashboard.datetime.now(
+                dashboard.timezone.utc,
+            ).isoformat(),
+        },
+    }
+    monkeypatch.setattr(
+        dashboard, "select_directional_option", Mock(return_value=selection),
+    )
+    monkeypatch.setattr(dashboard, "_fetch_live_vanilla_products", lambda: [])
+
+    prepared = dashboard._prepare_trend_score_auto_entry({
+        "zone": dashboard.TREND_SCORE_PE_ZONE,
+        "zone_action_allowed": True,
+        "snapshot": {"market": {"spot": 76_309.3}, "option_contracts": []},
+    })
+
+    # Observed, not enforced.
+    assert prepared["entry_depth"] == thin
+    assert prepared["lots"] == configured
+
+
+def test_paper_move_entry_requests_one_lot_of_depth_like_live(
+        isolated_score_account, monkeypatch):
+    """Both controller modes ask the MOVE quote helper for the same one lot."""
+    _write(isolated_score_account / "config.json", _safe_score_config())
+    assert dashboard._trend_score_auto_mode() == "dry_run"
+    monkeypatch.setattr(
+        dashboard,
+        "select_move_contract",
+        Mock(return_value={
+            "zone": dashboard.TREND_SCORE_MOVE_ZONE, "symbol": "MV-BTC-1",
+            "product_id": 2, "expiry": "2026-08-23T12:00:00Z",
+        }),
+    )
+    monkeypatch.setattr(dashboard, "_fetch_live_mv_products", lambda: [])
+    quote_fn = Mock(return_value={
+        "entry_price": 350.0, "entry_depth": 484, "side": "sell",
+    })
+    monkeypatch.setattr(dashboard, "_trend_score_auto_move_quote", quote_fn)
+    monkeypatch.setattr(
+        dashboard, "_trend_score_auto_short_move_eligibility",
+        lambda *a, **k: {"quoted_premium_usd": 350.0},
+    )
+
+    prepared = dashboard._prepare_trend_score_auto_entry({
+        "zone": dashboard.TREND_SCORE_MOVE_ZONE,
+        "zone_action_allowed": True,
+        "snapshot": {"market": {"spot": 76_309.3}, "option_contracts": []},
+    })
+
+    assert quote_fn.call_args.args[1] == 1
+    assert prepared["entry_depth"] == 484
+
+
+def test_short_move_uses_premium_expiry_and_weekday_entry_window():
+    allowed = datetime(2026, 8, 3, 11, 59, tzinfo=timezone.utc)
+    valid_selection = {
+        "expiry": (allowed + timedelta(minutes=91)).isoformat(),
+    }
+    approved = dashboard._trend_score_auto_short_move_eligibility(
+        valid_selection, {"bid": 300.01}, now=allowed,
+    )
+    assert approved["quoted_premium_usd"] == pytest.approx(300.01)
+    assert approved["minimum_premium_usd"] == 300.0
+    assert approved["minimum_time_to_expiry_seconds"] == 90 * 60
+
+    with pytest.raises(RuntimeError, match=r"premium must be above \$300"):
+        dashboard._trend_score_auto_short_move_eligibility(
+            valid_selection, {"bid": 300}, now=allowed,
+        )
+    with pytest.raises(RuntimeError, match="more than 90 minutes"):
+        dashboard._trend_score_auto_short_move_eligibility(
+            {"expiry": (allowed + timedelta(minutes=89)).isoformat()},
+            {"bid": 301}, now=allowed,
+        )
+
+    blocked = datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc)
+    with pytest.raises(RuntimeError, match="5:30 PM to midnight IST"):
+        dashboard._trend_score_auto_short_move_eligibility(
+            {"expiry": (blocked + timedelta(hours=3)).isoformat()},
+            {"bid": 301}, now=blocked,
+        )
+
+    midnight = datetime(2026, 8, 3, 18, 30, tzinfo=timezone.utc)
+    weekend = datetime(2026, 8, 8, 12, 30, tzinfo=timezone.utc)
+    for permitted in (midnight, weekend):
+        result = dashboard._trend_score_auto_short_move_eligibility(
+            {"expiry": (permitted + timedelta(hours=3)).isoformat()},
+            {"bid": 301}, now=permitted,
+        )
+        assert result["weekday_blackout_start_ist"] == "17:30"
+
+
+def test_short_move_enforce_min_tte_false_bypasses_only_the_90_minute_floor():
+    weekend = datetime(2026, 8, 8, 6, 0, tzinfo=timezone.utc)
+    near_expiry = {"expiry": (weekend + timedelta(minutes=1)).isoformat()}
+    with pytest.raises(RuntimeError, match="more than 90 minutes"):
+        dashboard._trend_score_auto_short_move_eligibility(
+            near_expiry, {"bid": 301}, now=weekend,
+        )
+    approved = dashboard._trend_score_auto_short_move_eligibility(
+        near_expiry, {"bid": 301}, now=weekend, enforce_min_tte=False,
+    )
+    assert approved["minimum_time_to_expiry_seconds"] == 0
+    assert approved["time_to_expiry_seconds"] == pytest.approx(60, abs=1)
+
+
+def test_short_move_eligibility_trusts_the_already_selected_expiry():
+    """This function no longer independently re-validates "today vs
+    tomorrow" -- select_move_contract's own today_only=True already
+    guarantees the selection is the nearest listed expiry, and re-deriving
+    that here from a single already-selected contract (without the full
+    listing) was not just redundant but actively wrong: it used to compare
+    the settlement's IST calendar date against wall-clock "today", which
+    is a real production incident (see select_move_contract's docstring).
+    """
+    weekend = datetime(2026, 8, 8, 6, 0, tzinfo=timezone.utc)
+    tomorrow = {"expiry": (weekend + timedelta(days=1)).isoformat()}
+    approved = dashboard._trend_score_auto_short_move_eligibility(
+        tomorrow, {"bid": 301}, now=weekend,
+    )
+    assert approved["quoted_premium_usd"] == pytest.approx(301.0)
+
+
+def test_failed_open_contract_preparation_is_rebuildable_for_same_signal(
+        score_cycle):
+    score_cycle["holder"]["signal"] = _score_signal(
+        score_cycle["mode"],
+        score=0,
+        zone=dashboard.TREND_SCORE_MOVE_ZONE,
+        suffix="10:02:17Z",
+    )
+    score_cycle["prepare"].side_effect = [
+        RuntimeError("ATM MOVE quote is temporarily unavailable"),
+        copy.deepcopy(_prepared(dashboard.TREND_SCORE_MOVE_ZONE)),
+    ]
+
+    assert dashboard._maybe_auto_trend_score_cycle() is False
+    ledger = dashboard._trend_score_auto_ledger(score_cycle["dry"])
+    assert ledger["current_transition"]["phase"] == "REBUILD_REQUIRED"
+    assert "temporarily unavailable" in ledger["current_transition"]["entry_blocked_reason"]
+    assert dashboard._trend_score_auto_health["alice"]["status"] == "blocked"
+
+    # A refreshed quote for the same closed candle can now be evaluated rather
+    # than being stranded behind a stale PREPARED transition.
+    assert dashboard._maybe_auto_trend_score_cycle() is True
+    state = json.loads((score_cycle["dry"] / "trend_state.json").read_text())
+    assert state["status"] == "OPEN"
+    assert state["option_type"] == "MOVE"
 
 
 def test_corrupt_score_mode_fails_closed_before_collection(
@@ -400,8 +750,17 @@ def test_score_open_state_is_ui_ready_protected_and_exactly_1000_lots(
     assert state["trend_score_zone"] == dashboard.TREND_SCORE_CE_ZONE
     assert state["direction_score_at_entry"] == 63.5
     assert state["simulation_id"].startswith("sim-trend-score-")
-    assert state["protection_config"] == policy
-    assert state["risk_at_entry_usd"] == policy["sl_target_pnl"]
+    protection = state["protection_config"]
+    # 220 premium × 0.001 contract value × 1,000 lots = $220 entry premium.
+    # The entry snapshot must use the fixed percentage rule, not the account's
+    # legacy dollar placeholders.
+    assert protection["entry_premium_usd"] == 220.0
+    assert protection["tp_target_pnl"] == 220.0
+    assert protection["sl_target_pnl"] == 110.0
+    assert protection["tsl_arm_pnl"] == protection["tsl_trail_pnl"] == 55.0
+    assert protection["protection_source"] == "automatic_filled_premium"
+    assert protection["manual_override_allowed"] is True
+    assert state["risk_at_entry_usd"] == 110.0
     assert state["entry_fees_usd"] == 10.0
     assert state["execution_snapshot"]["order_submitted"] is False
     assert state["execution_snapshot"]["exchange_api_called"] is False
@@ -426,7 +785,7 @@ def test_score_open_state_is_ui_ready_protected_and_exactly_1000_lots(
     assert view["dry_protection"]["status"] == "starting"
 
 
-def test_score_open_state_refuses_any_downsized_order(monkeypatch):
+def test_score_open_state_requires_the_user_configured_order_size(monkeypatch):
     monkeypatch.setattr(dashboard, "_tp_policy", lambda slot: {
         "tp_target_pnl": 500,
         "sl_target_pnl": 250,
@@ -454,10 +813,19 @@ def test_score_open_state_refuses_any_downsized_order(monkeypatch):
         "contract_value": 0.001,
         "entry_price": 500,
     }
-    with pytest.raises(RuntimeError, match="exactly 1,000 lots"):
+    with pytest.raises(RuntimeError, match="differs from the configured"):
         dashboard._trend_score_auto_open_state(
             signal, prepared, "transition-downsized",
         )
+
+    monkeypatch.setattr(
+        dashboard, "_trend_score_auto_configured_lots", lambda *_: 999,
+    )
+    opened = dashboard._trend_score_auto_open_state(
+        signal, prepared, "transition-configured",
+    )
+    assert opened["lots"] == 999
+    assert opened["execution_snapshot"]["requested"] == 999
 
 
 def test_score_cycle_opens_once_and_never_reuses_same_bar_after_protection_exit(
@@ -506,10 +874,201 @@ def test_score_cycle_opens_once_and_never_reuses_same_bar_after_protection_exit(
     assert len(history) == 1
     assert history[0]["exit_trigger"] == "take_profit_simulated"
     assert first["score_auto_signal_key"] in ledger["signals"]
+    assert ledger["setup_lock"]["target_zone"] == dashboard.TREND_SCORE_CE_ZONE
+    assert ledger["setup_lock"]["source_signal_key"] == first["score_auto_signal_key"]
     assert score_cycle["prepare"].call_count == 1
     assert score_cycle["notify"].call_count == 1
     for mock in score_cycle["forbidden"].values():
         mock.assert_not_called()
+
+
+def test_score_cycle_blocks_replacement_while_closed_history_is_pending(
+        score_cycle, monkeypatch):
+    """A failed close-history write must keep the controller flat and blocked."""
+    state_path = score_cycle["dry"] / "trend_state.json"
+    assert dashboard._maybe_auto_trend_score_cycle() is True
+    opened = json.loads(state_path.read_text(encoding="utf-8"))
+
+    original_append = dashboard._append_trade_history
+    monkeypatch.setattr(dashboard, "_append_trade_history", lambda *args, **kwargs: False)
+    monkeypatch.setattr(
+        dashboard, "_dry_run_mark_and_pnl",
+        lambda state: (230.0, 9.98, 10.0, 0.01),
+    )
+    with dashboard.account_entry_lock(
+            score_cycle["account"], "test-pending-history-close") as entry_lock:
+        assert entry_lock
+        with dashboard.account_file_lock(
+                score_cycle["dry"], "close-trend", "test-pending-history-close") as close_lock:
+            assert close_lock
+            closed = dashboard._close_dry_simulation_locked(
+                "trend", opened, trigger="take_profit_simulated",
+            )
+    assert closed["history_pending"] is True
+
+    score_cycle["holder"]["signal"] = _score_signal(
+        score_cycle["mode"], score=-60,
+        zone=dashboard.TREND_SCORE_PE_ZONE, suffix="10:05:00Z",
+    )
+    assert dashboard._maybe_auto_trend_score_cycle() is False
+    still_closed = json.loads(state_path.read_text(encoding="utf-8"))
+    assert still_closed["status"] == "CLOSED"
+    assert still_closed["simulation_id"] == opened["simulation_id"]
+    assert still_closed["history_pending"] is True
+    assert "awaiting durable history" in (
+        dashboard._trend_score_auto_health["alice"]["last_error"]
+    )
+
+    monkeypatch.setattr(dashboard, "_append_trade_history", original_append)
+
+
+def test_score_cycle_blocks_same_zone_after_protection_until_manual_reset(
+        score_cycle, monkeypatch):
+    """A protection exit must not turn a continuing CE zone into re-entries."""
+    state_path = score_cycle["dry"] / "trend_state.json"
+    assert dashboard._maybe_auto_trend_score_cycle() is True
+    opened = json.loads(state_path.read_text(encoding="utf-8"))
+
+    monkeypatch.setattr(
+        dashboard, "_dry_run_mark_and_pnl",
+        lambda state: (230.0, 9.98, 10.0, 0.01),
+    )
+    with dashboard.account_file_lock(
+        score_cycle["dry"], "close-trend", "test-setup-lock-close",
+    ) as acquired:
+        assert acquired
+        assert dashboard._close_dry_simulation_locked(
+            "trend", opened, trigger="take_profit_simulated",
+        )["status"] == "CLOSED"
+
+    # A different completed CE candle is a new signal, but not a new setup.
+    score_cycle["holder"]["signal"] = _score_signal(
+        score_cycle["mode"], score=60,
+        zone=dashboard.TREND_SCORE_CE_ZONE, suffix="10:05:00Z",
+    )
+    assert dashboard._maybe_auto_trend_score_cycle() is False
+    ledger = dashboard._trend_score_auto_ledger(score_cycle["dry"])
+    repeat_key = score_cycle["holder"]["signal"]["signal_key"]
+    assert ledger["signals"][repeat_key]["action"] == "SETUP_LOCKED"
+    assert ledger["current_transition"]["action"] == "SETUP_LOCKED"
+    assert ledger["setup_lock"]["target_zone"] == dashboard.TREND_SCORE_CE_ZONE
+    assert score_cycle["prepare"].call_count == 1
+    assert score_cycle["notify"].call_count == 1
+
+    # HOLD is not a new entry setup and must not clear a completed CE lock.
+    score_cycle["holder"]["signal"] = _score_signal(
+        score_cycle["mode"], score=20,
+        zone=dashboard.TREND_SCORE_HOLD_ZONE, suffix="10:10:00Z",
+    )
+    assert dashboard._maybe_auto_trend_score_cycle() is False
+    assert (
+        dashboard._trend_score_auto_ledger(score_cycle["dry"])["setup_lock"]
+        ["target_zone"]
+        == dashboard.TREND_SCORE_CE_ZONE
+    )
+
+    # Editing a risk/exit setting is not an explicit entry re-arm either.
+    _write(
+        score_cycle["account"] / "config.json",
+        _safe_score_config(TP_TARGET_PNL_TREND="501"),
+    )
+    revised_mode = dashboard._trading_mode_payload()
+    score_cycle["holder"]["signal"] = _score_signal(
+        revised_mode, score=60,
+        zone=dashboard.TREND_SCORE_CE_ZONE, suffix="10:15:00Z",
+    )
+    assert dashboard._maybe_auto_trend_score_cycle() is False
+    assert score_cycle["prepare"].call_count == 1
+    ledger = dashboard._trend_score_auto_ledger(score_cycle["dry"])
+    assert ledger["signals"][
+        score_cycle["holder"]["signal"]["signal_key"]
+    ]["action"] == "SETUP_LOCKED"
+
+    # The explicit operator reset is the sole re-arm for this same CE setup.
+    with dashboard.app.test_request_context(
+            "/api/trend-engine/score-auto/setup-lock/reset", method="POST"):
+        response = dashboard.api_trend_engine_score_auto_setup_lock_reset()
+    assert response.status_code == 200
+    assert response.get_json()["released"] is True
+
+    score_cycle["holder"]["signal"] = _score_signal(
+        revised_mode, score=60,
+        zone=dashboard.TREND_SCORE_CE_ZONE, suffix="10:20:00Z",
+    )
+    assert dashboard._maybe_auto_trend_score_cycle() is True
+    assert score_cycle["prepare"].call_count == 2
+    assert score_cycle["notify"].call_count == 2
+    for mock in score_cycle["forbidden"].values():
+        mock.assert_not_called()
+
+
+def test_legacy_controller_state_is_backfilled_once_without_undoing_reset(
+        score_cycle):
+    ledger = dashboard._trend_score_auto_ledger(score_cycle["dry"])
+    legacy_state = {
+        "status": "CLOSED",
+        "ownership": dashboard.TREND_SCORE_AUTO_OWNERSHIP,
+        "entry_trigger": dashboard.TREND_SCORE_AUTO_TRIGGER,
+        "execution_mode": "dry_run",
+        "dry_run": True,
+        "trend_score_zone": dashboard.TREND_SCORE_CE_ZONE,
+        "score_auto_signal_key": "legacy-controller-ce",
+    }
+
+    lock, checked = dashboard._trend_score_auto_backfill_legacy_setup_lock(
+        ledger, legacy_state, mode=score_cycle["mode"], dry_run=True,
+    )
+
+    assert checked is True
+    assert lock is not None
+    assert lock["target_zone"] == dashboard.TREND_SCORE_CE_ZONE
+    assert lock["backfilled_from_legacy_state"] is True
+    assert ledger["legacy_setup_lock_migration_v1"] is True
+
+    # An operator reset must remain reset; migration can only ever run once.
+    ledger["setup_lock"] = None
+    lock, checked = dashboard._trend_score_auto_backfill_legacy_setup_lock(
+        ledger, legacy_state, mode=score_cycle["mode"], dry_run=True,
+    )
+    assert lock is None
+    assert checked is False
+
+
+def test_setup_lock_semantics_v2_recovers_only_an_open_missing_lock(
+        score_cycle):
+    ledger = dashboard._trend_score_auto_ledger(score_cycle["dry"])
+    state = {
+        "status": "OPEN",
+        "ownership": dashboard.TREND_SCORE_AUTO_OWNERSHIP,
+        "entry_trigger": dashboard.TREND_SCORE_AUTO_TRIGGER,
+        "execution_mode": "dry_run",
+        "dry_run": True,
+        "trend_score_zone": dashboard.TREND_SCORE_PE_ZONE,
+        "score_auto_signal_key": "pre-v2-open-pe",
+    }
+
+    lock, checked = dashboard._trend_score_auto_recover_open_setup_lock_v2(
+        ledger, state, mode=score_cycle["mode"], dry_run=True,
+    )
+
+    assert checked is True
+    assert lock is not None
+    assert lock["target_zone"] == dashboard.TREND_SCORE_PE_ZONE
+    assert lock["recovered_by_lock_semantics_v2"] is True
+    assert ledger["setup_lock_semantics_v2_migrated"] is True
+
+    # A v2-recorded manual reset is never silently re-created by recovery.
+    ledger["setup_lock"] = None
+    ledger["setup_lock_semantics_v2_migrated"] = False
+    ledger["setup_lock_last_manual_reset_at_utc"] = (
+        "2026-07-22T10:30:00+00:00"
+    )
+    lock, checked = dashboard._trend_score_auto_recover_open_setup_lock_v2(
+        ledger, state, mode=score_cycle["mode"], dry_run=True,
+    )
+    assert checked is True
+    assert lock is None
+    assert ledger["setup_lock"] is None
 
 
 def test_score_cycle_closes_and_switches_on_the_same_new_signal_exactly_once(
@@ -559,6 +1118,41 @@ def test_score_cycle_closes_and_switches_on_the_same_new_signal_exactly_once(
     ).read_text(encoding="utf-8"))) == 1
     assert score_cycle["prepare"].call_count == 2
     assert score_cycle["notify"].call_count == 2
+    for mock in score_cycle["forbidden"].values():
+        mock.assert_not_called()
+
+
+def test_score_cycle_keeps_a_directional_trade_open_on_opposite_hold(
+        score_cycle, monkeypatch):
+    """HOLD is never a zone change, even on the opposite side of the band --
+    a CE stays open at -35 rather than being flattened. Only a real zone
+    change (to PE_2_ITM or SHORT_MOVE) exits it."""
+    state_path = score_cycle["dry"] / "trend_state.json"
+    assert dashboard._maybe_auto_trend_score_cycle() is True
+    opened = json.loads(state_path.read_text(encoding="utf-8"))
+
+    # -35 is deliberately inside the PE HOLD band rather than a PE entry.
+    score_cycle["holder"]["signal"] = _score_signal(
+        score_cycle["mode"], score=-35,
+        zone=dashboard.TREND_SCORE_HOLD_ZONE,
+        suffix="10:05:00Z",
+    )
+    monkeypatch.setattr(
+        dashboard, "_dry_run_mark_and_pnl",
+        lambda state: (210.0, -10.02, -10.0, 0.01),
+    )
+
+    assert dashboard._maybe_auto_trend_score_cycle() is False
+    still_open = json.loads(state_path.read_text(encoding="utf-8"))
+    ledger = json.loads((
+        score_cycle["dry"] / dashboard.TREND_SCORE_AUTO_LEDGER_FILE
+    ).read_text(encoding="utf-8"))
+
+    assert still_open["status"] == "OPEN"
+    assert still_open["simulation_id"] == opened["simulation_id"]
+    assert ledger["current_transition"]["action"] != "EXIT"
+    assert score_cycle["prepare"].call_count == 1
+    assert score_cycle["notify"].call_count == 1
     for mock in score_cycle["forbidden"].values():
         mock.assert_not_called()
 
@@ -734,3 +1328,229 @@ def test_score_auto_status_reports_server_mode_and_controller_position(
     assert payload["current_zone"] == dashboard.TREND_SCORE_CE_ZONE
     assert payload["symbol"].startswith("C-BTC-")
     assert payload["lots"] == 1000
+    assert payload["setup_lock"]["active"] is True
+    assert payload["setup_lock"]["zone"] == dashboard.TREND_SCORE_CE_ZONE
+
+
+def test_score_auto_status_keeps_lock_reset_available_after_config_save(
+        score_cycle):
+    assert dashboard._maybe_auto_trend_score_cycle() is True
+    _write(
+        score_cycle["account"] / "config.json",
+        _safe_score_config(TP_TARGET_PNL_TREND="501"),
+    )
+
+    with dashboard.app.test_request_context(
+            "/api/trend-engine/score-auto/status"):
+        payload = dashboard.api_trend_engine_score_auto_status().get_json()
+
+    assert payload["enabled"] is True
+    assert payload["setup_lock"]["active"] is True
+    assert payload["setup_lock"]["zone"] == dashboard.TREND_SCORE_CE_ZONE
+
+
+def test_score_auto_status_does_not_show_previous_zone_lock_as_active(
+        score_cycle):
+    assert dashboard._maybe_auto_trend_score_cycle() is True
+    dashboard._trend_score_auto_health["alice"]["engine_zone"] = (
+        dashboard.TREND_SCORE_PE_ZONE
+    )
+
+    with dashboard.app.test_request_context(
+            "/api/trend-engine/score-auto/status"):
+        payload = dashboard.api_trend_engine_score_auto_status().get_json()
+
+    assert payload["setup_lock"]["active"] is False
+    assert payload["setup_lock"]["stale"] is True
+    assert payload["setup_lock"]["zone"] == dashboard.TREND_SCORE_CE_ZONE
+    assert payload["setup_lock"]["current_zone"] == dashboard.TREND_SCORE_PE_ZONE
+
+
+def test_score_auto_status_keeps_prior_actionable_lock_during_hold(
+        score_cycle):
+    assert dashboard._maybe_auto_trend_score_cycle() is True
+    dashboard._trend_score_auto_health["alice"]["engine_zone"] = (
+        dashboard.TREND_SCORE_HOLD_ZONE
+    )
+
+    with dashboard.app.test_request_context(
+            "/api/trend-engine/score-auto/status"):
+        payload = dashboard.api_trend_engine_score_auto_status().get_json()
+
+    assert payload["setup_lock"]["active"] is True
+    assert payload["setup_lock"]["stale"] is False
+    assert payload["setup_lock"]["zone"] == dashboard.TREND_SCORE_CE_ZONE
+    assert payload["setup_lock"]["current_zone"] == dashboard.TREND_SCORE_HOLD_ZONE
+
+
+def test_setup_lock_reset_endpoint_clears_only_the_lock(score_cycle):
+    assert dashboard._maybe_auto_trend_score_cycle() is True
+    state_path = score_cycle["dry"] / "trend_state.json"
+    before = json.loads(state_path.read_text(encoding="utf-8"))
+
+    with dashboard.app.test_request_context(
+            "/api/trend-engine/score-auto/setup-lock/reset", method="POST"):
+        response = dashboard.api_trend_engine_score_auto_setup_lock_reset()
+    payload = response.get_json()
+
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert payload["released"] is True
+    assert payload["zone"] == dashboard.TREND_SCORE_CE_ZONE
+    assert dashboard._trend_score_auto_ledger(score_cycle["dry"])["setup_lock"] is None
+    assert json.loads(state_path.read_text(encoding="utf-8")) == before
+    assert score_cycle["notify"].call_count == 1
+    for mock in score_cycle["forbidden"].values():
+        mock.assert_not_called()
+
+
+def test_dry_cycle_closes_short_move_when_committed_15m_adx_rises_above_25(
+        score_cycle, monkeypatch):
+    state_path = score_cycle["dry"] / "trend_state.json"
+    score_cycle["holder"]["signal"] = _score_signal(
+        score_cycle["mode"],
+        score=0,
+        zone=dashboard.TREND_SCORE_MOVE_ZONE,
+        trigger_adx=25.0,
+    )
+    assert dashboard._maybe_auto_trend_score_cycle() is True
+    opened = json.loads(state_path.read_text(encoding="utf-8"))
+    assert opened["trend_score_zone"] == dashboard.TREND_SCORE_MOVE_ZONE
+
+    score_cycle["holder"]["signal"] = _score_signal(
+        score_cycle["mode"],
+        score=0,
+        zone=dashboard.TREND_SCORE_MOVE_ZONE,
+        suffix="10:05:00Z",
+        trigger_adx=25.1,
+        zone_action_allowed=False,
+        zone_reason="15m ADX 25.1 must be at or below 25 before selling MOVE",
+    )
+    monkeypatch.setattr(
+        dashboard, "_dry_run_mark_and_pnl",
+        lambda state: (690.0, 9.98, 10.0, 0.01),
+    )
+
+    assert dashboard._maybe_auto_trend_score_cycle() is True
+    closed = json.loads(state_path.read_text(encoding="utf-8"))
+    history = json.loads((score_cycle["dry"] / "trade_history.json").read_text(
+        encoding="utf-8"
+    ))
+    assert closed["status"] == "CLOSED"
+    assert history[-1]["exit_trigger"] == "trend_engine_short_move_adx_exit"
+    assert score_cycle["prepare"].call_count == 1
+    assert "ADX" in dashboard._trend_score_auto_health["alice"]["last_action"]
+
+
+def test_setup_lock_resets_once_daily_at_530_pm_ist(score_cycle):
+    assert dashboard._maybe_auto_trend_score_cycle() is True
+    before_cutoff = datetime(2026, 8, 1, 11, 59, tzinfo=timezone.utc)
+    at_cutoff = datetime(2026, 8, 1, 12, 0, tzinfo=timezone.utc)
+
+    assert dashboard._maybe_daily_reset_trend_score_setup_lock(
+        now=before_cutoff,
+    ) is False
+    assert dashboard._trend_score_auto_ledger(
+        score_cycle["dry"],
+    )["setup_lock"] is not None
+
+    assert dashboard._maybe_daily_reset_trend_score_setup_lock(
+        now=at_cutoff,
+    ) is True
+    ledger = dashboard._trend_score_auto_ledger(score_cycle["dry"])
+    assert ledger["setup_lock"] is None
+    assert ledger["setup_lock_last_daily_reset_ist_date"] == "2026-08-01"
+
+    # A trade entered later that evening stays locked until tomorrow.
+    dashboard._trend_score_auto_lock_setup(
+        ledger,
+        score_cycle["holder"]["signal"],
+        transition_id="later-evening-trade",
+        action="OPEN_CE",
+    )
+    dashboard._trend_score_auto_write_ledger(score_cycle["dry"], ledger)
+    assert dashboard._maybe_daily_reset_trend_score_setup_lock(
+        now=at_cutoff + timedelta(hours=2),
+    ) is False
+    assert dashboard._trend_score_auto_ledger(
+        score_cycle["dry"],
+    )["setup_lock"] is not None
+
+    assert dashboard._maybe_daily_reset_trend_score_setup_lock(
+        now=at_cutoff + timedelta(days=1),
+    ) is True
+    assert dashboard._trend_score_auto_ledger(
+        score_cycle["dry"],
+    )["setup_lock"] is None
+
+    reset_events = [
+        call for call in score_cycle["audit"].call_args_list
+        if call.args and call.args[0] == "trend_score_auto_setup_lock_daily_reset"
+    ]
+    assert len(reset_events) == 2
+
+
+def test_daily_setup_lock_check_marks_date_when_nothing_is_locked(score_cycle):
+    at_cutoff = datetime(2026, 8, 1, 12, 0, tzinfo=timezone.utc)
+    assert dashboard._maybe_daily_reset_trend_score_setup_lock(
+        now=at_cutoff,
+    ) is False
+    ledger = dashboard._trend_score_auto_ledger(score_cycle["dry"])
+    assert ledger["setup_lock"] is None
+    assert ledger["setup_lock_last_daily_reset_ist_date"] == "2026-08-01"
+
+
+def test_actionable_zone_change_releases_old_lock_even_if_entry_is_unavailable(
+        score_cycle, monkeypatch):
+    state_path = score_cycle["dry"] / "trend_state.json"
+    assert dashboard._maybe_auto_trend_score_cycle() is True
+    opened = json.loads(state_path.read_text(encoding="utf-8"))
+
+    monkeypatch.setattr(
+        dashboard, "_dry_run_mark_and_pnl",
+        lambda state: (230.0, 9.98, 10.0, 0.01),
+    )
+    with dashboard.account_file_lock(
+        score_cycle["dry"], "close-trend", "test-zone-change-lock-close",
+    ) as acquired:
+        assert acquired
+        assert dashboard._close_dry_simulation_locked(
+            "trend", opened, trigger="take_profit_simulated",
+        )["status"] == "CLOSED"
+
+    score_cycle["holder"]["signal"] = _score_signal(
+        score_cycle["mode"], score=-60,
+        zone=dashboard.TREND_SCORE_PE_ZONE, suffix="10:05:00Z",
+    )
+    score_cycle["prepare"].side_effect = RuntimeError(
+        "new-zone contract is temporarily unavailable"
+    )
+
+    assert dashboard._maybe_auto_trend_score_cycle() is False
+    ledger = dashboard._trend_score_auto_ledger(score_cycle["dry"])
+    assert ledger["setup_lock"] is None
+    release_events = [
+        call for call in score_cycle["audit"].call_args_list
+        if call.args and call.args[0] == "trend_score_auto_setup_lock_released"
+    ]
+    assert len(release_events) == 1
+    assert release_events[0].args[1]["previous_zone"] == (
+        dashboard.TREND_SCORE_CE_ZONE
+    )
+    assert release_events[0].args[1]["new_zone"] == (
+        dashboard.TREND_SCORE_PE_ZONE
+    )
+
+
+def test_hold_does_not_release_setup_lock(score_cycle):
+    assert dashboard._maybe_auto_trend_score_cycle() is True
+    ledger = dashboard._trend_score_auto_ledger(score_cycle["dry"])
+    hold_signal = _score_signal(
+        score_cycle["mode"], score=35,
+        zone=dashboard.TREND_SCORE_HOLD_ZONE, suffix="10:05:00Z",
+    )
+
+    assert dashboard._trend_score_auto_release_setup_lock_for_zone_change(
+        ledger, hold_signal,
+    ) is None
+    assert ledger["setup_lock"]["target_zone"] == dashboard.TREND_SCORE_CE_ZONE

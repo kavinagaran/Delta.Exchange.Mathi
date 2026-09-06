@@ -7,6 +7,17 @@ import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
+import 'api/client.dart';
+import 'screens/cockpit_screen.dart';
+import 'screens/exposure_screen.dart';
+import 'screens/performance_screen.dart';
+import 'screens/accounts_screen.dart';
+import 'screens/config_screen.dart';
+import 'screens/logs_screen.dart';
+import 'screens/dry_run_screen.dart';
+import 'screens/today_screen.dart';
+import 'screens/trend_engine_screen.dart';
+
 const kPositive = Color(0xFF38D99A);
 const kWarning = Color(0xFFFFC267);
 
@@ -30,17 +41,88 @@ const kBlueAccent = Color(0xFF39A7FF);
 const kBlueAccentBright = Color(0xFF8BD0FF);
 const kBlueNegative = Color(0xFFFF7180);
 
+// Neon green brand accent, mirroring --neon (#39ff14) in static/css/app.css.
+// Shared by both native themes on purpose: the web keeps the glow out of its
+// per-theme blocks so it reads identically in Red and Blue, and the app now
+// does the same for its tab icons and the header brand lock-up.
+const kNeon = Color(0xFF39FF14);
+const kNeonTitle = Color(0xFFEAFFE4); // .brand .name
+const kNeonSubtle = Color(0xFF6DFF4D); // .brand .sub
+
+// The glow is layered rather than one wide blur: a tight bright core keeps the
+// glyphs and icon strokes legible, and the wider faint halos do the actual
+// neon work. A single large shadow just looks smeared.
+const kNeonTextGlow = <Shadow>[
+  Shadow(color: Color(0xF239FF14), blurRadius: 4),
+  Shadow(color: Color(0xB339FF14), blurRadius: 11),
+  Shadow(color: Color(0x7339FF14), blurRadius: 24),
+];
+const kNeonIconGlow = <Shadow>[
+  Shadow(color: Color(0xD939FF14), blurRadius: 4),
+  Shadow(color: Color(0x7339FF14), blurRadius: 10),
+];
+const kNeonIconGlowStrong = <Shadow>[
+  Shadow(color: Color(0xF239FF14), blurRadius: 4),
+  Shadow(color: Color(0xA639FF14), blurRadius: 14),
+  Shadow(color: Color(0x5939FF14), blurRadius: 30),
+];
+
 const kRedBackgroundAsset = 'assets/crimson-dashboard-bg.png';
 const kBlueBackgroundAsset = 'assets/sparkling-blue-dashboard-bg.png';
 
 final appTheme = AppThemeController();
 
-const kWebAssetRevision = '3.4.0+7-red-blue-trend-tabs';
+const kWebAssetRevision = '6.3.5+40-trading-day';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  ErrorWidget.builder = (_) => const _AppErrorFallback();
   await appTheme.load();
   runApp(const MathiBotApp());
+}
+
+/// A release build must never turn a recoverable widget error into an empty
+/// page. Detailed diagnostics still go to Flutter's error pipeline; users get
+/// a concise, branded recovery message instead of a blank body.
+class _AppErrorFallback extends StatelessWidget {
+  const _AppErrorFallback();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Directionality(
+      textDirection: TextDirection.ltr,
+      child: ColoredBox(
+        color: kBlueBackground,
+        child: Center(
+          child: Padding(
+            padding: EdgeInsets.all(24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.sync_problem_rounded, color: kWarning, size: 36),
+                SizedBox(height: 12),
+                Text(
+                  'This screen could not be displayed',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color: kBlueText,
+                    fontSize: 18,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                SizedBox(height: 6),
+                Text(
+                  'Reopen the page to try again.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: kBlueMuted, fontSize: 13),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 class AppThemeController extends ChangeNotifier {
@@ -103,6 +185,57 @@ ThemeData buildAppTheme({required bool blue}) {
     useMaterial3: true,
     brightness: Brightness.dark,
     fontFamily: 'Roboto',
+    visualDensity: const VisualDensity(horizontal: -1, vertical: -1),
+    textTheme: TextTheme(
+      displayLarge: TextStyle(
+        color: text,
+        fontSize: 26,
+        fontWeight: FontWeight.w800,
+      ),
+      headlineLarge: TextStyle(
+        color: text,
+        fontSize: 21,
+        fontWeight: FontWeight.w800,
+      ),
+      headlineMedium: TextStyle(
+        color: text,
+        fontSize: 18,
+        fontWeight: FontWeight.w800,
+      ),
+      titleLarge: TextStyle(
+        color: text,
+        fontSize: 15,
+        fontWeight: FontWeight.w700,
+      ),
+      titleMedium: TextStyle(
+        color: text,
+        fontSize: 13,
+        fontWeight: FontWeight.w700,
+      ),
+      titleSmall: TextStyle(
+        color: text,
+        fontSize: 11.5,
+        fontWeight: FontWeight.w700,
+      ),
+      bodyLarge: TextStyle(color: text, fontSize: 12, height: 1.35),
+      bodyMedium: TextStyle(color: text, fontSize: 11.5, height: 1.35),
+      bodySmall: TextStyle(color: muted, fontSize: 9.5, height: 1.3),
+      labelLarge: TextStyle(
+        color: text,
+        fontSize: 10.5,
+        fontWeight: FontWeight.w700,
+      ),
+      labelMedium: TextStyle(
+        color: muted,
+        fontSize: 9.5,
+        fontWeight: FontWeight.w700,
+      ),
+      labelSmall: TextStyle(
+        color: muted,
+        fontSize: 8,
+        fontWeight: FontWeight.w700,
+      ),
+    ),
     scaffoldBackgroundColor: Colors.transparent,
     canvasColor: surface,
     colorScheme: scheme,
@@ -137,7 +270,7 @@ ThemeData buildAppTheme({required bool blue}) {
       fillColor: subtle.withValues(alpha: .86),
       labelStyle: TextStyle(color: muted, fontSize: 13),
       hintStyle: TextStyle(color: muted, fontSize: 13),
-      contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+      contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
       border: OutlineInputBorder(
         borderRadius: BorderRadius.circular(10),
         borderSide: BorderSide(color: border),
@@ -155,31 +288,45 @@ ThemeData buildAppTheme({required bool blue}) {
       style: FilledButton.styleFrom(
         backgroundColor: accent,
         foregroundColor: Colors.white,
-        minimumSize: const Size(0, 48),
-        textStyle: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+        minimumSize: const Size(0, 40),
+        textStyle: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(9)),
       ),
     ),
     navigationBarTheme: NavigationBarThemeData(
-      height: 70,
+      height: 62,
       backgroundColor: surface.withValues(alpha: .94),
-      indicatorColor: accent.withValues(alpha: .20),
+      indicatorColor: kNeon.withValues(alpha: .16),
       surfaceTintColor: Colors.transparent,
       labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
+      // The label keeps following each theme's accent/muted colours, exactly
+      // like `.nav a` on the web: only the icon goes neon, so the selected tab
+      // still reads as Red or Blue.
       labelTextStyle: WidgetStateProperty.resolveWith(
         (states) => TextStyle(
           color: states.contains(WidgetState.selected) ? accent : muted,
-          fontSize: 9,
+          fontSize: 8.5,
           fontWeight: states.contains(WidgetState.selected)
               ? FontWeight.w700
               : FontWeight.w600,
         ),
       ),
+      // Neon in both states, brighter when selected — `.nav a svg` versus
+      // `.nav a.active svg`. The bottom bar has no hover to lean on, so the
+      // idle icon is also held slightly back in opacity; together with the
+      // indicator pill that keeps the selected tab obvious.
       iconTheme: WidgetStateProperty.resolveWith(
-        (states) => IconThemeData(
-          color: states.contains(WidgetState.selected) ? accent : muted,
-          size: 21,
-        ),
+        (states) => states.contains(WidgetState.selected)
+            ? const IconThemeData(
+                color: kNeon,
+                size: 20,
+                shadows: kNeonIconGlowStrong,
+              )
+            : IconThemeData(
+                color: kNeon.withValues(alpha: .72),
+                size: 20,
+                shadows: kNeonIconGlow,
+              ),
       ),
     ),
     progressIndicatorTheme: ProgressIndicatorThemeData(color: accent),
@@ -329,6 +476,51 @@ class RedBlueThemeToggle extends StatelessWidget {
   }
 }
 
+/// The logo with the web's `.brand img.logo` treatment: a thin neon edge, a
+/// hard unblurred ring so the corner stays crisp instead of dissolving into
+/// its own halo, then widening blurred halos.
+class NeonLogo extends StatelessWidget {
+  const NeonLogo({super.key, required this.size, required this.radius});
+
+  final double size;
+  final double radius;
+
+  @override
+  Widget build(BuildContext context) {
+    final corner = BorderRadius.circular(radius);
+    return SizedBox(
+      width: size,
+      height: size,
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          borderRadius: corner,
+          border: Border.all(color: const Color(0x8C39FF14)),
+          boxShadow: const [
+            BoxShadow(color: Color(0x1A39FF14), spreadRadius: 3),
+            BoxShadow(color: Color(0x9939FF14), blurRadius: 8),
+            BoxShadow(color: Color(0x6639FF14), blurRadius: 18),
+            BoxShadow(color: Color(0x3339FF14), blurRadius: 34),
+          ],
+        ),
+        child: ClipRRect(
+          borderRadius: corner,
+          child: Image.asset('assets/logo.png', fit: BoxFit.contain),
+        ),
+      ),
+    );
+  }
+}
+
+/// `.brand .name` — neon-tinted off-white over the layered glow. The tracking
+/// is the web's .06em, expressed against whichever size the caller needs.
+TextStyle neonBrandTextStyle({required double fontSize}) => TextStyle(
+  color: kNeonTitle,
+  fontSize: fontSize,
+  fontWeight: FontWeight.w700,
+  letterSpacing: fontSize * .06,
+  shadows: kNeonTextGlow,
+);
+
 class MathiBotApp extends StatelessWidget {
   const MathiBotApp({super.key});
 
@@ -337,14 +529,21 @@ class MathiBotApp extends StatelessWidget {
     return AnimatedBuilder(
       animation: appTheme,
       builder: (context, _) => MaterialApp(
-        title: 'Nithi Bot',
+        title: 'BTC BOT',
         debugShowCheckedModeBanner: false,
         theme: buildAppTheme(blue: appTheme.isBlue),
         themeAnimationDuration: const Duration(milliseconds: 220),
-        builder: (context, child) => ThemeBackdrop(
-          blue: appTheme.isBlue,
-          child: child ?? const SizedBox.shrink(),
-        ),
+        builder: (context, child) {
+          final media = MediaQuery.of(context);
+          final scale = media.textScaler.scale(1).clamp(.9, 1.08).toDouble();
+          return MediaQuery(
+            data: media.copyWith(textScaler: TextScaler.linear(scale)),
+            child: ThemeBackdrop(
+              blue: appTheme.isBlue,
+              child: child ?? const SizedBox.shrink(),
+            ),
+          );
+        },
         home: const HomeShell(),
       ),
     );
@@ -365,34 +564,33 @@ class AppPageSpec {
   final IconData icon;
 }
 
+// Order matches the web sidebar's primary_items (templates/base.html):
+// operational pages first, Trend Engine last — it's a separate section
+// there too, just without the nav-gap spacer this flat list has no room for.
 const appPages = <AppPageSpec>[
   AppPageSpec(
-    label: 'Nithi Bot',
-    navLabel: 'Home',
+    label: 'Today',
+    navLabel: 'Today',
     path: '/',
     icon: Icons.home_outlined,
   ),
   AppPageSpec(
-    label: 'Trend Engine',
-    navLabel: 'Trend',
-    path: '/trend-engine',
-    icon: Icons.insights_rounded,
+    label: 'Cockpit',
+    navLabel: 'Cockpit',
+    path: '/cockpit',
+    icon: Icons.sports_esports_rounded,
   ),
   AppPageSpec(
-    label: 'Trades & P&L',
+    label: 'Performance',
+    // 'Performance' is the widest tab in the bar and the only one that has to
+    // shrink to fit; 'Trades' matches the /trades route it opens.
     navLabel: 'Trades',
     path: '/trades',
     icon: Icons.trending_up_rounded,
   ),
   AppPageSpec(
-    label: 'Dry Run',
-    navLabel: 'Dry Run',
-    path: '/dry-run',
-    icon: Icons.science_outlined,
-  ),
-  AppPageSpec(
-    label: 'Positions',
-    navLabel: 'Positions',
+    label: 'Exposure',
+    navLabel: 'Exposure',
     path: '/positions',
     icon: Icons.view_list_outlined,
   ),
@@ -408,7 +606,29 @@ const appPages = <AppPageSpec>[
     path: '/accounts',
     icon: Icons.manage_accounts_outlined,
   ),
+  AppPageSpec(
+    label: 'Logs',
+    navLabel: 'Logs',
+    path: '/logs',
+    icon: Icons.receipt_long_outlined,
+  ),
+  AppPageSpec(
+    label: 'Dry Run',
+    navLabel: 'Dry Run',
+    path: '/dry-run',
+    icon: Icons.science_outlined,
+  ),
+  AppPageSpec(
+    label: 'Trend Engine',
+    navLabel: 'Trend',
+    path: '/trend-engine',
+    icon: Icons.insights_rounded,
+  ),
 ];
+
+/// The five phone tabs, ordered for the trading workflow requested by the
+/// operator. Auxiliary pages remain available from the app-bar workspace menu.
+const primaryPageIndexes = <int>[0, 1, 2, 8, 4, 7];
 
 class SessionService {
   static const _defaultUrl = 'https://mathibot.duckdns.org';
@@ -417,6 +637,16 @@ class SessionService {
   static String username = 'mathi';
   static String password = '';
   static String displayName = '';
+
+  /// The Flask session cookie from the last successful sign-in.
+  ///
+  /// Retained so the native screens' JSON calls can authenticate as the same
+  /// session the WebView uses. Previously it was handed to the cookie manager
+  /// and dropped, which left `http` requests anonymous — they came back 401
+  /// and a native screen would have read that as "no data" rather than "not
+  /// signed in". Cleared on sign-out with everything else.
+  static String? sessionCookie;
+
   static final cookieManager = WebViewCookieManager();
 
   static Future<void> load() async {
@@ -487,17 +717,18 @@ class SessionService {
     }
 
     final setCookie = response.headers['set-cookie'] ?? '';
-    final sessionCookie = sessionCookieFromHeader(setCookie);
-    if (sessionCookie == null || sessionCookie.isEmpty) {
+    final cookie = sessionCookieFromHeader(setCookie);
+    if (cookie == null || cookie.isEmpty) {
       throw Exception('The server did not return an authenticated session.');
     }
+    sessionCookie = cookie;
 
     await cookieManager.clearCookies();
     final server = Uri.parse(nextUrl);
     await cookieManager.setCookie(
       WebViewCookie(
         name: 'session',
-        value: sessionCookie,
+        value: cookie,
         domain: server.host,
         path: '/',
       ),
@@ -514,6 +745,9 @@ class SessionService {
 
   static Future<void> signOut() async {
     await cookieManager.clearCookies();
+    // Must be cleared with the rest: a retained cookie would let the native
+    // screens keep fetching and rendering account data after sign-out.
+    sessionCookie = null;
     displayName = '';
     password = '';
     final prefs = await SharedPreferences.getInstance();
@@ -546,6 +780,61 @@ class WebAssetCache {
   }
 }
 
+class _BtcPricePill extends StatelessWidget {
+  const _BtcPricePill({required this.price, required this.direction});
+
+  final double? price;
+  final int direction;
+
+  String _formattedPrice() {
+    if (price == null) return '—';
+    final digits = price!.round().toString();
+    final grouped = StringBuffer();
+    for (var index = 0; index < digits.length; index++) {
+      if (index > 0 && (digits.length - index) % 3 == 0) grouped.write(',');
+      grouped.write(digits[index]);
+    }
+    return '\$${grouped.toString()}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final rising = direction >= 0;
+    final edge = rising ? kPositive : const Color(0xFFFF6172);
+    final gradient = rising
+        ? const [Color(0xFF07543F), Color(0xFF18C98A)]
+        : const [Color(0xFF65162A), Color(0xFFFF526C)];
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 280),
+      curve: Curves.easeOutCubic,
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(colors: gradient),
+        borderRadius: BorderRadius.circular(99),
+        border: Border.all(color: edge.withValues(alpha: .85), width: .7),
+        boxShadow: [
+          BoxShadow(
+            color: edge.withValues(alpha: .30),
+            blurRadius: 8,
+            spreadRadius: .4,
+          ),
+        ],
+      ),
+      child: Text(
+        'BTC - ${_formattedPrice()}',
+        style: const TextStyle(
+          color: Colors.white,
+          fontSize: 8.5,
+          height: 1.05,
+          fontWeight: FontWeight.w800,
+          letterSpacing: .15,
+          fontFeatures: [FontFeature.tabularFigures()],
+        ),
+      ),
+    );
+  }
+}
+
 class HomeShell extends StatefulWidget {
   const HomeShell({super.key});
 
@@ -554,13 +843,10 @@ class HomeShell extends StatefulWidget {
 }
 
 class _HomeShellState extends State<HomeShell> {
-  final _webKeys = List.generate(
-    appPages.length,
-    (_) => GlobalKey<DashboardWebPageState>(),
-  );
-
   final Set<int> _visitedTabs = {0};
   int _tab = 0;
+  double? _btcPrice;
+  int _btcDirection = 1;
   bool _ready = false;
   bool _authenticated = false;
   String? _startupError;
@@ -594,12 +880,174 @@ class _HomeShellState extends State<HomeShell> {
     });
   }
 
+  void _updateBtcPrice(double? price) {
+    if (price == null || !price.isFinite || price <= 0 || !mounted) return;
+    setState(() {
+      if (_btcPrice != null && price != _btcPrice) {
+        _btcDirection = price > _btcPrice! ? 1 : -1;
+      }
+      _btcPrice = price;
+    });
+  }
+
+  /// Every page is native. The web dashboard remains the server/API surface,
+  /// not a visual dependency of the Android app.
+  Widget _pageBody(int index, bool blue) {
+    final page = appPages[index];
+    final api = DashboardApi(
+      baseUrl: SessionService.baseUrl,
+      sessionCookie: SessionService.sessionCookie,
+    );
+    return switch (page.path) {
+      '/' => TodayScreen(
+        api: api,
+        onUnauthorised: _signOut,
+        onBtcPrice: _updateBtcPrice,
+      ),
+      '/cockpit' => CockpitScreen(api: api, onUnauthorised: _signOut),
+      '/positions' => ExposureScreen(api: api, onUnauthorised: _signOut),
+      '/trades' => PerformanceScreen(api: api, onUnauthorised: _signOut),
+      '/dry-run' => DryRunScreen(api: api, onUnauthorised: _signOut),
+      '/config' => ConfigScreen(
+        api: api,
+        onUnauthorised: _signOut,
+        displayName: SessionService.displayName.isEmpty
+            ? SessionService.username
+            : SessionService.displayName,
+      ),
+      '/accounts' => AccountsScreen(api: api, onUnauthorised: _signOut),
+      '/logs' => LogsScreen(api: api, onUnauthorised: _signOut),
+      '/trend-engine' => TrendEngineScreen(api: api, onUnauthorised: _signOut),
+      _ => const SizedBox.shrink(),
+    };
+  }
+
   void _selectTab(int index) {
     if (index < 0 || index >= appPages.length) return;
     setState(() {
       _tab = index;
       _visitedTabs.add(index);
     });
+  }
+
+  Future<void> _showMore() async {
+    const secondary = [3, 5, 6];
+    final selected = await showModalBottomSheet<int>(
+      context: context,
+      useSafeArea: true,
+      backgroundColor: Colors.transparent,
+      builder: (context) => Container(
+        padding: const EdgeInsets.fromLTRB(18, 18, 18, 24),
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [
+              Theme.of(context).colorScheme.surfaceContainerHighest,
+              Theme.of(context).colorScheme.surface,
+            ],
+          ),
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(26)),
+          border: Border(
+            top: BorderSide(color: Theme.of(context).colorScheme.primary),
+          ),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Expanded(
+                  child: Text(
+                    'Complete workspace',
+                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800),
+                  ),
+                ),
+                IconButton(
+                  onPressed: () => Navigator.pop(context),
+                  icon: const Icon(Icons.close_rounded),
+                ),
+              ],
+            ),
+            Text(
+              'Every dashboard page, natively designed for Android.',
+              style: TextStyle(
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+                fontSize: 12,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+            const SizedBox(height: 10),
+            GridView.count(
+              crossAxisCount: 2,
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              mainAxisSpacing: 10,
+              crossAxisSpacing: 10,
+              childAspectRatio: 2.25,
+              children: [
+                for (final index in secondary)
+                  InkWell(
+                    borderRadius: BorderRadius.circular(14),
+                    onTap: () => Navigator.pop(context, index),
+                    child: Ink(
+                      decoration: BoxDecoration(
+                        gradient: LinearGradient(
+                          colors: [
+                            Theme.of(
+                              context,
+                            ).colorScheme.primary.withValues(alpha: .18),
+                            Theme.of(context)
+                                .colorScheme
+                                .surfaceContainerHighest
+                                .withValues(alpha: .7),
+                          ],
+                        ),
+                        borderRadius: BorderRadius.circular(14),
+                        border: Border.all(
+                          color: Theme.of(context).colorScheme.outline,
+                        ),
+                        boxShadow: [
+                          BoxShadow(
+                            color: Theme.of(
+                              context,
+                            ).colorScheme.primary.withValues(alpha: .10),
+                            blurRadius: 15,
+                            offset: const Offset(0, 7),
+                          ),
+                        ],
+                      ),
+                      child: Row(
+                        children: [
+                          const SizedBox(width: 14),
+                          Icon(
+                            appPages[index].icon,
+                            color: kNeon,
+                            size: 21,
+                            shadows: kNeonIconGlow,
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Text(
+                              appPages[index].label,
+                              style: const TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+    if (selected != null) _selectTab(selected);
   }
 
   @override
@@ -619,60 +1067,51 @@ class _HomeShellState extends State<HomeShell> {
 
     final blue = appTheme.isBlue;
     final muted = blue ? kBlueMuted : kRedMuted;
+    final wide = MediaQuery.sizeOf(context).width >= 840;
+    final primaryIndex = primaryPageIndexes.indexOf(_tab);
+    final pageStack = IndexedStack(
+      index: _tab,
+      children: [
+        for (var index = 0; index < appPages.length; index++)
+          if (_visitedTabs.contains(index))
+            _pageBody(index, blue)
+          else
+            const SizedBox.shrink(),
+      ],
+    );
     return Scaffold(
       appBar: AppBar(
-        toolbarHeight: 62,
-        leadingWidth: 58,
-        leading: Padding(
-          padding: const EdgeInsets.fromLTRB(14, 10, 6, 10),
-          child: DecoratedBox(
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(10),
-              boxShadow: [
-                BoxShadow(
-                  color: Theme.of(
-                    context,
-                  ).colorScheme.primary.withValues(alpha: .18),
-                  blurRadius: 12,
-                  offset: const Offset(0, 2),
-                ),
-              ],
-            ),
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(10),
-              child: Image.asset('assets/logo.png', fit: BoxFit.cover),
-            ),
-          ),
+        toolbarHeight: 60,
+        leadingWidth: 57,
+        leading: const Padding(
+          padding: EdgeInsets.fromLTRB(14, 10, 7, 10),
+          child: Center(child: NeonLogo(size: 34, radius: 10)),
         ),
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Text('Nithi Bot'),
-            const SizedBox(height: 2),
             Text(
-              SessionService.displayName.isEmpty
-                  ? SessionService.username
-                  : SessionService.displayName,
+              appPages[_tab].label,
+              overflow: TextOverflow.ellipsis,
               style: TextStyle(
-                color: muted,
-                fontSize: 10.5,
-                fontWeight: FontWeight.w500,
+                color: Theme.of(context).colorScheme.onSurface,
+                fontSize: 15,
+                fontWeight: FontWeight.w800,
+                letterSpacing: -.25,
               ),
             ),
+            const SizedBox(height: 2),
+            _BtcPricePill(price: _btcPrice, direction: _btcDirection),
           ],
         ),
         actions: [
-          IconButton(
-            tooltip: 'Refresh this tab',
-            onPressed: () => _webKeys[_tab].currentState?.reload(),
-            icon: const Icon(Icons.refresh_rounded, size: 21),
-          ),
           const RedBlueThemeToggle(compact: true),
           PopupMenuButton<String>(
             tooltip: 'Account',
             onSelected: (value) {
               if (value == 'logout') unawaited(_signOut());
+              if (value == 'workspace') unawaited(_showMore());
             },
             itemBuilder: (context) => [
               PopupMenuItem(
@@ -696,6 +1135,16 @@ class _HomeShellState extends State<HomeShell> {
               ),
               const PopupMenuDivider(),
               const PopupMenuItem(
+                value: 'workspace',
+                child: Row(
+                  children: [
+                    Icon(Icons.grid_view_rounded, size: 18),
+                    SizedBox(width: 10),
+                    Text('More pages'),
+                  ],
+                ),
+              ),
+              const PopupMenuItem(
                 value: 'logout',
                 child: Row(
                   children: [
@@ -710,41 +1159,84 @@ class _HomeShellState extends State<HomeShell> {
           const SizedBox(width: 4),
         ],
       ),
-      body: IndexedStack(
-        index: _tab,
-        children: [
-          for (var index = 0; index < appPages.length; index++)
-            if (_visitedTabs.contains(index))
-              DashboardWebPage(
-                key: _webKeys[index],
-                page: appPages[index],
-                blue: blue,
-                onSessionExpired: _signOut,
-                onPageSelected: _selectTab,
-              )
-            else
-              const SizedBox.shrink(),
-        ],
-      ),
-      bottomNavigationBar: DecoratedBox(
-        decoration: BoxDecoration(
-          border: Border(
-            top: BorderSide(color: Theme.of(context).dividerColor),
-          ),
-        ),
-        child: NavigationBar(
-          selectedIndex: _tab,
-          onDestinationSelected: _selectTab,
-          destinations: [
-            for (final page in appPages)
-              NavigationDestination(
-                icon: Icon(page.icon),
-                selectedIcon: Icon(page.icon),
-                label: page.navLabel,
+      body: wide
+          ? Row(
+              children: [
+                NavigationRail(
+                  selectedIndex: _tab,
+                  extended: MediaQuery.sizeOf(context).width >= 1120,
+                  minExtendedWidth: 190,
+                  backgroundColor: Theme.of(
+                    context,
+                  ).colorScheme.surface.withValues(alpha: .88),
+                  indicatorColor: kNeon.withValues(alpha: .14),
+                  onDestinationSelected: _selectTab,
+                  leading: const Padding(
+                    padding: EdgeInsets.only(top: 10, bottom: 16),
+                    child: Icon(Icons.grid_view_rounded, color: kNeon),
+                  ),
+                  destinations: [
+                    for (final page in appPages)
+                      NavigationRailDestination(
+                        icon: Icon(
+                          page.icon,
+                          color: kNeon.withValues(alpha: .72),
+                        ),
+                        selectedIcon: Icon(
+                          page.icon,
+                          color: kNeon,
+                          shadows: kNeonIconGlowStrong,
+                        ),
+                        label: Text(page.navLabel),
+                      ),
+                  ],
+                ),
+                VerticalDivider(
+                  width: 1,
+                  color: Theme.of(context).dividerColor,
+                ),
+                Expanded(child: pageStack),
+              ],
+            )
+          : pageStack,
+      bottomNavigationBar: wide
+          ? null
+          : Padding(
+              padding: const EdgeInsets.fromLTRB(8, 4, 8, 8),
+              child: Container(
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(22),
+                  border: Border.all(color: Theme.of(context).dividerColor),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: .42),
+                      blurRadius: 22,
+                      offset: const Offset(0, 8),
+                    ),
+                    BoxShadow(
+                      color: Theme.of(
+                        context,
+                      ).colorScheme.primary.withValues(alpha: .14),
+                      blurRadius: 20,
+                    ),
+                  ],
+                ),
+                clipBehavior: Clip.antiAlias,
+                child: NavigationBar(
+                  selectedIndex: primaryIndex >= 0 ? primaryIndex : 0,
+                  onDestinationSelected: (index) {
+                    _selectTab(primaryPageIndexes[index]);
+                  },
+                  destinations: [
+                    for (final index in primaryPageIndexes)
+                      NavigationDestination(
+                        icon: Icon(appPages[index].icon),
+                        label: appPages[index].navLabel,
+                      ),
+                  ],
+                ),
               ),
-          ],
-        ),
-      ),
+            ),
     );
   }
 }
@@ -759,10 +1251,7 @@ class _StartupScreen extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            ClipRRect(
-              borderRadius: BorderRadius.circular(16),
-              child: Image.asset('assets/logo.png', width: 72, height: 72),
-            ),
+            const NeonLogo(size: 72, radius: 16),
             const SizedBox(height: 20),
             const SizedBox(
               width: 28,
@@ -771,7 +1260,7 @@ class _StartupScreen extends StatelessWidget {
             ),
             const SizedBox(height: 12),
             Text(
-              'Preparing Nithi Bot…',
+              'Preparing BTC BOT…',
               style: TextStyle(
                 color: Theme.of(context).colorScheme.onSurfaceVariant,
                 fontSize: 12,
@@ -856,26 +1345,12 @@ class _LoginScreenState extends State<LoginScreen> {
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.stretch,
                           children: [
-                            Align(
-                              child: ClipRRect(
-                                borderRadius: BorderRadius.circular(16),
-                                child: Image.asset(
-                                  'assets/logo.png',
-                                  width: 76,
-                                  height: 76,
-                                ),
-                              ),
-                            ),
+                            const Align(child: NeonLogo(size: 76, radius: 16)),
                             const SizedBox(height: 18),
                             Text(
-                              'Nithi Bot',
+                              'BTC BOT',
                               textAlign: TextAlign.center,
-                              style: TextStyle(
-                                color: colors.onSurface,
-                                fontSize: 24,
-                                fontWeight: FontWeight.w800,
-                                letterSpacing: -.35,
-                              ),
+                              style: neonBrandTextStyle(fontSize: 24),
                             ),
                             const SizedBox(height: 4),
                             Text(

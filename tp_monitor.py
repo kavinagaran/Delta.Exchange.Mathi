@@ -10,7 +10,7 @@ Slot config (.env):
   morning: TP_TARGET_PNL_MORNING, TP_POLL_SECS_MORNING
   trend:   TP_TARGET_PNL_TREND, TP_POLL_SECS_TREND
 """
-import os, sys, time, hmac, hashlib, json, logging, math, signal, requests
+import os, sys, time, hmac, hashlib, json, logging, math, signal, threading, requests
 from contextlib import contextmanager
 from decimal import Decimal, InvalidOperation
 from datetime import datetime, timezone
@@ -18,6 +18,7 @@ from pathlib import Path
 from urllib.parse import quote, urlencode
 from dotenv import load_dotenv
 from risk_controls import account_file_lock, audit_event
+from manual_exit_zone_lock import apply_manual_exit_zone_lock
 
 # Force IPv4 — Delta's whitelist holds our IPv4; IPv6 rotates and gets rejected
 import socket
@@ -86,6 +87,9 @@ else:
     API_KEY = _acct.get("api_key") or os.getenv("API_KEY", "")
     API_SECRET = _acct.get("api_secret") or os.getenv("API_SECRET", "")
 BASE_URL   = os.getenv("BASE_URL", "https://api.india.delta.exchange")
+PUBLIC_WS_URL = os.getenv(
+    "DELTA_PUBLIC_WS_URL", "wss://public-socket.india.delta.exchange",
+)
 TG_TOKEN   = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TG_CHAT    = os.getenv("TELEGRAM_CHAT_ID", "")
 
@@ -138,12 +142,22 @@ LOG_NAME = f"tp_{USER}_{SLOT}.log"
 
 HISTORY_FILE = USER_DIR / "trade_history.json"
 HEALTH_FILE = USER_DIR / f"tp_{SLOT}_health.json"
+STREAM_FILE = USER_DIR / f"tp_{SLOT}_stream.json"
 RECONCILE_SECS = max(int(_f("TP_ORDER_RECONCILE_SECS", 60)), 30)
 # When exchange-resident protection is unavailable, keep the local fallback
 # responsive while remaining well below normal REST API request-rate limits.
 LOCAL_FALLBACK_POLL_SECS = max(
     10, min(POLL_SECS, int(_f("TP_LOCAL_FALLBACK_POLL_SECS", 10)))
 )
+MARK_STREAM_EXPECTED_SECS = 2
+MARK_STREAM_STALE_SECS = max(
+    6, int(_f("TP_MARK_STREAM_STALE_SECS", 6)),
+)
+# Delta rejects exchange-resident stop orders for some MOVE/option products.
+# In that case, retain the verified 10-second local TP/SL/TSL monitor instead
+# of opening a position and immediately flattening it.  The exchange-only
+# safety path remains available as an explicit future policy switch.
+EXCHANGE_ONLY_PROTECTION = False
 OPTION_FEE_RATE = max(_f("OPTION_FEE_RATE", 0.00010), 0)
 OPTION_FEE_CAP_PCT = max(_f("OPTION_FEE_CAP_PCT", 0.035), 0)
 
@@ -175,6 +189,146 @@ def _sign(method, path, query="", body=""):
 def get_mark(symbol):
     r = requests.get(f"{BASE_URL}/v2/tickers/{symbol}", timeout=8)
     return float(r.json().get("result", {}).get("mark_price") or 0)
+
+
+def parse_mark_price_frame(frame, symbol, *, last_timestamp=0):
+    """Validate one compact Delta ``mark_price`` frame.
+
+    Returns ``(price, timestamp)`` for the requested contract or ``None`` for
+    heartbeat, unrelated, malformed, duplicated, or out-of-order frames.
+    """
+    try:
+        payload = json.loads(frame) if isinstance(frame, str) else frame
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict) or payload.get("type") != "mark_price":
+        return None
+    expected = f"MARK:{str(symbol or '').strip().upper()}"
+    if str(payload.get("sy") or "").strip().upper() != expected:
+        return None
+    try:
+        price = float(payload.get("p"))
+        timestamp = int(payload.get("ts") or 0)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if (
+        not math.isfinite(price)
+        or price <= 0
+        or timestamp <= 0
+        or timestamp <= int(last_timestamp or 0)
+    ):
+        return None
+    return price, timestamp
+
+
+class DeltaMarkPriceStream:
+    """Reconnecting public mark-price stream for one protected contract."""
+
+    def __init__(self, symbol, on_mark, on_status=None, *, url=PUBLIC_WS_URL):
+        self.symbol = str(symbol or "").strip().upper()
+        self.on_mark = on_mark
+        self.on_status = on_status or (lambda *_args: None)
+        self.url = url
+        self._stop = threading.Event()
+        self._thread = None
+        self._watchdog_thread = None
+        self._last_timestamp = 0
+        self._last_event_monotonic = 0.0
+
+    def start(self):
+        if self._thread and self._thread.is_alive():
+            return
+        self._thread = threading.Thread(
+            target=self._run,
+            name=f"mark-stream-{USER}-{SLOT}",
+            daemon=True,
+        )
+        self._thread.start()
+        self._watchdog_thread = threading.Thread(
+            target=self._rest_watchdog,
+            name=f"mark-watchdog-{USER}-{SLOT}",
+            daemon=True,
+        )
+        self._watchdog_thread.start()
+
+    def stop(self):
+        self._stop.set()
+
+    def _run(self):
+        # Import lazily so read-only tools and non-LIVE processes do not need
+        # to initialise a websocket transport merely by importing this module.
+        from websockets.sync.client import connect
+
+        delay = 1.0
+        while not self._stop.is_set():
+            self.on_status("connecting", "")
+            try:
+                with connect(
+                    self.url,
+                    open_timeout=8,
+                    close_timeout=3,
+                    ping_interval=20,
+                    ping_timeout=5,
+                    max_size=1_048_576,
+                ) as socket:
+                    socket.send(json.dumps({
+                        "type": "subscribe",
+                        "payload": {
+                            "channels": [{
+                                "name": "mark_price",
+                                "symbols": [f"MARK:{self.symbol}"],
+                            }],
+                        },
+                    }))
+                    socket.send(json.dumps({"type": "enable_heartbeat"}))
+                    self.on_status("live", "")
+                    delay = 1.0
+                    for frame in socket:
+                        if self._stop.is_set():
+                            return
+                        parsed = parse_mark_price_frame(
+                            frame,
+                            self.symbol,
+                            last_timestamp=self._last_timestamp,
+                        )
+                        if parsed is None:
+                            continue
+                        price, timestamp = parsed
+                        self._last_timestamp = timestamp
+                        self._last_event_monotonic = time.monotonic()
+                        self.on_mark(price, timestamp, "websocket")
+            except Exception as exc:
+                self.on_status(
+                    "reconnecting", f"{type(exc).__name__}: {exc}",
+                )
+                log.warning("Mark-price stream disconnected: %s", exc)
+            if self._stop.wait(delay):
+                return
+            delay = min(delay * 2, 30.0)
+
+    def _rest_watchdog(self):
+        """Use only the public ticker while websocket prices are stale."""
+        while not self._stop.wait(MARK_STREAM_EXPECTED_SECS):
+            age = (
+                time.monotonic() - self._last_event_monotonic
+                if self._last_event_monotonic else float("inf")
+            )
+            if age <= MARK_STREAM_STALE_SECS:
+                continue
+            try:
+                price = get_mark(self.symbol)
+                if not math.isfinite(price) or price <= 0:
+                    raise ValueError("public ticker returned an invalid mark")
+                self.on_status(
+                    "rest_fallback",
+                    "mark-price stream is stale; public ticker fallback active",
+                )
+                self.on_mark(price, time.time_ns() // 1000, "rest_fallback")
+            except Exception as exc:
+                self.on_status(
+                    "unavailable",
+                    f"stream and public ticker unavailable: {exc}",
+                )
 
 
 def get_exchange_position(product_id):
@@ -532,30 +686,37 @@ def _atomic_write_json(path, value):
 
 
 _CLOSE_LOCK_DEPTH = 0
+_CLOSE_THREAD_LOCK = threading.RLock()
+_STREAM_SNAPSHOT_LOCK = threading.Lock()
 
 
 @contextmanager
 def _close_state_lock(owner, *, stale_after_sec=30, wait_sec=2):
     """Process-local reentrant wrapper for the cross-process slot mutex."""
     global _CLOSE_LOCK_DEPTH
-    if _CLOSE_LOCK_DEPTH:
-        _CLOSE_LOCK_DEPTH += 1
-        try:
-            yield True
-        finally:
-            _CLOSE_LOCK_DEPTH -= 1
-        return
-    with account_file_lock(
-        USER_DIR, f"close-{SLOT}", owner,
-        stale_after_sec=stale_after_sec, wait_sec=wait_sec,
-    ) as acquired:
-        if acquired:
-            _CLOSE_LOCK_DEPTH = 1
-        try:
-            yield acquired
-        finally:
+    # The mark-price stream runs beside the reconciliation loop.  Serialize
+    # both threads before applying the existing process-wide reentrancy depth;
+    # otherwise a second thread could mistake another thread's lock for its
+    # own recursive acquisition and bypass the cross-process mutex.
+    with _CLOSE_THREAD_LOCK:
+        if _CLOSE_LOCK_DEPTH:
+            _CLOSE_LOCK_DEPTH += 1
+            try:
+                yield True
+            finally:
+                _CLOSE_LOCK_DEPTH -= 1
+            return
+        with account_file_lock(
+            USER_DIR, f"close-{SLOT}", owner,
+            stale_after_sec=stale_after_sec, wait_sec=wait_sec,
+        ) as acquired:
             if acquired:
-                _CLOSE_LOCK_DEPTH = 0
+                _CLOSE_LOCK_DEPTH = 1
+            try:
+                yield acquired
+            finally:
+                if acquired:
+                    _CLOSE_LOCK_DEPTH = 0
 
 
 def save_state_fields(**kw):
@@ -613,6 +774,30 @@ def load_state():
         except (OSError, ValueError, TypeError):
             log.critical("State and backup are unreadable: %s", STATE_FILE)
             return {}
+
+
+def write_stream_snapshot(**fields):
+    """Publish high-frequency display data without rewriting trade state."""
+    try:
+        with _STREAM_SNAPSHOT_LOCK:
+            current = {}
+            if STREAM_FILE.exists():
+                loaded = json.loads(STREAM_FILE.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    current = loaded
+            current.update(fields)
+            current.update({"user": USER, "slot": SLOT, "pid": os.getpid()})
+            tmp = STREAM_FILE.with_name(
+                f".{STREAM_FILE.name}.{os.getpid()}.{time.time_ns()}.tmp"
+            )
+            tmp.write_text(
+                json.dumps(current, separators=(",", ":")), encoding="utf-8",
+            )
+            os.replace(tmp, STREAM_FILE)
+            return current
+    except Exception as exc:
+        log.warning("Stream snapshot failed: %s", exc)
+        return {}
 
 
 _HEALTH_PROOF_DEFAULTS = {
@@ -805,6 +990,24 @@ def _finite_float(value, default=None):
     except (TypeError, ValueError, OverflowError):
         return default
     return number if math.isfinite(number) else default
+
+
+def _stream_tsl_snapshot(state):
+    """Return complete TSL telemetry for exactly one position state.
+
+    Stream files are patch-written.  Publishing these related values as a
+    complete unit prevents a peak, floor, or armed flag from an earlier
+    position surviving under the current position identity.
+    """
+    state = state if isinstance(state, dict) else {}
+    peak = max(_finite_float(state.get("tsl_peak"), 0.0), 0.0)
+    armed = bool(state.get("tsl_armed"))
+    floor = _finite_float(state.get("tsl_floor"), None) if armed else None
+    return {
+        "tsl_peak": round(peak, 8),
+        "tsl_armed": armed,
+        "tsl_floor": round(floor, 8) if floor is not None else None,
+    }
 
 
 def _estimate_option_entry_fee(state, price, lots):
@@ -1795,6 +1998,87 @@ def _trend_cycle_continuity(state, position, fills=None):
     }
 
 
+def _settled_trend_flat_evidence(state, now=None):
+    """Prove a delisted Trend contract flat after settlement.
+
+    Delta can stop serving the product-specific ``/v2/positions`` response as
+    soon as an option settles.  That response is intentionally authoritative
+    while a contract is live, so this fallback is restricted to post-settlement
+    Trend states.  An authenticated account-wide snapshot must contain no
+    non-zero row for the product *and* the complete fill ledger must reconstruct
+    the original position cycle to exactly zero.  Anything less fails closed.
+    """
+    if SLOT != "trend" or not isinstance(state, dict):
+        return False, "post-settlement fallback applies only to Trend positions", None
+    settlement = _parse_utc_datetime(state.get("settlement"))
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    else:
+        current = current.astimezone(timezone.utc)
+    if settlement is None:
+        return False, "authoritative settlement time is unavailable", None
+    if current < settlement:
+        return False, "contract has not settled", None
+    try:
+        product_id = int(state.get("product_id"))
+    except (TypeError, ValueError, OverflowError):
+        return False, "product identity is invalid", None
+
+    path = "/v2/positions/margined"
+    try:
+        data = requests.get(
+            f"{BASE_URL}{path}", headers=_sign("GET", path), timeout=8,
+        ).json()
+    except Exception as exc:
+        return False, f"account-wide positions are unavailable: {exc}", None
+    result = data.get("result") if isinstance(data, dict) else None
+    if (not isinstance(data, dict) or not data.get("success")
+            or not isinstance(result, list)):
+        error = data.get("error") if isinstance(data, dict) else data
+        return False, f"account-wide positions could not be verified: {error or data}", None
+
+    for row in result:
+        if not isinstance(row, dict):
+            return False, "account-wide positions contain a malformed row", None
+        try:
+            row_product = int(row.get("product_id"))
+            row_size = Decimal(str(row.get("size")))
+        except (InvalidOperation, TypeError, ValueError, OverflowError):
+            return False, "account-wide positions contain an invalid identity or size", None
+        if not row_size.is_finite() or row_size != row_size.to_integral_value():
+            return False, "account-wide positions contain a non-integral size", None
+        if row_product == product_id and row_size != 0:
+            return False, "account-wide positions still report this product open", None
+
+    continuity = _trend_cycle_continuity(
+        state, {"product_id": product_id, "size": 0},
+    )
+    if (continuity.get("verified") is not True
+            or continuity.get("status") != "closed"
+            or _nonnegative_integral_lots(continuity.get("signed_size")) != 0):
+        reason = continuity.get("reason") or continuity.get("status") or "unknown"
+        return False, f"fill ledger does not prove a closed position cycle: {reason}", None
+    return (True, "settlement, aggregate position, and fill ledger all prove flat",
+            continuity)
+
+
+def _is_protection_only_external(state):
+    """Whether an operator explicitly marked this position protection-only.
+
+    Set only by deliberate operator action on an externally opened position;
+    never inferred from an exchange position snapshot. It has no bot fill
+    ledger to reconstruct at any stage of its lifecycle -- neither while
+    open (continuity proof) nor at close (fill-ledger P&L reconstruction).
+    """
+    return (
+        isinstance(state, dict)
+        and state.get("operator_authorized_protection_only") is True
+        and str(state.get("ownership") or "").lower()
+        == "external_protection_only"
+    )
+
+
 def _owned_close_lots(state):
     # ``protection_lots`` is the complete aggregate explicitly adopted by this
     # monitor. ``owned_entry_lots`` remains the immutable bot-entry audit count.
@@ -2238,6 +2522,16 @@ def append_history(state):
             "unreconciled_partial_exit_lots": state.get(
                 "unreconciled_partial_exit_lots", 0),
             "position_cycle_id": state.get("position_cycle_id"),
+            # Preserve the entry origin through TP/SL/TSL reconciliation so a
+            # manually opened Cockpit trade never becomes an automatic trade
+            # merely because the protection monitor wrote its closed row.
+            "ownership": state.get("ownership"),
+            "entry_trigger": state.get("entry_trigger"),
+            "entry_classification": state.get("entry_classification"),
+            "strategy": state.get("strategy"),
+            "manual_cockpit_action": state.get("manual_cockpit_action"),
+            "signal_key": state.get("signal_key")
+                          or state.get("score_auto_signal_key"),
         }
         rec["accounting_status"] = str(state.get("accounting_status") or "") or (
             "complete" if _history_accounting_complete(rec) else "pending"
@@ -2278,6 +2572,9 @@ def append_history(state):
         if complete:
             history_fields["history_logged_at_utc"] = _utc_now()
         save_state_fields(**history_fields)
+        # All live close paths converge here. The helper no-ops for automated
+        # and external positions and idempotently evaluates each Cockpit cycle.
+        apply_manual_exit_zone_lock(USER_DIR, state)
         return True
     except Exception as e:
         log.warning("History append failed: %s", e)
@@ -2365,7 +2662,8 @@ def _hydrate_complete_history(state):
     return hydrated
 
 
-def _finalize_trend_flat_fill_ledger(state, now):
+def _finalize_trend_flat_fill_ledger(state, now, *, verified_position=None,
+                                     verified_continuity=None):
     """Resolve a flat Trend cycle from all fills, including partial exits.
 
     Returns ``(attempted, complete, error)``.  Once a state has a usable cycle
@@ -2376,7 +2674,7 @@ def _finalize_trend_flat_fill_ledger(state, now):
     if SLOT != "trend" or _trend_cycle_anchor_us(state) is None:
         return False, False, ""
     product_id = state.get("product_id")
-    position = get_exchange_position(product_id)
+    position = verified_position or get_exchange_position(product_id)
     if position is None:
         return True, False, "real-time flat position could not be reverified"
     try:
@@ -2385,7 +2683,7 @@ def _finalize_trend_flat_fill_ledger(state, now):
             return True, False, "Trend fill-ledger finalization requires a zero position"
     except (InvalidOperation, TypeError, ValueError, OverflowError):
         return True, False, "real-time flat position size is malformed"
-    continuity = _trend_cycle_continuity(state, position)
+    continuity = verified_continuity or _trend_cycle_continuity(state, position)
     if not continuity.get("verified") or continuity.get("status") != "closed":
         return True, False, str(
             continuity.get("reason") or continuity.get("status")
@@ -2495,7 +2793,8 @@ def _finalize_trend_flat_fill_ledger(state, now):
     return True, True, ""
 
 
-def _finalize_external_flat_close_locked(state):
+def _finalize_external_flat_close_locked(state, *, verified_position=None,
+                                         verified_continuity=None):
     """Persist an externally-flat close with proven history accounting.
 
     Exchange size zero proves exposure is gone, but it does not prove a fill
@@ -2521,9 +2820,22 @@ def _finalize_external_flat_close_locked(state):
         # in this product can then never be pulled backward into this close.
         state["exit_detected_at_utc"] = now.isoformat(timespec="seconds")
         _atomic_write_json(STATE_FILE, state)
-    ledger_attempted, ledger_complete, ledger_error = (
-        _finalize_trend_flat_fill_ledger(state, now)
-    )
+    # An operator-authorized protection-only position has no bot-placed
+    # entry order, so a "reconstructed fill ledger" starting from its
+    # adopted entry time is reconstructing fills that were never the bot's
+    # -- it is the wrong source of truth here, not merely an unverified one.
+    # The authenticated order-history lookup below is: this state's actual
+    # entry/side/lots matched against Delta's own terminal order record.
+    if _is_protection_only_external(state):
+        ledger_attempted, ledger_complete, ledger_error = False, False, ""
+    else:
+        ledger_attempted, ledger_complete, ledger_error = (
+            _finalize_trend_flat_fill_ledger(
+                state, now,
+                verified_position=verified_position,
+                verified_continuity=verified_continuity,
+            )
+        )
     if ledger_complete:
         return True
     if ledger_attempted:
@@ -2619,13 +2931,18 @@ def _finalize_external_flat_close_locked(state):
     return True
 
 
-def _finalize_external_flat_close(state):
+def _finalize_external_flat_close(state, *, verified_position=None,
+                                  verified_continuity=None):
     """Serialize external-close reconciliation across monitor/dashboard actions."""
     with _close_state_lock(f"tp-external-close-{os.getpid()}") as acquired:
         if not acquired:
             log.warning("Another %s close reconciliation is in progress.", SLOT)
             return False
-        return _finalize_external_flat_close_locked(state)
+        return _finalize_external_flat_close_locked(
+            state,
+            verified_position=verified_position,
+            verified_continuity=verified_continuity,
+        )
 
 
 def _finalize_confirmed_market_close_locked(state, order, mark, lots, reason):
@@ -2633,11 +2950,15 @@ def _finalize_confirmed_market_close_locked(state, order, mark, lots, reason):
     latest = load_state()
     if isinstance(latest, dict):
         state = {**state, **latest}
-    if _trend_fill_ledger_required(state):
+    if _trend_fill_ledger_required(state) and not _is_protection_only_external(state):
         # A terminal market order proves only its own fill.  An adopted Trend
         # aggregate may also contain manual additions and earlier reductions,
         # so its complete cycle must be reconstructed from fills before any
-        # realised row is declared final.
+        # realised row is declared final.  A protection-only hand-off has no
+        # such aggregate to reconstruct, and this order *is* its one and only
+        # fill -- redirecting it through fill-ledger reconstruction anyway
+        # would only route it into a fresh, page-size-limited order-history
+        # search for an order this call already holds proof of.
         ledger_state = dict(state)
         ledger_state["exit_trigger"] = (
             state.get("exit_trigger") or f"{reason}_{SLOT}"
@@ -2699,12 +3020,16 @@ def _finalize_confirmed_market_close_locked(state, order, mark, lots, reason):
     _atomic_write_json(STATE_FILE, state)
     append_history(state)
 
-    tag = {"take_profit": "TP", "stop_loss": "SL", "trailing_stop": "TSL"}.get(reason, "TP")
+    tag = {"take_profit": "TP", "stop_loss": "SL", "trailing_stop": "TSL",
+           "exchange_protection_unavailable": "SAFETY CLOSE"}.get(reason, "CLOSE")
     label = _slot_label()
     head = {
         "take_profit": f"✅ <b>TAKE PROFIT HIT — {label} ({USER.upper()})</b>",
         "stop_loss": f"🛑 <b>STOP LOSS HIT — {label} ({USER.upper()})</b>",
         "trailing_stop": f"🔻 <b>TRAILING STOP HIT — {label} ({USER.upper()})</b>",
+        "exchange_protection_unavailable": (
+            f"🚨 <b>EXCHANGE PROTECTION UNAVAILABLE — {label} ({USER.upper()})</b>"
+        ),
     }.get(reason, f"✅ <b>{tag} — {label} ({USER.upper()})</b>")
     psign = "+" if real >= 0 else "-"
     send_telegram(
@@ -3138,8 +3463,9 @@ def _close_position_locked(state, mark, pnl, reason="take_profit"):
         log.error("Trend close POST blocked by final cycle proof: %s", cycle_error)
         return False
 
-    tag = {"take_profit": "TP", "stop_loss": "SL", "trailing_stop": "TSL"}.get(
-        pending_reason, "TP"
+    tag = {"take_profit": "TP", "stop_loss": "SL", "trailing_stop": "TSL",
+           "exchange_protection_unavailable": "SAFETY CLOSE"}.get(
+        pending_reason, "CLOSE"
     )
     log.info("%s HIT — P&L $%.2f  mark $%.4f  %sing %d lots to close (client %s)...",
              tag, pnl, mark, close_side, lots, client_order_id)
@@ -3368,20 +3694,31 @@ def main():
     except (TypeError, ValueError):
         poll_secs = POLL_SECS
     local_fallback_poll = max(10, min(poll_secs, LOCAL_FALLBACK_POLL_SECS))
-    tsl_enabled = tsl_arm_pnl > 0 and tsl_trail_pnl > 0
+    # v2 mirrors Nimmathi: the trail arms as soon as the position has a
+    # positive P&L percentage, then protects ``peak_pct - tsl_pct``.  Older
+    # snapshots deliberately keep their original dollar arm/trail policy.
+    nimmathi_tsl = (
+        str(configured.get("protection_mode") or "")
+        == "filled_premium_percent_peak_trail_v2"
+    )
+    tsl_pct = _configured_number("tsl_pct", 0.0) if nimmathi_tsl else 0.0
+    tsl_enabled = tsl_pct > 0 if nimmathi_tsl else (tsl_arm_pnl > 0 and tsl_trail_pnl > 0)
 
     log.info("=" * 56)
     log.info(
         "TP/SL Monitor [%s/%s] started  tp=+$%.2f  sl=%s  "
-        "tsl=arm +$%.2f / trail $%.2f  poll=%ds  state=%s",
+        "tsl=%s  poll=%ds  state=%s",
         USER, SLOT, target_pnl, f"-${sl_pnl:.2f}" if sl_pnl > 0 else "off",
-        tsl_arm_pnl, tsl_trail_pnl, poll_secs, STATE_FILE,
+        (f"peak giveback {tsl_pct:.2f}%" if nimmathi_tsl
+         else f"arm +${tsl_arm_pnl:.2f} / trail ${tsl_trail_pnl:.2f}"),
+        poll_secs, STATE_FILE,
     )
     save_state_fields(protection_config_resolved={
         "tp_target_pnl": target_pnl,
         "sl_target_pnl": sl_pnl,
         "tsl_arm_pnl": tsl_arm_pnl,
         "tsl_trail_pnl": tsl_trail_pnl,
+        "tsl_pct": tsl_pct,
         "tsl_lock_min_pnl": tsl_lock_min_pnl,
         "poll_secs": poll_secs,
     })
@@ -3390,6 +3727,7 @@ def main():
     entry_mark = float(state["entry_mark"])
     lots = abs(int(float(state["lots"])))
     cv = float(state.get("contract_value", 0.001))
+    entry_premium_usd = abs(entry_mark * cv * lots)
     sign = -1 if str(state.get("side", "")).lower() == "short" else 1
     product_id = state["product_id"]
     close_side = "buy" if sign < 0 else "sell"
@@ -3442,11 +3780,16 @@ def main():
             exch_unsupported = True
             local_fallback_active = True
             save_state_fields(exchange_protection_supported=False,
-                              exchange_protection_error=f"{what} unsupported")
-            log.warning("%s is unsupported on this product; local fallback is active.", what)
-            alert_once("exchange_orders_unsupported",
-                       f"{symbol}: exchange-resident {what.lower()} is unsupported; "
-                       f"local monitor fallback is active every {local_fallback_poll}s")
+                              exchange_protection_error=f"{what} unsupported",
+                              protection_runtime_mode="local_monitor")
+            # This is an exchange capability result, not a protection outage.
+            # The monitor immediately switches to the faster local loop and
+            # retains the same reduce-only close path.  Telegram is reserved
+            # for failure of that fallback, not its expected activation.
+            log.warning(
+                "%s is unsupported on this product; healthy local protection "
+                "is active every %ds.", what, local_fallback_poll,
+            )
             return True
         return False
 
@@ -3973,11 +4316,13 @@ def main():
         exit_trigger = {"tp": f"take_profit_{SLOT}",
                         "tsl": f"trailing_stop_{SLOT}"}.get(
                             kind, f"stop_loss_{SLOT}")
-        if _trend_fill_ledger_required(closed_state):
+        if (_trend_fill_ledger_required(closed_state)
+                and not _is_protection_only_external(closed_state)):
             # The protection order is one segment of a potentially mixed,
             # partially reduced Trend cycle.  Do not finalize the cycle from
             # this one terminal order even when it filled the currently stored
-            # remainder.
+            # remainder.  A protection-only hand-off has no such cycle -- this
+            # stop order is its one and only fill, already proven here.
             ledger_state = dict(closed_state)
             ledger_state["exit_trigger"] = (
                 closed_state.get("exit_trigger") or exit_trigger
@@ -4036,6 +4381,255 @@ def main():
     if stop_id or tp_id:
         log.info("Resuming persisted orders: %s=%s (floor $%.2f), TP=%s, peak=$%.2f.",
                  stop_kind.upper(), stop_id, stop_floor, tp_id, peak_pnl)
+
+    def _stream_status(status, error):
+        current_state = load_state()
+        write_stream_snapshot(
+            status=status,
+            last_error=str(error or ""),
+            transport_updated_at_utc=_utc_now(),
+            expected_interval_secs=MARK_STREAM_EXPECTED_SECS,
+            stale_after_secs=MARK_STREAM_STALE_SECS,
+            symbol=symbol,
+            product_id=product_id,
+            position_cycle_id=current_state.get("position_cycle_id"),
+            protection_revision=int(
+                current_state.get("protection_revision") or 0
+            ),
+            **_stream_tsl_snapshot(current_state),
+        )
+
+    def _stream_health_allows_guard(current_state):
+        try:
+            health = json.loads(HEALTH_FILE.read_text(encoding="utf-8"))
+        except (OSError, TypeError, ValueError):
+            return None
+        if not isinstance(health, dict):
+            return None
+        identity_matches = (
+            str(health.get("product_id") or "") == str(product_id)
+            and int(health.get("protection_revision") or 0)
+            == int(current_state.get("protection_revision") or 0)
+            and str(health.get("position_cycle_id") or "")
+            == str(current_state.get("position_cycle_id") or "")
+        )
+        try:
+            heartbeat = datetime.fromisoformat(
+                str(health.get("heartbeat_utc") or "").replace("Z", "+00:00")
+            )
+            if heartbeat.tzinfo is None:
+                heartbeat = heartbeat.replace(tzinfo=timezone.utc)
+            health_age = (
+                datetime.now(timezone.utc) - heartbeat.astimezone(timezone.utc)
+            ).total_seconds()
+        except (TypeError, ValueError):
+            health_age = float("inf")
+        fresh = health_age <= max(poll_secs * 3, 30)
+        continuity_ok = (
+            SLOT != "trend" or health.get("continuity_verified") is True
+        )
+        if not (
+            identity_matches
+            and fresh
+            and continuity_ok
+            and health.get("status") == "healthy"
+            and health.get("protection_established") is True
+            and health.get("local_fallback_active") is True
+        ):
+            return None
+        return health
+
+    def _on_realtime_mark(mark, exchange_timestamp, source):
+        received_at = _utc_now()
+        preview = load_state()
+        if (
+            str(preview.get("status") or "").upper() != "OPEN"
+            or str(preview.get("product_id") or "") != str(product_id)
+        ):
+            return
+        try:
+            preview_entry = float(preview.get("entry_mark"))
+            preview_cv = float(preview.get("contract_value"))
+            preview_lots = abs(int(Decimal(str(preview.get("lots")))))
+            preview_sign = (
+                -1 if str(preview.get("side") or "").lower() == "short" else 1
+            )
+            preview_pnl = (
+                (float(mark) - preview_entry)
+                * preview_cv
+                * preview_lots
+                * preview_sign
+            )
+            if not all(math.isfinite(value) for value in (
+                preview_entry, preview_cv, preview_pnl,
+            )) or preview_entry <= 0 or preview_cv <= 0 or preview_lots <= 0:
+                raise ValueError("position dimensions are invalid")
+        except (InvalidOperation, TypeError, ValueError, OverflowError):
+            return
+
+        write_stream_snapshot(
+            status="live" if source == "websocket" else "rest_fallback",
+            source=source,
+            last_error=(
+                "" if source == "websocket"
+                else "mark-price stream stale; public ticker fallback active"
+            ),
+            symbol=symbol,
+            product_id=product_id,
+            mark=round(float(mark), 8),
+            pnl=round(preview_pnl, 8),
+            event_timestamp=int(exchange_timestamp),
+            event_received_at_utc=received_at,
+            expected_interval_secs=MARK_STREAM_EXPECTED_SECS,
+            stale_after_secs=MARK_STREAM_STALE_SECS,
+            position_cycle_id=preview.get("position_cycle_id"),
+            protection_revision=int(preview.get("protection_revision") or 0),
+            **_stream_tsl_snapshot(preview),
+        )
+
+        health = _stream_health_allows_guard(preview)
+        if health is None:
+            return
+        policy = preview.get("protection_config") or {}
+        try:
+            target = abs(float(policy.get("tp_target_pnl") or target_pnl))
+            stop_loss = abs(float(policy.get("sl_target_pnl") or sl_pnl))
+            arm = abs(float(policy.get("tsl_arm_pnl") or tsl_arm_pnl))
+            trail = abs(float(policy.get("tsl_trail_pnl") or tsl_trail_pnl))
+            policy_is_nimmathi_tsl = (
+                str(policy.get("protection_mode") or "")
+                == "filled_premium_percent_peak_trail_v2"
+            )
+            trail_pct = abs(float(policy.get("tsl_pct") or 0))
+            basis = abs(float(policy.get("entry_premium_usd") or entry_premium_usd))
+            lock_min = abs(float(
+                policy.get("tsl_lock_min_pnl") or tsl_lock_min_pnl
+            ))
+        except (TypeError, ValueError, OverflowError):
+            return
+
+        stored_peak = _finite_float(preview.get("tsl_peak"), 0.0)
+        stored_floor_raw = preview.get("tsl_floor")
+        stored_floor = _finite_float(stored_floor_raw, 0.0)
+        has_stored_floor = stored_floor_raw not in (None, "")
+        was_armed = bool(preview.get("tsl_armed"))
+        next_peak = max(stored_peak, preview_pnl)
+        next_armed = (
+            was_armed or (next_peak > 0 and trail_pct > 0 and basis > 0)
+            if policy_is_nimmathi_tsl
+            else was_armed or (arm > 0 and trail > 0 and next_peak >= arm)
+        )
+        next_floor = stored_floor
+        if next_armed:
+            nimmathi_floor = max(
+                -stop_loss, next_peak - basis * trail_pct / 100.0,
+            )
+            next_floor = (
+                nimmathi_floor if policy_is_nimmathi_tsl else
+                max(stored_floor, lock_min, next_peak - trail)
+            )
+        ratchet = max(1.0, trail * 0.05)
+        state_change = (
+            next_armed != was_armed
+            or next_peak >= stored_peak + ratchet
+            or (next_armed and (
+                not has_stored_floor or next_floor > stored_floor + 1e-8
+            ))
+        )
+        tp_trigger = bool(
+            health.get("local_tp_fallback_active") and preview_pnl >= target
+        )
+        stop_fallback = bool(health.get("local_stop_fallback_active"))
+        trigger = None
+        if tp_trigger:
+            trigger = "take_profit"
+        elif stop_fallback and next_armed and preview_pnl <= next_floor:
+            trigger = "trailing_stop"
+        elif stop_fallback and stop_loss > 0 and preview_pnl <= -stop_loss:
+            trigger = "stop_loss"
+        if not state_change and trigger is None:
+            return
+
+        with _close_state_lock(
+            f"tp-stream-{SLOT}-{os.getpid()}", wait_sec=0,
+        ) as acquired:
+            if not acquired:
+                return
+            current = load_state()
+            if (
+                str(current.get("status") or "").upper() != "OPEN"
+                or str(current.get("product_id") or "") != str(product_id)
+                or str(current.get("position_cycle_id") or "")
+                != str(preview.get("position_cycle_id") or "")
+            ):
+                return
+            current_peak = _finite_float(current.get("tsl_peak"), 0.0)
+            current_floor_raw = current.get("tsl_floor")
+            current_floor = _finite_float(current_floor_raw, 0.0)
+            has_current_floor = current_floor_raw not in (None, "")
+            current_armed = bool(current.get("tsl_armed"))
+            resolved_peak = max(current_peak, next_peak)
+            resolved_armed = current_armed or next_armed
+            if resolved_armed:
+                proposed_floor = (
+                    max(
+                        -stop_loss,
+                        resolved_peak - basis * trail_pct / 100.0,
+                    )
+                    if policy_is_nimmathi_tsl else
+                    max(lock_min, resolved_peak - trail)
+                )
+                resolved_floor = (
+                    max(current_floor, proposed_floor)
+                    if has_current_floor else proposed_floor
+                )
+            else:
+                resolved_floor = current_floor
+            current.update({
+                "tsl_peak": round(resolved_peak, 8),
+                "tsl_armed": resolved_armed,
+                "tsl_floor": round(resolved_floor, 8) if resolved_armed else None,
+                "protection_price_source": "mark_price_stream",
+                "protection_stream_event_utc": received_at,
+            })
+            _atomic_write_json(STATE_FILE, current)
+            write_stream_snapshot(
+                tsl_peak=round(resolved_peak, 8),
+                tsl_armed=resolved_armed,
+                tsl_floor=(
+                    round(resolved_floor, 8) if resolved_armed else None
+                ),
+                guard_verified=True,
+            )
+            if trigger is None:
+                return
+            closed = _close_position_locked(
+                current, float(mark), preview_pnl, trigger,
+            )
+            if closed:
+                cleaned = remove_exchange_protection(
+                    load_state(), confirmed_closed=True,
+                    reason="stream-driven reduce-only close confirmed",
+                )
+                if cleaned:
+                    write_monitor_health(
+                        "closed", state_status="CLOSED",
+                        exchange_position_size=0,
+                        protection_established=False,
+                    )
+                    write_stream_snapshot(
+                        status="closed", closed_at_utc=_utc_now(),
+                        close_trigger=trigger,
+                    )
+
+    mark_stream = DeltaMarkPriceStream(
+        symbol, _on_realtime_mark, _stream_status,
+    )
+    mark_stream.start()
+    save_state_fields(
+        protection_price_source="mark_price_stream",
+        protection_stream_expected_secs=MARK_STREAM_EXPECTED_SECS,
+    )
 
     while True:
         sleep_secs = poll_secs
@@ -4159,7 +4753,24 @@ def main():
             tp_id = state.get("tp_stop_order_id")
             stop_lots = int(state.get("stop_lots") or stop_lots or 0)
             tp_lots = int(state.get("tp_lots") or tp_lots or 0)
+            settled_continuity = None
             live = get_exchange_size(product_id)
+            if live is None:
+                settled_flat, settled_reason, settled_continuity = (
+                    _settled_trend_flat_evidence(state)
+                )
+                if settled_flat:
+                    log.warning(
+                        "Product-specific position is unavailable after settlement; "
+                        "authoritative aggregate and fill-ledger evidence prove %s flat.",
+                        symbol,
+                    )
+                    live = 0
+                else:
+                    log.info(
+                        "Post-settlement flat fallback not accepted for %s: %s",
+                        symbol, settled_reason,
+                    )
             if live is None:
                 consecutive_errors += 1
                 message = "exchange position could not be verified; protection orders retained"
@@ -4221,7 +4832,14 @@ def main():
                                 "resolving it through order history.", order_id,
                             )
                 if state.get("status") == "OPEN" and not done_kind:
-                    _finalize_external_flat_close(state)
+                    _finalize_external_flat_close(
+                        state,
+                        verified_position=(
+                            {"product_id": product_id, "size": 0}
+                            if settled_continuity is not None else None
+                        ),
+                        verified_continuity=settled_continuity,
+                    )
                 cleaned = remove_exchange_protection(
                     load_state(), confirmed_closed=True, reason="exchange position confirmed zero"
                 )
@@ -4380,7 +4998,16 @@ def main():
                 # net-size property.  A sell/buy round trip or full
                 # close/reopen can finish at the same lot count, so every open
                 # Trend poll must prove the complete fill-ledger continuity.
-                continuity_required = SLOT == "trend"
+                # A manually opened option may be deliberately handed to the
+                # monitor for protection only.  Such a hand-off is explicit
+                # (never inferred from an exchange position) and has no bot
+                # fill ledger to reconstruct, so requiring Trend-cycle
+                # continuity would leave it unprotected forever.  Normal
+                # controller-owned Trend positions keep the strict ledger
+                # proof, including same-product adoption safeguards.
+                continuity_required = (
+                    SLOT == "trend" and not _is_protection_only_external(state)
+                )
                 continuity = ({"verified": True, "status": "not_required",
                                "signed_size": live}
                               if not continuity_required else
@@ -4437,40 +5064,6 @@ def main():
                     sleep_secs = local_fallback_poll
                     raise _RetryMonitorCycle()
 
-                score_owned_live = (
-                    SLOT == "trend"
-                    and str(state.get("ownership") or "").lower()
-                    == "trend_score_auto_live"
-                    and str(state.get("entry_trigger") or "").lower()
-                    == "trend_engine_score_zone_auto"
-                )
-                if new_lots > lots and score_owned_live:
-                    message = (
-                        "exchange position grew beyond the proven score fill "
-                        f"({new_lots} > {lots}); fixed-size LIVE score ownership "
-                        "never adopts externally added lots"
-                    )
-                    write_monitor_health(
-                        "degraded",
-                        last_error=message,
-                        state_status=state.get("status"),
-                        exchange_position_size=live,
-                        protected_lots=lots,
-                        owned_entry_lots=owned_cap,
-                        unprotected_same_product_lots=max(new_lots - lots, 0),
-                        stop_order_id=stop_id,
-                        tp_order_id=tp_id,
-                        protection_established=False,
-                        adoption_status="blocked_score_fixed_size",
-                        continuity_verified=bool(continuity.get("verified")),
-                        continuity_status=continuity.get("status"),
-                    )
-                    alert_once(
-                        "score_same_product_growth_blocked",
-                        f"{symbol}: {message}",
-                    )
-                    sleep_secs = local_fallback_poll
-                    raise _RetryMonitorCycle()
                 if new_lots > lots and SLOT == "trend":
                     try:
                         previous_lots = lots
@@ -4666,21 +5259,59 @@ def main():
                 if not math.isfinite(mark) or mark <= 0:
                     raise ValueError(f"invalid mark price {mark!r}")
                 pnl = (mark - entry_mark) * cv * lots * sign
-                peak_pnl = max(peak_pnl, pnl)
+                # The websocket guard may have advanced the trail between
+                # watchdog cycles. Never overwrite that newer high-water mark
+                # with this slower REST snapshot, and stop immediately if the
+                # stream already completed the close.
+                streamed_state = load_state()
+                if str(streamed_state.get("status") or "").upper() != "OPEN":
+                    return 0
+                if str(streamed_state.get("position_cycle_id") or "") != str(
+                    state.get("position_cycle_id") or ""
+                ):
+                    return 0
+                peak_pnl = max(
+                    peak_pnl,
+                    _finite_float(streamed_state.get("tsl_peak"), 0.0),
+                    pnl,
+                )
+                tsl_armed = tsl_armed or bool(streamed_state.get("tsl_armed"))
+                stop_floor = max(
+                    stop_floor,
+                    _finite_float(streamed_state.get("tsl_floor"), 0.0),
+                )
                 if peak_pnl - persist_pk >= 1.0:
                     persist_pk = peak_pnl
                     save_state_fields(tsl_peak=round(peak_pnl, 2), tsl_armed=tsl_armed)
 
-                if tsl_enabled and not tsl_armed and peak_pnl >= tsl_arm_pnl:
+                peak_pct = (
+                    peak_pnl / entry_premium_usd * 100.0
+                    if entry_premium_usd > 0 else 0.0
+                )
+                should_arm_tsl = (
+                    peak_pct > 0 if nimmathi_tsl else peak_pnl >= tsl_arm_pnl
+                )
+                if tsl_enabled and not tsl_armed and should_arm_tsl:
                     tsl_armed = True
                     save_state_fields(tsl_peak=round(peak_pnl, 2), tsl_armed=True,
                                       tsl_armed_utc=_utc_now())
-                    log.info("TSL armed at peak $%.2f; arm=$%.2f, trail=$%.2f.",
-                             peak_pnl, tsl_arm_pnl, tsl_trail_pnl)
+                    if nimmathi_tsl:
+                        log.info("TSL armed at peak $%.2f (%.2f%%); giveback=%.2f%%.",
+                                 peak_pnl, peak_pct, tsl_pct)
+                    else:
+                        log.info("TSL armed at peak $%.2f; arm=$%.2f, trail=$%.2f.",
+                                 peak_pnl, tsl_arm_pnl, tsl_trail_pnl)
 
                 active_tsl = tsl_enabled and tsl_armed
-                tsl_floor = (max(tsl_lock_min_pnl, peak_pnl - tsl_trail_pnl)
-                             if active_tsl else None)
+                tsl_floor = (
+                    max(
+                        -sl_pnl,
+                        peak_pnl - entry_premium_usd * tsl_pct / 100.0,
+                    )
+                    if active_tsl and nimmathi_tsl else
+                    max(tsl_lock_min_pnl, peak_pnl - tsl_trail_pnl)
+                    if active_tsl else None
+                )
                 if active_tsl:
                     if (stop_id is None or stop_lots != lots
                             or not stop_complete
@@ -4816,19 +5447,31 @@ def main():
                 continuity_verified = bool(
                     not continuity_required or continuity.get("verified")
                 )
-                tp_local_fallback = continuity_verified and not tp_complete
+                tp_local_fallback = (
+                    not EXCHANGE_ONLY_PROTECTION
+                    and continuity_verified and not tp_complete
+                )
                 stop_local_fallback = (
-                    continuity_verified and stop_required and not stop_complete
+                    not EXCHANGE_ONLY_PROTECTION
+                    and continuity_verified and stop_required and not stop_complete
                 )
                 local_fallback_active = tp_local_fallback or stop_local_fallback
                 protection_established = continuity_verified and (
                     tp_complete or tp_local_fallback
                 ) and (stop_complete or stop_local_fallback)
                 sleep_secs = local_fallback_poll if local_fallback_active else poll_secs
-                status = "healthy" if exchange_complete else "degraded"
-                error = "" if exchange_complete else (
-                    "exchange protection incomplete; executable local fallback active"
-                    if local_fallback_active else "protection coverage is unverified"
+                # A proven, executable local fallback is a supported
+                # protection mode for products on which Delta rejects resting
+                # stop orders.  Keep the distinction in structured fields,
+                # but do not label a functioning protection loop as degraded.
+                protection_healthy = exchange_complete or (
+                    exch_unsupported
+                    and local_fallback_active
+                    and protection_established
+                )
+                status = "healthy" if protection_healthy else "degraded"
+                error = "" if protection_healthy else (
+                    "protection coverage is unverified"
                 )
                 write_monitor_health(
                     status, last_error=error, identity_state=state,
@@ -4854,6 +5497,13 @@ def main():
                     local_fallback_active=local_fallback_active,
                     local_tp_fallback_active=tp_local_fallback,
                     local_stop_fallback_active=stop_local_fallback,
+                    protection_runtime_mode=(
+                        "exchange_orders"
+                        if exchange_complete else "local_monitor"
+                        if exch_unsupported and local_fallback_active
+                        else "local_fallback_degraded"
+                        if local_fallback_active else "unverified"
+                    ),
                     protection_established=protection_established,
                     continuity_verified=continuity_verified,
                     continuity_status=continuity.get("status"),
@@ -4861,16 +5511,61 @@ def main():
                     continuity_verified_at_utc=continuity.get("verified_at_utc") or _utc_now(),
                     consecutive_errors=0, next_poll_secs=sleep_secs,
                 )
+                if (EXCHANGE_ONLY_PROTECTION and continuity_verified
+                        and not exchange_complete):
+                    reason = str(
+                        load_state().get("exchange_protection_error")
+                        or "complete reduce-only TP and SL/TSL orders are not verified"
+                    )
+                    alert_once(
+                        "exchange_only_protection_unavailable",
+                        f"{symbol}: Delta exchange protection is required; "
+                        f"the position is being flattened ({reason[:180]})",
+                    )
+                    closed = close_position(
+                        state, mark, pnl, "exchange_protection_unavailable",
+                    )
+                    if closed:
+                        cleaned = remove_exchange_protection(
+                            load_state(), confirmed_closed=True,
+                            reason="exchange-only safety close confirmed",
+                        )
+                        if cleaned:
+                            write_monitor_health(
+                                "closed", state_status="CLOSED",
+                                exchange_position_size=0,
+                                protection_established=False,
+                                protection_runtime_mode="exchange_required",
+                            )
+                            return 0
+                    sleep_secs = local_fallback_poll
+                    raise _RetryMonitorCycle()
+                if consecutive_errors:
+                    # A recovered fallback must be allowed to report a future
+                    # independent outage once, instead of suppressing it for
+                    # the lifetime of the position.
+                    recovered_code = "local_fallback_monitor_failed"
+                    if recovered_code in alert_codes:
+                        alert_codes.discard(recovered_code)
+                        save_state_fields(
+                            protection_alert_codes=sorted(alert_codes),
+                            local_fallback_recovered_at_utc=_utc_now(),
+                        )
                 consecutive_errors = 0
 
                 notification_pending = bool(
                     adopted_lots or state.get("external_adoption_notification_pending")
                 )
-                if notification_pending and exchange_complete:
+                if notification_pending and protection_established:
+                    coverage = (
+                        "TP + SL/TSL verified on exchange"
+                        if exchange_complete else
+                        f"Local TP/SL/TSL monitor active every {local_fallback_poll}s"
+                    )
                     send_telegram(
                         f"🛡️ <b>EXTERNAL LOTS PROTECTED — {_slot_label()} ({USER.upper()})</b>\n"
                         f"<code>{symbol}</code>\nTotal  » <code>{lots:,}</code> matching lots\n"
-                        f"Coverage » <code>TP + SL/TSL verified on exchange</code>\n"
+                        f"Coverage » <code>{coverage}</code>\n"
                         f"Basis  » <code>${entry_mark:.4f}</code> aggregate entry"
                     )
                     save_state_fields(external_adoption_notification_pending=False,
@@ -4924,6 +5619,13 @@ def main():
                 protection_established=bool(stop_id or tp_id),
                 consecutive_errors=consecutive_errors,
             )
+            if local_fallback_active and consecutive_errors >= 3:
+                alert_once(
+                    "local_fallback_monitor_failed",
+                    f"{symbol}: local protection failed "
+                    f"{consecutive_errors} consecutive checks; immediate "
+                    f"attention is required ({str(exc)[:180]})",
+                )
             sleep_secs = min(60, max(local_fallback_poll, 2 ** min(consecutive_errors, 5)))
 
         time.sleep(sleep_secs)

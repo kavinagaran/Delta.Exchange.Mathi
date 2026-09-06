@@ -1,5 +1,5 @@
 """
-dashboard.py — NITHI-BOT · MV-BTC Straddle Web Dashboard
+dashboard.py — BTC BOT · MV-BTC Straddle Web Dashboard
 Run  : python dashboard.py
 Open : http://localhost:5001
 """
@@ -18,6 +18,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from contextlib import ExitStack
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -25,9 +26,12 @@ from urllib.parse import quote, urlencode
 
 import requests as req
 from dotenv import load_dotenv, set_key
-from flask import (Flask, jsonify, request, abort, send_file, session,
-                   redirect, render_template, has_request_context, g)
+from flask import (Flask, jsonify, request, abort, session, Response,
+                   redirect, render_template, has_request_context, g,
+                   send_file, stream_with_context)
 
+import trend_engine_client
+from manual_exit_zone_lock import apply_manual_exit_zone_lock
 from risk_controls import (account_entry_lock, account_file_lock, audit_event,
                            decision_dict, evaluate_entry, risk_based_lots)
 from trend_engine import DEFAULT_CONFIG as TREND_ENGINE_DEFAULT_CONFIG, evaluate_trend
@@ -35,7 +39,10 @@ from trend_engine_live import collect_delta_trend_snapshot
 from trend_score_auto import (
     AUTO_TRADE_LOTS as TREND_SCORE_AUTO_LOTS,
     CE_2_ITM as TREND_SCORE_CE_ZONE,
-    PE_3_ITM as TREND_SCORE_PE_ZONE,
+    HOLD as TREND_SCORE_HOLD_ZONE,
+    LONG_MOVE as TREND_SCORE_LONG_MOVE_ZONE,
+    MIN_TIME_TO_EXPIRY_SECONDS,
+    PE_2_ITM as TREND_SCORE_PE_ZONE,
     SHORT_MOVE as TREND_SCORE_MOVE_ZONE,
     TrendScoreAutoInputError,
     completed_candle_signal_key,
@@ -44,11 +51,13 @@ from trend_score_auto import (
     score_zone,
     select_directional_option,
     select_move_contract,
+    short_move_adx_exit_required,
 )
 from trend_score_live_execution import (
     ExactOrderLookup as TrendScoreExactOrderLookup,
     bounded_ioc_payload as build_trend_score_live_ioc_payload,
     execute_or_recover_entry as execute_or_recover_trend_score_live_entry,
+    premium_percent_protection_policy as build_premium_percent_protection_policy,
     switch_entry_gate as trend_score_live_switch_entry_gate,
 )
 
@@ -57,7 +66,37 @@ import socket as _socket
 import urllib3.util.connection as _u3c
 _u3c.allowed_gai_family = lambda: _socket.AF_INET
 
-load_dotenv()
+BASE     = Path(__file__).parent
+ENV_FILE = BASE / ".env"
+
+
+def _first_dotenv_value(path: Path, key_name: str) -> str | None:
+    """Match the engine's minimal dotenv loader for one safety-critical key.
+
+    The engine deliberately keeps the first declaration it encounters.  The
+    python-dotenv package used by the dashboard resolves duplicate keys
+    differently.  Without this compatibility rule, duplicate ENGINE_TOKEN
+    rows can make the dashboard authenticate with one token while the engine
+    expects another.  Explicit process environment always retains priority.
+    """
+    if not path.exists():
+        return None
+    for line in path.read_text(encoding="utf-8-sig").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, _, value = stripped.partition("=")
+        if key.strip() == key_name:
+            return value.strip().strip('"').strip("'")
+    return None
+
+
+_engine_token_was_explicitly_set = "ENGINE_TOKEN" in os.environ
+load_dotenv(ENV_FILE)
+if not _engine_token_was_explicitly_set:
+    _engine_token_from_file = _first_dotenv_value(ENV_FILE, "ENGINE_TOKEN")
+    if _engine_token_from_file is not None:
+        os.environ["ENGINE_TOKEN"] = _engine_token_from_file
 
 API_KEY    = os.getenv("API_KEY", "")
 API_SECRET = os.getenv("API_SECRET", "")
@@ -76,24 +115,6 @@ def _sign(method, path, query="", body="", key=None, secret=None):
     return {"api-key": key, "timestamp": ts, "signature": sig,
             "Content-Type": "application/json"}
 
-def _exchange_pnl(product_id: int):
-    """Fetch live unrealized P&L directly from exchange positions API."""
-    try:
-        hdrs = _sign("GET", "/v2/positions/margined")
-        r = req.get(API_BASE + "/v2/positions/margined", headers=hdrs, timeout=5)
-        for pos in r.json().get("result", []):
-            if pos.get("product_id") == product_id and float(pos.get("size", 0)) != 0:
-                return {
-                    "live_pnl":     float(pos.get("unrealized_pnl", 0)),
-                    "current_mark": float(pos.get("mark_price", 0)),
-                }
-    except Exception:
-        pass
-    return None
-
-BASE     = Path(__file__).parent
-ENV_FILE = BASE / ".env"
-
 MOVE_SLOTS = ("morning", "evening")
 SLOTS = (*MOVE_SLOTS, "trend")
 
@@ -110,16 +131,213 @@ _trend_auto_last_attempt: dict[str, float] = {}
 _trend_auto_health: dict[str, dict] = {}
 _trend_debounce: dict[str, dict] = {}
 _trend_shadow_seen: dict[str, str] = {}
-_trend_engine_cache: dict[tuple[str, str, str, str], dict] = {}
 _trend_score_auto_cycle_locks: dict[str, threading.Lock] = {}
 _trend_score_auto_health: dict[str, dict] = {}
 TREND_ENGINE_DRY_PREVIEW_TTL_SECONDS = 120
 TREND_ENGINE_REMAINING_EV_TTL_SECONDS = 300
 TREND_SCORE_AUTO_LEDGER_FILE = "trend_score_auto_ledger.json"
+# A close must outlive its mutable slot state.  This journal is deliberately
+# separate from ``trade_history.json`` so a closed simulation cannot be lost
+# if a history write is temporarily unavailable just before the next entry.
+DRY_CLOSED_TRADE_OUTBOX_FILE = "dry_closed_trade_outbox.json"
 TREND_SCORE_AUTO_OWNERSHIP = "trend_score_auto_dry_run"
 TREND_SCORE_AUTO_LIVE_OWNERSHIP = "trend_score_auto_live"
 TREND_SCORE_AUTO_TRIGGER = "trend_engine_score_zone_auto"
+# The Cockpit's manual LIVE entries (Buy CE/PE/MOVE, Sell CE/PE/MOVE). A manual
+# trade has a real fill ledger -- it goes through the identical execution
+# seam as a bot entry -- so it is deliberately NOT treated like an adopted
+# external position (tp_monitor.py's fill-ledger-reconstruction exemptions
+# do not apply to it). It only differs from a bot entry in ownership: the
+# LIVE score-auto controller must never manage or replace it (see
+# _trend_score_auto_live_owned_position), only block new entries while it
+# is open.
+TREND_SCORE_MANUAL_LIVE_OWNERSHIP = "manual_cockpit_live"
+TREND_SCORE_MANUAL_DRY_OWNERSHIP = "manual_cockpit_dry_run"
+TREND_SCORE_SHORT_CE_ZONE = "SHORT_CE"
+TREND_SCORE_SHORT_PE_ZONE = "SHORT_PE"
+TREND_SCORE_MANUAL_TRIGGERS = {
+    "buy_ce": "manual_cockpit_buy_ce",
+    "buy_pe": "manual_cockpit_buy_pe",
+    "buy_move": "manual_cockpit_buy_move",
+    "sell_ce": "manual_cockpit_sell_ce",
+    "sell_pe": "manual_cockpit_sell_pe",
+    "sell_move": "manual_cockpit_sell_move",
+}
+
+# Display classification of how a trade was opened: M = manual (Cockpit or
+# placed outside this dashboard), A = automated (engine/bot), E = externally
+# detected and adopted, "—" = unknown (record predates origin tagging).
+ORIGIN_MANUAL = "M"
+ORIGIN_AUTO = "A"
+ORIGIN_EXTERNAL = "E"
+ORIGIN_UNKNOWN = "—"
+_TREND_AUTO_ENTRY_TRIGGERS = {
+    TREND_SCORE_AUTO_TRIGGER,
+    "trend_engine_phase1_confirmed",
+    "trend_auto",
+    "trend_alignment",
+}
+_TREND_AUTO_OWNERSHIPS = {
+    "trend_bot",
+    "trend_engine_dry_run",
+    TREND_SCORE_AUTO_OWNERSHIP,
+    TREND_SCORE_AUTO_LIVE_OWNERSHIP,
+}
+_EXTERNAL_ENTRY_TRIGGERS = {"exchange_sync", "trend_recovered"}
+_MANUAL_OWNERSHIPS = {
+    TREND_SCORE_MANUAL_LIVE_OWNERSHIP,
+    TREND_SCORE_MANUAL_DRY_OWNERSHIP,
+}
+_MANUAL_COCKPIT_AUDIT_CACHE: dict[str, tuple[tuple[int, int], frozenset[str]]] = {}
+
+
+def _manual_cockpit_order_ids_from_audit() -> frozenset[str]:
+    """Return durable order identities previously opened through Cockpit.
+
+    Older TP-monitor history rows omitted their origin fields.  The strategy
+    audit remains authoritative for those rows because the entry intent and
+    opened events contain both the manual signal key and client order ID.
+    Cache by file signature so the frequently-polled Today endpoint does not
+    repeatedly parse the audit log.
+    """
+    path = _user_dir() / "strategy_audit.jsonl"
+    try:
+        stat = path.stat()
+    except OSError:
+        return frozenset()
+    signature = (stat.st_mtime_ns, stat.st_size)
+    key = str(path)
+    cached = _MANUAL_COCKPIT_AUDIT_CACHE.get(key)
+    if cached and cached[0] == signature:
+        return cached[1]
+
+    identities: set[str] = set()
+    try:
+        with path.open("r", encoding="utf-8") as stream:
+            for line in stream:
+                try:
+                    event = json.loads(line)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    continue
+                if not isinstance(event, dict):
+                    continue
+                signal_key = str(event.get("signal_key") or "")
+                if not signal_key.startswith("manual-cockpit|"):
+                    continue
+                for field in ("client_order_id", "entry_client_order_id"):
+                    value = str(event.get(field) or "").strip()
+                    if value:
+                        identities.add(value)
+                for value in event.get("client_order_ids") or []:
+                    value = str(value or "").strip()
+                    if value:
+                        identities.add(value)
+    except OSError:
+        return frozenset()
+
+    result = frozenset(identities)
+    _MANUAL_COCKPIT_AUDIT_CACHE[key] = (signature, result)
+    return result
+
+
+def _trade_client_order_ids(record: dict) -> set[str]:
+    identities = {
+        str(record.get(field) or "").strip()
+        for field in ("client_order_id", "entry_client_order_id")
+    }
+    identities.update(
+        str(value or "").strip()
+        for value in (record.get("client_order_ids") or [])
+    )
+    identities.discard("")
+    return identities
+
+
+def _trade_origin_label(record: dict | None) -> str:
+    """Classify how a trade was opened so any table can show an M/A badge.
+
+    Works for LIVE and dry-run records alike; both entry paths tag the slot
+    state with ``entry_trigger``/``ownership`` before the close is journaled.
+    Untagged MOVE records predate origin tagging and were all written by the
+    legacy MV straddle bot, so they are reported as automated.
+    """
+    if not isinstance(record, dict):
+        return ORIGIN_UNKNOWN
+    trigger = str(record.get("entry_trigger") or "").strip().lower()
+    classification = str(record.get("entry_classification") or "").strip().lower()
+    ownership = str(record.get("ownership") or "").strip().lower()
+    signal_key = str(record.get("signal_key") or "")
+    if (
+        trigger.startswith("manual_cockpit")
+        or classification == "manual_cockpit"
+        or ownership in _MANUAL_OWNERSHIPS
+        or signal_key.startswith("manual-cockpit|")
+    ):
+        return ORIGIN_MANUAL
+    if (
+        _trade_client_order_ids(record)
+        & _manual_cockpit_order_ids_from_audit()
+    ):
+        return ORIGIN_MANUAL
+    if trigger in _TREND_AUTO_ENTRY_TRIGGERS or ownership in _TREND_AUTO_OWNERSHIPS:
+        return ORIGIN_AUTO
+    if trigger in _EXTERNAL_ENTRY_TRIGGERS or ownership == "external":
+        return ORIGIN_EXTERNAL
+    if str(record.get("symbol") or "").upper().startswith("MV-BTC"):
+        return ORIGIN_AUTO
+    return ORIGIN_UNKNOWN
+
+
+# "Lemme Risk": the operator's explicit manual override setup. Unlike every
+# other Cockpit setup it is gated by no engine evidence at all -- it is
+# always eligible, and every Cockpit trade type is selectable under it. It
+# is a *selection* bypass only: the entry it authorizes still runs through
+# the identical execution seam as any other Cockpit trade (contract
+# selection, fresh-quote check, wallet-affordable sizing, IOC submission,
+# and the standard TP/SL/TSL protection spawn), and it does not relax the
+# structural safety rails -- one open Trend position at a time and today's
+# expiry only still apply. Lemme Risk also bypasses MOVE time restrictions.
+COCKPIT_OVERRIDE_SETUP = "lemme_risk"
+COCKPIT_SETUP_ACTIONS = {
+    "trend_bullish": {"buy_ce", "sell_pe"},
+    "trend_bearish": {"buy_pe", "sell_ce"},
+    "ema_bullish": {"buy_ce", "sell_pe"},
+    "ema_bearish": {"buy_pe", "sell_ce"},
+    "rsi_bullish": {"buy_ce", "sell_pe"},
+    "rsi_bearish": {"buy_pe", "sell_ce"},
+    "supertrend_bullish": {"buy_ce", "sell_pe"},
+    "supertrend_bearish": {"buy_pe", "sell_ce"},
+    "support_bounce": {"buy_ce", "sell_pe"},
+    "resistance_rejection": {"buy_pe", "sell_ce"},
+    "breakout_bullish": {"buy_ce", "sell_pe", "buy_move"},
+    "breakout_bearish": {"buy_pe", "sell_ce", "buy_move"},
+    "orderflow_buy": {"buy_ce", "sell_pe"},
+    "orderflow_sell": {"buy_pe", "sell_ce"},
+    "calm_range": {"sell_ce", "sell_pe", "sell_move"},
+    "volatility_expansion": {"buy_move"},
+    COCKPIT_OVERRIDE_SETUP: {
+        "buy_ce", "buy_pe", "buy_move", "sell_ce", "sell_pe", "sell_move",
+    },
+}
 TREND_SCORE_AUTO_LEDGER_SIGNAL_LIMIT = 576
+# A zero-fill IOC is a transient liquidity outcome, not a completed trading
+# setup.  Retry only on a later completed candle and back off aggressively so
+# an unchanged zone cannot create an order/alert storm.
+# A terminal zero-fill IOC is safe to retry on a newer completed candle: the
+# exact order is already cancelled, its fill is proven zero, and real-time
+# exposure is proven flat.  Keep a short debounce so concurrent supervisors
+# cannot churn, but do not strand a valid zone for 15 minutes.  The controller
+# is completed-5m-candle driven, therefore a 60-second base makes the next
+# candle the first practical retry while retaining one order per signal.
+TREND_SCORE_AUTO_NO_FILL_RETRY_BASE_SECONDS = 60
+TREND_SCORE_AUTO_NO_FILL_RETRY_MAX_SECONDS = 5 * 60
+# Fixed strategy rule: both DRY RUN and LIVE use the same quoted ATM MOVE
+# premium floor before a SHORT MOVE can be opened.
+SHORT_MOVE_MIN_PREMIUM_USD = 300.0
+# Weekday risk window: do not open a new SHORT MOVE from 5:30 PM IST through
+# the end of that IST calendar day. Existing positions keep their normal exit
+# and protection lifecycle; CE/PE entries are unaffected.
+SHORT_MOVE_WEEKDAY_BLACKOUT_START_IST = (17, 30)
 _external_options: dict[str, list] = {}
 TREND_SIGNAL_SNAPSHOT_FILE = "trend_signal_snapshot.json"
 
@@ -336,8 +554,8 @@ def _wait_for_protection(user: str, slot: str, started_at: datetime,
             current_run = False
         active = bool(
             latest.get("protection_established")
-            and (latest.get("exchange_protection_complete")
-                 or latest.get("local_fallback_active"))
+            and (latest.get("exchange_protection_complete") is True
+                 or latest.get("local_fallback_active") is True)
         )
         if (current_run and active and _tp_health_matches(latest, expected_state, user, slot)
                 and latest.get("status") in {"healthy", "degraded", "running"}):
@@ -399,6 +617,8 @@ CONFIG_KEYS = [
     "TREND_LOTS", "TP_TARGET_PNL_TREND", "TP_POLL_SECS_TREND",
     "SL_TARGET_PNL_TREND", "TSL_TARGET_PNL_TREND", "TSL_ARM_PNL_TREND",
     "TSL_TRAIL_PNL_TREND", "TSL_LOCK_MIN_PNL_TREND",
+    "TREND_SCORE_AUTO_LOTS", "TREND_TP_PREMIUM_PCT",
+    "TREND_SL_PREMIUM_PCT", "TREND_TSL_PCT",
     "TREND_AUTO_ENTRY_ENABLED", "TREND_AUTO_ENTRY_MODE",
     "TREND_EMA_GAP_PCT", "TREND_RSI_UP", "TREND_RSI_DOWN",
     "TREND_15M_SLOPE_BARS", "TREND_MIN_15M_SLOPE_PCT", "TREND_ADX_MIN",
@@ -408,7 +628,7 @@ CONFIG_KEYS = [
     "TREND_MAX_MARK_IV", "TREND_RISK_BUDGET_USD",
     "TREND_MAX_SLIPPAGE_PCT", "TREND_ORDER_CHUNK_LOTS",
     "TREND_MARKET_FALLBACK_ENABLED", "TREND_REENTRY_COOLDOWN_MIN",
-    "TREND_ALLOW_MISSING_BOOK",
+    "TREND_ALLOW_MISSING_BOOK", "TREND_DRY_RUN_CAPITAL_USD",
     "TREND_ENGINE_SCORE_AUTO_MODE",
     "MAX_TRADES_PER_DAY", "MAX_TRADES_PER_DAY_GLOBAL",
     "MAX_DAILY_LOSS_USD", "MAX_OPEN_RISK_USD", "MAX_CONSECUTIVE_LOSSES",
@@ -435,17 +655,24 @@ CONFIG_KEYS = [
     "MOVE_FORECAST_PATHS_PER_SCENARIO",
 ]
 
-# One explicit, fail-safe profile for every editable setting on the Config
-# page. Do not derive this from .env or the strategy module's historical
-# fallbacks: those can enable live entries and differ between installations.
+# One explicit, fail-safe profile for the score-zone settings exposed on the
+# Config page. Do not derive this from .env or retired strategy fallbacks:
+# those can enable historical flows and differ between installations.
 # Telegram credentials are deliberately excluded because account secrets have
-# no meaningful shared default and a strategy reset must not erase them.
+# no meaningful shared default and a reset must not erase them.
 CONFIG_PAGE_DEFAULTS = {
-    # Trading mode and shared guardrails
+    # Score-zone controller
     "DRY_RUN": "true",
-    "STRADDLE_LOTS": "1000",
-    "STRIKE_STEP": "200",
-    "MAX_ORDER_LOTS": "1000",
+    "TREND_ENGINE_SCORE_AUTO_MODE": "disabled",
+    "TREND_SCORE_AUTO_LOTS": "1000",
+    # Score-zone protection targets are derived from each filled premium.
+    "TREND_TP_PREMIUM_PCT": "100",
+    "TREND_SL_PREMIUM_PCT": "50",
+    # Nimmathi-style trailing: once P&L is positive, exit only after it
+    # gives back this percentage from its own peak.
+    "TREND_TSL_PCT": "25",
+    "TP_POLL_SECS_TREND": "30",
+    # Account-wide risk limits
     "MAX_TRADES_PER_DAY_GLOBAL": "3",
     "MAX_DAILY_LOSS_USD": "500",
     "MAX_OPEN_RISK_USD": "500",
@@ -454,73 +681,35 @@ CONFIG_PAGE_DEFAULTS = {
     "MAX_ACCOUNT_PREMIUM_AT_RISK_USD": "500",
     "RISK_FAIL_CLOSED": "true",
     "ALLOW_EXTERNAL_POSITIONS_WITH_BOT": "false",
-    # Morning and evening MOVE slots. Times are UTC; the page renders IST.
-    "MORNING_ENABLED": "false",
-    "MORNING_LOTS": "1000",
-    "RISK_PER_TRADE_USD_MORNING": "200",
-    "MORNING_EXIT_ENABLED": "false",
-    "MORNING_H_UTC": "0",
-    "MORNING_M_UTC": "15",
-    "MORNING_EXIT_H_UTC": "11",
-    "MORNING_EXIT_M_UTC": "30",
-    "EVENING_ENABLED": "false",
-    "RISK_PER_TRADE_USD_EVENING": "200",
-    "EVENING_EXIT_ENABLED": "false",
-    "ENTRY_H_UTC": "12",
-    "ENTRY_M_UTC": "5",
-    "EXIT_H_UTC": "19",
-    "EXIT_M_UTC": "30",
-    # MOVE exposure and execution controls
-    "MOVE_AUTO_ENTRY_MODE": "shadow",
-    "MOVE_ALLOW_LONG": "true",
-    "ALLOW_SHORT_MOVE": "false",
-    "SHORT_MAX_RISK_USD": "0",
+    "TREND_RISK_BUDGET_USD": "100",
+    "SHORT_MAX_RISK_USD": "50",
+    "TREND_DRY_RUN_CAPITAL_USD": "1000",
+    # Safe execution and fresh-quote requirements. The controller chooses
+    # the matching option or MOVE settings for the active score zone.
     "SAFE_EXECUTION_ENABLED": "true",
     "MAX_SPREAD_PCT": "3",
     "MAX_SLIPPAGE_PCT": "1",
-    "MIN_BOOK_DEPTH_MULTIPLE": "1",
     "MAX_QUOTE_AGE_SEC": "20",
-    "ORDER_CHUNK_LOTS": "1000",
-    "MAX_CONCURRENT_MOVE_POSITIONS": "1",
-    "MOVE_MIN_BID_SIZE": "1",
-    "MOVE_MIN_ASK_SIZE": "1",
-    "MOVE_MAX_LONG_PREMIUM_RISK_USD": "1000",
-    "MOVE_MAX_SHORT_MARGIN_USAGE_PCT": "30",
-    "MOVE_MIN_LIQUIDATION_BUFFER_PCT": "50",
-    "MOVE_REQUIRE_NO_OPEN_ORDERS": "true",
-    "MOVE_REQUIRE_FLAT": "true",
-    "MOVE_DRY_RUN_CAPITAL_USD": "1000",
-    # Trend signal, contract, liquidity and execution controls
-    "TREND_LOTS": "100",
-    "TREND_AUTO_ENTRY_MODE": "shadow",
-    "TREND_RISK_BUDGET_USD": "100",
-    "TREND_REENTRY_COOLDOWN_MIN": "30",
-    "TREND_EMA_GAP_PCT": "0.05",
-    "TREND_RSI_UP": "55",
-    "TREND_RSI_DOWN": "45",
-    "TREND_15M_SLOPE_BARS": "3",
-    "TREND_MIN_15M_SLOPE_PCT": "0",
-    "TREND_ADX_MIN": "18",
-    "TREND_1H_CONFIRM_SAMPLES": "2",
-    "TREND_MIN_TTE_HOURS": "4",
-    "TREND_TARGET_DELTA": "0.65",
     "TREND_MAX_SPREAD_PCT": "12",
-    "TREND_MIN_BOOK_DEPTH_LOTS": "10",
-    "TREND_BOOK_PARTICIPATION_PCT": "25",
     "TREND_QUOTE_MAX_AGE_SECS": "20",
-    "TREND_MAX_MARK_IV": "0",
-    "TREND_ALLOW_MISSING_BOOK": "false",
     "TREND_MAX_SLIPPAGE_PCT": "1",
-    "TREND_ORDER_CHUNK_LOTS": "1000",
-    "TREND_MARKET_FALLBACK_ENABLED": "false",
-    # Independent rules-based paper controller. This mode can never be LIVE.
-    "TREND_ENGINE_SCORE_AUTO_MODE": "disabled",
-    "OPTION_FEE_RATE": "0.00010",
-    "OPTION_FEE_CAP_PCT": "0.035",
     # Alert behavior resets, but its account-specific credentials do not.
     "TELEGRAM_ALERTS": "true",
 }
 CONFIG_PAGE_PRESERVED_KEYS = ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID")
+
+# The retired scheduled MOVE and legacy Trend controllers must never regain
+# ownership through an old client or a stale account config.  Score-zone
+# automation is the sole entry controller for this project.
+SCORE_ZONE_LEGACY_DISABLED_SETTINGS = {
+    "MORNING_ENABLED": "false",
+    "MORNING_EXIT_ENABLED": "false",
+    "EVENING_ENABLED": "false",
+    "EVENING_EXIT_ENABLED": "false",
+    "MOVE_AUTO_ENTRY_MODE": "disabled",
+    "TREND_AUTO_ENTRY_MODE": "disabled",
+    "TREND_AUTO_ENTRY_ENABLED": "false",
+}
 
 assert set(CONFIG_PAGE_DEFAULTS).issubset(CONFIG_KEYS)
 assert set(CONFIG_PAGE_PRESERVED_KEYS).issubset(CONFIG_KEYS)
@@ -854,6 +1043,11 @@ def _hist_file(*, dry_run: bool = False) -> Path:
     return _mode_data_dir(dry_run) / "trade_history.json"
 
 
+def _dry_closed_trade_outbox_path(data_dir: Path | None = None) -> Path:
+    """Return the account-local durable journal for closed simulations."""
+    return Path(data_dir or _mode_data_dir(True)) / DRY_CLOSED_TRADE_OUTBOX_FILE
+
+
 def _is_dry_record(record: dict | None) -> bool:
     if not isinstance(record, dict):
         return False
@@ -1001,6 +1195,160 @@ def _append_trade_history(
         return _history_accounting_complete(stored)
 
 
+def _dry_closed_trade_outbox(data_dir: Path) -> dict:
+    """Read the durable close journal strictly; corruption blocks new entries."""
+    path = _dry_closed_trade_outbox_path(data_dir)
+    if not path.exists():
+        return {"schema_version": 1, "records": {}}
+    try:
+        journal = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError) as exc:
+        raise RuntimeError("closed DRY RUN trade journal is unreadable") from exc
+    if (not isinstance(journal, dict)
+            or journal.get("schema_version") != 1
+            or not isinstance(journal.get("records"), dict)):
+        raise RuntimeError("closed DRY RUN trade journal is invalid")
+    for simulation_id, item in journal["records"].items():
+        if (not isinstance(simulation_id, str) or not simulation_id
+                or not isinstance(item, dict)
+                or item.get("slot") not in SLOTS
+                or not isinstance(item.get("state"), dict)):
+            raise RuntimeError("closed DRY RUN trade journal contains an invalid record")
+    return journal
+
+
+def _write_dry_closed_trade_outbox(data_dir: Path, journal: dict) -> None:
+    _atomic_write_json(_dry_closed_trade_outbox_path(data_dir), journal)
+
+
+def _queue_closed_dry_trade(
+    slot: str,
+    state: dict,
+    *,
+    owner: str,
+) -> None:
+    """Persist a completed simulation before its mutable slot can be reused."""
+    data_dir = _mode_data_dir(True)
+    record = _as_dry_record(state, slot)
+    simulation_id = _simulation_identity(record, slot)
+    if str(record.get("status") or "").upper() != "CLOSED":
+        raise RuntimeError("only closed DRY RUN positions may enter the close journal")
+    with account_file_lock(
+        data_dir, "dry-closed-outbox", owner, stale_after_sec=90, wait_sec=2,
+    ) as acquired:
+        if not acquired:
+            raise RuntimeError("closed DRY RUN trade journal is busy")
+        journal = _dry_closed_trade_outbox(data_dir)
+        existing = journal["records"].get(simulation_id)
+        if existing is not None and existing.get("state") != record:
+            raise RuntimeError("closed DRY RUN trade journal identity conflict")
+        if existing is None:
+            journal["records"][simulation_id] = {
+                "slot": slot,
+                "state": record,
+                "queued_at_utc": datetime.now(timezone.utc).isoformat(),
+            }
+            _write_dry_closed_trade_outbox(data_dir, journal)
+
+
+def _audit_dry_run_close_once(slot: str, state: dict) -> tuple[dict, bool]:
+    """Durably audit a local close exactly once before allowing replacement."""
+    record = _as_dry_record(state, slot)
+    simulation_id = _simulation_identity(record, slot)
+    event_id = f"dry-run-close:{simulation_id}"
+    if record.get("close_audit_event_id") == event_id:
+        return record, True
+    try:
+        audit_event(_user_dir(), "dry_run_trade_closed", {
+            "event_id": event_id,
+            "slot": slot,
+            "simulation_id": simulation_id,
+            "symbol": record.get("symbol"),
+            "score_zone": record.get("trend_score_zone"),
+            "side": record.get("side"),
+            "lots": record.get("lots"),
+            "exit_trigger": record.get("exit_trigger"),
+            "pnl_usd": record.get("pnl_usd"),
+            "order_submitted": False,
+            "exchange_api_called": False,
+        })
+    except Exception as exc:
+        record["close_audit_pending"] = True
+        record["close_audit_error"] = str(exc)[:300]
+        return record, False
+    record.update({
+        "close_audit_event_id": event_id,
+        "close_audit_logged_at_utc": datetime.now(timezone.utc).isoformat(),
+        "close_audit_pending": False,
+        "close_audit_error": "",
+    })
+    return record, True
+
+
+def _recover_closed_dry_trade_outbox(*, owner: str) -> bool:
+    """Flush every journalled close, or return false and keep entries blocked.
+
+    Callers must hold the account entry lock and all applicable ``close-*``
+    slot locks.  The journal is written before a close reaches mutable slot
+    state, so this also recovers a process crash between those two writes.
+    """
+    data_dir = _mode_data_dir(True)
+    with account_file_lock(
+        data_dir, "dry-closed-outbox", owner, stale_after_sec=90, wait_sec=2,
+    ) as acquired:
+        if not acquired:
+            return False
+        journal = _dry_closed_trade_outbox(data_dir)
+        for simulation_id, item in list(journal["records"].items()):
+            slot = str(item["slot"])
+            queued = _as_dry_record(item["state"], slot)
+            if _simulation_identity(queued, slot) != simulation_id:
+                raise RuntimeError("closed DRY RUN trade journal identity is inconsistent")
+            state_path = _slot_file(slot, dry_run=True)
+            current = _load_json(state_path, {})
+            if current and not _is_dry_record(current):
+                raise RuntimeError(
+                    f"closed DRY RUN {slot} history conflicts with a non-DRY slot state"
+                )
+            current_identity = (
+                _simulation_identity(current, slot) if _is_dry_record(current) else ""
+            )
+            if current_identity and current_identity != simulation_id:
+                raise RuntimeError(
+                    f"closed DRY RUN {slot} history conflicts with a newer slot state"
+                )
+            # A shutdown after queueing but before writing the CLOSED slot is
+            # repaired from the journal.  A matching closed slot may have more
+            # recent notification/audit flags, so retain them when merging.
+            if current_identity == simulation_id:
+                closed = {**queued, **current}
+            else:
+                closed = dict(queued)
+            closed.update({
+                "status": "CLOSED",
+                "history_pending": True,
+                "history_logged": False,
+            })
+            closed, audited = _audit_dry_run_close_once(slot, closed)
+            _atomic_write_json(state_path, closed)
+            if not audited:
+                return False
+            appended = _append_trade_history(
+                closed, f"dry-close-recovery:{slot}:{simulation_id}", dry_run=True,
+            )
+            if not appended:
+                return False
+            closed.update({
+                "history_pending": False,
+                "history_logged": True,
+                "history_logged_at_utc": datetime.now(timezone.utc).isoformat(),
+            })
+            _atomic_write_json(state_path, closed)
+            del journal["records"][simulation_id]
+            _write_dry_closed_trade_outbox(data_dir, journal)
+    return True
+
+
 def _flush_pending_history() -> None:
     for slot in SLOTS:
         path = _slot_file(slot)
@@ -1022,6 +1370,15 @@ def _cfg_file() -> Path:
 
 class AccountConfigError(RuntimeError):
     """The active account's persisted strategy config cannot be trusted."""
+
+
+class TrendScoreDataSyncPending(RuntimeError):
+    """Market evidence is temporarily between completed-candle revisions.
+
+    This is a retryable wait state, not a controller fault.  It must remain a
+    distinct exception so both DRY RUN and LIVE fail closed without recording
+    a red error or approaching an order boundary.
+    """
 
 
 def _saved_user_cfg(
@@ -1081,21 +1438,14 @@ def _user_cfg() -> dict:
     """The active account's strategy config: .env values as global defaults,
     overridden key by key by users/<name>/config.json.
 
-    Trend, MOVE, and score-driven automation are exceptions: each must be
-    explicitly persisted for the active account and is never inherited from
-    the process environment.
+    Score-zone automation is explicitly persisted per account. Retired
+    scheduled MOVE and legacy Trend entry controllers are forced off here so
+    neither a stale environment value nor an old client can restore them.
     """
     cfg = {k: os.getenv(k, "") for k in CONFIG_KEYS}
     saved, _ = _saved_user_cfg()
     cfg.update({k: str(v) for k, v in saved.items() if k in CONFIG_KEYS})
-    mode = str(saved.get("TREND_AUTO_ENTRY_MODE") or "").strip().lower()
-    if not mode:
-        mode = "shadow"
-    cfg["TREND_AUTO_ENTRY_MODE"] = mode
-    cfg["TREND_AUTO_ENTRY_ENABLED"] = "true" if mode == "live" else "false"
-    move_mode = str(
-        saved.get("MOVE_AUTO_ENTRY_MODE") or "").strip().lower()
-    cfg["MOVE_AUTO_ENTRY_MODE"] = move_mode or "shadow"
+    cfg.update(SCORE_ZONE_LEGACY_DISABLED_SETTINGS)
     score_mode = str(
         saved.get("TREND_ENGINE_SCORE_AUTO_MODE") or ""
     ).strip().lower()
@@ -1166,11 +1516,13 @@ def _trend_score_auto_config_error(config: dict | None = None) -> str | None:
     if _config_truthy(cfg.get("EVENING_ENABLED"), False):
         return "Disable the scheduled Evening strategy before enabling score automation"
     try:
-        if int(float(cfg.get("MAX_ORDER_LOTS") or TREND_SCORE_AUTO_LOTS)) \
-                < TREND_SCORE_AUTO_LOTS:
-            return "Maximum order lots must allow the fixed 1,000-lot score order"
+        order_size = float(
+            cfg.get("TREND_SCORE_AUTO_LOTS") or TREND_SCORE_AUTO_LOTS
+        )
+        if not order_size.is_integer() or not 1 <= order_size <= 5_000:
+            return "Order size must be a whole number from 1 to 5,000 lots"
     except (TypeError, ValueError, OverflowError):
-        return "Maximum order lots is invalid"
+        return "Order size is invalid"
 
     def number(key: str, default: float) -> float:
         try:
@@ -1179,35 +1531,20 @@ def _trend_score_auto_config_error(config: dict | None = None) -> str | None:
             return float("nan")
         return value
 
-    tp = number("TP_TARGET_PNL_TREND", 100)
-    sl = abs(number("SL_TARGET_PNL_TREND", 50))
-    legacy_tsl = abs(number("TSL_TARGET_PNL_TREND", 50))
-    arm = abs(number("TSL_ARM_PNL_TREND", legacy_tsl))
-    trail = abs(number("TSL_TRAIL_PNL_TREND", legacy_tsl))
-    if not all(math.isfinite(value) and value > 0 for value in (tp, sl, arm, trail)):
-        return (
-            "Trend score automation requires positive Trend TP, SL, "
-            "TSL arm, and TSL trail values"
-        )
     if mode == "live":
         if not _config_truthy(cfg.get("SAFE_EXECUTION_ENABLED"), True):
             return "LIVE Trend score automation requires safe IOC execution"
-        if not _config_truthy(cfg.get("ALLOW_SHORT_MOVE"), False):
-            return (
-                "LIVE Trend score automation requires Short MOVE because the "
-                "neutral score zone always sells MOVE"
-            )
-        short_cap = number("SHORT_MAX_RISK_USD", 0)
-        if not math.isfinite(short_cap) or short_cap < sl:
-            return (
-                "LIVE Trend score automation requires Maximum short risk to "
-                "cover the configured Trend stop loss"
-            )
-        risk_budget = number("TREND_RISK_BUDGET_USD", 100)
-        if not math.isfinite(risk_budget) or risk_budget < sl:
-            return (
-                "LIVE Trend risk budget must cover the configured Trend stop loss"
-            )
+    dry_capital = number("TREND_DRY_RUN_CAPITAL_USD", 1000)
+    if not math.isfinite(dry_capital) or dry_capital <= 0:
+        return "Trend DRY RUN capital must be positive"
+    for key, label, default in (
+        ("TREND_TP_PREMIUM_PCT", "Take-profit percentage", 100),
+        ("TREND_SL_PREMIUM_PCT", "Stop-loss percentage", 50),
+        ("TREND_TSL_PCT", "Trailing percentage", 25),
+    ):
+        value = number(key, default)
+        if not math.isfinite(value) or not 0 < value <= 1_000:
+            return f"{label} must be above 0% and at most 1,000%"
     return None
 
 
@@ -1357,25 +1694,6 @@ def logout():
 @app.route("/health")
 def health():
     return jsonify({"ok": True})
-
-
-@app.route("/api/me")
-def api_me():
-    acct = _session_account()
-    if acct:
-        primary = acct["username"] == _primary_account_user()
-        return jsonify({"username":     acct["username"],
-                        "display_name": acct.get("display_name", acct["username"]),
-                        "bot":          acct["username"] == _safe_user(BOT_USER),
-                        "primary":      primary,
-                        "role":         "primary" if primary else "coexistent"})
-    username = _safe_user(DASH_USER) or "mathi"
-    primary = username == _primary_account_user()
-    return jsonify({"username": username,
-                    "display_name": os.getenv("ACCOUNT_NAME", username.capitalize()),
-                    "bot": username == _safe_user(BOT_USER),
-                    "primary": primary,
-                    "role": "primary" if primary else "coexistent"})
 
 
 def _mask(s: str) -> str:
@@ -1793,11 +2111,12 @@ def _pnl_stats(trades: list, *, dry_run: bool = False) -> dict:
 # ROUTES
 # ─────────────────────────────────────────────────────────────
 _PAGES = {
-    "":          ("overview.html",  "Overview"),
+    "":          ("overview.html",  "Today"),
+    "cockpit":   ("cockpit.html",   "Cockpit"),
     "trend-engine": ("trend_engine.html", "Trend Engine"),
-    "dry-run":   ("dry_run.html",   "Dry Run Dashboard"),
-    "trades":    ("trades.html",    "Trades & P&L"),
-    "positions": ("positions.html", "Positions"),
+    "dry-run":   ("dry_run.html",   "Dry Run"),
+    "trades":    ("trades.html",    "Performance"),
+    "positions": ("positions.html", "Exposure"),
     "config":    ("config.html",    "Bot Config"),
     "accounts":  ("accounts.html",  "API Accounts"),
     "logs":      ("logs.html",      "Logs"),
@@ -1898,6 +2217,25 @@ def _exchange_timestamp_iso(value) -> str:
         return ""
 
 
+def _is_operator_protection_only_state(state: dict) -> bool:
+    """Whether an operator explicitly marked this position protection-only.
+
+    Set only by deliberate operator action on an externally opened position;
+    never inferred from exchange data. It tells every consumer the same
+    thing: tp_monitor should keep protecting it, but nothing should manage,
+    replace, or require bot-fill provenance for it. ``_is_owned_trend_state``
+    uses this to keep it out of the "foreign duplicate" classification, and
+    the LIVE score-auto controller uses it to recognise the slot is occupied
+    by a position it does not own rather than treating the missing
+    provenance as a corrupt state.
+    """
+    return (
+        isinstance(state, dict)
+        and state.get("operator_authorized_protection_only") is True
+        and str(state.get("ownership") or "").lower() == "external_protection_only"
+    )
+
+
 def _is_owned_trend_state(state: dict) -> bool:
     """Recognise current, legacy, and explicitly managed Trend states.
 
@@ -1905,10 +2243,14 @@ def _is_owned_trend_state(state: dict) -> bool:
     explicit ``trend_alignment`` / ``trend_auto`` trigger remains accepted.
     An ``exchange_sync`` C/P position is deliberately *not* accepted: it may
     have been opened manually or by another strategy on the same account.
-    The sole exception is an operator-authorized protection-only record. That
-    marker is never inferred from exchange data; it exists so an already
-    monitored external position can retain TP/SL supervision across a rollout
-    without falsely relabelling its entry as a bot trade.
+    Two markers are recognised as owned despite not being the score-auto
+    controller's own entries: an operator-authorized protection-only record
+    (never inferred from exchange data -- it exists so an already monitored
+    external position can retain TP/SL supervision without falsely
+    relabelling its entry as a bot trade), and a Cockpit manual LIVE entry
+    (a real bot-placed order with its own ``trend-`` client-order-id, so the
+    first check below already covers it; the explicit ownership check here
+    is defense in depth, not the only path).
     """
     if not isinstance(state, dict):
         return False
@@ -1921,8 +2263,12 @@ def _is_owned_trend_state(state: dict) -> bool:
         == TREND_SCORE_AUTO_TRIGGER
     ):
         return True
-    if (state.get("operator_authorized_protection_only") is True
-            and str(state.get("ownership") or "").lower() == "external_protection_only"):
+    if (
+        str(state.get("ownership") or "").lower()
+        == TREND_SCORE_MANUAL_LIVE_OWNERSHIP
+    ):
+        return True
+    if _is_operator_protection_only_state(state):
         return True
     trigger = str(state.get("entry_trigger") or "").lower()
     return trigger in {
@@ -2666,9 +3012,14 @@ def api_status():
             "https://api.india.delta.exchange/v2/tickers/BTCUSD",
             timeout=5,
         )
-        state["btc_futures_price"] = float(r_btc.json().get("result", {}).get("mark_price") or 0)
+        btc_ticker = r_btc.json().get("result", {})
+        state["btc_futures_price"] = float(btc_ticker.get("mark_price") or 0)
+        btc_change = btc_ticker.get("mark_change_24h")
+        state["btc_futures_change_pct"] = (
+            float(btc_change) if btc_change not in (None, "") else None)
     except Exception:
         state["btc_futures_price"] = None
+        state["btc_futures_change_pct"] = None
     # IST schedule strings for the UI, from the active account's own config
     cfg = _user_cfg()
     def _ist_str(h_key, m_key, dflt_h, dflt_m):
@@ -2693,49 +3044,99 @@ def api_status():
     return jsonify(state)
 
 
-@app.route("/api/external-options")
-def api_external_options():
-    _sync_states_from_exchange()
-    return jsonify(_external_options.get(_active_user(), []))
+# Delta delists each day's contract at 17:30 IST, so the bot's trading day
+# runs 17:30 IST one day to 17:29 IST the next, not IST midnight to midnight.
+# "Today's trades" means that window: an evening entry and its next-morning
+# exit belong to one dashboard day instead of being split across two.
+_TRADING_DAY_START_IST = (17, 30)
+
+_ENTRY_STAMP_FORMATS = ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d")
 
 
+def _trading_day_window(
+        now: datetime | None = None) -> tuple[datetime, datetime]:
+    """Half-open [start, end) in UTC of the trading day ``now`` falls in.
 
-def _ist_calendar_date(date_str: str, time_str: str) -> str:
-    """IST (UTC+5:30) calendar date a UTC (date, time-of-day) pair falls on.
-    Users think in IST "today", but entry_date/entry_time are always stored
-    in UTC, so a straight string compare against a UTC or IST "today" is
-    wrong for whichever side of the actual moment doesn't match — this
-    converts the trade's own timestamp before comparing calendar dates."""
-    try:
-        dt_utc = datetime.strptime(f"{date_str} {time_str or '00:00:00'}", "%Y-%m-%d %H:%M:%S")
-        return (dt_utc + timedelta(hours=5, minutes=30)).strftime("%Y-%m-%d")
-    except (ValueError, TypeError):
-        return date_str
+    The day pivots at 17:30 IST (12:00 UTC): a trade stamped 17:30 IST
+    belongs to the new trading day, so
+    every trade lands in exactly one window."""
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    current = current.astimezone(_IST_TIMEZONE)
+    hour, minute = _TRADING_DAY_START_IST
+    start = current.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if (current.hour, current.minute) < (hour, minute):
+        start -= timedelta(days=1)
+    return (start.astimezone(timezone.utc),
+            (start + timedelta(days=1)).astimezone(timezone.utc))
+
+
+def _trade_entry_utc(date_str: str, time_str: str) -> datetime | None:
+    """The UTC moment a trade opened.
+
+    entry_date/entry_time are always stored in UTC, so the trade's own
+    timestamp is compared as an instant rather than as a date string — a
+    string compare is wrong for whichever side of the moment doesn't match.
+    Legacy records carrying a date but no usable clock fall back to midnight
+    UTC so they stay visible instead of silently dropping out."""
+    date_part = str(date_str or "").strip()
+    if not date_part:
+        return None
+    clock = str(time_str or "").strip().replace("Z", "")
+    for stamp in (f"{date_part} {clock}" if clock else "", date_part):
+        if not stamp:
+            continue
+        for fmt in _ENTRY_STAMP_FORMATS:
+            try:
+                return datetime.strptime(stamp, fmt).replace(tzinfo=timezone.utc)
+            except (ValueError, TypeError):
+                continue
+    return None
+
+
+def _in_trading_day(
+        date_str: str, time_str: str,
+        window: tuple[datetime, datetime]) -> bool:
+    """Whether a stored (date, time-of-day) UTC pair is in ``window``."""
+    moment = _trade_entry_utc(date_str, time_str)
+    return moment is not None and window[0] <= moment < window[1]
 
 
 @app.route("/api/today-trades")
 def api_today_trades():
-    today_ist = (datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)).strftime("%Y-%m-%d")
-    trades  = _load_json(_hist_file(), [])
+    window = _trading_day_window()
+    dry_run_mode = _trading_mode_payload()["dry_run_mode"]
+    trades = (
+        _dry_run_trades()
+        if dry_run_mode
+        else _load_json(_hist_file(), [])
+    )
     today_t = [
         t for t in trades
-        if isinstance(t, dict) and not _is_dry_record(t)
-        and _ist_calendar_date(
+        if isinstance(t, dict)
+        and (_is_dry_record(t) if dry_run_mode else not _is_dry_record(t))
+        and _in_trading_day(
             t.get("entry_date") or t.get("date", ""),
             t.get("entry_time") or t.get("entry_time_utc", ""),
-        ) == today_ist
+            window,
+        )
     ]
     # Include any open slot position as a live row with real-time mark & P&L
     for slot in SLOTS:
-        s = _load_json(_slot_file(slot), {})
-        if (s.get("status") == "OPEN" and not _is_dry_record(s)
-                and _ist_calendar_date(
+        s = _load_json(_slot_file(slot, dry_run=dry_run_mode), {})
+        if (s.get("status") == "OPEN"
+                and (_is_dry_record(s) if dry_run_mode else not _is_dry_record(s))
+                and _in_trading_day(
                     s.get("entry_date", ""), s.get("entry_time_utc", ""),
-                ) == today_ist):
+                    window,
+                )):
             s["_live"] = True
             s["slot"]  = slot
-            s = _enrich_live(s)
+            s = _enrich_dry_state(s) if dry_run_mode else _enrich_live(s)
             today_t = [s] + today_t
+    for row in today_t:
+        row.setdefault("origin_label", _trade_origin_label(row))
     return jsonify(today_t)
 
 
@@ -3517,6 +3918,11 @@ def _close_move_state_locked(
     appended = _append_trade_history(state, f"dashboard-squareoff:{slot}")
     state["history_pending"] = not (appended and accounting_complete)
     _atomic_write_json(state_file, state)
+    # The caller owns account_entry_lock across this close boundary. A lock
+    # evaluation failure is deliberately non-fatal to an already-flat trade.
+    apply_manual_exit_zone_lock(
+        _mode_data_dir(False), state, account_lock_held=True,
+    )
     audit_event(_user_dir(), "dashboard_move_close_verified", {
         "slot": slot, "client_order_id": client_id, "order_id": order.get("id"),
         "filled_lots": filled_lots, "flat_verified": True,
@@ -3632,15 +4038,21 @@ def _close_dry_simulation_locked(
         "history_logged": False,
     })
     state_file = _slot_file(slot, dry_run=True)
+    # The close journal is the commit boundary.  It is durable before the
+    # mutable slot changes, so an entry can never erase a completed position
+    # whose history append is temporarily unavailable.
+    recovery_owner = f"dry-close:{slot}:{os.getpid()}:{time.time_ns()}"
+    _queue_closed_dry_trade(slot, state, owner=recovery_owner)
     _atomic_write_json(state_file, state)
-    appended = _append_trade_history(
-        state, f"dry-close:{slot}:{trigger}", dry_run=True)
-    state["history_pending"] = not appended
-    state["history_logged"] = appended
-    if appended:
-        state["history_logged_at_utc"] = datetime.now(timezone.utc).isoformat()
-    _atomic_write_json(state_file, state)
-    return state
+    _recover_closed_dry_trade_outbox(owner=recovery_owner)
+    closed = _load_json(state_file, state)
+    apply_manual_exit_zone_lock(
+        _mode_data_dir(True), closed, account_lock_held=True,
+    )
+    # A history/audit failure intentionally leaves the CLOSED state and its
+    # journal entry in place.  The score controller will fail closed before it
+    # can reuse the slot, while startup/protection cycles keep retrying it.
+    return closed
 
 
 @app.route("/api/square-off", methods=["POST"])
@@ -3684,6 +4096,7 @@ def api_square_off():
             if _is_dry_record(state):
                 closed = _close_dry_simulation_locked(
                     slot, state, trigger="manual_squareoff_simulated")
+                _notify_dry_run_close_once(slot, closed)
                 return jsonify({"ok": True, "pnl": closed["pnl_usd"],
                                 "fill": closed["exit_mark"],
                                 "order_id": None, "dry_run": True,
@@ -3733,67 +4146,6 @@ def _send_telegram(text: str) -> None:
         pass
 
 
-def _select_atm_mv(products: list, spot: float, slot: str,
-                   now: datetime | None = None) -> dict | None:
-    """Select the current manual-entry MOVE contract.
-
-    The dashboard assigns a manual position to the active morning/evening
-    state slot, but the contract itself must be the nearest *currently listed*
-    operational settlement.  Delta may not list the next day's cycle until
-    the current cycle rolls, so forcing an evening click to tomorrow's date
-    makes otherwise valid manual entries impossible before that rollover.
-    """
-    if slot not in MOVE_SLOTS:
-        raise ValueError("MOVE slot must be morning or evening")
-    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
-    try:
-        min_minutes = float(_cfg("MOVE_MIN_TTE_MINUTES", "90"))
-        max_hours = float(_cfg("MOVE_MAX_TTE_HOURS", "30"))
-        if (not math.isfinite(min_minutes) or not math.isfinite(max_hours)
-                or min_minutes < 0 or max_hours <= 0
-                or min_minutes / 60 >= max_hours):
-            raise ValueError("invalid MOVE TTE bounds")
-        min_tte = min_minutes * 60
-        max_tte = max_hours * 3600
-    except (TypeError, ValueError):
-        min_tte, max_tte = 90 * 60, 30 * 3600
-    usable = []
-    for product in products or []:
-        if not isinstance(product, dict):
-            continue
-        if not str(product.get("symbol") or "").startswith("MV-BTC-"):
-            continue
-        product_state = str(product.get("state") or "").lower()
-        if product_state and product_state != "live":
-            continue
-        underlying = (product.get("underlying_asset") or {}).get("symbol")
-        if underlying not in (None, "", "BTC"):
-            continue
-        if str(product.get("trading_status") or "").lower() != "operational":
-            continue
-        try:
-            settlement = datetime.fromisoformat(
-                str(product.get("settlement_time") or "").replace("Z", "+00:00")
-            )
-            if settlement.tzinfo is None:
-                settlement = settlement.replace(tzinfo=timezone.utc)
-            settlement = settlement.astimezone(timezone.utc)
-            strike = float(product.get("strike_price") or 0)
-        except (TypeError, ValueError):
-            continue
-        tte = (settlement - now).total_seconds()
-        if (not math.isfinite(strike) or not math.isfinite(tte)
-                or strike <= 0 or tte < min_tte or tte > max_tte):
-            continue
-        usable.append((settlement, product))
-    if not usable or not math.isfinite(spot) or spot <= 0:
-        return None
-    nearest_settlement = min(settlement for settlement, _ in usable)
-    cycle = [product for settlement, product in usable
-             if settlement == nearest_settlement]
-    return min(cycle, key=lambda p: abs(float(p.get("strike_price") or 0) - spot))
-
-
 def _fetch_live_mv_products() -> list:
     """Fetch every page of live MOVE products or fail closed."""
     products = []
@@ -3818,17 +4170,6 @@ def _fetch_live_mv_products() -> list:
         seen_cursors.add(next_after)
         after = next_after
     raise RuntimeError("MOVE products pagination did not terminate")
-
-
-def _current_atm_mv(slot: str, now: datetime | None = None) -> dict | None:
-    """Fetch and validate the nearest eligible contract for a manual entry."""
-    try:
-        spot = float(req.get(f"{API_BASE}/v2/tickers/BTCUSD", timeout=6)
-                     .json().get("result", {}).get("mark_price") or 0)
-        prods = _fetch_live_mv_products()
-        return _select_atm_mv(prods, spot, slot, now)
-    except Exception:
-        return None
 
 
 # Rejection codes meaning "balance doesn't cover this size" — fixable by
@@ -3885,868 +4226,6 @@ def _affordable_option_lots(mark: float, cv: float, strike: float = 0.0) -> int 
         return None
 
 
-def _move_execution_quote(symbol: str, side: str, reference_price: float = 0.0) -> dict:
-    """Fresh two-sided MOVE quote and a price-bounded marketable IOC limit."""
-    cfg = _user_cfg()
-    if not _cfg_bool("SAFE_EXECUTION_ENABLED", True):
-        raise RuntimeError("Safe IOC execution is disabled; live MOVE entries are blocked")
-    data = req.get(f"{API_BASE}/v2/tickers/{symbol}", timeout=7).json()
-    ticker = data.get("result") or {}
-    if not ticker:
-        raise RuntimeError("fresh MOVE ticker is unavailable")
-    quote = _trend_quote_snapshot(ticker)
-    bid, ask = float(quote.get("bid") or 0), float(quote.get("ask") or 0)
-    if bid <= 0 or ask <= 0 or ask < bid:
-        raise RuntimeError("fresh two-sided MOVE quote is unavailable")
-    if quote.get("quote_age_secs") is None:
-        raise RuntimeError("MOVE quote timestamp is unavailable")
-    max_age = max(_as_float(cfg.get("MAX_QUOTE_AGE_SEC") or 20, 20), 0)
-    if quote["quote_age_secs"] > max_age:
-        raise RuntimeError(
-            f"MOVE quote is stale ({quote['quote_age_secs']:.1f}s > {max_age:.1f}s)")
-    max_spread = max(_as_float(cfg.get("MAX_SPREAD_PCT") or 3, 3), 0)
-    if quote.get("spread_pct") is None or quote["spread_pct"] > max_spread:
-        raise RuntimeError(
-            f"MOVE spread exceeds configured cap ({quote.get('spread_pct')} > {max_spread})")
-    if quote.get("trading_status") not in ("", "operational"):
-        raise RuntimeError("MOVE contract is not operational")
-    price = ask if side == "buy" else bid
-    depth = quote.get("ask_size", 0) if side == "buy" else quote.get("bid_size", 0)
-    if price <= 0 or depth <= 0:
-        raise RuntimeError(f"verified {side} price/depth is unavailable")
-    reference = reference_price or price
-    slippage = max(_as_float(cfg.get("MAX_SLIPPAGE_PCT") or 1, 1), 0)
-    tick = max(float(quote.get("tick_size") or 0.1), 0.00000001)
-    if side == "buy":
-        boundary = reference * (1 + slippage / 100)
-        limit_price = math.floor((boundary + 1e-12) / tick) * tick
-        if ask > limit_price:
-            raise RuntimeError(f"fresh ask {ask} exceeds bounded entry price {limit_price}")
-        upper = _as_float((quote.get("price_band") or {}).get("upper_limit"), 0)
-        if upper and limit_price > upper:
-            raise RuntimeError("bounded buy limit exceeds exchange price band")
-    else:
-        boundary = reference * (1 - slippage / 100)
-        limit_price = math.ceil((boundary - 1e-12) / tick) * tick
-        if bid < limit_price:
-            raise RuntimeError(f"fresh bid {bid} is below bounded entry price {limit_price}")
-        lower = _as_float((quote.get("price_band") or {}).get("lower_limit"), 0)
-        if lower and limit_price < lower:
-            raise RuntimeError("bounded sell limit is below exchange price band")
-    return {**quote, "entry_price": price, "entry_depth": float(depth),
-            "reference_price": reference, "limit_price": round(limit_price, 10)}
-
-
-def _move_lot_plan(
-    slot: str,
-    side: str,
-    contract: dict,
-    quote: dict,
-    *,
-    dry_run: bool = False,
-) -> dict:
-    """Fail-closed minimum of configured, funding, order and risk caps.
-
-    A paper trade has no real-wallet funding requirement.  In DRY RUN its
-    configured size is therefore the virtual affordability ceiling.  MOVE
-    order-book quantity is diagnostic only and never reduces the planned lots;
-    LIVE entries continue to use bounded IOC execution and accept only proven
-    fills.  LIVE entries also continue to require a verified exchange wallet.
-    """
-    cfg = _user_cfg()
-    lot_key, lot_default = (("MORNING_LOTS", 2000) if slot == "morning"
-                            else ("STRADDLE_LOTS", 800))
-    try:
-        configured = int(float(cfg.get(lot_key) or lot_default))
-        max_order = int(float(cfg.get("MAX_ORDER_LOTS") or 1000))
-        chunk_cap = int(float(cfg.get("ORDER_CHUNK_LOTS") or 1000))
-    except (TypeError, ValueError):
-        configured = max_order = chunk_cap = 0
-    cv = float(contract.get("contract_value") or 0)
-    strike = float(contract.get("strike_price") or 0)
-    price = float(quote.get("entry_price") or 0)
-    affordable = (max(configured, 0) if dry_run
-                  else _affordable_option_lots(price, cv, strike))
-    affordability_source = "paper_configured_cap" if dry_run else "exchange_wallet"
-    observed_entry_depth = max(int(float(quote.get("entry_depth") or 0)), 0)
-    risk_key = "RISK_PER_TRADE_USD_MORNING" if slot == "morning" \
-        else "RISK_PER_TRADE_USD_EVENING"
-    risk_budget = max(_as_float(cfg.get(risk_key) or 200, 200), 0)
-    _, _, sl_target, _ = _tp_env(slot)
-    configured_sl_target = sl_target
-    paper_short_risk_assumption = 0.0
-    is_short = side == "sell"
-    short_cap = max(_as_float(cfg.get("SHORT_MAX_RISK_USD") or 0, 0), 0)
-    if is_short:
-        if not _cfg_bool("ALLOW_SHORT_MOVE", False):
-            return {"lots": 0, "reason": "Short MOVE entries are disabled"}
-        if short_cap <= 0:
-            return {"lots": 0,
-                    "reason": ("Short MOVE simulation requires a positive short-risk cap"
-                               if dry_run else
-                               "Short MOVE requires a positive SL and short-risk cap")}
-        if sl_target <= 0:
-            if not dry_run:
-                return {"lots": 0,
-                        "reason": "Short MOVE requires a positive SL and short-risk cap"}
-            # A paper short has no exchange exposure and no exchange stop
-            # order. Use its mandatory short-risk cap as the simulated loss
-            # assumption for sizing and the paper portfolio-risk ledger.
-            sl_target = short_cap
-            paper_short_risk_assumption = short_cap
-        risk_budget = min(risk_budget, short_cap)
-    premium_per_lot = price * cv
-    fee_per_lot = 2 * _option_fee_per_lot(price, cv, strike)
-    slippage_per_lot = premium_per_lot * max(
-        _as_float(cfg.get("MAX_SLIPPAGE_PCT") or 1, 1), 0) / 100
-    premium_cap = max_order
-    if not is_short:
-        account_cap = max(_as_float(
-            cfg.get("MAX_ACCOUNT_PREMIUM_AT_RISK_USD") or 500, 500), 0)
-        remaining = max(
-            account_cap - _open_long_premium_usd(dry_run=dry_run), 0
-        ) if account_cap else 0
-        premium_cap = int(remaining / premium_per_lot) if premium_per_lot > 0 else 0
-    lots = risk_based_lots(
-        configured=max(configured, 0), affordable=max(int(affordable or 0), 0),
-        # risk_based_lots is shared with Trend, where book participation still
-        # is a strategy cap. For MOVE, feed only its independent premium cap;
-        # observed order-book quantity must not reduce the planned position.
-        liquidity_cap=max(premium_cap, 0),
-        max_order_lots=max(min(max_order, chunk_cap), 0),
-        risk_budget_usd=risk_budget, stop_loss_usd=sl_target,
-        premium_per_lot=premium_per_lot,
-        round_trip_fee_per_lot=fee_per_lot,
-        slippage_per_lot=slippage_per_lot, short=is_short,
-    )
-    proposed = (max(sl_target, lots * (premium_per_lot + fee_per_lot + slippage_per_lot))
-                if lots and not is_short else sl_target if lots else 0)
-    value_filter_enabled = str(cfg.get("MOVE_VALUE_FILTER_ENABLED") or "true").lower() \
-        in {"1", "true", "yes", "on"}
-    return {
-        "lots": lots, "configured": configured, "affordable": affordable,
-        "affordability_source": affordability_source,
-        "max_order_lots": max_order, "chunk_cap": chunk_cap,
-        "observed_entry_depth_lots": observed_entry_depth,
-        "book_depth_applied_to_sizing": False,
-        "risk_budget_usd": risk_budget,
-        "sl_target_pnl": configured_sl_target,
-        "risk_stop_loss_usd": sl_target,
-        "paper_short_risk_assumption_usd": paper_short_risk_assumption,
-        "proposed_risk_usd": proposed,
-        "premium_per_lot": premium_per_lot,
-        "round_trip_fee_per_lot": fee_per_lot,
-        "slippage_per_lot": slippage_per_lot,
-        # The scheduled strategy owns the realized-volatility forecast/value
-        # model. A dashboard click is explicitly discretionary and must never
-        # be represented as having passed that unattended strategy signal.
-        "move_value_filter_enabled": value_filter_enabled,
-        "move_value_gate_evaluated": False,
-        "entry_classification": "discretionary_manual",
-        "value_gate_note": ("Scheduled MOVE value eligibility was not claimed; "
-                            "this is a discretionary manual entry"),
-        "reason": "sizing checks passed" if lots else "No lots pass every safety cap",
-    }
-
-
-def _validate_move_entry_account(positions: list[dict], selected_product_id: int) -> float:
-    """Prove every exchange position is either bot-owned or explicitly allowed."""
-    states = {slot: _load_json(_slot_file(slot), {}) for slot in SLOTS}
-    try:
-        max_move = max(int(float(_cfg("MAX_CONCURRENT_MOVE_POSITIONS", "1"))), 1)
-    except (TypeError, ValueError):
-        raise RuntimeError("MAX_CONCURRENT_MOVE_POSITIONS is invalid")
-    open_move = sum(
-        1 for slot in MOVE_SLOTS
-        if states[slot].get("status") == "OPEN" and not states[slot].get("dry_run")
-    )
-    if open_move >= max_move:
-        raise RuntimeError(
-            f"concurrent MOVE position cap reached ({open_move}/{max_move})")
-    for slot, state in states.items():
-        if state.get("status") in {"ENTRY_PENDING", "CLOSE_PENDING"}:
-            raise RuntimeError(f"{slot} has an unresolved order intent")
-        if state.get("protection_cleanup_pending"):
-            raise RuntimeError(f"{slot} has unresolved exchange protection cleanup")
-        if state.get("status") != "OPEN" or state.get("dry_run"):
-            continue
-        product_id = int(state.get("product_id") or 0)
-        expected = -int(state.get("lots") or 0) if state.get("side") == "short" \
-            else int(state.get("lots") or 0)
-        live = _position_for_product(positions, product_id)
-        actual = int(float((live or {}).get("size") or 0))
-        if not product_id or not expected or actual != expected:
-            raise RuntimeError(f"{slot} state does not exactly match exchange exposure")
-    selected = _position_for_product(positions, selected_product_id)
-    if selected is not None:
-        raise RuntimeError("selected MOVE contract already has exchange exposure")
-    owned_products = {
-        int(state.get("product_id") or 0): (-int(state.get("lots") or 0)
-                                             if state.get("side") == "short"
-                                             else int(state.get("lots") or 0))
-        for state in states.values() if state.get("status") == "OPEN" and not state.get("dry_run")
-    }
-    external = [p for p in positions
-                if owned_products.get(int(p.get("product_id") or 0))
-                != int(float(p.get("size") or 0))]
-    if external and not _cfg_bool("ALLOW_EXTERNAL_POSITIONS_WITH_BOT", False):
-        raise RuntimeError(f"{len(external)} external/manual position(s) are open")
-    return sum(_as_float(p.get("unrealized_pnl"), 0) for p in positions)
-
-
-def _manual_entry_lots(slot: str, mark: float, cv: float, strike: float = 0.0) -> int:
-    """Usual sizing: slot's configured lots, sized DOWN by dynamic sizing
-    (min of configured and affordable-with-balance) when DYNAMIC_LOTS is on —
-    an order never exceeds either the configured size or the balance.
-    Delta charges the options taker fee on the underlying NOTIONAL, not the
-    premium, so each lot must be funded for premium + fee or the exchange
-    rejects the order with insufficient_commission."""
-    lot_key, lot_default = {
-        "morning": ("MORNING_LOTS", "2000"),
-        "evening": ("STRADDLE_LOTS", "800"),
-        "trend":   ("TREND_LOTS", "100"),
-    }.get(slot, ("STRADDLE_LOTS", "800"))
-    try:
-        configured = max(int(_cfg(lot_key, lot_default)), 1)
-    except ValueError:
-        configured = int(lot_default)
-    try:
-        max_lots = max(int(float(_cfg("MAX_ORDER_LOTS", "1000"))), 1)
-    except (TypeError, ValueError):
-        max_lots = 1000
-    try:
-        afford = _affordable_option_lots(mark, cv, strike)
-        if afford is None:
-            raise RuntimeError("wallet balance unavailable")
-        affordable = min(configured, afford, max_lots)
-        return max(affordable, 0)
-    except Exception:
-        return 0
-
-
-@app.route("/api/manual-entry/preview")
-def api_manual_entry_preview():
-    """Manual MOVE direction selection was retired with scheduled AUTO."""
-    return jsonify({
-        "ok": False,
-        "error": (
-            "Manual MOVE BUY/SELL is disabled. Morning and Evening MOVE "
-            "directions are selected only by the scheduled forecast engine."
-        ),
-        "code": "MANUAL_MOVE_DISABLED",
-    }), 410
-
-    # Retained temporarily as rollback-compatible implementation context.
-    # This block is unreachable and may be removed after the AUTO rollout.
-    slot = _strict_slot_arg(move_only=True)
-    if slot is None:
-        return jsonify({"ok": False, "error": "slot must be morning or evening"}), 400
-    side = str(request.args.get("side") or "buy").lower()
-    if side not in {"buy", "sell"}:
-        return jsonify({"ok": False, "error": "side must be buy or sell"}), 400
-    contract = _current_atm_mv(slot)
-    if not contract:
-        return jsonify({
-            "ok": False,
-            "error": (f"No eligible operational MV contract is currently "
-                      f"listed for manual {slot} entry"),
-        }), 502
-    symbol = contract["symbol"]
-    cv     = float(contract.get("contract_value") or 0.001)
-    mode = _trading_mode_payload()
-    try:
-        quote = _move_execution_quote(symbol, side)
-        plan = _move_lot_plan(
-            slot, side, contract, quote, dry_run=mode["dry_run_mode"])
-    except Exception as exc:
-        return jsonify({"ok": False, "error": str(exc)}), 409
-    mark = float(quote.get("entry_price") or 0)
-    lots = int(plan.get("lots") or 0)
-    if lots <= 0:
-        return jsonify({"ok": False, "error": plan.get("reason") or
-                        "No lots pass every safety cap", "sizing": plan}), 409
-    return jsonify({
-        "ok":         True,
-        "slot":       slot,
-        "side":       side,
-        "symbol":     symbol,
-        "product_id": int(contract.get("id") or 0),
-        "strike":     float(contract.get("strike_price") or 0),
-        "mark":       round(mark, 4),
-        "lots":       lots,
-        "est_value":  round(mark * cv * lots, 2),
-        "settlement": contract.get("settlement_time", ""),
-        "dry_run":    mode["dry_run_mode"],
-        "execution_mode": mode["execution_mode"],
-        "mode_revision": mode["mode_revision"],
-        "sizing":     plan,
-        "quote":      quote,
-        "entry_classification": "discretionary_manual",
-        "move_value_gate_evaluated": False,
-        "value_gate_note": plan.get("value_gate_note"),
-    })
-
-
-def _open_state_from_pending(pending: dict, order: dict, filled: int) -> dict:
-    fill = float(order.get("average_fill_price") or 0)
-    if fill <= 0 or filled <= 0:
-        raise RuntimeError("terminal entry fill lacks price or quantity")
-    fees = _order_commission_usd(order)
-    return {
-        **pending,
-        "status": "OPEN", "lots": filled, "owned_entry_lots": filled,
-        "original_owned_entry_lots": filled,
-        "entry_mark": round(fill, 4),
-        "total_cost_usd": round(fill * float(pending.get("contract_value") or 0) * filled, 2),
-        "entry_fees_usd": fees, "fees_usd": fees,
-        "order_id": order.get("id"), "order_ids": [order.get("id")],
-        "client_order_id": pending.get("pending_entry_client_order_id"),
-        "client_order_ids": [pending.get("pending_entry_client_order_id")],
-        "pending_entry_order_id": None,
-        "pending_entry_submission_state": None,
-        "entry_execution": {
-            "kind": "bounded_ioc_limit", "requested": pending.get("pending_entry_requested_lots"),
-            "filled": filled, "unfilled": max(
-                int(pending.get("pending_entry_requested_lots") or 0) - filled, 0),
-            "client_order_id": pending.get("pending_entry_client_order_id"),
-            "order_id": order.get("id"), "order_state": _dash_order_state(order),
-            "average_fill_price": fill, "paid_commission_usd": fees,
-        },
-    }
-
-
-def _flatten_unpersisted_move_fill(state: dict) -> dict:
-    """Last-resort flatten when a proven fill cannot be durably made OPEN."""
-    product_id = int(state.get("product_id") or 0)
-    expected = -int(state.get("lots") or 0) if state.get("side") == "short" \
-        else int(state.get("lots") or 0)
-    position = _position_for_product(_strict_exchange_positions(), product_id)
-    actual = int(float((position or {}).get("size") or 0))
-    if actual != expected:
-        raise RuntimeError(
-            f"cannot emergency-flatten unpersisted fill: expected {expected}, exchange {actual}")
-    client_id = _move_client_id("close", str(state.get("slot") or "evening"))
-    payload = {"product_id": product_id, "size": abs(actual),
-               "side": "buy" if actual < 0 else "sell",
-               "order_type": "market_order", "reduce_only": True,
-               "client_order_id": client_id}
-    try:
-        audit_event(_user_dir(), "dashboard_unpersisted_fill_flatten_intent", {
-            "client_order_id": client_id, "product_id": product_id,
-            "size": abs(actual), "side": payload["side"], "reduce_only": True,
-        })
-    except Exception:
-        # Exposure reduction is safer than abandoning the known fill merely
-        # because the secondary audit stream shares the storage outage.
-        pass
-    order, data = _post_dashboard_order(payload)
-    if not order:
-        raise RuntimeError(str(data.get("error") or data))
-    order = _validate_dashboard_order(
-        order, product_id=product_id, client_order_id=client_id,
-        side=payload["side"], reduce_only=True)
-    order, fill = _wait_dashboard_terminal(order, abs(actual), product_id, client_id)
-    if fill is None:
-        raise RuntimeError("emergency flatten order is not terminal/proven")
-    after = _position_for_product(_strict_exchange_positions(), product_id)
-    remaining = int(float((after or {}).get("size") or 0))
-    if remaining != 0:
-        raise RuntimeError(f"emergency flatten left {remaining} lots open")
-    return {"flattened": True, "order_id": order.get("id"),
-            "client_order_id": client_id}
-
-
-def _persist_proven_move_open(slot: str, pending: dict,
-                              order: dict, filled: int) -> dict:
-    """Persist a proven fill, immediately recover it, or flatten it."""
-    opened = _open_state_from_pending(pending, order, filled)
-    try:
-        _atomic_write_json(_slot_file(slot), opened)
-        return opened
-    except Exception as first_error:
-        # The pre-submit ENTRY_PENDING record still holds the exact client ID.
-        # Re-read and recover through that identity before considering a close.
-        try:
-            durable = _load_json(_slot_file(slot), {})
-            recovered, _ = _recover_pending_move_entry(slot, durable)
-            if recovered.get("status") == "OPEN":
-                recovered["entry_state_write_recovered"] = True
-                _atomic_write_json(_slot_file(slot), recovered)
-                return recovered
-        except Exception:
-            pass
-        try:
-            # A one-off replace/fsync failure may already have cleared.
-            opened["entry_state_write_recovered"] = True
-            _atomic_write_json(_slot_file(slot), opened)
-            return opened
-        except Exception:
-            flattened = _flatten_unpersisted_move_fill(opened)
-            try:
-                _atomic_write_json(_slot_file(slot), {
-                    "slot": slot, "status": "IDLE",
-                    "last_entry_client_order_id": opened.get("client_order_id"),
-                    "last_entry_order_id": opened.get("order_id"),
-                    "entry_state_write_error": str(first_error),
-                    "emergency_flatten": flattened,
-                })
-            except Exception:
-                pass
-            raise RuntimeError(
-                "proven entry fill could not be persisted and was immediately flattened")
-
-
-def _recover_pending_move_entry(slot: str, state: dict) -> tuple[dict, bool]:
-    """Recover a journalled response-loss entry without product-based adoption."""
-    if state.get("status") != "ENTRY_PENDING":
-        return state, False
-    product_id = int(state.get("product_id") or 0)
-    requested = int(state.get("pending_entry_requested_lots") or 0)
-    client_id = str(state.get("pending_entry_client_order_id") or "")
-    side = str(state.get("pending_entry_side") or "")
-    if not product_id or requested <= 0 or not client_id or side not in {"buy", "sell"}:
-        raise RuntimeError("pending MOVE entry has incomplete durable identity")
-    order = _lookup_dashboard_order(
-        state.get("pending_entry_order_id"), client_id, product_id)
-    if not order:
-        raise RuntimeError(
-            f"pending entry {client_id} is not yet visible; duplicate submission blocked")
-    order = _validate_dashboard_order(
-        order, product_id=product_id, client_order_id=client_id,
-        side=side, reduce_only=False)
-    order, filled = _wait_dashboard_terminal(order, requested, product_id, client_id)
-    if filled is None:
-        state.update(pending_entry_order_id=order.get("id"),
-                     pending_entry_submission_state="active_or_ambiguous")
-        _atomic_write_json(_slot_file(slot), state)
-        raise RuntimeError("pending entry has no terminal proven fill")
-    if filled == 0:
-        idle = {"slot": slot, "status": "IDLE",
-                "last_entry_client_order_id": client_id,
-                "last_entry_order_id": order.get("id"),
-                "last_entry_order_state": _dash_order_state(order),
-                "last_entry_attempt_utc": datetime.now(timezone.utc).isoformat()}
-        _atomic_write_json(_slot_file(slot), idle)
-        return idle, True
-    opened = _open_state_from_pending(state, order, filled)
-    try:
-        _atomic_write_json(_slot_file(slot), opened)
-    except Exception:
-        try:
-            opened["entry_state_write_recovered"] = True
-            _atomic_write_json(_slot_file(slot), opened)
-        except Exception:
-            _flatten_unpersisted_move_fill(opened)
-            raise RuntimeError(
-                "recovered entry fill could not be persisted and was flattened")
-    return opened, True
-
-
-def _force_flatten_move(slot: str, state: dict, reason: str) -> dict:
-    with account_file_lock(_user_dir(), f"close-{slot}",
-                           f"dashboard-forced-flatten:{os.getpid()}", wait_sec=0) as acquired:
-        if not acquired:
-            raise RuntimeError("emergency close lock is unavailable")
-        return _close_move_state_locked(slot, state, reason=reason)
-
-
-def _post_entry_exchange_size(product_id: int, expected_size: int) -> int | None:
-    actual_size = None
-    for attempt in range(4):
-        try:
-            live = _position_for_product(_strict_exchange_positions(), product_id)
-            actual_size = int(float((live or {}).get("size") or 0))
-            if actual_size == expected_size or attempt == 3:
-                break
-        except Exception:
-            if attempt == 3:
-                break
-        time.sleep(0.35)
-    return actual_size
-
-
-def _protect_or_flatten_move(slot: str, state: dict, started_at: datetime) -> tuple[bool, dict]:
-    """Require a matching protection heartbeat; otherwise reduce-only flatten."""
-    user = _active_user()
-    health = {}
-    monitor_error = None
-    try:
-        health = _tp_health(user, slot)
-        running = _tp_running(user, slot)
-        if running and not _tp_health_matches(health, state, user, slot):
-            _restart_tp_monitor(user, slot)
-        elif not running:
-            if _spawn_tp(user, slot) is None:
-                raise RuntimeError("TP monitor could not be started")
-        verified, health = _wait_for_protection(user, slot, started_at, timeout_secs=10)
-    except Exception as exc:
-        verified = False
-        monitor_error = str(exc)
-        health = {**health, "last_error": monitor_error}
-    latest = _load_json(_slot_file(slot), state)
-    latest.update(protection_verified_at_entry=verified,
-                  protection_health_at_entry=health,
-                  protection_start_error=monitor_error)
-    try:
-        _atomic_write_json(_slot_file(slot), latest)
-    except Exception:
-        # The OPEN state was already persisted before monitor startup. Do not
-        # let a secondary health annotation failure skip the required flatten.
-        pass
-    if verified:
-        return True, {"protection_health": health}
-
-    _send_telegram(
-        f"🚨 <b>MOVE PROTECTION FAILURE ({user.upper()} / {slot.upper()})</b>\n"
-        f"<code>{latest.get('symbol', '')}</code> was filled but protection was not verified; "
-        "an immediate reduce-only flatten is being attempted.")
-    flattened = _force_flatten_move(slot, latest, "protection_failure_flatten")
-    return False, {"flattened": True, **flattened, "protection_health": health}
-
-
-def _submit_manual_move_entry(slot: str, side: str, contract: dict,
-                              quote: dict, plan: dict, dry_run: bool) -> tuple[dict, dict]:
-    state_file = _slot_file(slot, dry_run=dry_run)
-    requested = int(plan.get("lots") or 0)
-    product_id = int(contract.get("id") or 0)
-    now = datetime.now(timezone.utc)
-    protection = _tp_policy(slot)
-    if dry_run:
-        fill = float(quote.get("entry_price") or 0)
-        order = {"id": 0, "state": "filled", "filled_size": requested,
-                 "unfilled_size": 0, "average_fill_price": fill}
-        pending_client = None
-    else:
-        pending_client = _move_client_id("entry", slot)
-        order = None
-    pending = {
-        "slot": slot, "status": "ENTRY_PENDING" if not dry_run else "OPEN",
-        "side": "long" if side == "buy" else "short",
-        "entry_date": now.strftime("%Y-%m-%d"),
-        "entry_time_utc": now.strftime("%H:%M:%S"),
-        "symbol": contract["symbol"], "product_id": product_id,
-        "strike": float(contract.get("strike_price") or 0),
-        "settlement": contract.get("settlement_time", ""),
-        "contract_value": float(contract.get("contract_value") or 0.001),
-        "lots": requested, "btc_at_entry": 0,
-        "entry_trigger": f"manual_{side}_bounded_ioc",
-        "ownership": "manual_move_bot", "dry_run": dry_run,
-        "execution_mode": "dry_run" if dry_run else "live",
-        "entry_classification": "discretionary_manual",
-        "move_value_gate_evaluated": False,
-        "move_value_filter_enabled": plan.get("move_value_filter_enabled", True),
-        "move_value_gate_note": plan.get("value_gate_note"),
-        "protection_config": protection,
-        "sizing_snapshot": plan, "quote_snapshot": quote,
-        "risk_at_entry_usd": plan.get("proposed_risk_usd"),
-        "pending_entry_client_order_id": pending_client,
-        "pending_entry_order_id": None,
-        "pending_entry_requested_lots": requested,
-        "pending_entry_side": side,
-        "pending_entry_submission_state": "prepared" if not dry_run else None,
-        "pending_entry_started_at_utc": now.isoformat(),
-    }
-    if dry_run:
-        pending["simulation_id"] = _simulation_identity(pending, slot)
-        opened = _open_state_from_pending(pending, order, requested)
-        opened["dry_run"] = True
-        opened["execution_mode"] = "dry_run"
-        entry_fee = _option_fee_per_lot(
-            float(opened.get("entry_mark") or 0),
-            float(opened.get("contract_value") or 0.001),
-            float(opened.get("strike") or 0),
-        ) * requested
-        opened.update({
-            "entry_fees_usd": round(entry_fee, 8),
-            "fees_usd": round(entry_fee, 8),
-            "entry_fee_source": "configured_simulation",
-            "pnl_includes_fees": False,
-        })
-        _atomic_write_json(state_file, opened)
-        return opened, order
-
-    # The exact exchange identity is durable before irreversible network I/O.
-    _atomic_write_json(state_file, pending)
-    audit_event(_user_dir(), "dashboard_move_entry_intent", {
-        "slot": slot, "client_order_id": pending_client,
-        "product_id": product_id, "symbol": contract["symbol"],
-        "size": requested, "side": side, "order_type": "limit_order",
-        "limit_price": quote["limit_price"], "time_in_force": "ioc",
-        "entry_classification": "discretionary_manual",
-        "move_value_gate_evaluated": False,
-    })
-    payload = {"product_id": product_id, "size": requested, "side": side,
-               "order_type": "limit_order", "limit_price": str(quote["limit_price"]),
-               "time_in_force": "ioc", "client_order_id": pending_client}
-    try:
-        order, data = _post_dashboard_order(payload)
-    except Exception as exc:
-        order = _lookup_dashboard_order(None, pending_client, product_id)
-        if not order:
-            pending.update(pending_entry_submission_state="submission_unknown",
-                           pending_entry_last_error=str(exc))
-            _atomic_write_json(state_file, pending)
-            raise RuntimeError("entry response lost; exact recovery pending") from exc
-    if not order:
-        error = str(data.get("error") or data)
-        if data.get("success") is False:
-            _atomic_write_json(state_file, {
-                "slot": slot, "status": "IDLE",
-                "last_entry_client_order_id": pending_client,
-                "last_entry_rejection": error,
-                "last_entry_attempt_utc": datetime.now(timezone.utc).isoformat(),
-            })
-        else:
-            pending["pending_entry_last_error"] = error
-            pending["pending_entry_submission_state"] = "acknowledgement_ambiguous"
-            _atomic_write_json(state_file, pending)
-        raise RuntimeError(error)
-    order = _validate_dashboard_order(
-        order, product_id=product_id, client_order_id=pending_client,
-        side=side, reduce_only=False)
-    pending.update(pending_entry_order_id=order.get("id"),
-                   pending_entry_submission_state="acknowledged")
-    try:
-        _atomic_write_json(state_file, pending)
-    except Exception:
-        # The already-durable prepared record contains the same client ID;
-        # continue to terminal verification so a fill is protected/flattened
-        # in this request instead of being abandoned.
-        pass
-    order, filled = _wait_dashboard_terminal(order, requested, product_id, pending_client)
-    if filled is None:
-        pending.update(pending_entry_order_id=order.get("id"),
-                       pending_entry_submission_state="active_or_ambiguous",
-                       pending_entry_last_error="entry fill is not terminal/proven")
-        _atomic_write_json(state_file, pending)
-        raise RuntimeError("entry order is unverified; duplicate submission blocked")
-    if filled <= 0:
-        idle = {"slot": slot, "status": "IDLE",
-                "last_entry_client_order_id": pending_client,
-                "last_entry_order_id": order.get("id"),
-                "last_entry_order_state": _dash_order_state(order)}
-        _atomic_write_json(state_file, idle)
-        raise RuntimeError("bounded IOC order filled zero lots")
-    opened = _persist_proven_move_open(slot, pending, order, filled)
-    return opened, order
-
-
-@app.route("/api/manual-entry", methods=["POST"])
-def api_manual_entry():
-    """Reject discretionary MOVE entries; only scheduled AUTO may open them."""
-    return jsonify({
-        "ok": False,
-        "error": (
-            "Manual MOVE BUY/SELL is disabled. Morning and Evening MOVE "
-            "entries can be opened only by the scheduled forecast engine."
-        ),
-        "code": "MANUAL_MOVE_DISABLED",
-    }), 410
-
-    # Retained temporarily as rollback-compatible implementation context.
-    # This block is unreachable and may be removed after the AUTO rollout.
-    slot = _strict_slot_arg(move_only=True)
-    if slot is None:
-        return jsonify({"ok": False, "error": "slot must be morning or evening"}), 400
-    data = request.get_json(silent=True) or {}
-    side = (data.get("side") or request.args.get("side") or "").lower()
-    if side not in ("buy", "sell"):
-        return jsonify({"ok": False, "error": "side must be buy or sell"}), 400
-    user = _active_user()
-    with account_entry_lock(_user_dir(), f"dashboard-entry:{user}:{slot}") as acquired:
-        if not acquired:
-            return jsonify({"ok": False, "error": "Another account exposure change is in progress"}), 409
-        expectation_error = _mode_expectation_error(data)
-        if expectation_error:
-            return jsonify({"ok": False, "error": expectation_error}), 409
-        mode = _trading_mode_payload()
-        dry_run = mode["dry_run_mode"]
-        key, secret = _active_creds()
-        if not dry_run and (not key or not secret):
-            return jsonify({"ok": False, "error": "API credentials not configured"}), 400
-        try:
-            preview_product_id = int(data.get("product_id") or 0)
-            preview_lots = int(data.get("lots") or 0)
-            preview_price = float(data.get("mark") or 0)
-        except (TypeError, ValueError, OverflowError):
-            preview_product_id = preview_lots = 0
-            preview_price = 0.0
-        preview_symbol = str(data.get("symbol") or "")
-        if (preview_product_id <= 0 or preview_lots <= 0 or preview_price <= 0
-                or not math.isfinite(preview_price) or not preview_symbol):
-            return jsonify({"ok": False,
-                            "error": "A fresh MOVE preview is required before entry"}), 409
-        state_file = _slot_file(slot, dry_run=dry_run)
-        state = _load_json(state_file, {})
-        try:
-            if not dry_run and state.get("status") == "ENTRY_PENDING":
-                state, recovered = _recover_pending_move_entry(slot, state)
-                if state.get("status") == "OPEN":
-                    product_id = int(state.get("product_id") or 0)
-                    expected_size = (-int(state.get("lots") or 0)
-                                     if state.get("side") == "short"
-                                     else int(state.get("lots") or 0))
-                    actual_size = _post_entry_exchange_size(product_id, expected_size)
-                    state["position_verified_at_entry"] = actual_size == expected_size
-                    state["verified_exchange_size_at_entry"] = actual_size
-                    if actual_size != expected_size:
-                        if actual_size and actual_size * expected_size > 0:
-                            state["lots"] = abs(actual_size)
-                            state["position_mismatch_at_recovery"] = {
-                                "terminal_fill": expected_size,
-                                "exchange_size": actual_size,
-                            }
-                            try:
-                                _atomic_write_json(state_file, state)
-                            except Exception:
-                                pass
-                        try:
-                            detail = _force_flatten_move(
-                                slot, state, "recovered_entry_position_mismatch_flatten")
-                            return jsonify({"ok": False,
-                                            "error": "Recovered entry size mismatched and was flattened",
-                                            "flattened": True, **detail}), 502
-                        except Exception as flatten_exc:
-                            return jsonify({"ok": False,
-                                            "error": "Recovered entry size is unverified; duplicate entry blocked",
-                                            "flatten_error": str(flatten_exc),
-                                            "actual_size": actual_size,
-                                            "expected_size": expected_size}), 409
-                    try:
-                        _atomic_write_json(state_file, state)
-                    except Exception:
-                        pass
-                    protected, detail = _protect_or_flatten_move(
-                        slot, state, datetime.now(timezone.utc))
-                    if not protected:
-                        return jsonify({"ok": False, "error": "Recovered entry lacked protection and was flattened",
-                                        **detail}), 502
-                    return jsonify({"ok": True, "recovered": recovered, "slot": slot,
-                                    "side": state["side"], "symbol": state["symbol"],
-                                    "lots": state["lots"], "fill": state["entry_mark"],
-                                    "order_id": state.get("order_id"), "dry_run": False,
-                                    "protection_verified": True})
-            if state.get("status") == "OPEN":
-                return jsonify({"ok": False, "error": f"{slot} already has an open position"}), 400
-
-            contract = _current_atm_mv(slot)
-            if not contract:
-                return jsonify({
-                    "ok": False,
-                    "error": (f"No eligible operational MV contract is currently "
-                              f"listed for manual {slot} entry"),
-                }), 502
-            product_id = int(contract.get("id") or 0)
-            if (product_id != preview_product_id
-                    or str(contract.get("symbol") or "") != preview_symbol):
-                return jsonify({
-                    "ok": False,
-                    "error": ("MOVE contract changed after preview; review the refreshed "
-                              "contract before submitting"),
-                }), 409
-            if dry_run:
-                unrealized = 0.0
-            else:
-                positions = _strict_exchange_positions()
-                unrealized = _validate_move_entry_account(positions, product_id)
-            quote = _move_execution_quote(
-                contract["symbol"], side, reference_price=preview_price)
-            plan = _move_lot_plan(
-                slot, side, contract, quote, dry_run=dry_run)
-            if int(plan.get("lots") or 0) <= 0:
-                return jsonify({"ok": False, "error": plan.get("reason"),
-                                "sizing": plan}), 409
-            if int(plan.get("lots") or 0) != preview_lots:
-                return jsonify({
-                    "ok": False,
-                    "error": "MOVE sizing changed after preview; review the refreshed lots",
-                    "sizing": plan,
-                }), 409
-            decision = evaluate_entry(
-                _mode_data_dir(dry_run), float(plan["proposed_risk_usd"]),
-                _user_cfg(), unrealized_pnl_usd=unrealized,
-                dry_run=dry_run)
-            if not decision.allowed:
-                return jsonify({"ok": False, "error": decision.reason,
-                                "risk": decision_dict(decision), "sizing": plan}), 409
-
-            opened, order = _submit_manual_move_entry(
-                slot, side, contract, quote, plan, dry_run)
-            expected_size = -int(opened["lots"]) if opened["side"] == "short" \
-                else int(opened["lots"])
-            if not dry_run:
-                actual_size = _post_entry_exchange_size(product_id, expected_size)
-                opened["position_verified_at_entry"] = actual_size == expected_size
-                opened["verified_exchange_size_at_entry"] = actual_size
-                try:
-                    _atomic_write_json(state_file, opened)
-                except Exception:
-                    # The essential OPEN record is already durable; continue
-                    # immediately to protection/flatten despite annotation I/O.
-                    pass
-                if actual_size != expected_size:
-                    if actual_size and actual_size * expected_size > 0:
-                        # The selected product was proven flat immediately
-                        # before submit, so track the complete new exposure for
-                        # the emergency reduce-only close instead of abandoning
-                        # an unexplained excess.
-                        opened["lots"] = abs(actual_size)
-                        opened["owned_entry_lots"] = abs(actual_size)
-                        opened["position_mismatch_at_entry"] = {
-                            "terminal_fill": expected_size, "exchange_size": actual_size,
-                        }
-                        try:
-                            _atomic_write_json(state_file, opened)
-                        except Exception:
-                            pass
-                    try:
-                        detail = _force_flatten_move(
-                            slot, opened, "entry_position_mismatch_flatten")
-                        return jsonify({"ok": False,
-                                        "error": "Entry exchange-size mismatch; exposure was flattened",
-                                        "flattened": True, **detail}), 502
-                    except Exception as flatten_exc:
-                        _send_telegram(
-                            f"🚨 <b>MOVE ENTRY RECONCILIATION REQUIRED ({user.upper()})</b>\n"
-                            f"Expected <code>{expected_size}</code>, exchange reported "
-                            f"<code>{actual_size}</code>; flatten failed: "
-                            f"<code>{str(flatten_exc)[:250]}</code>")
-                        return jsonify({"ok": False,
-                                        "error": "Entry exchange-size mismatch and flatten is unresolved",
-                                        "flatten_error": str(flatten_exc),
-                                        "slot": slot, "order_id": order.get("id")}), 409
-                protected, detail = _protect_or_flatten_move(
-                    slot, opened, datetime.now(timezone.utc))
-                if not protected:
-                    return jsonify({"ok": False,
-                                    "error": "Protection was not verified; entry was flattened",
-                                    **detail}), 502
-            else:
-                detail = {"protection_health": {}}
-
-            fill = float(opened["entry_mark"])
-            lots = int(opened["lots"])
-            _send_telegram(
-                f"🖐 <b>MANUAL {side.upper()} — {slot.upper()} ({user.upper()})</b>"
-                f"{' — DRY-RUN' if dry_run else ''}\n"
-                f"<code>DISCRETIONARY (scheduled value gate not claimed)</code>\n"
-                f"<code>{opened['symbol']}</code> · <code>{lots:,}</code> lots · "
-                f"IOC fill <code>${fill:.4f}</code>")
-            return jsonify({"ok": True, "slot": slot, "side": opened["side"],
-                            "symbol": opened["symbol"], "lots": lots,
-                            "requested_lots": plan["lots"], "fill": fill,
-                            "order_id": order.get("id"), "dry_run": dry_run,
-                            "partial_fill": lots < int(plan["lots"]),
-                            "protection_verified": True,
-                            "entry_classification": "discretionary_manual",
-                            "move_value_gate_evaluated": False, **detail})
-        except Exception as exc:
-            _send_telegram(
-                f"🚨 <b>MANUAL MOVE ENTRY ERROR ({user.upper()} / {slot.upper()})</b>\n"
-                f"<code>{str(exc)[:400]}</code>")
-            return jsonify({"ok": False, "error": str(exc)}), 409
-
-
 def _tp_env(slot: str):
     """The active account's TP target / poll / SL / TSL for a slot (their
     config.json, .env defaults as fallback). SL/TSL 0 = disabled."""
@@ -4796,8 +4275,72 @@ def _tp_policy(slot: str) -> dict:
     }
 
 
-@app.route("/api/tp-monitor", methods=["GET"])
-def tp_monitor_status():
+def _trend_score_auto_premium_protection_policy(
+    prepared: dict,
+    *,
+    entry_price: float | None = None,
+) -> dict:
+    """Snapshot the user's premium-percentage rule for one score-zone entry.
+
+    TP, SL, and TSL amounts are derived from this entry's premium and never
+    inherited from an earlier trade. LIVE fills are recalculated a second time
+    against the authoritative exchange average price while preserving the
+    percentages captured in the pending entry.
+    """
+    reference = _trend_score_auto_number(
+        entry_price if entry_price is not None else prepared.get("entry_price"),
+        "selected entry premium", positive=True,
+    )
+    contract_value = _trend_score_auto_number(
+        prepared.get("contract_value"), "contract value", positive=True,
+    )
+    lots = int(_trend_score_auto_number(
+        prepared.get("lots") or _trend_score_auto_configured_lots(),
+        "entry lots", positive=True,
+    ))
+    configured_lots = _trend_score_auto_configured_lots()
+    if lots != configured_lots:
+        # LIVE orders may be deliberately reduced by the wallet/depth sizing
+        # pass. Protection must follow the actual selected/fill size, not the
+        # unattainable configured request. Accept a reduction only when the
+        # full affordability proof is attached and exactly matches both the
+        # configured ceiling and the prepared lot count. Paper orders and
+        # unproven mutations remain strict fixed-size failures.
+        sizing = prepared.get("live_affordability")
+        if not isinstance(sizing, dict):
+            raise RuntimeError(
+                "Prepared order size differs from the configured Trend Engine size"
+            )
+        sizing_configured = _trend_score_auto_exact_int(
+            sizing.get("configured_lots"),
+            "affordability configured size", positive=True,
+        )
+        sizing_selected = _trend_score_auto_exact_int(
+            sizing.get("selected_lots"),
+            "affordability selected size", positive=True,
+        )
+        if (
+            sizing_configured != configured_lots
+            or sizing_selected != lots
+            or lots > configured_lots
+        ):
+            raise RuntimeError(
+                "Prepared order size differs from verified LIVE affordability"
+            )
+    cfg = _user_cfg()
+    poll_secs = _tp_policy("trend").get("poll_secs", 30)
+    return build_premium_percent_protection_policy(
+        reference,
+        contract_value,
+        lots,
+        poll_secs=poll_secs,
+        tp_percent=cfg.get("TREND_TP_PREMIUM_PCT") or 100,
+        sl_percent=cfg.get("TREND_SL_PREMIUM_PCT") or 50,
+        tsl_trail_percent=cfg.get("TREND_TSL_PCT") or 25,
+    )
+
+
+def _tp_monitor_payload():
     user = _active_user()
     out = {}
     def lot_count(value) -> int:
@@ -4806,15 +4349,47 @@ def tp_monitor_status():
         except (TypeError, ValueError, OverflowError):
             return 0
     for slot in SLOTS:
-        policy = _tp_policy(slot)
+        st = _load_json(_slot_file(slot), {})
+        policy = _dry_protection_policy({
+            **st,
+            "slot": st.get("slot") or slot,
+        })
         target, poll, sl, tsl = (policy["tp_target_pnl"], policy["poll_secs"],
                                  policy["sl_target_pnl"], policy["tsl_target_pnl"])
-        st = _load_json(_slot_file(slot), {})
         health = _tp_health(user, slot)
         running = _tp_running(user, slot)
         health_fresh = _tp_health_fresh(health)
         health_matches = _tp_health_matches(health, st, user, slot)
         verified_health = health_fresh and health_matches
+        stream = _load_json(USERS_DIR / user / f"tp_{slot}_stream.json", {})
+        stream_matches = bool(
+            isinstance(stream, dict)
+            and str(stream.get("product_id") or "")
+                == str(st.get("product_id") or "")
+            and str(stream.get("position_cycle_id") or "")
+                == str(st.get("position_cycle_id") or "")
+            and int(stream.get("protection_revision") or 0)
+                == int(st.get("protection_revision") or 0)
+        )
+        try:
+            stream_at = datetime.fromisoformat(
+                str(stream.get("event_received_at_utc") or "")
+                .replace("Z", "+00:00")
+            )
+            if stream_at.tzinfo is None:
+                stream_at = stream_at.replace(tzinfo=timezone.utc)
+            stream_age = (
+                datetime.now(timezone.utc) - stream_at.astimezone(timezone.utc)
+            ).total_seconds()
+        except (TypeError, ValueError):
+            stream_age = float("inf")
+        stream_stale_after = max(float(stream.get("stale_after_secs") or 6), 6)
+        streaming = bool(
+            st.get("status") == "OPEN"
+            and stream_matches
+            and stream_age <= stream_stale_after + 2
+            and stream.get("status") in {"live", "rest_fallback"}
+        )
         protected_lots = lot_count(
             health.get("protected_lots") if verified_health else
             st.get("protection_lots") or st.get("lots")
@@ -4844,12 +4419,12 @@ def tp_monitor_status():
         )
         if not continuity_ok:
             coverage_status = "attention"
-        elif running and exchange_lots > exchange_protected_lots:
-            coverage_status = "resizing"
         elif exchange_complete:
             coverage_status = "exchange_protected"
         elif local_fallback and health.get("protection_established"):
             coverage_status = "local_fallback"
+        elif running and exchange_lots > protected_lots:
+            coverage_status = "resizing"
         elif running and not verified_health:
             coverage_status = "verifying"
         else:
@@ -4877,8 +4452,30 @@ def tp_monitor_status():
                      "poll_secs": poll, "sl_pnl": sl, "tsl_pnl": tsl,
                      "tsl_arm_pnl": policy["tsl_arm_pnl"],
                      "tsl_trail_pnl": policy["tsl_trail_pnl"],
+                     "tsl_pct": policy["tsl_pct"],
+                     "nimmathi_tsl": policy["protection_mode"]
+                                      == "filled_premium_percent_peak_trail_v2",
                      "tsl_lock_min_pnl": policy["tsl_lock_min_pnl"],
+                     "protection_source": policy["protection_source"],
+                     "entry_premium_usd": policy["entry_premium_usd"],
+                     "manual_override_allowed": policy[
+                         "manual_override_allowed"],
                      "healthy": bool(verified_health and health.get("status") == "healthy"),
+                     "streaming": streaming,
+                     "stream_status": stream.get("status") if stream_matches else "unavailable",
+                     "stream_source": stream.get("source") if stream_matches else None,
+                     "stream_event_utc": stream.get("event_received_at_utc")
+                                         if stream_matches else None,
+                     "stream_expected_interval_secs": stream.get(
+                         "expected_interval_secs", 2),
+                     "live_mark": stream.get("mark") if streaming else None,
+                     "live_pnl": stream.get("pnl") if streaming else None,
+                     "stream_tsl_peak": stream.get("tsl_peak")
+                                        if stream_matches else None,
+                     "stream_tsl_floor": stream.get("tsl_floor")
+                                         if stream_matches else None,
+                     "stream_tsl_armed": bool(stream.get("tsl_armed"))
+                                         if stream_matches else False,
                      "health_matches": health_matches, "health": health,
                      "protection_established": bool(
                          verified_health and health.get("protection_established")),
@@ -4907,7 +4504,51 @@ def tp_monitor_status():
                      "tp_on_exchange":  tp_proven}
     # Back-compat top-level fields = evening
     out.update(out["evening"])
-    return jsonify(out)
+    return out
+
+
+@app.route("/api/tp-monitor", methods=["GET"])
+def tp_monitor_status():
+    return jsonify(_tp_monitor_payload())
+
+
+@app.route("/api/stream/protection", methods=["GET"])
+def protection_event_stream():
+    """Account-scoped live protection telemetry for web and native clients."""
+    _active_user()  # authenticate before opening the long-lived response
+
+    @stream_with_context
+    def events():
+        previous = None
+        heartbeat_at = 0.0
+        while True:
+            try:
+                encoded = json.dumps(
+                    _tp_monitor_payload(), separators=(",", ":"),
+                    sort_keys=True, default=str,
+                )
+                if encoded != previous:
+                    yield f"event: protection\ndata: {encoded}\n\n"
+                    previous = encoded
+                    heartbeat_at = time.monotonic()
+                elif time.monotonic() - heartbeat_at >= 10:
+                    yield ": keep-alive\n\n"
+                    heartbeat_at = time.monotonic()
+                time.sleep(1)
+            except GeneratorExit:
+                return
+            except Exception as exc:
+                app.logger.warning("Protection event stream failed: %s", exc)
+                return
+
+    return Response(
+        events(), mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.route("/api/tp-monitor/start", methods=["POST"])
@@ -4956,26 +4597,178 @@ def tp_monitor_stop():
 
 @app.route("/download/apk")
 def download_apk():
+    """Serve the latest built Android APK for sideloading.
+
+    The file is produced by ``flutter build apk --release`` in ``mv_btc_bot``
+    and lands at the path below (gitignored build output). On a freshly
+    deployed host it will not exist until an APK is uploaded there, so a
+    missing file is a 404 rather than an error. This path is auth-gated like
+    the rest of the dashboard: the before-request hook returns 401 (not a
+    login redirect) for ``/download/`` when unauthenticated, so callers reach
+    it via a logged-in browser session or the app's HTTP Basic credentials.
+    """
     apk = BASE / "mv_btc_bot" / "build" / "app" / "outputs" / "flutter-apk" / "app-release.apk"
     if not apk.exists():
         abort(404)
-    return send_file(str(apk), as_attachment=True, download_name="nithi-bot.apk")
+    return send_file(str(apk), as_attachment=True, download_name="btc-bot.apk")
 
 
 @app.route("/api/logs")
 def api_logs():
-    # Each bot instance logs to its own file; fall back to the legacy
-    # shared straddle.log for history from before the per-user split.
+    """Return the active account's readable activity feed.
+
+    The score-zone controller writes durable, per-account audit events rather
+    than the retired straddle_<user>.log file.  Reading that file first makes
+    the Logs page useful without showing a shared system log that could expose
+    another account's activity.  A per-account legacy bot log remains a safe
+    fallback for accounts that have not produced audit events yet.
+    """
+    try:
+        n = int(request.args.get("n", 100))
+    except (TypeError, ValueError):
+        n = 100
+    n = max(1, min(n, 500))
+
+    audit_rows = _account_audit_log_lines(_user_dir() / "strategy_audit.jsonl", n)
+    if audit_rows:
+        return jsonify({
+            "lines": audit_rows,
+            "source": "account_activity",
+            "message": "Score-zone decisions, dry-run trade changes, and safety notices for this account.",
+        })
+
+    # Never fall back to the shared straddle.log here: that historic file can
+    # contain another account's operations.  The Logs page is account-scoped.
     log_file = BASE / "logs" / f"straddle_{_active_user()}.log"
-    if not log_file.exists():
-        log_file = BASE / "logs" / "straddle.log"
-    n = min(int(request.args.get("n", 100)), 500)
     try:
         text = log_file.read_text(encoding="utf-8", errors="replace")
         rows = [l for l in text.splitlines() if l.strip()]
-        return jsonify({"lines": rows[-n:]})
+        return jsonify({
+            "lines": rows[-n:],
+            "source": "legacy_bot_log",
+            "message": "Account-specific bot log.",
+        })
     except FileNotFoundError:
-        return jsonify({"lines": []})
+        return jsonify({
+            "lines": [],
+            "source": "empty",
+            "message": "No account activity has been recorded yet.",
+        })
+
+
+def _tail_text_lines(path: Path, limit: int, *, max_bytes: int = 2_000_000) -> list[str]:
+    """Read a bounded tail without making the dashboard load an unbounded log."""
+    try:
+        with path.open("rb") as fh:
+            size = path.stat().st_size
+            if size > max_bytes:
+                fh.seek(-max_bytes, os.SEEK_END)
+                fh.readline()  # discard a partial first line
+            text = fh.read().decode("utf-8", errors="replace")
+            return [line for line in text.splitlines() if line.strip()][-limit:]
+    except (FileNotFoundError, OSError):
+        return []
+
+
+def _safe_activity_text(value, *, limit: int = 360) -> str:
+    """Keep activity messages readable while masking accidental secret text."""
+    text = " ".join(str(value or "").split())
+    text = re.sub(
+        r"(?i)\b(api[ _-]?(?:key|secret)|token|signature)\b\s*[:=]\s*\S+",
+        r"\1=[redacted]",
+        text,
+    )
+    return text[:limit]
+
+
+def _audit_log_time_ist(value) -> str:
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(_IST_TIMEZONE).strftime("%Y-%m-%d %I:%M:%S %p IST")
+    except (TypeError, ValueError):
+        return "Time not recorded"
+
+
+def _audit_score_label(value) -> str:
+    try:
+        return f"{float(value):+.1f}"
+    except (TypeError, ValueError):
+        return ""
+
+
+def _account_audit_log_line(record: dict) -> str:
+    """Format one durable audit record as a compact, non-sensitive UI line."""
+    at = _audit_log_time_ist(record.get("at_utc"))
+    event = str(record.get("event") or "activity").strip().lower()
+    symbol = _safe_activity_text(record.get("symbol"), limit=80)
+    zone = _safe_activity_text(record.get("zone"), limit=40).replace("_", " ")
+    lots = record.get("lots")
+    score = _audit_score_label(record.get("direction_score"))
+
+    if event == "trend_score_auto_entry_opened":
+        details = ["TRADE OPENED", zone, symbol]
+        if lots not in (None, ""):
+            details.append(f"{lots:,} lots" if isinstance(lots, int) else f"{lots} lots")
+        if score:
+            details.append(f"score {score}")
+        details.append("DRY RUN" if record.get("exchange_api_called") is False else "LIVE")
+        return f"{at} · " + " · ".join(part for part in details if part)
+
+    if event == "trend_score_auto_zone_exit":
+        details = ["TRADE EXIT", symbol]
+        pnl = record.get("pnl_usd")
+        try:
+            details.append(f"P/L ${float(pnl):+,.2f}")
+        except (TypeError, ValueError):
+            pass
+        if zone:
+            details.append(f"next zone {zone}")
+        return f"{at} · " + " · ".join(part for part in details if part)
+
+    if event in {
+        "trend_score_auto_error",
+        "trend_score_auto_live_error",
+        "trend_score_auto_live_pending_recovery_error",
+    }:
+        message = _safe_activity_text(record.get("error"))
+        lowered = message.lower()
+        if "hold band" in lowered:
+            prefix = "HOLD"
+        elif (
+            "stale_l1" in lowered
+            or "signal_expired" in lowered
+            or "different completed 5-minute candles" in lowered
+        ):
+            prefix = "DATA WAIT"
+        elif "operator-protected external trend position" in lowered:
+            prefix = "PROTECTED"
+        elif "manually opened cockpit trend position" in lowered:
+            prefix = "INFO"
+        else:
+            prefix = "ERROR"
+        return f"{at} · {prefix} · {message or 'Score-zone controller needs attention.'}"
+
+    label = event.replace("_", " ").upper()
+    details = [label, symbol]
+    if zone:
+        details.append(zone)
+    if score:
+        details.append(f"score {score}")
+    return f"{at} · " + " · ".join(part for part in details if part)
+
+
+def _account_audit_log_lines(path: Path, limit: int) -> list[str]:
+    rows: list[str] = []
+    for raw in _tail_text_lines(path, limit * 2):
+        try:
+            record = json.loads(raw)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(record, dict):
+            rows.append(_account_audit_log_line(record))
+    return rows[-limit:]
 
 
 # ─────────────────────────────────────────────────────────────
@@ -5183,6 +4976,434 @@ def _fetch_reconstructed_trades(skip_prefixes=("MV-BTC",)) -> list:
         return []
 
 
+_DELTA_HISTORY_PAGE_SIZE = 50
+_DELTA_HISTORY_MAX_PAGES = 1_000
+_delta_contract_value_cache: dict[int, float | None] = {}
+
+
+def _delta_history_timestamp(value) -> datetime | None:
+    """Parse Delta's documented microsecond epoch timestamps safely.
+
+    Delta's fill endpoint normally returns ``created_at`` as microseconds,
+    but accepting ISO values and older millisecond/second values keeps the
+    Performance page readable if Delta changes the representation again.
+    """
+    if value in (None, "") or isinstance(value, bool):
+        return None
+    text = str(value).strip()
+    try:
+        number = float(text)
+        if not math.isfinite(number):
+            return None
+        absolute = abs(number)
+        if absolute >= 100_000_000_000_000:
+            number /= 1_000_000
+        elif absolute >= 100_000_000_000:
+            number /= 1_000
+        return datetime.fromtimestamp(number, timezone.utc)
+    except (TypeError, ValueError, OverflowError, OSError):
+        pass
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return (parsed.replace(tzinfo=timezone.utc)
+            if parsed.tzinfo is None else parsed.astimezone(timezone.utc))
+
+
+def _delta_history_number(value):
+    """Return a finite exchange number without manufacturing a zero."""
+    if value in (None, "") or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _delta_contract_value(product_id) -> float | None:
+    """Read and cache a Delta contract multiplier for trade-level P&L.
+
+    A fill does not carry its multiplier.  We therefore show a P&L only when
+    Delta's product record supplies a finite positive value; an unavailable
+    multiplier leaves the trade unvalued rather than assuming ``0.001``.
+    """
+    try:
+        product_id = int(product_id)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if product_id in _delta_contract_value_cache:
+        return _delta_contract_value_cache[product_id]
+    value = None
+    try:
+        response = req.get(f"{API_BASE}/v2/products/{product_id}", timeout=8)
+        payload = response.json()
+        result = payload.get("result") if isinstance(payload, dict) else None
+        candidate = _delta_history_number(
+            result.get("contract_value") if isinstance(result, dict) else None)
+        if candidate is not None and candidate > 0:
+            value = candidate
+    except Exception:
+        value = None
+    _delta_contract_value_cache[product_id] = value
+    return value
+
+
+def _delta_history_error_message(error) -> str:
+    """Turn expected Delta API failures into an actionable dashboard message."""
+    if isinstance(error, dict):
+        code = str(error.get("code") or "").strip().lower()
+        if code == "ip_not_whitelisted_for_api_key":
+            return (
+                "Delta Exchange blocked this server because its public IP is not "
+                "on this API key's allowlist. Add the server IP in Delta, then refresh."
+            )
+        if code in {"invalid_api_key", "invalid_signature", "unauthorized"}:
+            return "Delta Exchange rejected this account's API credentials."
+        message = error.get("message") or error.get("error")
+        if message:
+            return str(message)
+    return str(error or "invalid response")
+
+
+def _fetch_complete_delta_fills() -> list[dict]:
+    """Read every available authenticated Delta fill, following cursors.
+
+    This is intentionally a fill ledger rather than an order history:
+    only fills are executed trades.  The operation is read-only.  A repeated
+    cursor, malformed page, or configured safety limit fails the request
+    instead of silently presenting a partial account history as complete.
+    """
+    key, secret = _active_creds()
+    if not key or not secret:
+        raise RuntimeError("Delta API credentials are not configured for this account")
+
+    rows: list[dict] = []
+    seen_cursors: set[str] = set()
+    after: str | None = None
+    for _page in range(_DELTA_HISTORY_MAX_PAGES):
+        params = {"page_size": _DELTA_HISTORY_PAGE_SIZE}
+        if after:
+            params["after"] = after
+        query = "?" + urlencode(params)
+        try:
+            response = req.get(
+                f"{API_BASE}/v2/fills", params=params,
+                headers=_sign("GET", "/v2/fills", query, key=key, secret=secret),
+                timeout=20,
+            )
+            payload = response.json()
+        except Exception as exc:
+            raise RuntimeError(f"Delta fill history could not be read: {exc}") from exc
+        if not isinstance(payload, dict) or not payload.get("success"):
+            error = payload.get("error") if isinstance(payload, dict) else payload
+            raise RuntimeError(
+                f"Delta fill history was rejected: {_delta_history_error_message(error)}")
+        page_rows = payload.get("result")
+        if isinstance(page_rows, dict):
+            page_rows = page_rows.get("fills") or page_rows.get("data")
+        if not isinstance(page_rows, list):
+            raise RuntimeError("Delta fill history returned an invalid page")
+        rows.extend(row for row in page_rows if isinstance(row, dict))
+
+        meta = payload.get("meta") or {}
+        next_after = meta.get("after") if isinstance(meta, dict) else None
+        if not page_rows or not next_after:
+            return rows
+        next_after = str(next_after)
+        if next_after in seen_cursors:
+            raise RuntimeError("Delta fill history pagination repeated a cursor")
+        seen_cursors.add(next_after)
+        after = next_after
+    raise RuntimeError(
+        f"Delta fill history exceeded {_DELTA_HISTORY_MAX_PAGES:,} pages; "
+        "nothing was shown because the result would be incomplete"
+    )
+
+
+def _delta_fee_add(amounts: dict[str, float], asset, amount) -> None:
+    """Accumulate one reported fee without mixing settlement currencies."""
+    amount = _delta_history_number(amount)
+    if amount is None:
+        return
+    label = str(asset or "fee units")
+    amounts[label] = amounts.get(label, 0.0) + amount
+
+
+def _delta_fee_split(amounts: dict[str, float], asset, amount,
+                     fraction: float) -> None:
+    """Attach the matching portion of a reversal fill's fee to one trade."""
+    if fraction > 0:
+        _delta_fee_add(amounts, asset, (_delta_history_number(amount) or 0) * fraction)
+
+
+def _delta_trade_time(timestamp: datetime | None) -> tuple[str, str]:
+    if timestamp is None:
+        return "", "Not reported"
+    return (
+        timestamp.isoformat().replace("+00:00", "Z"),
+        timestamp.astimezone(_IST_TIMEZONE).strftime("%Y-%m-%d %I:%M:%S %p IST"),
+    )
+
+
+def _delta_trade_row(state: dict, *, status: str,
+                     exit_timestamp: datetime | None = None) -> dict:
+    """Publish a position cycle, never the individual orders/fills behind it."""
+    entry_timestamp = state.get("entry_timestamp")
+    entry_at_utc, entry_time_ist = _delta_trade_time(entry_timestamp)
+    exit_at_utc, exit_time_ist = _delta_trade_time(exit_timestamp)
+    fees = dict(state.get("fees") or {})
+    gross_pnl = (round(float(state["gross_pnl"]), 2)
+                 if status == "CLOSED" and state.get("pnl_available") else None)
+    fee_assets = {str(asset).upper() for asset in fees}
+    usd_fees = sum(amount for asset, amount in fees.items()
+                   if str(asset).upper() == "USD")
+    net_pnl = (
+        round(gross_pnl - usd_fees, 2)
+        if gross_pnl is not None and fee_assets <= {"USD"} else None
+    )
+    return {
+        "source": "delta_exchange",
+        "record_type": "trade",
+        "status": status,
+        "symbol": state.get("symbol") or "Not reported",
+        "side": "LONG" if state.get("direction", 1) > 0 else "SHORT",
+        "lots": round(float(state.get("entry_lots") or 0), 6),
+        "open_lots": (round(abs(float(state.get("net_lots") or 0)), 6)
+                      if status == "OPEN" else 0),
+        "entry_price": round(float(state.get("entry_notional") or 0)
+                             / float(state.get("entry_lots") or 1), 8),
+        "exit_price": (
+            round(float(state.get("exit_notional") or 0)
+                  / float(state.get("closed_lots") or 1), 8)
+            if status == "CLOSED" else None
+        ),
+        "gross_pnl_usd": gross_pnl,
+        "net_pnl_usd": net_pnl,
+        "fees": [
+            {"asset": asset, "amount": round(amount, 8)}
+            for asset, amount in sorted(fees.items())
+            if amount
+        ],
+        "entry_at_utc": entry_at_utc,
+        "exit_at_utc": exit_at_utc,
+        "entry_time_ist": entry_time_ist,
+        "exit_time_ist": exit_time_ist,
+        "date": entry_timestamp.strftime("%Y-%m-%d") if entry_timestamp else "",
+        "sort_timestamp": entry_timestamp.timestamp() if entry_timestamp else 0,
+    }
+
+
+def _new_delta_trade_state(fill: dict, signed_lots: float,
+                           fee_fraction: float = 1.0) -> dict:
+    """Start a new LONG/SHORT trade cycle from one authenticated fill."""
+    lots = abs(signed_lots)
+    fees: dict[str, float] = {}
+    _delta_fee_split(fees, fill.get("commission_asset"),
+                     fill.get("commission"), fee_fraction)
+    return {
+        "symbol": fill.get("symbol"),
+        "direction": 1 if signed_lots > 0 else -1,
+        "net_lots": signed_lots,
+        "peak_lots": lots,
+        "entry_lots": lots,
+        "entry_notional": float(fill["price"]) * lots,
+        "basis_lots": lots,
+        "basis_notional": float(fill["price"]) * lots,
+        "entry_timestamp": fill.get("timestamp"),
+        "exit_notional": 0.0,
+        "closed_lots": 0.0,
+        "gross_pnl": 0.0,
+        "pnl_available": fill.get("contract_value") is not None,
+        "contract_value": fill.get("contract_value"),
+        "fees": fees,
+    }
+
+
+def _reconstruct_delta_trades(fills: list[dict], *,
+                              contract_value_lookup=None) -> list[dict]:
+    """Turn Delta's raw fill ledger into human-level position trades.
+
+    The visible Performance response deliberately excludes all order/fill
+    identity and liquidity metadata.  Same-direction additions retain a
+    weighted entry price; partial closes stay with their original trade; a
+    reversal closes the old trade and starts a new one with the remainder.
+    """
+    contract_value_lookup = contract_value_lookup or _delta_contract_value
+    normalized = []
+    for raw in fills:
+        timestamp = _delta_history_timestamp(raw.get("created_at"))
+        lots = _delta_history_number(raw.get("size"))
+        price = _delta_history_number(raw.get("price"))
+        side = str(raw.get("side") or "").strip().lower()
+        symbol = str(raw.get("product_symbol") or "").strip()
+        if not timestamp or not lots or lots <= 0 or price is None or side not in {"buy", "sell"} or not symbol:
+            continue
+        product_id = raw.get("product_id")
+        normalized.append({
+            "symbol": symbol,
+            "timestamp": timestamp,
+            "lots": lots,
+            "price": price,
+            "side": side,
+            "commission": raw.get("commission"),
+            "commission_asset": raw.get("settling_asset_symbol"),
+            "contract_value": contract_value_lookup(product_id),
+        })
+    normalized.sort(key=lambda fill: fill["timestamp"])
+
+    open_trades: dict[str, dict] = {}
+    completed: list[dict] = []
+    for fill in normalized:
+        signed_lots = fill["lots"] if fill["side"] == "buy" else -fill["lots"]
+        state = open_trades.get(fill["symbol"])
+        if state is None or abs(state["net_lots"]) < 1e-9:
+            open_trades[fill["symbol"]] = _new_delta_trade_state(fill, signed_lots)
+            continue
+
+        same_direction = (signed_lots > 0) == (state["net_lots"] > 0)
+        if same_direction:
+            added_lots = abs(signed_lots)
+            state["net_lots"] += signed_lots
+            state["peak_lots"] = max(state["peak_lots"], abs(state["net_lots"]))
+            state["entry_lots"] += added_lots
+            state["entry_notional"] += fill["price"] * added_lots
+            state["basis_lots"] += added_lots
+            state["basis_notional"] += fill["price"] * added_lots
+            if fill.get("contract_value") is None:
+                state["pnl_available"] = False
+            _delta_fee_add(state["fees"], fill.get("commission_asset"),
+                           fill.get("commission"))
+            continue
+
+        current_lots = abs(state["net_lots"])
+        closing_lots = min(current_lots, abs(signed_lots))
+        fill_fraction = closing_lots / abs(signed_lots)
+        basis_lots = float(state.get("basis_lots") or 0)
+        entry_basis = (float(state.get("basis_notional") or 0) / basis_lots
+                       if basis_lots else 0.0)
+        multiplier = state.get("contract_value")
+        if multiplier is None:
+            state["pnl_available"] = False
+        else:
+            state["gross_pnl"] += (
+                (fill["price"] - entry_basis) * float(multiplier)
+                * closing_lots * float(state["direction"])
+            )
+        state["exit_notional"] += fill["price"] * closing_lots
+        state["closed_lots"] += closing_lots
+        state["basis_lots"] = max(0.0, basis_lots - closing_lots)
+        state["basis_notional"] = max(
+            0.0, float(state.get("basis_notional") or 0) - entry_basis * closing_lots)
+        _delta_fee_split(state["fees"], fill.get("commission_asset"),
+                         fill.get("commission"), fill_fraction)
+        if abs(signed_lots) >= current_lots:
+            state["net_lots"] = 0.0
+        else:
+            state["net_lots"] += signed_lots
+
+        if abs(state["net_lots"]) < 1e-9:
+            completed.append(_delta_trade_row(
+                state, status="CLOSED", exit_timestamp=fill["timestamp"]))
+            remaining_lots = abs(signed_lots) - closing_lots
+            if remaining_lots > 1e-9:
+                remaining_signed = remaining_lots if signed_lots > 0 else -remaining_lots
+                open_trades[fill["symbol"]] = _new_delta_trade_state(
+                    fill, remaining_signed, fee_fraction=1 - fill_fraction)
+            else:
+                open_trades.pop(fill["symbol"], None)
+
+    for state in open_trades.values():
+        if abs(state.get("net_lots", 0)) >= 1e-9:
+            completed.append(_delta_trade_row(state, status="OPEN"))
+    return sorted(completed, key=lambda row: row.get("sort_timestamp", 0))
+
+
+def _performance_origin_index() -> dict:
+    """Tracked LIVE trades keyed by (symbol, entry date).
+
+    Each value is a list of ``(entry_clock_seconds, origin_label)`` pairs so
+    an exchange-ledger row can be matched to the record that opened it.
+    Legacy records store only a clock string plus ``entry_date`` — never a
+    full timestamp — so the clock is matched, not the instant.
+    """
+    records = [
+        row for row in _load_json(_hist_file(), [])
+        if isinstance(row, dict) and not _is_dry_record(row)
+    ]
+    for slot in SLOTS:
+        state = _load_json(_slot_file(slot), {})
+        if (isinstance(state, dict)
+                and str(state.get("status") or "").upper() == "OPEN"
+                and not _is_dry_record(state)):
+            records.append(state)
+    index: dict = {}
+    for record in records:
+        symbol = str(record.get("symbol") or "").strip()
+        clock = _trade_clock_seconds(record, "entry")
+        date = str(record.get("entry_date")
+                   or record.get("date") or "").strip()
+        if not date:
+            stamp = _parse_utc_stamp(record.get("entry_time_utc"))
+            date = stamp.date().isoformat() if stamp else ""
+        if not symbol or clock is None or not date:
+            continue
+        index.setdefault((symbol, date), []).append(
+            (clock, _trade_origin_label(record)))
+    return index
+
+
+def _delta_row_origin_label(row: dict, index: dict) -> str:
+    """Best-effort M/A attribution for one exchange-ledger trade row.
+
+    The ledger itself has no origin metadata. A row matching a locally
+    tracked trade by symbol, date and entry clock inherits that record's
+    label; unmatched MOVE rows belong to the legacy MV straddle bot, and
+    anything else was placed outside this dashboard's automation, i.e.
+    manually.
+    """
+    symbol = str(row.get("symbol") or "").strip()
+    date = str(row.get("date") or "").strip()
+    stamp = _parse_utc_stamp(row.get("entry_at_utc"))
+    if symbol and date and stamp is not None:
+        clock = stamp.hour * 3600 + stamp.minute * 60 + stamp.second
+        for candidate, label in index.get((symbol, date), []):
+            distance = abs(candidate - clock)
+            if min(distance, 86_400 - distance) <= 5:
+                return label
+    if symbol.upper().startswith("MV-BTC"):
+        return ORIGIN_AUTO
+    return ORIGIN_MANUAL
+
+
+@app.route("/api/performance/delta-trades")
+@app.route("/api/performance/delta-fills")
+def api_performance_delta_trades():
+    """Complete trade-level Delta history for the signed-in account."""
+    try:
+        rows = _reconstruct_delta_trades(_fetch_complete_delta_fills())
+        origin_index = _performance_origin_index()
+        for row in rows:
+            row["origin_label"] = _delta_row_origin_label(row, origin_index)
+        return jsonify({
+            "ok": True,
+            "source": "delta_exchange",
+            "source_label": "Delta Exchange",
+            "record_label": "trades",
+            "records": rows,
+            "count": len(rows),
+            "fetched_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        })
+    except RuntimeError as exc:
+        return jsonify({"ok": False, "source": "delta_exchange", "error": str(exc)}), 502
+
+
+# Backward-compatible Python name for integrations/tests that imported the
+# first read-only Performance endpoint before it became trade-level.
+api_performance_delta_fills = api_performance_delta_trades
+
+
 def _trade_phase_ids(record: dict, phase: str) -> set[str]:
     """Stable exchange/client identities attached to one side of a trade."""
     if phase == "entry":
@@ -5322,6 +5543,12 @@ def _all_trades_merged() -> list:
         if not any(_trades_represent_same_round_trip(tracked, reconstructed)
                    for tracked in mv_trades)
     ]
+    for t in other:
+        # A round trip the bot never tracked was placed outside this
+        # dashboard's automation (e.g. directly on Delta) — show it as manual
+        # rather than an unexplained blank.
+        if _trade_origin_label(t) == ORIGIN_UNKNOWN:
+            t["origin_label"] = ORIGIN_MANUAL
     merged = mv_trades + other
     for t in merged:
         # Older records (square-offs, resumed states) carry only entry_date /
@@ -5330,6 +5557,7 @@ def _all_trades_merged() -> list:
         t.setdefault("date", t.get("entry_date", ""))
         t.setdefault("entry_time", t.get("entry_time_utc", ""))
         t.setdefault("exit_time", t.get("exit_time_utc", ""))
+        t.setdefault("origin_label", _trade_origin_label(t))
     merged.sort(key=lambda t: (t.get("entry_date") or t.get("date", ""),
                                 t.get("entry_time", "")))
     return merged
@@ -5366,6 +5594,7 @@ def _dry_run_trades() -> list[dict]:
         row.setdefault("date", row.get("entry_date", ""))
         row.setdefault("entry_time", row.get("entry_time_utc", ""))
         row.setdefault("exit_time", row.get("exit_time_utc", ""))
+        row.setdefault("origin_label", _trade_origin_label(row))
     rows.sort(key=lambda row: (
         row.get("entry_date") or row.get("date", ""),
         row.get("entry_time") or row.get("entry_time_utc", ""),
@@ -5410,10 +5639,26 @@ def _dry_protection_policy(state: dict) -> dict:
     return {
         "tp_target_pnl": nonnegative("tp_target_pnl"),
         "sl_target_pnl": nonnegative("sl_target_pnl"),
+        # Kept for the monitor-status API and older clients.  New dry-run
+        # protection uses the explicit arm/trail values below.
+        "tsl_target_pnl": legacy_tsl,
         "tsl_arm_pnl": nonnegative("tsl_arm_pnl", legacy_tsl),
         "tsl_trail_pnl": nonnegative("tsl_trail_pnl", legacy_tsl),
         "tsl_lock_min_pnl": nonnegative("tsl_lock_min_pnl"),
         "poll_secs": max(poll_secs, 10),
+        "protection_mode": str(policy.get("protection_mode") or ""),
+        "protection_source": str(policy.get("protection_source") or "manual"),
+        "entry_premium_usd": nonnegative("entry_premium_usd"),
+        "tp_percent_of_entry_premium": nonnegative(
+            "tp_percent_of_entry_premium"),
+        "sl_percent_of_entry_premium": nonnegative(
+            "sl_percent_of_entry_premium"),
+        "tsl_arm_percent_of_entry_premium": nonnegative(
+            "tsl_arm_percent_of_entry_premium"),
+        "tsl_trail_percent_of_entry_premium": nonnegative(
+            "tsl_trail_percent_of_entry_premium"),
+        "tsl_pct": nonnegative("tsl_pct"),
+        "manual_override_allowed": bool(policy.get("manual_override_allowed")),
     }
 
 
@@ -5677,6 +5922,46 @@ def _position_display_slots(
     return display, conflicts
 
 
+def _score_zone_position_view(state: dict) -> dict:
+    """Return the one storage-owned position used by score-zone automation.
+
+    Morning and evening are historic MOVE storage slots.  They are not a
+    trading model any more: the score controller owns only ``trend`` and can
+    hold a CE, PE, or MOVE position there.  The dedicated DRY RUN workspace
+    therefore consumes this view rather than re-bucketing an entry by its
+    time of day.
+    """
+    view = dict(state) if isinstance(state, dict) else {}
+    view.setdefault("slot", "trend")
+    view.setdefault("status", "IDLE")
+    view.update({
+        "source_slot": "trend",
+        "control_slot": "trend",
+        "display_slot": "score_zone",
+        "display_instrument_group": _position_instrument_group(view),
+    })
+    return view
+
+
+def _legacy_score_zone_blockers(slots: dict[str, dict]) -> list[str]:
+    """Describe non-terminal legacy slot state without rendering it as a trade.
+
+    The controller already fail-closes on this state before it can enter a
+    score-zone trade.  Reporting it lets the single-position workspace give a
+    useful explanation instead of silently appearing idle in a migrated
+    account that still has old persisted state.
+    """
+    blockers: list[str] = []
+    for slot in MOVE_SLOTS:
+        state = slots.get(slot) or {}
+        status = str(state.get("status") or "").upper()
+        if status not in {"", "IDLE", "CLOSED"}:
+            blockers.append(f"legacy {slot} state is {status}")
+        elif _trend_score_auto_pending_identity(state):
+            blockers.append(f"legacy {slot} state has a pending order")
+    return blockers
+
+
 # Backward-compatible names for code/tests that refer to the original
 # DRY-RUN-only presentation helpers.
 _dry_run_instrument_group = _position_instrument_group
@@ -5705,6 +5990,12 @@ def api_dry_run_status():
     return jsonify({
         **mode,
         "mode_active": mode["dry_run_mode"],
+        # New single-position contract for the score-zone DRY RUN workspace.
+        # The slot fields below remain temporarily for other existing
+        # dashboards and API clients; they are no longer used to render the
+        # DRY RUN page.
+        "score_zone_position": _score_zone_position_view(slots["trend"]),
+        "legacy_position_blockers": _legacy_score_zone_blockers(slots),
         "morning": slots["morning"],
         "evening": slots["evening"],
         "trend": slots["trend"],
@@ -5731,25 +6022,29 @@ def api_dry_run_trades():
 
 @app.route("/api/dry-run/today-trades")
 def api_dry_run_today_trades():
-    today_ist = datetime.now(_IST_TIMEZONE).strftime("%Y-%m-%d")
+    window = _trading_day_window()
     rows = [
         row for row in _dry_run_trades()
-        if _ist_calendar_date(
+        if _in_trading_day(
             row.get("entry_date") or row.get("date", ""),
             row.get("entry_time") or row.get("entry_time_utc", ""),
-        ) == today_ist
+            window,
+        )
     ]
     for slot in SLOTS:
         state = _load_json(_slot_file(slot, dry_run=True), {})
         if (str(state.get("status") or "").upper() == "OPEN"
                 and _is_dry_record(state)
-                and _ist_calendar_date(
+                and _in_trading_day(
                     state.get("entry_date", ""),
                     state.get("entry_time_utc", ""),
-                ) == today_ist):
+                    window,
+                )):
             live = _enrich_dry_state(state)
             live.update({"_live": True, "slot": slot})
             rows.insert(0, live)
+    for row in rows:
+        row.setdefault("origin_label", _trade_origin_label(row))
     return jsonify(rows)
 
 
@@ -5773,20 +6068,11 @@ def _product_info(product_id: int) -> dict:
     return info
 
 
-_fx_cache = {"rate": 0.0, "ts": 0.0}
+DELTA_USD_INR_RATE = 85.0
 
 def _usd_inr_rate() -> float:
-    """USD->INR, cached for an hour (display-only, precision not critical)."""
-    if _fx_cache["rate"] and time.time() - _fx_cache["ts"] < 3600:
-        return _fx_cache["rate"]
-    try:
-        r = req.get("https://open.er-api.com/v6/latest/USD", timeout=8).json()
-        rate = float(r.get("rates", {}).get("INR") or 0)
-        if rate > 0:
-            _fx_cache.update(rate=rate, ts=time.time())
-        return rate
-    except Exception:
-        return _fx_cache["rate"]
+    """Return Delta Exchange's fixed USD-to-INR display conversion."""
+    return DELTA_USD_INR_RATE
 
 
 # ─────────────────────────────────────────────────────────────
@@ -6029,6 +6315,198 @@ def api_trend():
                         "error": str(e)}), 502
 
 
+# ── btc_trend_engine proxy (Trend Engine page) ─────────────────────────────
+# Read-only pass-through to trend_engine_client.py. This engine holds no
+# trading credentials and cannot place an order (ADR 0001) -- these routes
+# exist purely so the browser doesn't need a second origin/token to display
+# what the engine currently thinks. /snapshot is the committed candle-close
+# decision used by score automation; /live is provisional display data and has
+# no signal_id or entry permission fields by construction.
+@app.route("/api/engine/snapshot")
+def api_engine_snapshot():
+    symbol = request.args.get("symbol", "BTCUSD")
+    return jsonify(trend_engine_client.get_snapshot(symbol))
+
+
+@app.route("/api/engine/live")
+def api_engine_live():
+    symbol = request.args.get("symbol", "BTCUSD")
+    return jsonify(trend_engine_client.get_live_view(symbol))
+
+
+def _trend_chart_trade_code(record: dict) -> str:
+    """Return the compact chart marker for one score-driven trade."""
+    zone = str(
+        record.get("trend_score_zone") or record.get("engine_zone") or ""
+    ).strip().upper().replace(" ", "_")
+    option_type = str(record.get("option_type") or "").strip().upper()
+    instrument = str(record.get("instrument_kind") or "").strip().upper()
+    symbol = str(record.get("symbol") or "").strip().upper()
+    if (
+        zone == TREND_SCORE_MOVE_ZONE
+        or option_type == "MOVE"
+        or instrument == "BTC_MOVE"
+        or symbol.startswith("MV-BTC")
+    ):
+        return "MV"
+    if (
+        zone == TREND_SCORE_CE_ZONE
+        or option_type in {"CE", "CALL"}
+        or symbol.startswith("C-BTC")
+    ):
+        return "CE"
+    if (
+        zone == TREND_SCORE_PE_ZONE
+        or option_type in {"PE", "PUT"}
+        or symbol.startswith("P-BTC")
+    ):
+        return "PE"
+    return ""
+
+
+def _trend_chart_trade_markers() -> tuple[list[dict], str]:
+    """Return the active account's last 24 hours of score-trade events.
+
+    The current DRY/LIVE namespace is selected exactly as the account's
+    controller selects it. Only event time, entry/exit action, and the compact
+    CE/PE/MV marker are exposed; order IDs, fills, credentials, and another
+    user's records never reach the chart.
+    """
+    config = _user_cfg()
+    controller_mode = _trend_score_auto_mode(config)
+    if controller_mode == "live":
+        dry_run = False
+        marker_mode = "live"
+    elif controller_mode == "dry_run":
+        dry_run = True
+        marker_mode = "dry_run"
+    else:
+        dry_run = _config_truthy(config.get("DRY_RUN"), True)
+        marker_mode = "dry_run" if dry_run else "live"
+
+    records = _load_json(_hist_file(dry_run=dry_run), [])
+    candidates = [
+        dict(row) for row in records
+        if isinstance(row, dict) and _is_dry_record(row) == dry_run
+    ] if isinstance(records, list) else []
+    current = _load_json(_slot_file("trend", dry_run=dry_run), {})
+    if (
+        isinstance(current, dict)
+        and str(current.get("status") or "").upper() in {"OPEN", "CLOSED"}
+        and _is_dry_record(current) == dry_run
+    ):
+        candidates.append(dict(current))
+
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(hours=24)
+    unique: dict[tuple[int, str, str, str], dict] = {}
+    for record in candidates:
+        score_driven = bool(
+            record.get("trend_score_zone")
+            or record.get("engine_zone")
+            or record.get("entry_trigger") == TREND_SCORE_AUTO_TRIGGER
+            or record.get("strategy") == "trend_engine_score_zone"
+        )
+        if not score_driven:
+            continue
+        code = _trend_chart_trade_code(record)
+        entered = _utc_trade_entry_at(record)
+        if not code:
+            continue
+        exited = _utc_trade_exit_at(record)
+        symbol = str(record.get("symbol") or "")
+        for action, event_at in (("ENTRY", entered), ("EXIT", exited)):
+            if event_at is None or event_at < cutoff:
+                continue
+            # A small future tolerance accommodates an exchange timestamp just
+            # ahead of the dashboard clock without admitting unrelated history.
+            if event_at > now + timedelta(minutes=5):
+                continue
+            key = (int(event_at.timestamp()), code, symbol, action)
+            unique[key] = {
+                "time_utc": event_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "code": code,
+                "action": action,
+            }
+    return (
+        sorted(unique.values(), key=lambda item: item["time_utc"]),
+        marker_mode,
+    )
+
+
+@app.route("/api/engine/live-history")
+def api_engine_live_history():
+    """Read-only Preview Decision score candles for the Trend Engine chart."""
+    symbol = request.args.get("symbol", "BTCUSD")
+    history = trend_engine_client.get_live_history(symbol, limit=288)
+    try:
+        markers, marker_mode = _trend_chart_trade_markers()
+    except Exception as exc:
+        # Marker history is presentation-only. A malformed local ledger must
+        # not hide otherwise healthy engine score candles.
+        print(
+            f"Trend chart marker warning for {_active_user()}: "
+            f"{type(exc).__name__}: {exc}"
+        )
+        markers, marker_mode = [], "unavailable"
+    return jsonify({
+        **history,
+        "history_window_hours": 24,
+        "trade_markers": markers,
+        "trade_marker_mode": marker_mode,
+    })
+
+
+@app.route("/api/engine/decision-history")
+def api_engine_decision_history():
+    """Committed score points and account-scoped trade chart events."""
+    symbol = request.args.get("symbol", "BTCUSD")
+    history = trend_engine_client.get_decision_history(symbol, limit=288)
+    try:
+        markers, marker_mode = _trend_chart_trade_markers()
+    except Exception as exc:
+        # Marker history is presentation-only. A malformed local ledger must
+        # not hide otherwise healthy committed decisions.
+        print(
+            f"Trend chart marker warning for {_active_user()}: "
+            f"{type(exc).__name__}: {exc}"
+        )
+        markers, marker_mode = [], "unavailable"
+    return jsonify({
+        **history,
+        "history_window_hours": 24,
+        "trade_markers": markers,
+        "trade_marker_mode": marker_mode,
+    })
+
+
+@app.route("/api/engine/health")
+def api_engine_health():
+    return jsonify(trend_engine_client.get_health())
+
+
+@app.route("/api/engine/status")
+def api_engine_status():
+    return jsonify(trend_engine_client.get_status())
+
+
+@app.route("/api/engine/risk")
+def api_engine_risk():
+    """Read-only kill-switch visibility. Firing/resuming a switch is
+    deliberately NOT proxied — that is an operator action against the engine's
+    own /admin endpoints, not something a dashboard page can trigger."""
+    return jsonify(trend_engine_client.get_risk_status())
+
+
+@app.route("/api/engine/shadow")
+def api_engine_shadow():
+    """Read-only shadow-comparison summary (Phase 8a). Posting a decision
+    happens only from the trend-auto loop via trend_engine_client directly —
+    there is no route here that writes, for the same reason /api/engine/risk
+    has none: a browser page must not be able to feed the comparison."""
+    return jsonify(trend_engine_client.get_shadow_summary())
+
+
 def _trend_engine_config_overrides() -> dict:
     """Approved model overrides from account config or process environment.
 
@@ -6195,67 +6673,6 @@ def _collect_fresh_trend_engine_decision(
         # never permission to fall back to guessed values.
         print(f"Trend Engine collection warning for {_active_user()}: {exc}")
         return _trend_engine_invalid_decision(exc, effective_engine_config), None
-
-
-@app.route("/api/trend-engine")
-def api_trend_engine():
-    """Read-only, account-scoped rules engine; this endpoint cannot trade."""
-    user = _active_user()
-    try:
-        mode = _trading_mode_payload()
-        engine_config = _trend_engine_config_overrides()
-        strategy_config = _trend_engine_strategy_config()
-    except Exception as exc:
-        decision = _trend_engine_invalid_decision(exc)
-        decision["audit"] = {
-            **decision.get("audit", {}), "order_submitted": False,
-        }
-        return jsonify(decision)
-
-    config_fingerprint = hashlib.sha256(json.dumps(
-        {"engine": engine_config, "adapter": strategy_config},
-        sort_keys=True, separators=(",", ":"), default=str,
-    ).encode("utf-8")).hexdigest()[:16]
-    cache_key = (
-        user, mode["execution_mode"], mode["mode_revision"], config_fingerprint,
-    )
-    cached = _trend_engine_cache.get(cache_key, {})
-    force = str(request.args.get("refresh") or "").lower() in {
-        "1", "true", "yes", "on",
-    }
-    if (not force and isinstance(cached.get("decision"), dict)
-            and cached["decision"].get("decision") == "NO_TRADE"
-            and time.time() - float(cached.get("at", 0)) < 15):
-        return jsonify(cached["decision"])
-
-    decision, _ = _collect_fresh_trend_engine_decision(
-        mode=mode,
-        engine_config=engine_config,
-        strategy_config=strategy_config,
-    )
-
-    audit = decision.get("audit") if isinstance(decision.get("audit"), dict) else {}
-    decision["audit"] = {
-        **audit,
-        "execution_mode": mode["execution_mode"],
-        "mode_revision": mode["mode_revision"],
-        "order_submitted": False,
-    }
-    if decision.get("decision") == "NO_TRADE":
-        _trend_engine_cache[cache_key] = {"at": time.time(), "decision": decision}
-    else:
-        _trend_engine_cache.pop(cache_key, None)
-    try:
-        data_dir = _mode_data_dir(mode["dry_run_mode"])
-        with account_file_lock(
-            data_dir, "trend-engine", f"dashboard-trend-engine-{os.getpid()}",
-            stale_after_sec=30, wait_sec=1,
-        ) as acquired:
-            if acquired:
-                _atomic_write_json(data_dir / "trend_engine_decision.json", decision)
-    except Exception as exc:
-        print(f"Trend Engine audit warning for {user}: {exc}")
-    return jsonify(decision)
 
 
 def _trend_engine_signal_fingerprint(
@@ -7426,50 +7843,6 @@ def api_trend_engine_dry_run_entry():
         _trend_engine_dry_entry_lock.release()
 
 
-def _pick_two_step_itm(products: list, spot: float, option_type: str,
-                       min_tte_hours: float = 1.0,
-                       now: datetime | None = None) -> dict | None:
-    """Pick two strike-ladder steps ITM from ATM in the nearest usable expiry.
-
-    CE: ATM index - 2. PE: ATM index + 2. This matches the strategy's
-    historical ``itm_strike`` definition while still using live products.
-    Products, rather than STRIKE_STEP arithmetic, are authoritative because
-    Delta's strike spacing varies by expiry and market conditions.
-    """
-    prefix = "C-BTC" if option_type == "CE" else "P-BTC"
-    now_plus_buffer = (now or datetime.now(timezone.utc)) + timedelta(hours=min_tte_hours)
-    usable = []
-    for p in products:
-        if not str(p.get("symbol", "")).startswith(prefix):
-            continue
-        try:
-            settlement = datetime.fromisoformat(str(p.get("settlement_time", "")).replace("Z", "+00:00"))
-            strike = float(p.get("strike_price") or 0)
-        except (TypeError, ValueError):
-            continue
-        if settlement <= now_plus_buffer:
-            continue
-        usable.append((settlement, strike, p))
-    for settlement in sorted({x[0] for x in usable}):
-        batch = [x for x in usable if x[0] == settlement]
-        batch.sort(key=lambda x: x[1])
-        distinct = []
-        seen = set()
-        for _, strike, product in batch:
-            if strike not in seen:
-                seen.add(strike)
-                distinct.append((strike, product))
-        if len(distinct) < 5:
-            continue
-        atm_idx = min(range(len(distinct)), key=lambda i: abs(distinct[i][0] - spot))
-        target_idx = atm_idx - 2 if option_type == "CE" else atm_idx + 2
-        if 0 <= target_idx < len(distinct):
-            strike, product = distinct[target_idx]
-            if (option_type == "CE" and strike < spot) or (option_type == "PE" and strike > spot):
-                return product
-    return None
-
-
 def _as_float(value, default=0.0) -> float:
     try:
         return float(value)
@@ -7631,12 +8004,6 @@ def _current_trend_option_details(direction: str) -> tuple[dict | None, float, d
         return contract, spot, quote, notes
     except Exception as exc:
         return None, 0.0, None, [str(exc)]
-
-
-def _current_trend_option(direction: str) -> tuple[dict | None, float]:
-    """Back-compatible wrapper retained for existing API/tests."""
-    contract, spot, _, _ = _current_trend_option_details(direction)
-    return contract, spot
 
 
 def _trend_auto_mode() -> str:
@@ -7961,17 +8328,6 @@ def _trend_entry_preview_data(
             "auto_mode": _trend_auto_mode()}, 200
 
 
-@app.route("/api/trend-entry/preview")
-def api_trend_entry_preview():
-    current_mode = _trading_mode_payload()
-    data, status = _trend_entry_preview_data(
-        dry_run=current_mode["dry_run_mode"])
-    for key, value in _trading_mode_payload().items():
-        data.setdefault(key, value)
-    data.setdefault("dry_run", data.get("dry_run_mode", False))
-    return jsonify(data), status
-
-
 def _trend_audit(event: str, details: dict) -> None:
     try:
         audit_event(_user_dir(), event, details)
@@ -8016,12 +8372,6 @@ def _order_commission_optional_usd(order: dict) -> float | None:
     if meta.get("paid_commission") not in (None, ""):
         return max(_as_float(meta.get("paid_commission"), 0), 0)
     return None
-
-
-def _order_commission_usd(order: dict) -> float:
-    """Compatibility helper for entry execution; missing remains zero there."""
-    value = _order_commission_optional_usd(order)
-    return float(value or 0.0)
 
 
 def _refresh_order(order: dict, product_id: int, requested: int) -> dict:
@@ -8613,13 +8963,6 @@ def _maybe_auto_trend_entry() -> bool:
         _trend_entry_lock.release()
 
 
-@app.route("/api/trend-auto/status")
-def api_trend_auto_status():
-    user = _active_user()
-    return jsonify({"user": user, "mode": _trend_auto_mode(),
-                    **_trend_auto_health.get(user, {})})
-
-
 def _trend_score_auto_ledger_path(data_dir: Path | None = None) -> Path:
     return Path(data_dir or _mode_data_dir(True)) / TREND_SCORE_AUTO_LEDGER_FILE
 
@@ -8647,6 +8990,12 @@ def _trend_score_auto_ledger(data_dir: Path) -> dict:
             "signals": {},
             "notifications": {},
             "current_transition": None,
+            "no_fill_setup": None,
+            "setup_lock": None,
+            "legacy_setup_lock_migration_v1": False,
+            "setup_lock_semantics_v2_migrated": False,
+            "setup_lock_last_manual_reset_at_utc": None,
+            "setup_lock_last_daily_reset_ist_date": None,
         }
     if ledger.get("schema_version") != 1:
         raise RuntimeError("Trend score-auto ledger schema is unsupported")
@@ -8657,8 +9006,48 @@ def _trend_score_auto_ledger(data_dir: Path) -> dict:
     transition = ledger.get("current_transition")
     if transition is not None and not isinstance(transition, dict):
         raise RuntimeError("Trend score-auto transition journal is invalid")
+    no_fill_setup = ledger.get("no_fill_setup")
+    if no_fill_setup is not None and not isinstance(no_fill_setup, dict):
+        raise RuntimeError("Trend score-auto NO_FILL setup ledger is invalid")
+    setup_lock = ledger.get("setup_lock")
+    if setup_lock is not None and not isinstance(setup_lock, dict):
+        raise RuntimeError("Trend score-auto setup lock ledger is invalid")
+    # Manual Cockpit *entries* must never own the automated score-zone lock.
+    # Older versions wrote a COCKPIT_* lock after a manual fill; discard that
+    # stale marker. A MANUAL_EXIT_MATCH lock is different: it is intentionally
+    # armed only when the position closes with a same-direction decision.
+    if isinstance(setup_lock, dict):
+        lock_action = str(setup_lock.get("source_action") or "").strip().upper()
+        lock_ownership = str(setup_lock.get("ownership") or "").strip().lower()
+        if (
+            lock_action.startswith("COCKPIT_")
+            or lock_ownership in {
+                TREND_SCORE_MANUAL_LIVE_OWNERSHIP,
+                TREND_SCORE_MANUAL_DRY_OWNERSHIP,
+            }
+        ):
+            ledger["setup_lock"] = None
+            setup_lock = None
+    migration_checked = ledger.get("legacy_setup_lock_migration_v1", False)
+    if not isinstance(migration_checked, bool):
+        raise RuntimeError("Trend score-auto setup-lock migration marker is invalid")
+    semantics_migrated = ledger.get("setup_lock_semantics_v2_migrated", False)
+    if not isinstance(semantics_migrated, bool):
+        raise RuntimeError("Trend score-auto setup-lock semantics marker is invalid")
+    manual_reset_at = ledger.get("setup_lock_last_manual_reset_at_utc")
+    if manual_reset_at is not None and not isinstance(manual_reset_at, str):
+        raise RuntimeError("Trend score-auto setup-lock reset marker is invalid")
+    daily_reset_date = ledger.get("setup_lock_last_daily_reset_ist_date")
+    if daily_reset_date is not None and not isinstance(daily_reset_date, str):
+        raise RuntimeError("Trend score-auto daily setup-lock reset marker is invalid")
     ledger.setdefault("notifications", {})
     ledger.setdefault("current_transition", None)
+    ledger.setdefault("no_fill_setup", None)
+    ledger.setdefault("setup_lock", None)
+    ledger.setdefault("legacy_setup_lock_migration_v1", False)
+    ledger.setdefault("setup_lock_semantics_v2_migrated", False)
+    ledger.setdefault("setup_lock_last_manual_reset_at_utc", None)
+    ledger.setdefault("setup_lock_last_daily_reset_ist_date", None)
     return ledger
 
 
@@ -8681,38 +9070,15 @@ def _trend_score_auto_write_ledger(data_dir: Path, ledger: dict) -> None:
     _atomic_write_json(_trend_score_auto_ledger_path(data_dir), ledger)
 
 
-def _trend_score_auto_market_decision(snapshot: dict, engine_config: dict) -> dict:
-    """Evaluate direction only, excluding any existing strategy position."""
-    market_only = copy.deepcopy(snapshot)
-    market_only["positions"] = []
-    market_only["pending_orders"] = []
-    account = market_only.get("account")
-    if isinstance(account, dict):
-        account["open_risk"] = 0
-        account["current_exposure"] = 0
-    risk = market_only.get("risk")
-    if isinstance(risk, dict):
-        risk["position_state_consistent"] = True
-        risk["orders_state_known"] = True
-        risk["max_open_positions"] = 1
-    approved = dict(engine_config)
-    approved.setdefault("allow_unknown_event_risk", True)
-    decision = evaluate_trend(market_only, approved)
-    gates = decision.get("hard_gates")
-    if not isinstance(gates, dict) or gates.get("data_valid") is not True:
-        detail = ((decision.get("audit") or {}).get("validation_error")
-                  if isinstance(decision.get("audit"), dict) else None)
-        raise RuntimeError(
-            "Trend Engine market data is invalid or stale"
-            + (f": {detail}" if detail else "")
-        )
-    score = float(decision.get("direction_score"))
-    score_zone(score)  # validates finite range and exact policy boundaries
-    return decision
-
-
 def _collect_trend_score_auto_signal() -> dict:
-    """Collect one completed-5m score event in the selected account namespace."""
+    """Collect one completed-5m score event in the selected account namespace.
+
+    The score comes from btc_trend_engine (see below). Shadow comparison was
+    removed when the engine became the sole score source: it had been posting
+    the engine's own score back to the engine and scoring the agreement, which
+    is a comparison of the engine with itself and would have read as a
+    flawless 100% agreement rate.
+    """
     mode = _trading_mode_payload()
     controller_mode = _trend_score_auto_mode()
     expected_dry_run = controller_mode == "dry_run"
@@ -8722,7 +9088,12 @@ def _collect_trend_score_auto_signal() -> dict:
         raise RuntimeError(
             "Trend score automation does not match Account Trading Mode"
         )
-    engine_config = _trend_engine_config_overrides()
+    # No _trend_engine_config_overrides() call here. It used to be assigned to
+    # an `engine_config` local that nothing in this function read -- the score
+    # comes from btc_trend_engine and contract selection uses
+    # `strategy_config` -- but it was the live order path's last reference to
+    # the legacy engine's DEFAULT_CONFIG, so the legacy scorer had to stay
+    # imported for a value that was computed and discarded.
     strategy_config = _trend_engine_strategy_config()
     snapshot = collect_delta_trend_snapshot(
         http_get=req.get,
@@ -8733,10 +9104,53 @@ def _collect_trend_score_auto_signal() -> dict:
         mode_revision=mode["mode_revision"],
         strategy_config=strategy_config,
     )
-    decision = _trend_score_auto_market_decision(snapshot, engine_config)
-    score = float(decision["direction_score"])
-    zone = score_zone(score)
-    signal_key = completed_candle_signal_key(snapshot)
+    # The SCORE now comes from btc_trend_engine, not from the legacy
+    # in-dashboard scorer. `snapshot` above is still fetched, but only for
+    # market data the engine does not carry (spot, the listed option ladder)
+    # which contract selection needs.
+    #
+    # Fail closed, hard: trend_engine_client never raises and substitutes a
+    # DEGRADED snapshot on any failure, so an unreachable or stale engine
+    # must be turned into a refusal here. Without this, an engine outage
+    # would silently fall through to a score of 0 -- which is the SHORT_MOVE
+    # band, i.e. an outage would start selling straddles.
+    engine_snapshot = trend_engine_client.get_snapshot("BTCUSD")
+    engine_quality = str(engine_snapshot.get("data_quality") or "")
+    if engine_quality in {"STALE_L1", "SIGNAL_EXPIRED"}:
+        raise TrendScoreDataSyncPending(
+            "Waiting for fresh Trend Engine market data "
+            f"({engine_quality}); retrying automatically on the next cycle"
+        )
+    if engine_quality != "OK":
+        raise RuntimeError(
+            f"trend engine is not healthy ({engine_quality}); entries fail closed")
+    score = float(engine_snapshot["trend_score"])
+    expected_zone = score_zone(score)
+    zone = str(engine_snapshot.get("zone") or "").strip().upper()
+    if zone != expected_zone:
+        raise RuntimeError(
+            "trend engine score and zone disagree "
+            f"({score:+.1f} maps to {expected_zone}, received {zone or 'missing'})"
+        )
+    engine_signal_id = str(engine_snapshot.get("signal_id") or "").strip()
+    if not engine_signal_id:
+        raise RuntimeError("trend engine committed signal has no signal_id")
+    zone_action_allowed = engine_snapshot.get("zone_action_allowed") is True
+    zone_reason = str(engine_snapshot.get("zone_reason") or "").strip()
+    trigger_adx = engine_snapshot.get("trigger_adx")
+    decision = {
+        "direction_score": score,
+        "market_regime": engine_snapshot.get("regime") or "UNCLEAR",
+        "engine_signal_id": engine_signal_id,
+        "engine_candle_close_utc": engine_snapshot.get("candle_close_utc"),
+        "zone_action_allowed": zone_action_allowed,
+        "zone_reason": zone_reason,
+        "trigger_adx": trigger_adx,
+        "decision_id": engine_signal_id,
+        "model_version": engine_snapshot.get("model_version"),
+        "schema_version": engine_snapshot.get("schema_version"),
+        "source": "btc_trend_engine",
+    }
     complete_rows = [
         row for row in ((snapshot.get("candles") or {}).get("5m") or [])
         if isinstance(row, dict) and row.get("complete") is True
@@ -8752,17 +9166,116 @@ def _collect_trend_score_auto_signal() -> dict:
     )
     if opened_at.tzinfo is None:
         opened_at = opened_at.replace(tzinfo=timezone.utc)
-    bar_close = (opened_at.astimezone(timezone.utc) + timedelta(minutes=5))
-    return {
+    opened_at = opened_at.astimezone(timezone.utc)
+    try:
+        engine_candle = datetime.fromisoformat(
+            str(engine_snapshot.get("candle_close_utc") or "").replace(
+                "Z", "+00:00"
+            )
+        )
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(
+            "trend engine committed signal has an invalid candle_close_utc"
+        ) from exc
+    if engine_candle.tzinfo is None:
+        engine_candle = engine_candle.replace(tzinfo=timezone.utc)
+    engine_candle = engine_candle.astimezone(timezone.utc)
+    if engine_candle != opened_at:
+        candle_gap = abs((engine_candle - opened_at).total_seconds())
+        if candle_gap == 5 * 60:
+            raise TrendScoreDataSyncPending(
+                "Waiting for market-data synchronization: Trend Engine candle "
+                f"{engine_candle.strftime('%H:%M UTC')} and contract candle "
+                f"{opened_at.strftime('%H:%M UTC')} are one interval apart; "
+                "retrying automatically on the next cycle"
+            )
+        raise RuntimeError(
+            "trend engine and contract snapshot are on different completed "
+            f"5-minute candles ({engine_candle.isoformat()} != "
+            f"{opened_at.isoformat()})"
+        )
+    # Keep the existing durable key format for ledger compatibility, but derive
+    # it only after proving that the dashboard candle is exactly the engine's
+    # committed candle. The engine signal_id is retained separately below.
+    signal_key = (
+        "trend-score-auto|BTCUSD|5m|"
+        f"{engine_candle.isoformat().replace('+00:00', 'Z')}"
+    )
+    if signal_key != completed_candle_signal_key(snapshot):
+        raise RuntimeError(
+            "trend engine symbol/candle identity does not match market evidence"
+        )
+    bar_close = opened_at + timedelta(minutes=5)
+    signal = {
         "mode": mode,
         "snapshot": snapshot,
         "decision": decision,
         "score": score,
         "zone": zone,
+        "zone_action_allowed": zone_action_allowed,
+        "zone_reason": zone_reason,
+        "trigger_adx": trigger_adx,
+        "engine_signal_id": engine_signal_id,
+        "engine_candle_close_utc": engine_candle.isoformat().replace(
+            "+00:00", "Z"
+        ),
         "signal_key": signal_key,
         "signal_bar_close_utc": bar_close.isoformat().replace("+00:00", "Z"),
         "market_regime": str(decision.get("market_regime") or "UNCLEAR"),
+        "forecast": {
+            "forecast_horizon_seconds": engine_snapshot.get(
+                "forecast_horizon_seconds"),
+            "forecast_volatility_bps": engine_snapshot.get(
+                "forecast_volatility_bps"),
+            "expected_absolute_move_bps": engine_snapshot.get(
+                "expected_absolute_move_bps"),
+            "jump_probability": engine_snapshot.get("jump_probability"),
+        },
     }
+    return signal
+
+
+def _trend_score_auto_engine_action_ready(
+    user: str,
+    cycle_at: str,
+    signal: dict,
+    *,
+    execution_mode: str,
+) -> bool:
+    """Do not mutate a position until the engine has approved this zone.
+
+    A SHORT_MOVE entry is actionable only when the engine confirms the current
+    closed 5m score is neutral and its 15m ADX is at or below 25. A committed
+    ADX above 25 is nevertheless allowed through so an already-open SHORT_MOVE
+    can be flattened once it is no longer a calm-market trade. The planner
+    guarantees that this exception cannot open or switch a position.
+    """
+    if signal.get("zone") == TREND_SCORE_HOLD_ZONE:
+        # A HOLD reading never closes or opens a position on its own -- see
+        # zones.should_exit. The planner decides that under the account
+        # lock; it never opens a position from this branch.
+        return True
+    if signal.get("zone_action_allowed") is True:
+        return True
+    if (
+        signal.get("zone") == TREND_SCORE_MOVE_ZONE
+        and short_move_adx_exit_required(signal.get("trigger_adx"))
+    ):
+        return True
+    reason = str(signal.get("zone_reason") or "engine action gate is closed")
+    _trend_score_auto_health_update(
+        user,
+        status="blocked",
+        last_cycle_utc=cycle_at,
+        last_action=f"{execution_mode} score action is blocked by the Trend Engine",
+        last_error=reason,
+        direction_score=signal.get("score"),
+        market_regime=signal.get("market_regime"),
+        engine_zone=signal.get("zone"),
+        signal_key=signal.get("signal_key"),
+        signal_bar_close_utc=signal.get("signal_bar_close_utc"),
+    )
+    return False
 
 
 def _fetch_live_vanilla_products() -> list:
@@ -8821,6 +9334,19 @@ def _trend_score_auto_exact_int(
     return int(number)
 
 
+def _trend_score_auto_configured_lots(config: dict | None = None) -> int:
+    """Return the active user's validated score-controller order size."""
+    cfg = config if isinstance(config, dict) else _user_cfg()
+    lots = _trend_score_auto_exact_int(
+        cfg.get("TREND_SCORE_AUTO_LOTS") or TREND_SCORE_AUTO_LOTS,
+        "Trend Engine order size",
+        positive=True,
+    )
+    if lots > 5_000:
+        raise RuntimeError("Trend Engine order size must not exceed 5,000 lots")
+    return lots
+
+
 def _trend_score_auto_quote_age(timestamp, now: datetime) -> float:
     raw = str(timestamp or "").strip()
     if not raw:
@@ -8837,8 +9363,16 @@ def _trend_score_auto_quote_age(timestamp, now: datetime) -> float:
     return max(age, 0)
 
 
-def _trend_score_auto_move_quote(symbol: str) -> dict:
-    """Validate a public, executable 1,000-lot MOVE sell quote."""
+def _trend_score_auto_move_quote(
+    symbol: str, lots: int, *, side: str = "sell",
+) -> dict:
+    """Validate a public, executable MOVE quote for the configured size.
+
+    ``side="sell"`` (the default, and the only side the automated SHORT_MOVE
+    path ever requests) prices and depth-checks the bid, the side that
+    receives premium. ``side="buy"`` -- the Cockpit's manual Buy MOVE trade
+    only -- prices and depth-checks the ask, the side that pays it.
+    """
     payload = req.get(f"{API_BASE}/v2/tickers/{symbol}", timeout=8).json()
     ticker = payload.get("result") if isinstance(payload, dict) else None
     if not isinstance(ticker, dict) or not ticker:
@@ -8858,11 +9392,18 @@ def _trend_score_auto_move_quote(symbol: str) -> dict:
         raise RuntimeError("MOVE spread exceeds the configured cap")
     if quote.get("trading_status") not in ("", "operational"):
         raise RuntimeError("MOVE contract is not operational")
+    if side == "buy":
+        depth = _trend_score_auto_number(
+            quote.get("ask_size"), "MOVE ask depth", positive=True,
+        )
+        if depth < lots:
+            raise RuntimeError("MOVE ask depth cannot fill the configured order size")
+        return {**quote, "entry_price": ask, "entry_depth": depth, "side": "buy"}
     depth = _trend_score_auto_number(
         quote.get("bid_size"), "MOVE bid depth", positive=True,
     )
-    if depth < TREND_SCORE_AUTO_LOTS:
-        raise RuntimeError("MOVE bid depth cannot fill the exact 1,000-lot score order")
+    if depth < lots:
+        raise RuntimeError("MOVE bid depth cannot fill the configured order size")
     return {
         **quote,
         "entry_price": bid,
@@ -8871,13 +9412,99 @@ def _trend_score_auto_move_quote(symbol: str) -> dict:
     }
 
 
+def _trend_score_auto_short_move_eligibility(
+    selection: dict,
+    quote: dict,
+    *,
+    now: datetime | None = None,
+    enforce_min_tte: bool = True,
+    enforce_min_premium: bool = True,
+    enforce_time_restrictions: bool = True,
+) -> dict:
+    """Validate the explicit SHORT MOVE contract-entry rules.
+
+    The Trend Engine supplies the calm-market signal. Contract selection then
+    requires only a quoted ATM MOVE premium above $300 and, for the
+    automated controller, strictly more than 90 minutes to expiry.
+    Forecast-value and jump-probability filters are not part of this
+    strategy. ``selection`` is trusted to already be the nearest listed
+    expiry -- that is ``select_move_contract``'s own ``today_only``
+    guarantee at selection time, not re-derivable here from a single
+    already-selected contract without re-fetching the whole listing. A
+    A Cockpit manual entry passes both enforcement flags as ``False``: the
+    operator's own real-time judgement substitutes for the automated
+    90-minute and $300 entry floors, same as it already does for the ADX
+    calm-market gate. The weekday blackout remains a strategy-wide rule.
+    """
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    current = current.astimezone(timezone.utc)
+    current_ist = current.astimezone(_IST_TIMEZONE)
+    if enforce_time_restrictions and (
+        current_ist.weekday() < 5
+        and (current_ist.hour, current_ist.minute)
+        >= SHORT_MOVE_WEEKDAY_BLACKOUT_START_IST
+    ):
+        raise RuntimeError(
+            "SHORT MOVE entries are disabled from 5:30 PM to midnight IST "
+            "on weekdays"
+        )
+    expiry = datetime.fromisoformat(
+        str(selection.get("expiry") or "").replace("Z", "+00:00")
+    )
+    if expiry.tzinfo is None:
+        expiry = expiry.replace(tzinfo=timezone.utc)
+    tte_seconds = (expiry.astimezone(timezone.utc) - current).total_seconds()
+    if enforce_min_tte and tte_seconds <= MIN_TIME_TO_EXPIRY_SECONDS:
+        raise RuntimeError("SHORT MOVE needs more than 90 minutes until expiry")
+    bid = _trend_score_auto_number(quote.get("bid"), "MOVE bid", positive=True)
+    if enforce_min_premium and bid <= SHORT_MOVE_MIN_PREMIUM_USD:
+        raise RuntimeError(
+            "SHORT MOVE premium must be above "
+            f"${SHORT_MOVE_MIN_PREMIUM_USD:,.0f} (currently ${bid:,.2f})"
+        )
+    return {
+        "quoted_premium_usd": round(bid, 8),
+        "minimum_premium_usd": (
+            SHORT_MOVE_MIN_PREMIUM_USD if enforce_min_premium else 0
+        ),
+        "time_to_expiry_seconds": round(tte_seconds, 3),
+        "minimum_time_to_expiry_seconds": (
+            MIN_TIME_TO_EXPIRY_SECONDS if enforce_min_tte else 0
+        ),
+        "weekday_blackout_start_ist": "17:30",
+    }
+
+
 def _prepare_trend_score_auto_entry(signal: dict) -> dict:
-    """Resolve and validate the exact public contract for a score zone."""
+    """Resolve and validate the exact public contract for a score zone.
+
+    Top-of-book depth is observational in both modes, matching the Cockpit
+    (``_cockpit_prepare_manual_entry``) and the LIVE sizing rule documented
+    on ``_trend_score_auto_live_affordability``: the bounded IOC sweeps
+    deeper price levels up to its slippage cap, so one volatile touch
+    quantity never decides the order size. DRY RUN used to demand the whole
+    configured size at the touch, which made the paper controller skip
+    entries the LIVE controller would have taken -- the opposite of what a
+    paper proxy is for, given Delta's daily books rest tens-to-hundreds of
+    contracts at the touch against a four-digit configured size. The
+    quantity is still resolved, still required to be positive, and still
+    recorded as ``entry_depth``; it just no longer gates.
+    """
+    if signal.get("zone_action_allowed") is not True:
+        reason = str(signal.get("zone_reason") or "").strip()
+        raise RuntimeError(
+            "trend engine blocked entry for this zone"
+            + (f": {reason}" if reason else "")
+        )
     zone = signal["zone"]
     snapshot = signal["snapshot"]
     spot = _trend_score_auto_number(
         (snapshot.get("market") or {}).get("spot"), "BTC spot", positive=True,
     )
+    lots = _trend_score_auto_configured_lots()
+    live_sizing = _trend_score_auto_mode() == "live"
     now = datetime.now(timezone.utc)
     if zone in {TREND_SCORE_CE_ZONE, TREND_SCORE_PE_ZONE}:
         selection = select_directional_option(
@@ -8886,12 +9513,15 @@ def _prepare_trend_score_auto_entry(signal: dict) -> dict:
             spot=spot,
             zone=zone,
             now=now,
+            lots=lots,
+            today_only=True,
         )
         if not selection:
             label = "2-step ITM CALL" if zone == TREND_SCORE_CE_ZONE \
-                else "3-step ITM PUT"
+                else "2-step ITM PUT"
             raise RuntimeError(
-                f"No exact executable {label} contract is available"
+                f"No exact executable today's-expiry {label} contract "
+                "is available"
             )
         contract = selection["executable_contract"]
         max_age = max(_as_float(_cfg("TREND_QUOTE_MAX_AGE_SECS", "20"), 20), 1)
@@ -8902,11 +9532,7 @@ def _prepare_trend_score_auto_entry(signal: dict) -> dict:
             contract.get("ask_size") or contract.get("ask_quantity"),
             "option ask depth", positive=True,
         )
-        if depth < TREND_SCORE_AUTO_LOTS:
-            raise RuntimeError(
-                "option ask depth cannot fill the exact 1,000-lot score order"
-            )
-        return {
+        prepared = {
             **selection,
             "side": "long",
             "instrument_kind": "BTC_OPTION",
@@ -8919,18 +9545,30 @@ def _prepare_trend_score_auto_entry(signal: dict) -> dict:
             "entry_depth": depth,
             "quote_snapshot": copy.deepcopy(contract),
         }
+        return (
+            _trend_score_auto_live_affordable_entry(prepared)
+            if live_sizing else prepared
+        )
 
     if zone != TREND_SCORE_MOVE_ZONE:
         raise RuntimeError("unsupported Trend score zone")
     selection = select_move_contract(
-        _fetch_live_mv_products(), spot=spot, now=now,
+        _fetch_live_mv_products(), spot=spot, now=now, lots=lots,
+        today_only=True,
     )
     if not selection:
         raise RuntimeError(
-            "No operational ATM MOVE contract with at least 90 minutes remains"
+            "No operational ATM MOVE contract for today's expiry with more "
+            "than 90 minutes remains"
         )
-    quote = _trend_score_auto_move_quote(selection["symbol"])
-    return {
+    # LIVE sizing needs the executable quote before it can turn the account's
+    # available USD into an affordable whole-lot quantity.  Require at least
+    # one quoted lot here; the sizing step below applies the wallet limit.
+    # DRY RUN asks for the same single lot -- see the docstring on why the
+    # touch quantity is observational in both modes.
+    quote = _trend_score_auto_move_quote(selection["symbol"], 1)
+    move_eligibility = _trend_score_auto_short_move_eligibility(selection, quote)
+    prepared = {
         **selection,
         "side": "short",
         "option_type": "MOVE",
@@ -8940,7 +9578,615 @@ def _prepare_trend_score_auto_entry(signal: dict) -> dict:
         "quote_timestamp": datetime.now(timezone.utc).isoformat(),
         "entry_depth": quote["entry_depth"],
         "quote_snapshot": quote,
+        "move_eligibility": move_eligibility,
     }
+    return (
+        _trend_score_auto_live_affordable_entry(prepared)
+        if live_sizing else prepared
+    )
+
+
+def _cockpit_market_snapshot(*, dry_run: bool = False) -> dict:
+    """Collect the same authenticated account/market snapshot the score-auto
+    controller uses for contract selection -- independent of whether the
+    automated controller itself is enabled. A manual Cockpit trade does not
+    depend on ``TREND_ENGINE_SCORE_AUTO_MODE``; it depends only on the
+    selected account execution mode, which the caller has already checked.
+    DRY RUN collection uses only public market data and isolated simulation
+    state; it never requires or signs with Delta credentials.
+    """
+    mode = _trading_mode_payload()
+    strategy_config = _trend_engine_strategy_config()
+    return collect_delta_trend_snapshot(
+        http_get=req.get,
+        api_base=API_BASE,
+        sign=_sign,
+        user_dir=_user_dir(),
+        dry_run=dry_run,
+        mode_revision=mode["mode_revision"],
+        strategy_config=strategy_config,
+    )
+
+
+def _cockpit_setup_eligibility(snapshot: dict) -> dict[str, dict]:
+    """Return the server-authoritative Cockpit setup matrix.
+
+    The browser renders the same evidence, but every preview and entry calls
+    this function again so a stale green radio button can never authorize an
+    action after its setup has ceased to be eligible.
+
+    ``COCKPIT_OVERRIDE_SETUP`` ("Lemme Risk") is the single deliberate
+    exception: it is reported eligible unconditionally, including when
+    ``data_quality`` is degraded, because it exists precisely to let the
+    operator trade against -- or without -- engine evidence. Everything
+    downstream of the selection is unchanged.
+    """
+    components = {}
+    for item in snapshot.get("components") or []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "")
+        if not name or item.get("available") is False:
+            continue
+        try:
+            value = float(item.get("score"))
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if math.isfinite(value):
+            components[name] = value
+
+    def number(key: str) -> float | None:
+        try:
+            value = float(snapshot.get(key))
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return value if math.isfinite(value) else None
+
+    score = number("trend_score")
+    adx = number("trigger_adx")
+    higher = components.get("higher_timeframe_trend")
+    lower = components.get("lower_timeframe_momentum")
+    rsi = components.get("rsi_momentum")
+    structure = components.get("market_structure")
+    breakout = components.get("breakout_quality")
+    flow = components.get("order_flow")
+    reasons = [
+        str(value).upper()
+        for value in (snapshot.get("reason_codes") or [])
+    ]
+
+    def has_reason(*parts: str) -> bool:
+        return any(
+            all(part in reason for part in parts)
+            for reason in reasons
+        )
+
+    checks = {
+        "trend_bullish": score is not None and score > 40,
+        "trend_bearish": score is not None and score < -40,
+        "ema_bullish": (
+            higher is not None and lower is not None
+            and higher >= 15 and lower >= 15
+        ),
+        "ema_bearish": (
+            higher is not None and lower is not None
+            and higher <= -15 and lower <= -15
+        ),
+        "rsi_bullish": rsi is not None and rsi >= 20,
+        "rsi_bearish": rsi is not None and rsi <= -20,
+        "supertrend_bullish": (
+            has_reason("SUPER", "BULL") or has_reason("SUPER", "UP")
+        ),
+        "supertrend_bearish": (
+            has_reason("SUPER", "BEAR") or has_reason("SUPER", "DOWN")
+        ),
+        "support_bounce": (
+            structure is not None and structure >= 25
+            and not (breakout is not None and breakout >= 20)
+        ),
+        "resistance_rejection": (
+            structure is not None and structure <= -25
+            and not (breakout is not None and breakout <= -20)
+        ),
+        "breakout_bullish": breakout is not None and breakout >= 20,
+        "breakout_bearish": breakout is not None and breakout <= -20,
+        "orderflow_buy": flow is not None and flow >= 15,
+        "orderflow_sell": flow is not None and flow <= -15,
+        "calm_range": (
+            score is not None and abs(score) <= 30
+            and adx is not None and adx <= 20
+        ),
+        "volatility_expansion": (
+            adx is not None and adx > 25
+            and breakout is not None and abs(breakout) >= 20
+        ),
+        # Deliberately unconditional -- see COCKPIT_OVERRIDE_SETUP.
+        COCKPIT_OVERRIDE_SETUP: True,
+    }
+    quality_ok = snapshot.get("data_quality") == "OK"
+    result = {}
+    for setup_id, actions in COCKPIT_SETUP_ACTIONS.items():
+        override = setup_id == COCKPIT_OVERRIDE_SETUP
+        detail = None
+        if override:
+            detail = "Ungated · every strategy · TP/SL/TSL"
+        elif setup_id.startswith("orderflow_") and flow is None:
+            detail = "Order-flow feed unavailable"
+        elif setup_id.startswith("supertrend_") and not checks[setup_id]:
+            detail = "No fresh flip confirmation"
+        result[setup_id] = {
+            "eligible": bool(override or (quality_ok and checks[setup_id])),
+            "actions": sorted(actions),
+            "detail": detail,
+            "override": override,
+        }
+    return result
+
+
+def _cockpit_require_eligible_setup(setup_id: str, action: str) -> dict:
+    """Re-authorize a setup/action pair server-side at preview and entry.
+
+    The returned snapshot is informational -- every caller re-collects its
+    own execution snapshot -- so the ``COCKPIT_OVERRIDE_SETUP`` short-circuit
+    below is a pure authorization decision. It is taken before the engine
+    snapshot is fetched on purpose: "Lemme Risk" must stay usable when the
+    Trend Engine is unreachable or degraded, which is one of the states an
+    operator is most likely to want it in.
+    """
+    setup = str(setup_id or "").strip().lower()
+    if setup not in COCKPIT_SETUP_ACTIONS:
+        raise ValueError("Select a valid Cockpit market setup")
+    if action not in COCKPIT_SETUP_ACTIONS[setup]:
+        raise ValueError("The selected option does not match this market setup")
+    if setup == COCKPIT_OVERRIDE_SETUP:
+        return {}
+    snapshot = trend_engine_client.get_snapshot("BTCUSD")
+    state = _cockpit_setup_eligibility(snapshot).get(setup) or {}
+    if state.get("eligible") is not True:
+        raise RuntimeError(
+            "The selected market setup is no longer eligible; refresh Cockpit"
+        )
+    return snapshot
+
+
+def _cockpit_prepare_manual_entry(
+    action: str,
+    snapshot: dict,
+    *,
+    dry_run: bool = False,
+    setup_id: str | None = None,
+) -> dict:
+    """Resolve and wallet-size the exact contract for one Cockpit trade type.
+
+    Mirrors ``_prepare_trend_score_auto_entry``'s contract selection. LIVE
+    entries use wallet-affordable sizing; DRY RUN entries retain the configured
+    lot size and create only an isolated simulation. Both intentionally skip
+    every
+    automated-only precondition: there is no engine ``zone_action_allowed``
+    gate to satisfy and no ``plan_score_transition``/ADX calm-market check
+    to pass, because a manual trade substitutes the operator's own
+    real-time judgement for both. Directional buys select the configured
+    two-step ITM contract; individual directional sells select the current
+    ATM CE/PE. Every vanilla option still requires a fresh, non-stale
+    executable quote; ``sell_move`` still enforces the
+    strategy-wide weekday-blackout guard but skips the automated $300
+    premium floor;
+    ``buy_move`` has no automated precedent to mirror.
+
+    Top-of-book depth is observational in *both* modes, exactly as
+    ``_trend_score_auto_live_affordability`` documents for LIVE: the bounded
+    IOC sweeps deeper price levels up to its slippage cap, so one volatile
+    touch quantity never decides the order size. DRY RUN previously demanded
+    that the whole configured size rest at the touch before it would
+    simulate, which made the rehearsal stricter than the real-money path it
+    rehearses and blocked it against ordinary Delta daily-option books (a
+    2-step ITM strike routinely shows tens-to-hundreds of contracts at the
+    touch against a four-digit configured size). A simulation consumes no
+    liquidity at all, so the quantity is recorded -- ``entry_depth`` here and
+    ``execution_snapshot.observed_entry_depth`` on the simulated position --
+    and never gates. Both modes still require a fresh, positive, executable
+    quote on the side being traded.
+
+    Every trade type is restricted to today's IST expiry, same as the
+    automated controller -- a Cockpit trade must never silently roll to
+    tomorrow's contract either. Unlike the automated controller, none of
+    these selections enforce the standard 90-minute-minimum-time-to-expiry
+    floor: the operator's own real-time judgement substitutes for it, same
+    as the ADX bypass above, so today's contract is always selectable up
+    to whenever the exchange itself stops listing it as operational (the
+    ``state``/``trading_status`` checks inside ``select_directional_option``/
+    ``select_move_contract`` remain the only backstop).
+    """
+    lots = _trend_score_auto_configured_lots()
+    now = datetime.now(timezone.utc)
+    spot = _trend_score_auto_number(
+        (snapshot.get("market") or {}).get("spot"), "BTC spot", positive=True,
+    )
+
+    if action in ("buy_ce", "buy_pe", "sell_ce", "sell_pe"):
+        is_short = action.startswith("sell_")
+        is_call = action.endswith("_ce")
+        zone = (
+            TREND_SCORE_CE_ZONE if is_call else TREND_SCORE_PE_ZONE
+        )
+        selection = select_directional_option(
+            _fetch_live_vanilla_products(),
+            snapshot.get("option_contracts") or [],
+            spot=spot, zone=zone, now=now, lots=lots,
+            today_only=True, min_time_to_expiry_seconds=0,
+            manual_itm_steps=0 if is_short else None,
+        )
+        if not selection:
+            option_label = "CALL" if is_call else "PUT"
+            label = f"ATM {option_label}" if is_short \
+                else f"2-step ITM {option_label}"
+            raise RuntimeError(
+                f"No exact executable today's-expiry {label} contract "
+                "is available"
+            )
+        contract = selection["executable_contract"]
+        max_age = max(_as_float(_cfg("TREND_QUOTE_MAX_AGE_SECS", "20"), 20), 1)
+        age = _trend_score_auto_quote_age(contract.get("quote_timestamp"), now)
+        if age > max_age:
+            raise RuntimeError("selected option quote is stale")
+        price_key = "bid" if is_short else "ask"
+        depth_keys = (
+            ("bid_size", "bid_quantity") if is_short
+            else ("ask_size", "ask_quantity")
+        )
+        prepared = {
+            **selection,
+            "zone": (
+                TREND_SCORE_SHORT_CE_ZONE if is_short and is_call
+                else TREND_SCORE_SHORT_PE_ZONE if is_short
+                else zone
+            ),
+            "side": "short" if is_short else "long",
+            "instrument_kind": "BTC_OPTION",
+            "entry_price": _trend_score_auto_number(
+                contract.get(price_key), f"option {price_key}", positive=True,
+            ),
+            "contract_value": _trend_score_auto_number(
+                contract.get("contract_value"), "option contract value",
+                positive=True,
+            ),
+            "settlement": selection["expiry"],
+            "quote_timestamp": contract.get("quote_timestamp"),
+            "entry_depth": _trend_score_auto_number(
+                contract.get(depth_keys[0]) or contract.get(depth_keys[1]),
+                f"option {price_key} depth", positive=True,
+            ),
+            "quote_snapshot": copy.deepcopy(contract),
+        }
+        if dry_run:
+            return prepared
+        return _trend_score_auto_live_affordable_entry(prepared)
+
+    if action not in ("buy_move", "sell_move"):
+        raise RuntimeError(f"unsupported Cockpit trade type: {action}")
+    selection = select_move_contract(
+        _fetch_live_mv_products(), spot=spot, now=now, lots=lots,
+        today_only=True, min_time_to_expiry_seconds=0,
+    )
+    if not selection:
+        raise RuntimeError(
+            "No operational ATM MOVE contract is available for today's expiry"
+        )
+    if action == "sell_move":
+        quote = _trend_score_auto_move_quote(selection["symbol"], 1)
+        move_eligibility = _trend_score_auto_short_move_eligibility(
+            selection,
+            quote,
+            enforce_min_tte=False,
+            enforce_min_premium=False,
+            enforce_time_restrictions=(
+                str(setup_id or "").strip().lower()
+                != COCKPIT_OVERRIDE_SETUP
+            ),
+        )
+        prepared = {
+            **selection,
+            "side": "short",
+            "option_type": "MOVE",
+            "instrument_kind": "BTC_MOVE",
+            "entry_price": quote["entry_price"],
+            "settlement": selection["expiry"],
+            "quote_timestamp": datetime.now(timezone.utc).isoformat(),
+            "entry_depth": quote["entry_depth"],
+            "quote_snapshot": quote,
+            "move_eligibility": move_eligibility,
+        }
+    else:
+        quote = _trend_score_auto_move_quote(
+            selection["symbol"], 1, side="buy",
+        )
+        prepared = {
+            **selection,
+            "zone": TREND_SCORE_LONG_MOVE_ZONE,
+            "side": "long",
+            "option_type": "MOVE",
+            "instrument_kind": "BTC_MOVE",
+            "entry_price": quote["entry_price"],
+            "settlement": selection["expiry"],
+            "quote_timestamp": datetime.now(timezone.utc).isoformat(),
+            "entry_depth": quote["entry_depth"],
+            "quote_snapshot": quote,
+        }
+    return (
+        prepared
+        if dry_run
+        else _trend_score_auto_live_affordable_entry(prepared)
+    )
+
+
+def _cockpit_manual_signal(action: str, snapshot: dict) -> dict:
+    """Build the minimal synthetic ``signal`` a Cockpit entry hands to the
+    execution seam.
+
+    ``signal_key`` is namespaced with a ``manual-cockpit|`` prefix a real
+    completed-candle key (``trend-score-auto|BTCUSD|5m|...``) can never
+    collide with, and this key is never written into the score-auto
+    ledger's consumed-signals set. A confirmed Cockpit fill records only the
+    durable setup lock, so it cannot consume or shadow a completed engine
+    signal while still requiring an explicit Reset Zone Lock for another
+    entry in the same setup.
+    """
+    return {
+        "signal_key": (
+            f"manual-cockpit|{action}|{uuid.uuid4().hex}"
+        ),
+        "score": 0.0,
+        "market_regime": "MANUAL",
+        "signal_bar_close_utc": None,
+        "decision": {"source": "cockpit", "action": action},
+        "snapshot": snapshot,
+    }
+
+
+def _cockpit_margin_retry_entry(
+    prepared: dict,
+    result: dict,
+) -> dict | None:
+    """Build one reduced retry after Delta proves rejection and flatness."""
+    if str(result.get("status") or "").upper() != "REJECTED":
+        return None
+    state = result.get("state")
+    if not isinstance(state, dict):
+        return None
+    if (
+        state.get("last_entry_rejection_exact_absence") is not True
+        or state.get("last_entry_position_verified_flat") is not True
+    ):
+        return None
+    rejection = state.get("last_entry_rejection")
+    if not isinstance(rejection, dict):
+        return None
+    if str(rejection.get("code") or "") not in BALANCE_REJECTIONS:
+        return None
+    attempted = _trend_score_auto_exact_int(
+        prepared.get("lots"), "Cockpit attempted order size", positive=True,
+    )
+    context = rejection.get("context")
+    resized_lots = _downsized_lots(
+        attempted, context if isinstance(context, dict) else {},
+    )
+    if resized_lots is None or resized_lots >= attempted:
+        return None
+    resized = copy.deepcopy(prepared)
+    affordability = resized.get("live_affordability")
+    affordability = (
+        copy.deepcopy(affordability)
+        if isinstance(affordability, dict) else {}
+    )
+    affordability.update({
+        "selected_lots": resized_lots,
+        "affordable_lots": resized_lots,
+        "downsized": True,
+        "exchange_margin_adjusted": True,
+        "exchange_rejected_lots": attempted,
+        "exchange_rejection_code": str(rejection.get("code") or ""),
+    })
+    resized.update({
+        "lots": resized_lots,
+        "affordability_limited": True,
+        "live_affordability": affordability,
+    })
+    return resized
+
+
+def _cockpit_enter_dry_run(
+    *,
+    user: str,
+    action: str,
+    setup_id: str,
+    initial_mode: dict,
+):
+    """Open one manual Cockpit simulation in the isolated DRY RUN slot.
+
+    This is the paper counterpart of ``_trend_score_auto_live_execute``. It
+    resolves a fresh public quote, applies the same configured risk policy,
+    writes only ``users/<user>/dry_run/trend_state.json``, and never signs or
+    submits an exchange request.
+    """
+    root_dir = _user_dir()
+    data_dir = _mode_data_dir(True)
+    owner = f"cockpit-dry-run:{user}:{os.getpid()}:{time.time_ns()}"
+    try:
+        with account_entry_lock(root_dir, owner) as exposure_lock:
+            if not exposure_lock:
+                return jsonify({
+                    "ok": False,
+                    "error": (
+                        "Another entry, exit, or recovery is in progress; "
+                        "retry shortly"
+                    ),
+                }), 409
+
+            boundary_mode = _trading_mode_payload()
+            if (
+                not boundary_mode.get("dry_run_mode")
+                or boundary_mode.get("mode_revision")
+                != initial_mode.get("mode_revision")
+            ):
+                return jsonify({
+                    "ok": False,
+                    "error": "Trading mode changed; reload and retry",
+                }), 409
+            _cockpit_require_eligible_setup(setup_id, action)
+            snapshot = _cockpit_market_snapshot(dry_run=True)
+            prepared = _cockpit_prepare_manual_entry(
+                action, snapshot, dry_run=True, setup_id=setup_id,
+            )
+            signal = _cockpit_manual_signal(action, snapshot)
+            signal["zone"] = prepared["zone"]
+            signal["mode"] = dict(initial_mode)
+            transition_id = _trend_score_auto_transition_id(
+                user, signal["signal_key"], prepared["zone"],
+            )
+
+            with ExitStack() as locks:
+                for slot in SLOTS:
+                    acquired = locks.enter_context(account_file_lock(
+                        data_dir,
+                        f"close-{slot}",
+                        owner,
+                        stale_after_sec=30,
+                        wait_sec=2,
+                    ))
+                    if not acquired:
+                        return jsonify({
+                            "ok": False,
+                            "error": f"The DRY RUN {slot.title()} slot is busy",
+                        }), 409
+                config_lock = locks.enter_context(account_file_lock(
+                    root_dir,
+                    "config",
+                    owner,
+                    stale_after_sec=30,
+                    wait_sec=5,
+                ))
+                if not config_lock:
+                    return jsonify({
+                        "ok": False,
+                        "error": "Account configuration is busy; retry shortly",
+                    }), 409
+
+                final_mode = _trading_mode_payload()
+                if (
+                    not final_mode.get("dry_run_mode")
+                    or final_mode.get("mode_revision")
+                    != initial_mode.get("mode_revision")
+                ):
+                    return jsonify({
+                        "ok": False,
+                        "error": "Trading mode changed before the simulation opened",
+                    }), 409
+                if not _recover_closed_dry_trade_outbox(owner=owner):
+                    raise RuntimeError(
+                        "A closed DRY RUN trade is awaiting durable history; "
+                        "new entries are blocked"
+                    )
+
+                states = {
+                    slot: _trend_score_auto_strict_json(
+                        _slot_file(slot, dry_run=True), {},
+                    )
+                    for slot in SLOTS
+                }
+                for slot in MOVE_SLOTS:
+                    blocker = _trend_score_auto_other_slot_blocker(
+                        slot, states[slot],
+                    )
+                    if blocker:
+                        return jsonify({"ok": False, "error": blocker}), 409
+                states["trend"] = _trend_score_auto_repair_closed_history(
+                    states["trend"], owner=owner,
+                )
+                blocker = _trend_engine_dry_state_blocker(
+                    states["trend"], data_dir,
+                )
+                if blocker:
+                    return jsonify({"ok": False, "error": blocker}), 409
+
+                quote_age = _trend_score_auto_quote_age(
+                    prepared.get("quote_timestamp"),
+                    datetime.now(timezone.utc),
+                )
+                quote_limit = max(_as_float(
+                    _cfg(
+                        "MAX_QUOTE_AGE_SEC"
+                        if prepared.get("instrument_kind") == "BTC_MOVE"
+                        else "TREND_QUOTE_MAX_AGE_SECS",
+                        "20",
+                    ),
+                    20,
+                ), 1)
+                if quote_age > quote_limit:
+                    raise RuntimeError(
+                        "Cockpit quote became stale before the simulation opened"
+                    )
+                risk_snapshot = _trend_score_auto_dry_risk_snapshot(
+                    prepared,
+                    dict(prepared.get("quote_snapshot") or {}),
+                )
+                opened = _trend_score_auto_open_state(
+                    signal, prepared, transition_id, risk_snapshot,
+                )
+                opened.update({
+                    "ownership": TREND_SCORE_MANUAL_DRY_OWNERSHIP,
+                    "entry_trigger": TREND_SCORE_MANUAL_TRIGGERS[action],
+                    "entry_classification": "manual_cockpit",
+                    "strategy": "manual_cockpit",
+                    "manual_cockpit_action": action,
+                    "engine_policy_decision": f"COCKPIT_{action.upper()}",
+                    "engine_entry_decision": f"COCKPIT_{action.upper()}",
+                    "execution_mode": "dry_run",
+                    "dry_run": True,
+                    "cockpit_destination": "dry_run_dashboard",
+                })
+                _atomic_write_json(
+                    _slot_file("trend", dry_run=True), opened,
+                )
+
+        _trend_audit("cockpit_manual_dry_run_entry", {
+            "action": action,
+            "signal_key": signal["signal_key"],
+            "symbol": opened["symbol"],
+            "lots": opened["lots"],
+            "simulation_id": opened["simulation_id"],
+            "order_submitted": False,
+            "exchange_api_called": False,
+        })
+        _trend_score_auto_notify(
+            f"🕹️ <b>COCKPIT DRY RUN — {user.upper()}</b>\n"
+            f"Trade » <code>{action}</code>\n"
+            f"Symbol » <code>{opened['symbol']}</code>\n"
+            f"Lots » <code>{opened['lots']:,}</code>\n"
+            "Simulation opened in the DRY RUN dashboard. No exchange order "
+            "was submitted."
+        )
+        return jsonify({
+            "ok": True,
+            "status": "OPEN",
+            "dry_run": True,
+            "execution_mode": "dry_run",
+            "destination": "dry_run_dashboard",
+            "order_submitted": False,
+            "state": opened,
+            "bot_automation_mode": _trend_score_auto_mode(),
+        })
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)[:300]}), 400
+    except RuntimeError as exc:
+        return jsonify({"ok": False, "error": str(exc)[:300]}), 409
+    except Exception as exc:
+        _trend_audit("cockpit_manual_dry_run_error", {
+            "action": action,
+            "error": str(exc)[:500],
+            "order_submitted": False,
+            "exchange_api_called": False,
+        })
+        return jsonify({"ok": False, "error": str(exc)[:300]}), 400
 
 
 def _trend_score_auto_transition_id(user: str, signal_key: str, zone: str) -> str:
@@ -8954,10 +10200,16 @@ def _trend_score_auto_open_state(
     signal: dict,
     prepared: dict,
     transition_id: str,
+    risk_snapshot: dict | None = None,
 ) -> dict:
     """Create the isolated paper record; never submit an order."""
-    if int(prepared.get("lots") or 0) != TREND_SCORE_AUTO_LOTS:
-        raise RuntimeError("Trend score automation requires exactly 1,000 lots")
+    lots = _trend_score_auto_exact_int(
+        prepared.get("lots"), "prepared order size", positive=True,
+    )
+    if lots != _trend_score_auto_configured_lots():
+        raise RuntimeError(
+            "Prepared order size differs from the configured Trend Engine size"
+        )
     now = datetime.now(timezone.utc)
     price = _trend_score_auto_number(
         prepared.get("entry_price"), "entry price", positive=True,
@@ -8971,12 +10223,7 @@ def _trend_score_auto_open_state(
     product_id = int(_trend_score_auto_number(
         prepared.get("product_id"), "product id", positive=True,
     ))
-    policy = _tp_policy("trend")
-    if not all(float(policy.get(key) or 0) > 0 for key in (
-        "tp_target_pnl", "sl_target_pnl", "tsl_arm_pnl", "tsl_trail_pnl",
-    )):
-        raise RuntimeError("Trend TP, SL, and TSL protection must all be enabled")
-    lots = TREND_SCORE_AUTO_LOTS
+    policy = _trend_score_auto_premium_protection_policy(prepared)
     fee = _option_fee_per_lot(price, contract_value, strike) * lots
     zone = signal["zone"]
     direction = (
@@ -9000,6 +10247,7 @@ def _trend_score_auto_open_state(
         "entry_date": now.strftime("%Y-%m-%d"),
         "entry_time_utc": now.strftime("%H:%M:%S"),
         "entry_at_utc": now.isoformat().replace("+00:00", "Z"),
+        "dry_next_protection_check_utc": now.isoformat(),
         "symbol": prepared["symbol"],
         "product_id": product_id,
         "strike": strike,
@@ -9047,6 +10295,7 @@ def _trend_score_auto_open_state(
         "market_regime_at_entry": signal["market_regime"],
         "btc_at_entry": (signal["snapshot"].get("market") or {}).get("spot"),
         "risk_at_entry_usd": float(policy["sl_target_pnl"]),
+        "protection_risk_at_entry_usd": float(policy["sl_target_pnl"]),
         "protection_config": policy,
         "protection_revision": 0,
         "continuity_revision": 0,
@@ -9059,6 +10308,12 @@ def _trend_score_auto_open_state(
         "position_composition": "simulated_only",
         "selected_contract_snapshot": copy.deepcopy(prepared),
         "quote_snapshot": copy.deepcopy(prepared.get("quote_snapshot") or {}),
+        "risk_decision": copy.deepcopy(risk_snapshot or {}),
+        "risk_at_entry_usd": (
+            (risk_snapshot or {}).get(
+                "risk_at_entry_usd", float(policy["sl_target_pnl"])
+            )
+        ),
         "entry_decision_snapshot": copy.deepcopy(signal["decision"]),
         "signal_snapshot": {
             "signal_key": signal["signal_key"],
@@ -9115,10 +10370,17 @@ def _trend_score_auto_owned_position(state: dict) -> dict | None:
         raise RuntimeError("The controller-owned Trend state has a pending order identity")
     try:
         lots = int(float(state.get("lots") or 0))
+        requested = int(float(
+            state.get("requested_lots")
+            or (state.get("execution_snapshot") or {}).get("requested")
+            or lots
+        ))
     except (TypeError, ValueError, OverflowError) as exc:
         raise RuntimeError("The controller-owned Trend lot count is invalid") from exc
-    if lots != TREND_SCORE_AUTO_LOTS:
-        raise RuntimeError("The controller-owned Trend position is not exactly 1,000 lots")
+    if not 1 <= lots <= 5_000 or lots != requested:
+        raise RuntimeError(
+            "The controller-owned dry-run position has an invalid order size"
+        )
     position_score_zone(state)
     return dict(state)
 
@@ -9132,7 +10394,7 @@ def _trend_score_auto_other_slot_blocker(slot: str, state: dict) -> str | None:
     return None
 
 
-def _trend_score_auto_repair_closed_history(state: dict) -> dict:
+def _trend_score_auto_repair_closed_history(state: dict, *, owner: str) -> dict:
     if (
         str(state.get("status") or "").upper() != "CLOSED"
         or not state.get("history_pending")
@@ -9140,16 +10402,12 @@ def _trend_score_auto_repair_closed_history(state: dict) -> dict:
         return state
     if not _is_dry_record(state):
         raise RuntimeError("A non-DRY closed Trend record has pending history")
-    if not _append_trade_history(
-        state, "trend-score-auto-history-recovery", dry_run=True,
-    ):
+    # Adopt pre-journal legacy pending closes before repair.  From this point
+    # onward the same durable outbox protects both current and migrated rows.
+    _queue_closed_dry_trade("trend", state, owner=owner)
+    if not _recover_closed_dry_trade_outbox(owner=owner):
         raise RuntimeError("Previous DRY RUN Trend history is still pending")
-    repaired = dict(state)
-    repaired["history_pending"] = False
-    repaired["history_logged"] = True
-    repaired["history_logged_at_utc"] = datetime.now(timezone.utc).isoformat()
-    _atomic_write_json(_slot_file("trend", dry_run=True), repaired)
-    return repaired
+    return _trend_score_auto_strict_json(_slot_file("trend", dry_run=True), {})
 
 
 def _trend_score_auto_signal_record(
@@ -9164,6 +10422,7 @@ def _trend_score_auto_signal_record(
         "direction_score": signal["score"],
         "market_regime": signal["market_regime"],
         "target_zone": signal["zone"],
+        "trigger_adx": signal.get("trigger_adx"),
         "action": action,
         "symbol": (state or {}).get("symbol"),
         "lots": (state or {}).get("lots"),
@@ -9186,7 +10445,10 @@ def _trend_score_auto_signal_in_flight(
     if str(transition.get("signal_key") or "") != str(signal_key or ""):
         return False
     phase = str(transition.get("phase") or "").strip().upper()
-    return bool(phase) and phase != "COMPLETE"
+    # REBUILD_REQUIRED is a durable instruction to discard an unsafe pre-POST
+    # intent and rebuild it from current evidence. Treating it as in-flight
+    # deadlocked the very next retry forever.
+    return bool(phase) and phase not in {"COMPLETE", "REBUILD_REQUIRED"}
 
 
 def _trend_score_auto_register_notification(
@@ -9208,9 +10470,486 @@ def _trend_score_auto_register_notification(
     return True
 
 
+def _trend_score_auto_no_fill_setup(
+    ledger: dict,
+) -> dict | None:
+    """Read the one durable LIVE zero-fill setup, if it is well formed."""
+    setup = ledger.get("no_fill_setup")
+    if setup is None:
+        return None
+    if not isinstance(setup, dict):
+        raise RuntimeError("Trend score-auto NO_FILL setup ledger is invalid")
+    zone = str(setup.get("target_zone") or "").strip()
+    if not zone:
+        raise RuntimeError("Trend score-auto NO_FILL setup has no target zone")
+    return setup
+
+
+def _trend_score_auto_no_fill_setup_matches(
+    ledger: dict,
+    signal: dict,
+) -> bool:
+    """Whether this candle remains in the already-attempted zero-fill setup."""
+    setup = _trend_score_auto_no_fill_setup(ledger)
+    if setup is None:
+        return False
+    return (
+        str(setup.get("target_zone") or "") == str(signal["zone"])
+        and str(setup.get("mode_revision") or "")
+        == str((signal.get("mode") or {}).get("mode_revision") or "")
+    )
+
+
+def _trend_score_auto_no_fill_attempt_count(setup: dict) -> int:
+    """Return the durable count of zero-fill exchange attempts."""
+    raw = setup.get("attempt_count", 1)
+    try:
+        count = int(raw)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise RuntimeError(
+            "Trend score-auto NO_FILL attempt count is invalid"
+        ) from exc
+    if count < 1:
+        raise RuntimeError(
+            "Trend score-auto NO_FILL attempt count is invalid"
+        )
+    return count
+
+
+def _trend_score_auto_no_fill_retry_delay_seconds(attempt_count: int) -> int:
+    """Exponential 1m/2m/4m retry delay, capped at five minutes."""
+    exponent = max(0, min(int(attempt_count) - 1, 16))
+    return min(
+        TREND_SCORE_AUTO_NO_FILL_RETRY_BASE_SECONDS * (2 ** exponent),
+        TREND_SCORE_AUTO_NO_FILL_RETRY_MAX_SECONDS,
+    )
+
+
+def _trend_score_auto_no_fill_retry_not_before(setup: dict) -> datetime:
+    """Resolve the retry time, shortening legacy 15-minute cooldowns.
+
+    Older ledgers persist an explicit 15/30/60-minute timestamp.  Taking the
+    earlier of that timestamp and the current policy makes this release take
+    effect without an operator reset or unsafe manual ledger edit.
+    """
+    recorded_at = _parse_utc_stamp(setup.get("recorded_at_utc"))
+    if recorded_at is None:
+        raise RuntimeError(
+            "Trend score-auto NO_FILL recorded timestamp is invalid"
+        )
+    policy_retry_at = recorded_at + timedelta(
+        seconds=_trend_score_auto_no_fill_retry_delay_seconds(
+            _trend_score_auto_no_fill_attempt_count(setup)
+        )
+    )
+    explicit = setup.get("retry_not_before_utc")
+    if explicit not in (None, ""):
+        retry_at = _parse_utc_stamp(explicit)
+        if retry_at is None:
+            raise RuntimeError(
+                "Trend score-auto NO_FILL retry timestamp is invalid"
+            )
+        return min(retry_at, policy_retry_at)
+    return policy_retry_at
+
+
+def _trend_score_auto_no_fill_retry_due(
+    ledger: dict,
+    signal: dict,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    """Allow a same-zone retry only after cooldown and a newer candle."""
+    if not _trend_score_auto_no_fill_setup_matches(ledger, signal):
+        return False
+    setup = _trend_score_auto_no_fill_setup(ledger)
+    signal_close = _parse_utc_stamp(signal.get("signal_bar_close_utc"))
+    prior_close = _parse_utc_stamp(setup.get("signal_bar_close_utc"))
+    if signal_close is None or prior_close is None:
+        raise RuntimeError(
+            "Trend score-auto NO_FILL signal timestamp is invalid"
+        )
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    else:
+        current = current.astimezone(timezone.utc)
+    return (
+        signal_close > prior_close
+        and current >= _trend_score_auto_no_fill_retry_not_before(setup)
+    )
+
+
+def _trend_score_auto_release_no_fill_setup_if_reset(
+    ledger: dict,
+    signal: dict,
+) -> dict | None:
+    """Clear a zero-fill block after a zone or deliberate config reset.
+
+    A score-zone change is a new setup.  A changed saved configuration has a
+    new mode revision and is the deliberate operator reset path for an
+    otherwise unchanged zone.
+    """
+    setup = _trend_score_auto_no_fill_setup(ledger)
+    if setup is None:
+        return None
+    if _trend_score_auto_no_fill_setup_matches(ledger, signal):
+        return None
+    released = dict(setup)
+    ledger["no_fill_setup"] = None
+    return released
+
+
+def _trend_score_auto_setup_lock(ledger: dict) -> dict | None:
+    """Read the durable one-trade-per-unchanged-zone lock."""
+    lock = ledger.get("setup_lock")
+    if lock is None:
+        return None
+    if not isinstance(lock, dict):
+        raise RuntimeError("Trend score-auto setup lock ledger is invalid")
+    zone = str(lock.get("target_zone") or "").strip()
+    if not zone:
+        raise RuntimeError("Trend score-auto setup lock has no target zone")
+    return lock
+
+
+def _trend_score_auto_setup_lock_matches(ledger: dict, signal: dict) -> bool:
+    """Whether a later candle is still the already-traded score zone.
+
+    Risk, TP, SL, trailing-stop, and other Bot Config edits must never turn a
+    completed score-zone trade into a fresh entry.  The zone is the setup
+    identity; ``mode_revision`` remains audit metadata only.
+    """
+    lock = _trend_score_auto_setup_lock(ledger)
+    if lock is None:
+        return False
+    return str(lock.get("target_zone") or "") == str(signal["zone"])
+
+
+def _trend_score_auto_release_setup_lock_for_zone_change(
+    ledger: dict,
+    signal: dict,
+) -> dict | None:
+    """Retire the prior setup lock after a new actionable zone is confirmed.
+
+    HOLD is deliberately excluded: a brief visit to either hold band must not
+    re-arm the same CE, PE, or SHORT_MOVE setup.  Moving between actionable
+    zones is a genuine setup change and must allow one fresh entry if all
+    other gates pass.
+    """
+    lock = _trend_score_auto_setup_lock(ledger)
+    if lock is None:
+        return None
+    new_zone = str(signal.get("zone") or "").strip()
+    if new_zone not in {
+        TREND_SCORE_CE_ZONE,
+        TREND_SCORE_PE_ZONE,
+        TREND_SCORE_MOVE_ZONE,
+    }:
+        return None
+    if str(lock.get("target_zone") or "") == new_zone:
+        return None
+    released = dict(lock)
+    ledger["setup_lock"] = None
+    return released
+
+
+def _trend_score_auto_lock_setup(
+    ledger: dict,
+    signal: dict,
+    *,
+    transition_id: str,
+    action: str,
+) -> None:
+    """Persist that an automated bot setup has already opened a position.
+
+    Manual Cockpit entries are intentionally excluded. Their separately
+    evaluated exit may arm a MANUAL_EXIT_MATCH lock when its direction still
+    matches the committed engine decision.
+    """
+    if str(action or "").strip().upper().startswith("COCKPIT_"):
+        return
+    ledger["setup_lock"] = {
+        "recorded_at_utc": datetime.now(timezone.utc).isoformat(),
+        "target_zone": signal["zone"],
+        "mode_revision": str(
+            (signal.get("mode") or {}).get("mode_revision") or ""
+        ),
+        "source_signal_key": signal["signal_key"],
+        "source_transition_id": transition_id,
+        "source_action": action,
+    }
+
+
+def _maybe_daily_reset_trend_score_setup_lock(
+    *,
+    now: datetime | None = None,
+) -> bool:
+    """Clear an existing score-zone lock once daily after 5:30 PM IST.
+
+    The date marker is written even when no lock exists.  This is important:
+    a setup first traded later that evening must remain locked until the next
+    day's reset instead of being cleared by a subsequent supervisor tick.
+    """
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    current_ist = current.astimezone(_IST_TIMEZONE)
+    reset_date = current_ist.strftime("%Y-%m-%d")
+    if (current_ist.hour, current_ist.minute) < (17, 30):
+        return False
+
+    mode = _trend_score_auto_mode()
+    if mode not in {"dry_run", "live"}:
+        return False
+    dry_run = mode == "dry_run"
+    user = _active_user()
+    data_dir = _mode_data_dir(dry_run)
+    owner = f"trend-score-daily-reset:{user}:{os.getpid()}:{time.time_ns()}"
+    previous = None
+    with account_entry_lock(_user_dir(), owner) as acquired:
+        if not acquired:
+            return False
+        # A mode save may race the supervisor. Never clear the other
+        # namespace after the account lock was acquired.
+        if _trend_score_auto_mode() != mode:
+            return False
+        with account_file_lock(
+            data_dir, "score-setup-lock", owner,
+            stale_after_sec=30, wait_sec=0,
+        ) as file_acquired:
+            if not file_acquired:
+                return False
+            ledger = _trend_score_auto_ledger(data_dir)
+            if ledger.get("setup_lock_last_daily_reset_ist_date") == reset_date:
+                return False
+            previous = _trend_score_auto_setup_lock(ledger)
+            ledger["setup_lock"] = None
+            ledger["setup_lock_last_daily_reset_ist_date"] = reset_date
+            _trend_score_auto_write_ledger(data_dir, ledger)
+
+    if previous is not None:
+        _trend_audit("trend_score_auto_setup_lock_daily_reset", {
+            "execution_mode": mode,
+            "zone": previous["target_zone"],
+            "source_signal_key": previous.get("source_signal_key"),
+            "reset_ist_date": reset_date,
+            "scheduled_for_ist": "17:30",
+            "order_submitted": False,
+            "exchange_api_called": False,
+        })
+        return True
+    return False
+
+
+def _trend_score_auto_backfill_legacy_setup_lock(
+    ledger: dict,
+    state: dict,
+    *,
+    mode: dict,
+    dry_run: bool,
+) -> tuple[dict | None, bool]:
+    """Create one durable lock for a verified pre-lock controller position.
+
+    The first deployed setup-lock version cannot have recorded a lock for a
+    position it opened before the upgrade.  This one-time migration adopts
+    only an explicitly score-controller-owned OPEN/CLOSED state.  It never
+    touches a trade, and its marker prevents a later manual reset from being
+    silently undone by another migration pass.
+    """
+    if ledger.get("legacy_setup_lock_migration_v1") is True:
+        return None, False
+    ledger["legacy_setup_lock_migration_v1"] = True
+    if _trend_score_auto_setup_lock(ledger) is not None:
+        return None, True
+
+    expected_mode = "dry_run" if dry_run else "live"
+    expected_ownership = _trend_score_auto_ownership(expected_mode)
+    zone = str(state.get("trend_score_zone") or "").strip()
+    signal_key = str(state.get("score_auto_signal_key") or "").strip()
+    if not (
+        str(state.get("status") or "").upper() in {"OPEN", "CLOSED"}
+        and state.get("ownership") == expected_ownership
+        and state.get("entry_trigger") == TREND_SCORE_AUTO_TRIGGER
+        and str(state.get("execution_mode") or "").lower() == expected_mode
+        and state.get("dry_run") is dry_run
+        and zone in {
+            TREND_SCORE_CE_ZONE,
+            TREND_SCORE_PE_ZONE,
+            TREND_SCORE_MOVE_ZONE,
+        }
+        and signal_key
+    ):
+        return None, True
+
+    migration_signal = {
+        "zone": zone,
+        "signal_key": signal_key,
+        "mode": mode,
+    }
+    _trend_score_auto_lock_setup(
+        ledger,
+        migration_signal,
+        transition_id=f"legacy-backfill:{signal_key}",
+        action="LEGACY_BACKFILL",
+    )
+    lock = _trend_score_auto_setup_lock(ledger)
+    if lock is None:  # Defensive: the helper above must have produced a lock.
+        raise RuntimeError("legacy score-zone setup lock was not recorded")
+    lock["backfilled_from_legacy_state"] = True
+    return lock, True
+
+
+def _trend_score_auto_recover_open_setup_lock_v2(
+    ledger: dict,
+    state: dict,
+    *,
+    mode: dict,
+    dry_run: bool,
+) -> tuple[dict | None, bool]:
+    """Repair the pre-v2 automatic-unlock defect for one open position.
+
+    Older releases cleared a lock when any Bot Config field was saved or when
+    the score briefly visited HOLD.  On the first v2 cycle only, recover a
+    missing lock from a verified controller-owned *open* position.  A manual
+    reset recorded by v2 is always respected and can never be re-created by
+    this recovery path.
+    """
+    if ledger.get("setup_lock_semantics_v2_migrated") is True:
+        return None, False
+    ledger["setup_lock_semantics_v2_migrated"] = True
+    if _trend_score_auto_setup_lock(ledger) is not None:
+        return None, True
+    if ledger.get("setup_lock_last_manual_reset_at_utc"):
+        return None, True
+
+    expected_mode = "dry_run" if dry_run else "live"
+    expected_ownership = _trend_score_auto_ownership(expected_mode)
+    zone = str(state.get("trend_score_zone") or "").strip()
+    signal_key = str(state.get("score_auto_signal_key") or "").strip()
+    if not (
+        str(state.get("status") or "").upper() == "OPEN"
+        and state.get("ownership") == expected_ownership
+        and state.get("entry_trigger") == TREND_SCORE_AUTO_TRIGGER
+        and str(state.get("execution_mode") or "").lower() == expected_mode
+        and state.get("dry_run") is dry_run
+        and zone in {
+            TREND_SCORE_CE_ZONE,
+            TREND_SCORE_PE_ZONE,
+            TREND_SCORE_MOVE_ZONE,
+        }
+        and signal_key
+    ):
+        return None, True
+
+    _trend_score_auto_lock_setup(
+        ledger,
+        {"zone": zone, "signal_key": signal_key, "mode": mode},
+        transition_id=f"lock-semantics-v2:{signal_key}",
+        action="LOCK_SEMANTICS_V2_RECOVERY",
+    )
+    lock = _trend_score_auto_setup_lock(ledger)
+    if lock is None:  # Defensive: the helper above must have produced a lock.
+        raise RuntimeError("score-zone setup lock recovery was not recorded")
+    lock["recovered_by_lock_semantics_v2"] = True
+    return lock, True
+
+
+def _trend_score_auto_entry_is_setup_locked(
+    ledger: dict,
+    signal: dict,
+    plan: dict,
+) -> bool:
+    """Block a fresh entry, never an exit, while its setup remains unchanged."""
+    return (
+        plan.get("action") in {"OPEN", "CLOSE_THEN_OPEN"}
+        and _trend_score_auto_setup_lock_matches(ledger, signal)
+    )
+
+
+def _trend_score_auto_suppress_setup_locked_entry(
+    ledger: dict,
+    signal: dict,
+    state: dict | None,
+    *,
+    user: str,
+) -> tuple[dict, str]:
+    """Consume one candle as setup-locked without submitting an order."""
+    lock = _trend_score_auto_setup_lock(ledger)
+    if lock is None:
+        raise RuntimeError("score-zone setup lock disappeared during suppression")
+    transition_id = _trend_score_auto_transition_id(
+        user, signal["signal_key"], signal["zone"],
+    )
+    ledger["signals"][signal["signal_key"]] = _trend_score_auto_signal_record(
+        signal, action="SETUP_LOCKED", state=state,
+    )
+    ledger["current_transition"] = {
+        "transition_id": transition_id,
+        "signal_key": signal["signal_key"],
+        "signal_bar_close_utc": signal["signal_bar_close_utc"],
+        "target_zone": signal["zone"],
+        "phase": "COMPLETE",
+        "action": "SETUP_LOCKED",
+        "locked_by_signal_key": lock.get("source_signal_key"),
+        "updated_at_utc": datetime.now(timezone.utc).isoformat(),
+    }
+    return lock, transition_id
+
+
 def _trend_score_auto_notify(text: str) -> None:
     if _cfg_bool("TELEGRAM_ALERTS", True):
         _send_telegram(text)
+
+
+def _notify_dry_run_close_once(slot: str, state: dict) -> bool:
+    """Alert one completed dry-run close once, including TP/SL/TSL exits.
+
+    DRY RUN protection is executed locally, so it does not pass through the
+    LIVE ``tp_monitor`` alert path.  Persisting the event id in the closed
+    state before sending avoids recurring Telegram messages if a caller or
+    supervisor observes the same completed close again.
+    """
+    if not _cfg_bool("TELEGRAM_ALERTS", True):
+        return False
+    trigger = str(state.get("exit_trigger") or "paper_close")
+    simulation_id = str(
+        state.get("simulation_id")
+        or f"{slot}:{state.get('entry_at_utc') or state.get('entry_time_utc')}"
+    )
+    event_id = f"dry-close:{simulation_id}:{trigger}"
+    if state.get("telegram_close_alert_event_id") == event_id:
+        return False
+
+    state["telegram_close_alert_event_id"] = event_id
+    state["telegram_close_alerted_at_utc"] = datetime.now(
+        timezone.utc
+    ).isoformat()
+    _atomic_write_json(_slot_file(slot, dry_run=True), state)
+
+    reason = {
+        "take_profit_simulated": "Take profit reached",
+        "stop_loss_simulated": "Stop loss reached",
+        "trailing_stop_simulated": "Trailing stop reached",
+        "settlement_simulated": "Contract settled",
+        "manual_squareoff_simulated": "Manually closed",
+        "trend_engine_directional_invalidation": "Trend signal invalidated",
+        "trend_engine_score_zone_switch": "Score zone switched",
+    }.get(trigger, "Position closed")
+    try:
+        pnl = float(state.get("pnl_usd") or 0)
+        pnl_text = f"{pnl:+,.2f}"
+    except (TypeError, ValueError):
+        pnl_text = "—"
+    _trend_score_auto_notify(
+        f"🤖 <b>DRY RUN TRADE CLOSED — {_active_user().upper()}</b>\n"
+        f"{reason}\n"
+        f"Symbol » <code>{state.get('symbol', '')}</code>\n"
+        f"Lots » <code>{int(state.get('lots') or 0):,}</code>\n"
+        f"P&amp;L » <code>${pnl_text}</code>\n"
+        "No exchange order was submitted."
+    )
+    return True
 
 
 def _trend_score_auto_health_update(user: str, **fields) -> dict:
@@ -9220,15 +10959,40 @@ def _trend_score_auto_health_update(user: str, **fields) -> dict:
         mode = _trend_score_auto_mode()
     except Exception:
         mode = str(health.get("mode") or "invalid")
+    try:
+        configured_lots = _trend_score_auto_configured_lots()
+    except Exception:
+        configured_lots = TREND_SCORE_AUTO_LOTS
     health.update({
         "user": user,
         "mode": mode,
         "enabled": mode in {"dry_run", "live"},
         "dry_run_only": mode == "dry_run",
         "live_orders_enabled": mode == "live",
-        "fixed_lots": TREND_SCORE_AUTO_LOTS,
+        "fixed_lots": configured_lots,
+        "configured_lots": configured_lots,
     })
     return health
+
+
+def _trend_score_auto_wait_for_data_sync(
+    user: str,
+    cycle_at: str,
+    pending: TrendScoreDataSyncPending,
+    *,
+    execution_mode: str,
+) -> bool:
+    """Publish a non-error retry state without consuming a signal or trading."""
+    _trend_score_auto_health_update(
+        user,
+        status="waiting_for_data_sync",
+        last_cycle_utc=cycle_at,
+        last_action=str(pending),
+        last_error=None,
+        data_sync_pending=True,
+        execution_mode=execution_mode.lower(),
+    )
+    return False
 
 
 def _trend_score_auto_live_owned_position(state: dict) -> dict | None:
@@ -9239,6 +11003,12 @@ def _trend_score_auto_live_owned_position(state: dict) -> dict | None:
             raise RuntimeError(
                 f"LIVE Trend state is unresolved ({status or 'unknown'})"
             )
+        return None
+    if _is_operator_protection_only_state(state):
+        # Deliberately open without controller provenance -- an operator
+        # handed this position to tp_monitor for protection only. Not the
+        # controller's to manage, but the slot is not free either; see
+        # _trend_score_auto_live_previous_state_error for the OPEN case.
         return None
     if _is_dry_record(state):
         raise RuntimeError("LIVE score automation will not manage a DRY state")
@@ -9253,6 +11023,13 @@ def _trend_score_auto_live_owned_position(state: dict) -> dict | None:
         state.get("ownership") != TREND_SCORE_AUTO_LIVE_OWNERSHIP
         or state.get("entry_trigger") != TREND_SCORE_AUTO_TRIGGER
     ):
+        if state.get("ownership") == TREND_SCORE_MANUAL_LIVE_OWNERSHIP:
+            # A Cockpit manual entry: full bot-grade provenance (a real
+            # fill ledger, unlike the protection-only-external case above),
+            # but the controller must never manage or replace it -- only
+            # block a new entry while it is open; see
+            # _trend_score_auto_live_previous_state_error for the OPEN case.
+            return None
         raise RuntimeError(
             "A non-controller LIVE Trend position is already open"
         )
@@ -9271,13 +11048,9 @@ def _trend_score_auto_live_owned_position(state: dict) -> dict | None:
         "controller-owned LIVE Trend requested lot count",
         positive=True,
     )
-    if not 1 <= lots <= TREND_SCORE_AUTO_LOTS:
+    if not 1 <= lots <= requested <= 5_000:
         raise RuntimeError(
-            "The controller-owned LIVE Trend fill is outside the 1–1,000 lot range"
-        )
-    if requested != TREND_SCORE_AUTO_LOTS:
-        raise RuntimeError(
-            "The controller-owned LIVE Trend order did not request exactly 1,000 lots"
+            "The controller-owned LIVE Trend fill exceeds its requested order size"
         )
     _trend_score_auto_exact_int(
         state.get("product_id"),
@@ -9312,7 +11085,20 @@ def _trend_score_auto_live_previous_state_error(state: dict) -> str | None:
     if status == "ENTRY_PENDING":
         return "A LIVE Trend entry identity is still pending recovery"
     if status == "OPEN":
-        return None
+        # The only ways status can be OPEN here (owned position resolution
+        # already returned None) are the two exemptions in
+        # _trend_score_auto_live_owned_position -- the slot is occupied by
+        # a position the controller does not own, so it must not open a new
+        # one over it, whichever exemption applies.
+        if state.get("ownership") == TREND_SCORE_MANUAL_LIVE_OWNERSHIP:
+            return (
+                "A manually opened Cockpit Trend position is open; the "
+                "LIVE controller will not act on this slot until it closes"
+            )
+        return (
+            "An operator-protected external Trend position is open; the "
+            "LIVE controller will not act on this slot until it closes"
+        )
     if status not in {"", "IDLE", "CLOSED"}:
         return f"LIVE Trend state is unresolved ({status or 'unknown'})"
     if _trend_score_auto_pending_identity(state):
@@ -9392,8 +11178,21 @@ def _trend_score_auto_live_quote(prepared: dict) -> dict:
     return quote
 
 
-def _trend_score_auto_live_require_tte(prepared: dict) -> None:
-    """Require the selected daily BTC contract to retain 90 minutes at POST."""
+def _trend_score_auto_live_require_tte(
+    prepared: dict, *, require_min_tte: bool = True,
+) -> None:
+    """Require the selected daily BTC contract to, unless the caller
+    substitutes its own real-time judgement, still retain 90 minutes at
+    POST.
+
+    ``require_min_tte=False`` is for a Cockpit manual entry: the 90-minute
+    liquidity floor is bypassed the same way the SHORT MOVE ADX
+    calm-market gate already is. This does not separately re-check "today's
+    expiry" -- that the contract is the nearest listed one is
+    ``select_directional_option``/``select_move_contract``'s own
+    ``today_only`` guarantee at selection time, not re-derivable here from
+    a single already-selected contract.
+    """
     raw = prepared.get("settlement") or prepared.get("expiry")
     if raw in (None, ""):
         raise RuntimeError(
@@ -9408,11 +11207,13 @@ def _trend_score_auto_live_require_tte(prepared: dict) -> None:
         raise RuntimeError(
             "selected LIVE score contract has an invalid settlement time"
         ) from exc
-    remaining = (settlement - datetime.now(timezone.utc)).total_seconds()
-    if remaining < 90 * 60:
-        raise RuntimeError(
-            "selected LIVE score contract has less than 1.5 hours to expiry"
-        )
+    current = datetime.now(timezone.utc)
+    if require_min_tte:
+        remaining = (settlement - current).total_seconds()
+        if remaining < 90 * 60:
+            raise RuntimeError(
+                "selected LIVE score contract has less than 1.5 hours to expiry"
+            )
 
 
 def _trend_score_auto_live_available_usd(
@@ -9441,38 +11242,343 @@ def _trend_score_auto_live_available_usd(
     raise RuntimeError("LIVE score USD wallet balance is unavailable")
 
 
-def _trend_score_auto_live_risk_snapshot(
+TREND_LIVE_BALANCE_RESERVE_PCT = 2.0
+
+
+def _trend_score_auto_product_fee_per_lot(
+    prepared: dict,
+    *,
+    price: float,
+    legs: int = 1,
+) -> float:
+    """Estimate the opening taker charge from authoritative product fields.
+
+    Delta caps option commission by both underlying notional and premium.  A
+    MOVE contract represents a call and put together, hence ``legs=2``.  The
+    configured fee defaults are retained only for older product snapshots
+    that do not carry the current exchange fields.
+    """
+    product = prepared.get("raw_product")
+    if not isinstance(product, dict):
+        product = {}
+    specs = product.get("product_specs")
+    if not isinstance(specs, dict):
+        specs = {}
+    try:
+        taker_rate = float(product.get("taker_commission_rate"))
+    except (TypeError, ValueError, OverflowError):
+        taker_rate = max(_as_float(_cfg("OPTION_FEE_RATE", "0.00010"), 0.00010), 0)
+    try:
+        premium_rate = float(specs.get("premium_commission_rate"))
+    except (TypeError, ValueError, OverflowError):
+        premium_rate = max(_as_float(_cfg("OPTION_FEE_CAP_PCT", "0.035"), 0.035), 0)
+    if (
+        not math.isfinite(taker_rate) or taker_rate < 0
+        or not math.isfinite(premium_rate) or premium_rate < 0
+    ):
+        raise RuntimeError("selected contract commission fields are invalid")
+    cv = _trend_score_auto_number(
+        prepared.get("contract_value"), "contract value", positive=True,
+    )
+    reference = max(
+        _trend_score_auto_number(
+            prepared.get("spot"), "BTC spot", positive=True,
+        ),
+        _trend_score_auto_number(
+            prepared.get("strike"), "contract strike", positive=True,
+        ),
+    )
+    premium = _trend_score_auto_number(
+        price, "entry premium", positive=True,
+    )
+    per_leg = min(taker_rate * reference, premium_rate * premium) * cv
+    return per_leg * _trend_score_auto_exact_int(
+        legs, "commission leg count", positive=True,
+    )
+
+
+def _trend_score_auto_live_required_funds(
+    prepared: dict,
+    quote: dict,
+    lots: int,
+    *,
+    cfg: dict | None = None,
+) -> dict:
+    """Return estimated entry margin/premium and opening charges for ``lots``.
+
+    Long options are wallet-funded by their bounded IOC premium.  SHORT MOVE
+    is a two-leg short straddle, so its isolated initial margin is calculated
+    from both legs.  Delta's published scaling fields are applied above the
+    product's maximum-leverage notional threshold.
+    """
+    requested = _trend_score_auto_exact_int(
+        lots, "affordability lot count", positive=True,
+    )
+    config = cfg if isinstance(cfg, dict) else _user_cfg()
+    cv = _trend_score_auto_number(
+        prepared.get("contract_value"), "contract value", positive=True,
+    )
+    is_short = str(prepared.get("side") or "").strip().lower() in {
+        "short", "sell",
+    }
+    # A MOVE straddle is always two legs (call + put together) regardless of
+    # direction -- this must key off the instrument, not is_short, or a long
+    # MOVE entry silently halves its estimated commission.
+    legs = 2 if str(prepared.get("instrument_kind") or "").upper() == "BTC_MOVE" else 1
+    price_key = "bid" if is_short else "ask"
+    touch = _trend_score_auto_number(
+        quote.get(price_key), f"fresh {price_key}", positive=True,
+    )
+    if is_short:
+        product = prepared.get("raw_product")
+        if not isinstance(product, dict):
+            raise RuntimeError(
+                "selected short contract has no authoritative margin fields"
+            )
+        initial_margin_pct = _trend_score_auto_number(
+            product.get("initial_margin"), "short initial margin", positive=True,
+        )
+        reference = max(
+            _trend_score_auto_number(
+                prepared.get("spot"), "BTC spot", positive=True,
+            ),
+            _trend_score_auto_number(
+                prepared.get("strike"), "MOVE strike", positive=True,
+            ),
+        )
+        notional = float(legs) * reference * cv * requested
+        ratio = initial_margin_pct / 100.0
+        max_leverage_notional = _trend_score_auto_number(
+            product.get("max_leverage_notional") or notional,
+            "MOVE maximum-leverage notional",
+            positive=True,
+        )
+        if notional > max_leverage_notional:
+            scaling = _trend_score_auto_number(
+                product.get("initial_margin_scaling_factor") or 0,
+                "MOVE initial-margin scaling factor",
+            )
+            if scaling < 0:
+                raise RuntimeError(
+                    "MOVE initial-margin scaling factor is invalid"
+                )
+            ratio += (notional - max_leverage_notional) * scaling
+        margin_or_premium = notional * ratio
+        fee_per_lot = _trend_score_auto_product_fee_per_lot(
+            prepared, price=touch, legs=legs,
+        )
+        basis = (
+            "move_isolated_margin_plus_entry_charges"
+            if legs == 2 else "option_isolated_margin_plus_entry_charges"
+        )
+        funding_price = touch
+    else:
+        max_slippage = max(_as_float(
+            config.get("TREND_MAX_SLIPPAGE_PCT") or 1, 1,
+        ), 0)
+        funding_price = max(
+            _trend_score_auto_number(
+                prepared.get("entry_price"),
+                "selected option reference price", positive=True,
+            ),
+            touch,
+        ) * (1 + max_slippage / 100.0)
+        margin_or_premium = funding_price * cv * requested
+        fee_per_lot = _trend_score_auto_product_fee_per_lot(
+            prepared, price=funding_price, legs=legs,
+        )
+        basis = "long_option_premium_plus_entry_charges"
+    fees = fee_per_lot * requested
+    return {
+        "lots": requested,
+        "basis": basis,
+        "funding_price_usd": round(funding_price, 8),
+        "margin_or_premium_usd": round(margin_or_premium, 8),
+        "entry_fee_per_lot_usd": round(fee_per_lot, 12),
+        "estimated_entry_fees_usd": round(fees, 8),
+        "estimated_total_required_usd": round(
+            margin_or_premium + fees, 8,
+        ),
+    }
+
+
+def _trend_score_auto_live_affordability(
     prepared: dict,
     quote: dict,
     *,
+    available_usd: float,
+    configured_lots: int | None = None,
+    cfg: dict | None = None,
+) -> dict:
+    """Find the maximum safe whole-lot LIVE size within the wallet.
+
+    Two percent of available USD remains uncommitted for quote/margin drift.
+    The result never exceeds the user's configured size or the product limit.
+    Top-of-book depth is deliberately observational: the bounded IOC can sweep
+    deeper price levels up to its slippage cap, so one volatile touch quantity
+    must not masquerade as the account's affordable order size.
+    """
+    config = cfg if isinstance(cfg, dict) else _user_cfg()
+    configured = (
+        _trend_score_auto_configured_lots(config)
+        if configured_lots is None
+        else _trend_score_auto_exact_int(
+            configured_lots, "configured Trend Engine size", positive=True,
+        )
+    )
+    available = _trend_score_auto_number(
+        available_usd, "available USD balance",
+    )
+    if available < 0:
+        raise RuntimeError("available USD balance is invalid")
+    is_short = str(prepared.get("side") or "").strip().lower() in {
+        "short", "sell",
+    }
+    depth_key = "bid_size" if is_short else "ask_size"
+    depth = int(math.floor(_trend_score_auto_number(
+        quote.get(depth_key), f"fresh {depth_key}", positive=True,
+    )))
+    product_limit = _trend_score_auto_exact_int(
+        prepared.get("max_order_lots"), "contract order limit", positive=True,
+    )
+    upper = min(configured, product_limit)
+    usable = available * (1 - TREND_LIVE_BALANCE_RESERVE_PCT / 100.0)
+    low, high = 0, upper
+    while low < high:
+        candidate = (low + high + 1) // 2
+        required = _trend_score_auto_live_required_funds(
+            prepared, quote, candidate, cfg=config,
+        )["estimated_total_required_usd"]
+        if required <= usable + 1e-9:
+            low = candidate
+        else:
+            high = candidate - 1
+    affordable = low
+    if affordable < 1:
+        one_lot = _trend_score_auto_live_required_funds(
+            prepared, quote, 1, cfg=config,
+        )
+        raise RuntimeError(
+            "Available USD balance cannot fund one lot including estimated "
+            f"entry margin/premium and charges (needs approximately "
+            f"${one_lot['estimated_total_required_usd']:.4f})"
+        )
+    selected = _trend_score_auto_live_required_funds(
+        prepared, quote, affordable, cfg=config,
+    )
+    return {
+        **selected,
+        "configured_lots": configured,
+        "affordable_lots": affordable,
+        "selected_lots": affordable,
+        "book_depth_lots": depth,
+        "top_of_book_depth_lots": depth,
+        "book_depth_limited": False,
+        "available_usd": round(available, 8),
+        "usable_balance_usd": round(usable, 8),
+        "balance_reserve_pct": TREND_LIVE_BALANCE_RESERVE_PCT,
+        "downsized": affordable < configured,
+    }
+
+
+def _trend_score_auto_live_affordable_entry(prepared: dict) -> dict:
+    """Attach wallet-backed sizing to one freshly selected LIVE contract."""
+    quote = prepared.get("quote_snapshot")
+    if not isinstance(quote, dict):
+        raise RuntimeError("selected LIVE contract has no executable quote")
+    configured = _trend_score_auto_configured_lots()
+    available = _trend_score_auto_live_available_usd()
+    sizing = _trend_score_auto_live_affordability(
+        prepared,
+        quote,
+        available_usd=available,
+        configured_lots=configured,
+    )
+    return {
+        **prepared,
+        "lots": sizing["selected_lots"],
+        "requested_lots": configured,
+        "configured_lots": configured,
+        "affordability_limited": bool(sizing["downsized"]),
+        "live_affordability": sizing,
+    }
+
+
+def _trend_score_auto_risk_snapshot(
+    prepared: dict,
+    quote: dict,
+    *,
+    dry_run: bool,
     unrealized_pnl_usd: float = 0.0,
     available_usd: float | None = None,
 ) -> dict:
-    """Prove that the fixed 1,000-lot request fits every configured risk cap."""
+    """Prove that the configured request fits every configured risk cap.
+
+    The calculation is deliberately shared by DRY RUN and LIVE.  Paper uses a
+    configured virtual USD balance, while LIVE revalidates the exchange wallet;
+    all order-size, premium, short-stop, and account-ledger limits are identical.
+    """
     cfg = _user_cfg()
-    protection = _tp_policy("trend")
-    sl_target = _trend_score_auto_number(
-        protection.get("sl_target_pnl"), "Trend stop loss", positive=True,
-    )
     cv = _trend_score_auto_number(
         prepared.get("contract_value"), "contract value", positive=True,
     )
     strike = _trend_score_auto_number(
         prepared.get("strike"), "strike", positive=True,
     )
-    is_short = prepared.get("zone") == TREND_SCORE_MOVE_ZONE
+    is_short = str(prepared.get("side") or "").strip().lower() in {
+        "short", "sell",
+    }
     side_price_key = "bid" if is_short else "ask"
     quoted_price = _trend_score_auto_number(
         quote.get(side_price_key), f"fresh {side_price_key}", positive=True,
     )
-    lots = TREND_SCORE_AUTO_LOTS
+    lots = _trend_score_auto_exact_int(
+        prepared.get("lots"), "prepared order size", positive=True,
+    )
+    configured_lots = _trend_score_auto_configured_lots(cfg)
+    if dry_run and lots != configured_lots:
+        raise RuntimeError(
+            "Prepared dry-run order size differs from the configured Trend Engine size"
+        )
+    if not dry_run:
+        sizing = prepared.get("live_affordability")
+        if not isinstance(sizing, dict):
+            raise RuntimeError(
+                "LIVE entry has no wallet-backed affordability calculation"
+            )
+        sizing_configured = _trend_score_auto_exact_int(
+            sizing.get("configured_lots"),
+            "affordability configured size", positive=True,
+        )
+        sizing_selected = _trend_score_auto_exact_int(
+            sizing.get("selected_lots"),
+            "affordability selected size", positive=True,
+        )
+        if (
+            sizing_configured != configured_lots
+            or sizing_selected != lots
+            or lots > configured_lots
+        ):
+            raise RuntimeError(
+                "LIVE affordability sizing does not match the prepared order"
+            )
+    reference_price = _trend_score_auto_number(
+        prepared.get("entry_price"),
+        "selected option reference price", positive=True,
+    )
     risk_budget = _trend_score_auto_number(
         cfg.get("TREND_RISK_BUDGET_USD") or 100,
         "Trend risk budget",
         positive=True,
     )
     if available_usd is None:
-        available_usd = _trend_score_auto_live_available_usd()
+        if dry_run:
+            available_usd = _trend_score_auto_number(
+                cfg.get("TREND_DRY_RUN_CAPITAL_USD") or 1000,
+                "Trend DRY RUN capital", positive=True,
+            )
+        else:
+            available_usd = _trend_score_auto_live_available_usd()
     else:
         available_usd = _trend_score_auto_number(
             available_usd, "available USD balance",
@@ -9481,8 +11587,12 @@ def _trend_score_auto_live_risk_snapshot(
             raise RuntimeError("available USD balance is invalid")
 
     if is_short:
-        if not _config_truthy(cfg.get("ALLOW_SHORT_MOVE"), False):
-            raise RuntimeError("Short MOVE entries are disabled")
+        protection = _trend_score_auto_premium_protection_policy(
+            prepared, entry_price=max(reference_price, quoted_price),
+        )
+        sl_target = _trend_score_auto_number(
+            protection.get("sl_target_pnl"), "Trend stop loss", positive=True,
+        )
         short_cap = _trend_score_auto_number(
             cfg.get("SHORT_MAX_RISK_USD"), "maximum short risk", positive=True,
         )
@@ -9500,28 +11610,54 @@ def _trend_score_auto_live_risk_snapshot(
         max_slippage = max(_as_float(
             cfg.get("TREND_MAX_SLIPPAGE_PCT") or 1, 1,
         ), 0)
-        reference_price = _trend_score_auto_number(
-            prepared.get("entry_price"),
-            "selected option reference price",
-            positive=True,
+        # Contract selection can precede execution by several seconds.  Size
+        # the long-option risk at the maximum boundary above the *fresh ask*,
+        # never merely the older selection mark.  This matches the LIVE IOC
+        # builder and prevents a marketable retry from escaping the configured
+        # wallet, premium, and risk-budget checks.
+        price = max(reference_price, quoted_price) * (
+            1 + max_slippage / 100
         )
-        # Size the long-option risk at the maximum approved buy boundary,
-        # rather than a transient best ask. This remains stable across the
-        # final quote recheck and conservatively covers every permitted fill.
-        price = reference_price * (1 + max_slippage / 100)
+        protection = _trend_score_auto_premium_protection_policy(
+            prepared, entry_price=price,
+        )
+        sl_target = _trend_score_auto_number(
+            protection.get("sl_target_pnl"), "Trend stop loss", positive=True,
+        )
         fee_per_lot = 2 * _option_fee_per_lot(price, cv, strike)
-        premium_per_lot = price * cv
         slippage_per_lot = 0.0
-        premium_at_risk = premium_per_lot * lots
+        premium_at_risk = price * cv * lots
+        if not dry_run:
+            # Wallet affordability is authoritative for the cash needed to
+            # open a LIVE option. Reuse its product-aware entry-premium and
+            # commission model here instead of comparing the already-
+            # downsized order against a second, legacy round-trip-fee
+            # estimate. The latter could reject a valid Cockpit order even
+            # though its entry premium, entry charge, and 2% reserve fit.
+            opening_funds = _trend_score_auto_live_required_funds(
+                prepared,
+                quote,
+                lots,
+                cfg=cfg,
+            )
+            premium_at_risk = _trend_score_auto_number(
+                opening_funds.get("margin_or_premium_usd"),
+                "wallet-funded option premium",
+                positive=True,
+            )
         proposed_risk = max(
             sl_target,
-            lots * (premium_per_lot + fee_per_lot + slippage_per_lot),
+            premium_at_risk
+            + lots * (fee_per_lot + slippage_per_lot),
         )
-        if available_usd * 0.98 < (
-            premium_at_risk + fee_per_lot * lots
+        if not dry_run and available_usd * 0.98 < _trend_score_auto_number(
+                opening_funds.get("estimated_total_required_usd"),
+                "estimated option opening funds",
+                positive=True,
         ):
             raise RuntimeError(
-                "Available USD balance cannot fund the fixed 1,000-lot option order"
+                "Available USD balance changed and cannot fund the affordable "
+                "option order including entry charges"
             )
         premium_cap = _trend_score_auto_number(
             cfg.get("MAX_ACCOUNT_PREMIUM_AT_RISK_USD") or 500,
@@ -9530,19 +11666,19 @@ def _trend_score_auto_live_risk_snapshot(
         )
         if premium_at_risk > premium_cap:
             raise RuntimeError(
-                "Fixed 1,000-lot option premium exceeds the account premium cap"
+                "Configured option premium exceeds the account premium cap"
             )
     if proposed_risk > risk_budget:
         raise RuntimeError(
-            "Fixed 1,000-lot request exceeds the configured Trend risk budget"
+            "Configured order size exceeds the Trend risk budget"
         )
 
     decision = evaluate_entry(
-        _mode_data_dir(False),
+        _mode_data_dir(dry_run),
         proposed_risk,
         cfg,
         unrealized_pnl_usd=unrealized_pnl_usd,
-        dry_run=False,
+        dry_run=dry_run,
     )
     if not decision.allowed:
         raise RuntimeError(decision.reason)
@@ -9558,8 +11694,37 @@ def _trend_score_auto_live_risk_snapshot(
             quoted_price if is_short else price, 8,
         ),
         "requested_lots": lots,
-        "fixed_size_policy": True,
+        "configured_lots": configured_lots,
+        "fixed_size_policy": dry_run,
+        "affordability_sized": not dry_run,
+        "live_affordability": copy.deepcopy(
+            prepared.get("live_affordability")
+        ) if not dry_run else None,
+        "risk_mode": "dry_run" if dry_run else "live",
+        "protection_policy_at_entry": copy.deepcopy(protection),
     }
+
+
+def _trend_score_auto_live_risk_snapshot(
+    prepared: dict,
+    quote: dict,
+    *,
+    unrealized_pnl_usd: float = 0.0,
+    available_usd: float | None = None,
+) -> dict:
+    """LIVE wrapper retained as the explicit wallet-backed execution seam."""
+    return _trend_score_auto_risk_snapshot(
+        prepared, quote, dry_run=False,
+        unrealized_pnl_usd=unrealized_pnl_usd, available_usd=available_usd,
+    )
+
+
+def _trend_score_auto_dry_risk_snapshot(
+    prepared: dict,
+    quote: dict,
+) -> dict:
+    """Paper equivalent of the LIVE fixed-lot entry preflight."""
+    return _trend_score_auto_risk_snapshot(prepared, quote, dry_run=True)
 
 
 def _trend_score_auto_live_execution_limits(
@@ -9817,16 +11982,31 @@ def _trend_score_auto_live_final_preflight(
     prepared: dict,
     quote: dict,
     expected_credentials: tuple[str, str] | None = None,
+    require_score_auto_mode: bool = True,
+    require_min_tte: bool = True,
 ) -> None:
-    """Last account/config/exposure proof immediately before the entry POST."""
-    _trend_score_auto_live_require_tte(prepared)
+    """Last account/config/exposure proof immediately before the entry POST.
+
+    ``require_score_auto_mode`` gates on ``TREND_ENGINE_SCORE_AUTO_MODE``
+    (the automated Bot ON/OFF toggle) being "live" -- correct for the
+    automated controller, whose entries are that toggle's entire reason to
+    exist, but wrong for a Cockpit manual entry: a human clicking a button
+    does not stop being a deliberate, authorized action just because the
+    automated loop is switched off. The Cockpit route passes False here.
+
+    ``require_min_tte`` gates the 90-minute-to-expiry floor inside
+    ``_trend_score_auto_live_require_tte``: required for the automated
+    controller, bypassed for a Cockpit manual entry (which still requires
+    today's IST expiry either way -- only the liquidity floor differs).
+    """
+    _trend_score_auto_live_require_tte(prepared, require_min_tte=require_min_tte)
     mode = _trading_mode_payload()
     cfg = _user_cfg()
     error = _trend_score_auto_config_error(cfg)
     if (
         mode.get("dry_run_mode")
         or mode.get("mode_revision") != initial_revision
-        or _trend_score_auto_mode(cfg) != "live"
+        or (require_score_auto_mode and _trend_score_auto_mode(cfg) != "live")
         or error
     ):
         raise RuntimeError(
@@ -9900,6 +12080,21 @@ def _trend_score_auto_live_final_preflight(
     max_slippage, max_spread, max_quote_age = (
         _trend_score_auto_live_execution_limits(prepared, cfg)
     )
+    refreshed_affordability = _trend_score_auto_live_affordability(
+        prepared,
+        final_quote,
+        available_usd=available_usd,
+        configured_lots=_trend_score_auto_configured_lots(cfg),
+        cfg=cfg,
+    )
+    prepared_lots = _trend_score_auto_exact_int(
+        prepared.get("lots"), "prepared order size", positive=True,
+    )
+    if prepared_lots > refreshed_affordability["affordable_lots"]:
+        raise RuntimeError(
+            "Available USD margin or executable depth changed before POST; "
+            "the affordable LIVE order will be rebuilt"
+        )
     rebuilt_payload, _ = build_trend_score_live_ioc_payload(
         prepared,
         final_quote,
@@ -9968,7 +12163,7 @@ def _trend_score_auto_live_final_preflight(
             "LIVE score risk changed before POST; entry will be rebuilt"
         )
     # Recheck all time-sensitive, local boundaries after the last network call.
-    _trend_score_auto_live_require_tte(prepared)
+    _trend_score_auto_live_require_tte(prepared, require_min_tte=require_min_tte)
     quote_epoch = _trend_score_auto_number(
         final_quote.get("quote_epoch"),
         "fresh LIVE score ticker timestamp",
@@ -10015,7 +12210,17 @@ def _trend_score_auto_live_signal_from_state(
     zone = str(
         state.get("trend_score_zone") or state.get("engine_zone") or ""
     ).strip().upper()
-    if score_zone(score) != zone:
+    # A Cockpit manual entry always persists score=0.0 (see
+    # _cockpit_manual_signal) regardless of which trade type the operator
+    # chose -- score never determined its zone, so score_zone(0.0) has no
+    # reason to agree with e.g. CE_2_ITM/LONG_MOVE. That mismatch is exactly
+    # what this check exists to catch for a bot-owned entry (score and zone
+    # are supposed to be mathematically linked there); for a manual entry
+    # it would reject every recovery of a never-submitted intent.
+    if (
+        state.get("ownership") != TREND_SCORE_MANUAL_LIVE_OWNERSHIP
+        and score_zone(score) != zone
+    ):
         raise RuntimeError(
             "pending LIVE entry score no longer matches its durable zone"
         )
@@ -10061,11 +12266,25 @@ def _trend_score_auto_live_pre_post_pending(state: dict) -> bool:
 
 
 def _trend_score_auto_live_pending_identity(state: dict) -> bool:
-    """Whether state is a controller-owned LIVE score entry generation."""
+    """Whether state is a controller- or Cockpit-owned LIVE entry generation.
+
+    ``entry_trigger`` is not parameterized by ``build_pending_entry_state``
+    (it always persists the automated controller's literal, a pre-existing,
+    accepted gap -- see ``_trend_score_auto_live_execute``), so it matches
+    for both owners and cannot distinguish them; ``ownership`` is the only
+    field that actually varies, and is therefore the only one checked here.
+    A Cockpit-owned pending entry must be recoverable by the same machinery
+    as a bot one -- e.g. a pre-POST intent left behind by a failed
+    preflight (see ``_trend_score_auto_live_cancel_stale_pre_post``) --
+    or a failed manual entry permanently wedges the Trend slot shut against
+    every future entry, manual or automated.
+    """
     return bool(
         str((state or {}).get("status") or "").strip().upper()
         == "ENTRY_PENDING"
-        and state.get("ownership") == TREND_SCORE_AUTO_LIVE_OWNERSHIP
+        and state.get("ownership") in (
+            TREND_SCORE_AUTO_LIVE_OWNERSHIP, TREND_SCORE_MANUAL_LIVE_OWNERSHIP,
+        )
         and state.get("entry_trigger") == TREND_SCORE_AUTO_TRIGGER
     )
 
@@ -10328,7 +12547,8 @@ def _trend_score_auto_live_entry_result(
     record_action = (
         action if status == "OPEN" and result.get("ok") else status
     )
-    now = datetime.now(timezone.utc).isoformat()
+    now_dt = datetime.now(timezone.utc)
+    now = now_dt.isoformat()
     transition.update({
         "phase": "COMPLETE" if consume else status,
         "action": record_action,
@@ -10348,10 +12568,59 @@ def _trend_score_auto_live_entry_result(
             )
         )
         transition["completed_at_utc"] = now
+        try:
+            filled_lots = int(float(result.get("filled_lots") or 0))
+        except (TypeError, ValueError, OverflowError):
+            filled_lots = 0
+        if (status == "OPEN" and result.get("ok")) or filled_lots > 0:
+            _trend_score_auto_lock_setup(
+                ledger,
+                signal,
+                transition_id=handled_transition_id,
+                action=record_action,
+            )
+        prior_no_fill = _trend_score_auto_no_fill_setup(ledger)
+        if status == "NO_FILL" and filled_lots == 0:
+            # Treat a zero-fill as transient liquidity.  Preserve a durable
+            # backoff across processes/restarts, then rebuild the contract and
+            # quote from a later completed candle without operator reset.
+            previous_attempts = (
+                _trend_score_auto_no_fill_attempt_count(prior_no_fill)
+                if prior_no_fill is not None
+                and _trend_score_auto_no_fill_setup_matches(ledger, signal)
+                else 0
+            )
+            attempt_count = previous_attempts + 1
+            retry_delay_seconds = (
+                _trend_score_auto_no_fill_retry_delay_seconds(attempt_count)
+            )
+            ledger["no_fill_setup"] = {
+                "recorded_at_utc": now,
+                "last_attempt_at_utc": now,
+                "source_signal_key": handled_signal_key,
+                "source_transition_id": handled_transition_id,
+                "signal_bar_close_utc": signal["signal_bar_close_utc"],
+                "target_zone": signal["zone"],
+                "mode_revision": str(
+                    (signal.get("mode") or {}).get("mode_revision") or ""
+                ),
+                "order_submitted": bool(result.get("order_submitted")),
+                "attempt_count": attempt_count,
+                "retry_delay_seconds": retry_delay_seconds,
+                "retry_not_before_utc": (
+                    now_dt + timedelta(seconds=retry_delay_seconds)
+                ).isoformat(),
+            }
+        elif prior_no_fill is not None and (
+            _trend_score_auto_no_fill_setup_matches(ledger, signal)
+        ):
+            # A fill or another terminal outcome ends this liquidity retry.
+            ledger["no_fill_setup"] = None
     ledger["current_transition"] = transition
     event_id = f"{handled_transition_id}:{status.lower()}"
     should_notify = (
         consume
+        and status != "NO_FILL"
         and _trend_score_auto_register_notification(
             ledger,
             event_id,
@@ -10406,7 +12675,10 @@ def _trend_score_auto_live_entry_result(
         last_action = (
             "LIVE order was rejected"
             if status == "REJECTED"
-            else "LIVE bounded IOC filled zero lots"
+            else (
+                "LIVE bounded IOC filled zero lots; an automatic liquidity "
+                "retry is scheduled without requiring a zone-lock reset"
+            )
         )
         last_error = str(result.get("error") or "")[:500] or None
     else:
@@ -10442,7 +12714,7 @@ def _trend_score_auto_live_entry_result(
                 f"Regime » <code>{signal['market_regime']}</code>\n"
                 f"Rule » <code>{signal['zone']}</code> · "
                 f"Fill » <code>{int(state.get('lots') or 0):,}/"
-                f"{TREND_SCORE_AUTO_LOTS:,}</code> lots\n"
+                f"{int(state.get('requested_lots') or state.get('lots') or 0):,}</code> lots\n"
                 "Exchange order and TP / SL / TSL protection were verified."
             )
         elif status == "UNPROTECTED_OPEN":
@@ -10478,6 +12750,7 @@ def _trend_score_auto_live_execute(
     transition_id: str,
     initial_revision: str,
     existing_state: dict,
+    ownership: str = TREND_SCORE_AUTO_LIVE_OWNERSHIP,
 ) -> dict:
     """Bind the pure LIVE executor to strict dashboard exchange adapters."""
     pending = str(existing_state.get("status") or "").upper() == "ENTRY_PENDING"
@@ -10489,6 +12762,16 @@ def _trend_score_auto_live_execute(
         existing_state.get("selected_contract_snapshot")
         if pending else prepared
     )
+    # Recovering a durable ENTRY_PENDING generation must use *that*
+    # generation's own recorded ownership, not the caller's default --
+    # a recovery-lane caller does not always know in advance whether the
+    # stuck intent it is resuming was a bot or a Cockpit entry.  A fresh
+    # entry (no pending record to inherit from) always uses the caller's
+    # explicit ``ownership``.
+    effective_ownership = (
+        str(existing_state.get("ownership") or "").strip() or ownership
+        if pending else ownership
+    )
     bound_credentials = _active_creds()
     if not all(bound_credentials):
         raise RuntimeError(
@@ -10497,7 +12780,12 @@ def _trend_score_auto_live_execute(
     if pre_post and not isinstance(selected, dict):
         raise RuntimeError("LIVE score entry has no selected contract")
     if pre_post:
-        _trend_score_auto_live_require_tte(selected)
+        _trend_score_auto_live_require_tte(
+            selected,
+            require_min_tte=(
+                effective_ownership != TREND_SCORE_MANUAL_LIVE_OWNERSHIP
+            ),
+        )
         quote = _trend_score_auto_live_quote(selected)
         available_usd = _trend_score_auto_live_available_usd(
             credentials=bound_credentials,
@@ -10563,7 +12851,7 @@ def _trend_score_auto_live_execute(
         fresh_quote=quote,
         protection_config=(
             existing_state.get("protection_config")
-            if pending else _tp_policy("trend")
+            if pending else _trend_score_auto_premium_protection_policy(selected)
         ),
         risk_snapshot=risk_snapshot,
         existing_state=existing_state,
@@ -10580,6 +12868,12 @@ def _trend_score_auto_live_execute(
             prepared=dict(selected),
             quote=dict(quote or {}),
             expected_credentials=bound_credentials,
+            require_score_auto_mode=(
+                effective_ownership != TREND_SCORE_MANUAL_LIVE_OWNERSHIP
+            ),
+            require_min_tte=(
+                effective_ownership != TREND_SCORE_MANUAL_LIVE_OWNERSHIP
+            ),
         ),
         submit_order=submit_with_verified_credentials,
         lookup_order=lookup_with_verified_credentials,
@@ -10593,7 +12887,7 @@ def _trend_score_auto_live_execute(
         max_slippage_pct=max_slippage,
         max_spread_pct=max_spread,
         max_quote_age_sec=max_quote_age,
-        ownership=TREND_SCORE_AUTO_LIVE_OWNERSHIP,
+        ownership=effective_ownership,
         audit=lambda event, details: _trend_audit(event, dict(details)),
     )
 
@@ -10828,8 +13122,18 @@ def _maybe_auto_trend_score_live_cycle(
         )
         return False
 
+    # Captured before any in-cycle health update can reset last_error to
+    # None, so the post-cycle dedup below compares against the *previous
+    # cycle's* outcome rather than a value this same cycle already cleared.
+    previous_error = _trend_score_auto_health.get(
+        user, {},
+    ).get("last_error")
     try:
         current_signal = _collect_trend_score_auto_signal()
+        if not _trend_score_auto_engine_action_ready(
+            user, cycle_at, current_signal, execution_mode="LIVE",
+        ):
+            return False
         initial_revision = current_signal["mode"]["mode_revision"]
         data_dir = _mode_data_dir(False)
         root_dir = _user_dir()
@@ -10844,6 +13148,7 @@ def _maybe_auto_trend_score_live_cycle(
             engine_zone=current_signal["zone"],
             signal_key=current_signal["signal_key"],
             signal_bar_close_utc=current_signal["signal_bar_close_utc"],
+            data_sync_pending=False,
         )
 
         # Resolve the listed target before taking account/state locks.  A zone
@@ -10858,6 +13163,18 @@ def _maybe_auto_trend_score_live_cycle(
             guessed_state.get("status") or ""
         ).upper()
         guessed_ledger = _trend_score_auto_ledger(data_dir)
+        guessed_same_no_fill_setup = _trend_score_auto_no_fill_setup_matches(
+            guessed_ledger, current_signal,
+        )
+        guessed_no_fill_blocked = (
+            guessed_same_no_fill_setup
+            and not _trend_score_auto_no_fill_retry_due(
+                guessed_ledger, current_signal,
+            )
+        )
+        guessed_setup_locked = _trend_score_auto_setup_lock_matches(
+            guessed_ledger, current_signal,
+        )
         guessed_consumed = set(guessed_ledger["signals"])
         guessed_consumed |= set(
             _trend_score_auto_ledger(_mode_data_dir(True)).get(
@@ -10883,8 +13200,13 @@ def _maybe_auto_trend_score_live_cycle(
                         [guessed_owned] if guessed_owned else []
                     ),
                     consumed_signal_keys=guessed_consumed,
+                    short_move_adx=current_signal.get("trigger_adx"),
                 )
-                if guessed_plan["action"] in {"OPEN", "CLOSE_THEN_OPEN"}:
+                if (
+                    guessed_plan["action"] in {"OPEN", "CLOSE_THEN_OPEN"}
+                    and not guessed_no_fill_blocked
+                    and not guessed_setup_locked
+                ):
                     prepared = _prepare_trend_score_auto_entry(
                         current_signal,
                     )
@@ -10947,6 +13269,62 @@ def _maybe_auto_trend_score_live_cycle(
                     _slot_file("trend"), {},
                 )
                 ledger = _trend_score_auto_ledger(data_dir)
+                legacy_setup_lock, migration_checked = (
+                    _trend_score_auto_backfill_legacy_setup_lock(
+                        ledger,
+                        latest_trend,
+                        mode=boundary_mode,
+                        dry_run=False,
+                    )
+                )
+                recovered_setup_lock, semantics_migration_checked = (
+                    _trend_score_auto_recover_open_setup_lock_v2(
+                        ledger,
+                        latest_trend,
+                        mode=boundary_mode,
+                        dry_run=False,
+                    )
+                )
+                released_setup_lock = (
+                    _trend_score_auto_release_setup_lock_for_zone_change(
+                        ledger, current_signal,
+                    )
+                )
+                if (
+                    migration_checked
+                    or semantics_migration_checked
+                    or released_setup_lock is not None
+                ):
+                    _trend_score_auto_write_ledger(data_dir, ledger)
+                if legacy_setup_lock is not None:
+                    _trend_audit("trend_score_auto_live_setup_lock_backfilled", {
+                        "zone": legacy_setup_lock["target_zone"],
+                        "source_signal_key": legacy_setup_lock.get(
+                            "source_signal_key"
+                        ),
+                        "order_submitted": False,
+                        "exchange_api_called": False,
+                    })
+                if recovered_setup_lock is not None:
+                    _trend_audit("trend_score_auto_live_setup_lock_recovered", {
+                        "zone": recovered_setup_lock["target_zone"],
+                        "source_signal_key": recovered_setup_lock.get(
+                            "source_signal_key"
+                        ),
+                        "order_submitted": False,
+                        "exchange_api_called": False,
+                    })
+                if released_setup_lock is not None:
+                    _trend_audit("trend_score_auto_live_setup_lock_released", {
+                        "previous_zone": released_setup_lock["target_zone"],
+                        "new_zone": current_signal["zone"],
+                        "source_signal_key": released_setup_lock.get(
+                            "source_signal_key"
+                        ),
+                        "reset_by": "actionable_zone_change",
+                        "order_submitted": False,
+                        "exchange_api_called": False,
+                    })
                 if _trend_score_auto_signal_in_flight(
                     ledger, current_signal["signal_key"],
                 ):
@@ -10963,6 +13341,35 @@ def _maybe_auto_trend_score_live_cycle(
                         lots=latest_trend.get("lots", 0),
                     )
                     return False
+
+                released_no_fill_setup = (
+                    _trend_score_auto_release_no_fill_setup_if_reset(
+                        ledger, current_signal,
+                    )
+                )
+                if released_no_fill_setup is not None:
+                    _trend_score_auto_write_ledger(data_dir, ledger)
+                    _trend_audit(
+                        "trend_score_auto_live_no_fill_setup_released",
+                        {
+                            "previous_zone": released_no_fill_setup.get(
+                                "target_zone"
+                            ),
+                            "new_zone": current_signal["zone"],
+                            "source_signal_key": released_no_fill_setup.get(
+                                "source_signal_key"
+                            ),
+                            "reset_by": (
+                                "zone_change"
+                                if str(released_no_fill_setup.get(
+                                    "target_zone"
+                                ) or "") != str(current_signal["zone"])
+                                else "configuration_change"
+                            ),
+                            "order_submitted": False,
+                            "exchange_api_called": False,
+                        },
+                    )
 
                 # Crash/response-loss recovery owns this complete cycle.  Its
                 # original signal—not today's newest bar—is the only key that
@@ -11121,6 +13528,7 @@ def _maybe_auto_trend_score_live_cycle(
                         signal_key=current_signal["signal_key"],
                         owned_positions=[owned] if owned else [],
                         consumed_signal_keys=consumed,
+                        short_move_adx=current_signal.get("trigger_adx"),
                     )
 
                     if plan["action"] == "NOOP":
@@ -11170,6 +13578,147 @@ def _maybe_auto_trend_score_live_cycle(
                         )
                         return False
 
+                    same_no_fill_setup = (
+                        plan["action"] == "OPEN"
+                        and _trend_score_auto_no_fill_setup_matches(
+                            ledger, current_signal,
+                        )
+                    )
+                    no_fill_retry_due = (
+                        same_no_fill_setup
+                        and _trend_score_auto_no_fill_retry_due(
+                            ledger, current_signal,
+                        )
+                    )
+                    if same_no_fill_setup and not no_fill_retry_due:
+                        blocked_setup = _trend_score_auto_no_fill_setup(ledger)
+                        suppressed_transition_id = (
+                            _trend_score_auto_transition_id(
+                                user,
+                                current_signal["signal_key"],
+                                current_signal["zone"],
+                            )
+                        )
+                        ledger["signals"][current_signal["signal_key"]] = (
+                            _trend_score_auto_signal_record(
+                                current_signal,
+                                action="NO_FILL_SUPPRESSED",
+                                state=owned,
+                            )
+                        )
+                        ledger["current_transition"] = {
+                            "transition_id": suppressed_transition_id,
+                            "signal_key": current_signal["signal_key"],
+                            "signal_bar_close_utc": current_signal[
+                                "signal_bar_close_utc"
+                            ],
+                            "target_zone": current_signal["zone"],
+                            "phase": "COMPLETE",
+                            "action": "NO_FILL_SUPPRESSED",
+                            "suppressed_by_signal_key": blocked_setup.get(
+                                "source_signal_key"
+                            ),
+                            "retry_not_before_utc": (
+                                _trend_score_auto_no_fill_retry_not_before(
+                                    blocked_setup
+                                ).isoformat()
+                            ),
+                            "updated_at_utc": datetime.now(
+                                timezone.utc
+                            ).isoformat(),
+                        }
+                        _trend_score_auto_write_ledger(data_dir, ledger)
+                        _trend_audit(
+                            "trend_score_auto_live_no_fill_setup_suppressed",
+                            {
+                                "signal_key": current_signal["signal_key"],
+                                "target_zone": current_signal["zone"],
+                                "source_signal_key": blocked_setup.get(
+                                    "source_signal_key"
+                                ),
+                                "attempt_count": (
+                                    _trend_score_auto_no_fill_attempt_count(
+                                        blocked_setup
+                                    )
+                                ),
+                                "retry_not_before_utc": (
+                                    _trend_score_auto_no_fill_retry_not_before(
+                                        blocked_setup
+                                    ).isoformat()
+                                ),
+                                "order_submitted": False,
+                                "exchange_api_called": False,
+                            },
+                        )
+                        _trend_score_auto_health_update(
+                            user,
+                            status="no_fill_suppressed",
+                            last_action=(
+                                "waiting for the automatic zero-fill "
+                                "liquidity retry; no reset or Telegram "
+                                "alert is required"
+                            ),
+                            last_error=None,
+                            current_zone=None,
+                            symbol=None,
+                            lots=0,
+                            last_transition_id=suppressed_transition_id,
+                        )
+                        return False
+
+                    if no_fill_retry_due:
+                        retry_setup = _trend_score_auto_no_fill_setup(ledger)
+                        _trend_audit(
+                            "trend_score_auto_live_no_fill_retry_released",
+                            {
+                                "signal_key": current_signal["signal_key"],
+                                "target_zone": current_signal["zone"],
+                                "previous_signal_key": retry_setup.get(
+                                    "source_signal_key"
+                                ),
+                                "previous_attempt_count": (
+                                    _trend_score_auto_no_fill_attempt_count(
+                                        retry_setup
+                                    )
+                                ),
+                                "order_submitted": False,
+                                "exchange_api_called": False,
+                            },
+                        )
+
+                    if _trend_score_auto_entry_is_setup_locked(
+                        ledger, current_signal, plan,
+                    ):
+                        setup_lock, suppressed_transition_id = (
+                            _trend_score_auto_suppress_setup_locked_entry(
+                                ledger, current_signal, owned, user=user,
+                            )
+                        )
+                        _trend_score_auto_write_ledger(data_dir, ledger)
+                        _trend_audit("trend_score_auto_live_setup_locked", {
+                            "signal_key": current_signal["signal_key"],
+                            "target_zone": current_signal["zone"],
+                            "source_signal_key": setup_lock.get(
+                                "source_signal_key"
+                            ),
+                            "order_submitted": False,
+                            "exchange_api_called": False,
+                        })
+                        _trend_score_auto_health_update(
+                            user,
+                            status="setup_locked",
+                            last_action=(
+                                "this score zone already opened one LIVE trade; "
+                                "waiting for a different zone or an explicit reset"
+                            ),
+                            last_error=None,
+                            current_zone=None,
+                            symbol=None,
+                            lots=0,
+                            last_transition_id=suppressed_transition_id,
+                        )
+                        return False
+
                     transition_id = _trend_score_auto_transition_id(
                         user,
                         current_signal["signal_key"],
@@ -11197,7 +13746,7 @@ def _maybe_auto_trend_score_live_cycle(
                     _trend_score_auto_write_ledger(data_dir, ledger)
 
                     closed_state = None
-                    if plan["action"] == "CLOSE_THEN_OPEN":
+                    if plan["action"] in {"CLOSE", "CLOSE_THEN_OPEN"}:
                         final_mode = _trading_mode_payload()
                         if (
                             final_mode.get("dry_run_mode")
@@ -11210,7 +13759,14 @@ def _maybe_auto_trend_score_live_cycle(
                         _close_move_state_locked(
                             "trend",
                             owned,
-                            reason="trend_engine_score_zone_switch",
+                            reason=(
+                                "trend_engine_short_move_adx_exit"
+                                if plan.get("reason")
+                                == "SHORT_MOVE_ADX_NO_LONGER_CALM"
+                                else "trend_engine_directional_invalidation"
+                                if plan["action"] == "CLOSE"
+                                else "trend_engine_score_zone_switch"
+                            ),
                         )
                         closed_state = _trend_score_auto_strict_json(
                             _slot_file("trend"), {},
@@ -11247,7 +13803,7 @@ def _maybe_auto_trend_score_live_cycle(
 
                 # All close-* locks are released here.  If a switch occurred,
                 # independently prove flat/accounting/cleanup before entry.
-                if plan["action"] == "CLOSE_THEN_OPEN":
+                if plan["action"] in {"CLOSE", "CLOSE_THEN_OPEN"}:
                     old_product_id = int(
                         (closed_state or {}).get("product_id") or 0
                     )
@@ -11283,6 +13839,62 @@ def _maybe_auto_trend_score_live_cycle(
                         )
                         return True
 
+                if plan["action"] == "CLOSE":
+                    ledger["signals"][current_signal["signal_key"]] = (
+                        _trend_score_auto_signal_record(
+                            current_signal, action="EXIT", state=closed_state,
+                        )
+                    )
+                    transition.update({
+                        "phase": "COMPLETE",
+                        "action": "EXIT",
+                        "completed_at_utc": datetime.now(timezone.utc).isoformat(),
+                    })
+                    event_id = f"{transition_id}:exit-complete"
+                    should_notify = _trend_score_auto_register_notification(
+                        ledger, event_id, action="EXIT", signal=current_signal,
+                    )
+                    ledger["current_transition"] = transition
+                    _trend_score_auto_write_ledger(data_dir, ledger)
+                    _trend_audit(
+                        "trend_score_auto_live_directional_invalidation_exit",
+                        {
+                            "transition_id": transition_id,
+                            "signal_key": current_signal["signal_key"],
+                            "from_zone": plan.get("current_zone"),
+                            "score": current_signal["score"],
+                            "order_submitted": True,
+                            "exchange_api_called": True,
+                        },
+                    )
+                    _trend_score_auto_health_update(
+                        user, status="flat",
+                        last_action=(
+                            "exited SHORT MOVE because committed 15-minute ADX "
+                            "is no longer calm"
+                            if plan.get("reason")
+                            == "SHORT_MOVE_ADX_NO_LONGER_CALM"
+                            else "exited the invalidated directional LIVE position"
+                        ),
+                        last_error=None, current_zone=None, symbol=None, lots=0,
+                        last_transition_id=transition_id,
+                    )
+                    if should_notify:
+                        _trend_score_auto_notify(
+                            f"🤖 <b>TREND ENGINE LIVE — {user.upper()}</b>\n"
+                            f"Exited <code>{closed_state.get('symbol', '')}</code> "
+                            + (
+                                f"because committed 15-minute ADX reached "
+                                f"<code>{current_signal.get('trigger_adx')}</code> "
+                                "(calm requires ADX at or below 25). "
+                                if plan.get("reason")
+                                == "SHORT_MOVE_ADX_NO_LONGER_CALM"
+                                else "after directional invalidation. "
+                            )
+                            + "No replacement was opened."
+                        )
+                    return True
+
                 if prepared is None:
                     transition.update({
                         "phase": "FLAT_WAITING_CONTRACT",
@@ -11302,7 +13914,7 @@ def _maybe_auto_trend_score_live_cycle(
                         user,
                         status="flat_waiting_contract",
                         last_action=(
-                            "waiting for the exact executable 1,000-lot "
+                            "waiting for the exact executable configured-size "
                             "LIVE target contract"
                         ),
                         last_error=transition[
@@ -11347,10 +13959,14 @@ def _maybe_auto_trend_score_live_cycle(
                     transition=transition,
                     action=action,
                 )
+    except TrendScoreDataSyncPending as pending:
+        return _trend_score_auto_wait_for_data_sync(
+            user,
+            cycle_at,
+            pending,
+            execution_mode="LIVE",
+        )
     except Exception as exc:
-        previous_error = _trend_score_auto_health.get(
-            user, {},
-        ).get("last_error")
         message = str(exc)[:500]
         _trend_score_auto_health_update(
             user,
@@ -11358,6 +13974,7 @@ def _maybe_auto_trend_score_live_cycle(
             last_cycle_utc=cycle_at,
             last_action="LIVE score cycle failed closed",
             last_error=message,
+            data_sync_pending=False,
         )
         if previous_error != message:
             _trend_audit(
@@ -11411,8 +14028,18 @@ def _maybe_auto_trend_score_cycle() -> bool:
         )
         return False
 
+    # Captured before any in-cycle health update can reset last_error to
+    # None, so the post-cycle dedup below compares against the *previous
+    # cycle's* outcome rather than a value this same cycle already cleared.
+    previous_error = _trend_score_auto_health.get(
+        user, {},
+    ).get("last_error")
     try:
         signal = _collect_trend_score_auto_signal()
+        if not _trend_score_auto_engine_action_ready(
+            user, cycle_at, signal, execution_mode="DRY RUN",
+        ):
+            return False
         _trend_score_auto_health_update(
             user,
             status="evaluating",
@@ -11424,6 +14051,7 @@ def _maybe_auto_trend_score_cycle() -> bool:
             engine_zone=signal["zone"],
             signal_key=signal["signal_key"],
             signal_bar_close_utc=signal["signal_bar_close_utc"],
+            data_sync_pending=False,
         )
 
         # Contract resolution is intentionally outside account/state locks.
@@ -11452,7 +14080,13 @@ def _maybe_auto_trend_score_cycle() -> bool:
                 guess_owned
                 and position_score_zone(guess_owned) == signal["zone"]
             )
-            if not already and not same_zone:
+            setup_locked = _trend_score_auto_setup_lock_matches(
+                guess_ledger, signal,
+            )
+            if (
+                signal["zone"] != TREND_SCORE_HOLD_ZONE
+                and not already and not same_zone and not setup_locked
+            ):
                 prepared = _prepare_trend_score_auto_entry(signal)
         except Exception as exc:
             preparation_error = str(exc)
@@ -11495,6 +14129,15 @@ def _maybe_auto_trend_score_cycle() -> bool:
                     )
                     return False
 
+                # Do not reuse a slot until every earlier paper close has an
+                # fsynced audit record and a final history row.  This is also
+                # the controller's startup-recovery boundary.
+                if not _recover_closed_dry_trade_outbox(owner=owner):
+                    raise RuntimeError(
+                        "A closed DRY RUN trade is awaiting durable history; "
+                        "new entries are blocked"
+                    )
+
                 boundary_mode = _trading_mode_payload()
                 boundary_cfg = _user_cfg()
                 boundary_error = _trend_score_auto_config_error(boundary_cfg)
@@ -11522,10 +14165,66 @@ def _maybe_auto_trend_score_cycle() -> bool:
                     if blocker:
                         raise RuntimeError(blocker)
                 states["trend"] = _trend_score_auto_repair_closed_history(
-                    states["trend"],
+                    states["trend"], owner=owner,
                 )
                 owned = _trend_score_auto_owned_position(states["trend"])
                 ledger = _trend_score_auto_ledger(data_dir)
+                legacy_setup_lock, migration_checked = (
+                    _trend_score_auto_backfill_legacy_setup_lock(
+                        ledger,
+                        states["trend"],
+                        mode=boundary_mode,
+                        dry_run=True,
+                    )
+                )
+                recovered_setup_lock, semantics_migration_checked = (
+                    _trend_score_auto_recover_open_setup_lock_v2(
+                        ledger,
+                        states["trend"],
+                        mode=boundary_mode,
+                        dry_run=True,
+                    )
+                )
+                released_setup_lock = (
+                    _trend_score_auto_release_setup_lock_for_zone_change(
+                        ledger, signal,
+                    )
+                )
+                if (
+                    migration_checked
+                    or semantics_migration_checked
+                    or released_setup_lock is not None
+                ):
+                    _trend_score_auto_write_ledger(data_dir, ledger)
+                if legacy_setup_lock is not None:
+                    _trend_audit("trend_score_auto_setup_lock_backfilled", {
+                        "zone": legacy_setup_lock["target_zone"],
+                        "source_signal_key": legacy_setup_lock.get(
+                            "source_signal_key"
+                        ),
+                        "order_submitted": False,
+                        "exchange_api_called": False,
+                    })
+                if recovered_setup_lock is not None:
+                    _trend_audit("trend_score_auto_setup_lock_recovered", {
+                        "zone": recovered_setup_lock["target_zone"],
+                        "source_signal_key": recovered_setup_lock.get(
+                            "source_signal_key"
+                        ),
+                        "order_submitted": False,
+                        "exchange_api_called": False,
+                    })
+                if released_setup_lock is not None:
+                    _trend_audit("trend_score_auto_setup_lock_released", {
+                        "previous_zone": released_setup_lock["target_zone"],
+                        "new_zone": signal["zone"],
+                        "source_signal_key": released_setup_lock.get(
+                            "source_signal_key"
+                        ),
+                        "reset_by": "actionable_zone_change",
+                        "order_submitted": False,
+                        "exchange_api_called": False,
+                    })
                 if _trend_score_auto_signal_in_flight(
                     ledger, signal["signal_key"],
                 ):
@@ -11559,7 +14258,39 @@ def _maybe_auto_trend_score_cycle() -> bool:
                     signal_key=signal["signal_key"],
                     owned_positions=[owned] if owned else [],
                     consumed_signal_keys=consumed,
+                    short_move_adx=signal.get("trigger_adx"),
                 )
+
+                if _trend_score_auto_entry_is_setup_locked(
+                    ledger, signal, plan,
+                ):
+                    setup_lock, suppressed_transition_id = (
+                        _trend_score_auto_suppress_setup_locked_entry(
+                            ledger, signal, owned, user=user,
+                        )
+                    )
+                    _trend_score_auto_write_ledger(data_dir, ledger)
+                    _trend_audit("trend_score_auto_setup_locked", {
+                        "signal_key": signal["signal_key"],
+                        "target_zone": signal["zone"],
+                        "source_signal_key": setup_lock.get("source_signal_key"),
+                        "order_submitted": False,
+                        "exchange_api_called": False,
+                    })
+                    _trend_score_auto_health_update(
+                        user,
+                        status="setup_locked",
+                        last_action=(
+                            "this score zone already opened one dry-run trade; "
+                            "waiting for a different zone or an explicit reset"
+                        ),
+                        last_error=None,
+                        current_zone=None,
+                        symbol=None,
+                        lots=0,
+                        last_transition_id=suppressed_transition_id,
+                    )
+                    return False
 
                 if plan["action"] == "NOOP":
                     _trend_score_auto_health_update(
@@ -11618,15 +14349,28 @@ def _maybe_auto_trend_score_cycle() -> bool:
                 _trend_score_auto_write_ledger(data_dir, ledger)
 
                 closed = None
-                if plan["action"] == "CLOSE_THEN_OPEN":
+                if plan["action"] in {"CLOSE", "CLOSE_THEN_OPEN"}:
                     # The config lock remains held across the close and open;
                     # a DRY/LIVE or controller toggle cannot split the switch.
                     if _trading_mode_payload()["mode_revision"] != initial_revision:
                         raise RuntimeError("Configuration changed before score-zone exit")
                     closed = _close_dry_simulation_locked(
                         "trend", owned,
-                        trigger="trend_engine_score_zone_switch",
+                        trigger=(
+                            "trend_engine_short_move_adx_exit"
+                            if plan.get("reason")
+                            == "SHORT_MOVE_ADX_NO_LONGER_CALM"
+                            else "trend_engine_directional_invalidation"
+                            if plan["action"] == "CLOSE"
+                            else "trend_engine_score_zone_switch"
+                        ),
                     )
+                    if (closed.get("history_pending")
+                            or closed.get("close_audit_pending")):
+                        raise RuntimeError(
+                            "DRY RUN exit is awaiting durable history; "
+                            "replacement entry is blocked"
+                        )
                     transition.update({
                         "phase": "EXIT_COMMITTED",
                         "exit_committed_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -11647,6 +14391,51 @@ def _maybe_auto_trend_score_cycle() -> bool:
                         "exchange_api_called": False,
                     })
 
+                if plan["action"] == "CLOSE":
+                    ledger["signals"][signal["signal_key"]] = (
+                        _trend_score_auto_signal_record(
+                            signal, action="EXIT", state=closed,
+                        )
+                    )
+                    transition.update({
+                        "phase": "COMPLETE",
+                        "action": "EXIT",
+                        "completed_at_utc": datetime.now(timezone.utc).isoformat(),
+                    })
+                    event_id = f"{transition_id}:exit-complete"
+                    should_notify = _trend_score_auto_register_notification(
+                        ledger, event_id, action="EXIT", signal=signal,
+                    )
+                    ledger["current_transition"] = transition
+                    _trend_score_auto_write_ledger(data_dir, ledger)
+                    _trend_score_auto_health_update(
+                        user, status="flat",
+                        last_action=(
+                            "exited SHORT MOVE because committed 15-minute ADX "
+                            "is no longer calm"
+                            if plan.get("reason")
+                            == "SHORT_MOVE_ADX_NO_LONGER_CALM"
+                            else "exited the invalidated directional dry-run position"
+                        ),
+                        last_error=None, current_zone=None, symbol=None, lots=0,
+                        last_transition_id=transition_id,
+                    )
+                    if should_notify:
+                        _trend_score_auto_notify(
+                            f"🤖 <b>TREND ENGINE DRY RUN — {user.upper()}</b>\n"
+                            f"Exited <code>{closed.get('symbol', '')}</code> after "
+                            + (
+                                f"committed 15-minute ADX reached "
+                                f"<code>{signal.get('trigger_adx')}</code> "
+                                "(calm requires ADX at or below 25). "
+                                if plan.get("reason")
+                                == "SHORT_MOVE_ADX_NO_LONGER_CALM"
+                                else "directional invalidation. "
+                            )
+                            + "No replacement was opened."
+                        )
+                    return True
+
                 if prepared is None:
                     if plan["action"] == "CLOSE_THEN_OPEN":
                         event_id = f"{transition_id}:exit-awaiting-contract"
@@ -11663,8 +14452,8 @@ def _maybe_auto_trend_score_cycle() -> bool:
                         _trend_score_auto_health_update(
                             user, status="flat_waiting_contract",
                             last_action=(
-                                "previous score zone exited; waiting for the exact "
-                                "1,000-lot target contract"
+                                "previous score zone exited; waiting for the "
+                                "configured-size target contract"
                             ),
                             last_error=transition["entry_blocked_reason"],
                             current_zone=None,
@@ -11676,13 +14465,27 @@ def _maybe_auto_trend_score_cycle() -> bool:
                                 f"🤖 <b>TREND ENGINE DRY RUN — {user.upper()}</b>\n"
                                 f"Exited <code>{closed.get('symbol', '')}</code> after the "
                                 f"score moved to <code>{signal['zone']}</code>.\n"
-                                "The exact new 1,000-lot contract is not executable yet; "
-                                "the paper account remains flat and will retry this signal."
+                                "The configured-size contract is not executable yet; "
+                                "the dry-run account remains flat and will retry this signal."
                             )
                         return True
+                    # No position has changed. Mark this intent rebuildable so
+                    # a refreshed quote for the *same* completed candle may be
+                    # evaluated again. Leaving it PREPARED would falsely mark
+                    # the signal as in-flight forever.
+                    transition.update({
+                        "phase": "REBUILD_REQUIRED",
+                        "entry_blocked_reason": (
+                            preparation_error
+                            or "target contract requires fresh revalidation"
+                        ),
+                        "updated_at_utc": datetime.now(timezone.utc).isoformat(),
+                    })
+                    ledger["current_transition"] = transition
+                    _trend_score_auto_write_ledger(data_dir, ledger)
                     _trend_score_auto_health_update(
                         user, status="blocked",
-                        last_action="waiting for the exact 1,000-lot target contract",
+                        last_action="waiting for the configured-size target contract",
                         last_error=(preparation_error or
                                     "contract will be revalidated next cycle"),
                         current_zone=None,
@@ -11693,6 +14496,31 @@ def _maybe_auto_trend_score_cycle() -> bool:
 
                 if prepared.get("zone") != signal["zone"]:
                     raise RuntimeError("prepared contract no longer matches the score zone")
+                try:
+                    dry_risk_snapshot = _trend_score_auto_dry_risk_snapshot(
+                        prepared,
+                        dict(prepared.get("quote_snapshot") or {}),
+                    )
+                except Exception as exc:
+                    transition.update({
+                        "phase": "ENTRY_BLOCKED_RISK",
+                        "entry_blocked_reason": str(exc)[:500],
+                        "updated_at_utc": datetime.now(timezone.utc).isoformat(),
+                    })
+                    ledger["current_transition"] = transition
+                    _trend_score_auto_write_ledger(data_dir, ledger)
+                    _trend_score_auto_health_update(
+                        user,
+                        status="flat_waiting_risk" if plan["action"] == "CLOSE_THEN_OPEN" else "blocked",
+                        last_action=(
+                            "previous score zone exited; dry-run replacement is blocked by risk"
+                            if plan["action"] == "CLOSE_THEN_OPEN"
+                            else "dry-run score entry is blocked by the same risk policy used in LIVE"
+                        ),
+                        last_error=str(exc)[:500], current_zone=None,
+                        symbol=None, lots=0,
+                    )
+                    return plan["action"] == "CLOSE_THEN_OPEN"
                 quote_age = _trend_score_auto_quote_age(
                     prepared.get("quote_timestamp"), datetime.now(timezone.utc),
                 )
@@ -11716,9 +14544,9 @@ def _maybe_auto_trend_score_cycle() -> bool:
                     or final_mode.get("mode_revision") != initial_revision
                     or _trend_score_auto_mode() != "dry_run"
                 ):
-                    raise RuntimeError("Controller mode changed before paper entry")
+                    raise RuntimeError("Controller mode changed before dry-run entry")
                 opened = _trend_score_auto_open_state(
-                    signal, prepared, transition_id,
+                    signal, prepared, transition_id, dry_risk_snapshot,
                 )
                 _atomic_write_json(
                     _slot_file("trend", dry_run=True), opened,
@@ -11739,6 +14567,12 @@ def _maybe_auto_trend_score_cycle() -> bool:
                     _trend_score_auto_signal_record(
                         signal, action=action, state=opened,
                     )
+                )
+                _trend_score_auto_lock_setup(
+                    ledger,
+                    signal,
+                    transition_id=transition_id,
+                    action=action,
                 )
                 transition.update({
                     "phase": "COMPLETE",
@@ -11769,9 +14603,9 @@ def _maybe_auto_trend_score_cycle() -> bool:
                 _trend_score_auto_health_update(
                     user, status="position_open",
                     last_action=(
-                        "switched the paper position to the new score zone"
+                        "switched the dry-run position to the new score zone"
                         if action == "SWITCH"
-                        else "opened the score-directed paper position"
+                        else "opened the score-directed dry-run position"
                     ),
                     last_error=None,
                     current_zone=signal["zone"],
@@ -11792,11 +14626,18 @@ def _maybe_auto_trend_score_cycle() -> bool:
                         "No exchange order was submitted."
                     )
                 return True
+    except TrendScoreDataSyncPending as pending:
+        return _trend_score_auto_wait_for_data_sync(
+            user,
+            cycle_at,
+            pending,
+            execution_mode="DRY RUN",
+        )
     except Exception as exc:
-        previous_error = _trend_score_auto_health.get(user, {}).get("last_error")
         _trend_score_auto_health_update(
             user, status="error", last_cycle_utc=cycle_at,
             last_action="score cycle failed closed", last_error=str(exc)[:500],
+            data_sync_pending=False,
         )
         if previous_error != str(exc)[:500]:
             _trend_audit("trend_score_auto_error", {
@@ -11840,6 +14681,10 @@ def api_trend_engine_score_auto_status():
     state = _load_json(
         _slot_file("trend", dry_run=namespace_dry_run), {},
     )
+    try:
+        configured_lots = _trend_score_auto_configured_lots(cfg)
+    except Exception:
+        configured_lots = None
     payload = {
         **health,
         "user": user,
@@ -11850,9 +14695,132 @@ def api_trend_engine_score_auto_status():
         "execution_mode": mode if active_mode else "disabled",
         "data_namespace": namespace,
         "ownership": ownership,
-        "fixed_lots": TREND_SCORE_AUTO_LOTS,
+        "fixed_lots": configured_lots,
+        "configured_lots": configured_lots,
         "config_error": error,
+        "account_live": not _config_truthy(cfg.get("DRY_RUN"), False),
+        "account_trading_mode": (
+            "DRY RUN" if _config_truthy(cfg.get("DRY_RUN"), False) else "LIVE"
+        ),
     }
+    engine_zone = str(payload.get("engine_zone") or "").strip().upper()
+    if not engine_zone and active_mode:
+        # Process-memory health can be empty immediately after a dashboard
+        # restart.  Use the read-only engine snapshot so the reset control
+        # never presents a previous zone's lock as blocking the current one.
+        try:
+            engine_snapshot = trend_engine_client.get_snapshot("BTCUSD")
+            candidate_zone = str(
+                engine_snapshot.get("zone") or ""
+            ).strip().upper()
+            if (
+                engine_snapshot.get("data_quality") == "OK"
+                and candidate_zone in {
+                    TREND_SCORE_CE_ZONE,
+                    TREND_SCORE_PE_ZONE,
+                    TREND_SCORE_MOVE_ZONE,
+                    TREND_SCORE_HOLD_ZONE,
+                }
+            ):
+                engine_zone = candidate_zone
+                payload["engine_zone"] = candidate_zone
+        except Exception:
+            pass
+    no_fill_setup = None
+    no_fill_retry_payload = {"active": False}
+    try:
+        status_ledger = _trend_score_auto_ledger(
+            _mode_data_dir(namespace_dry_run)
+        )
+        setup_lock = _trend_score_auto_setup_lock(status_ledger)
+        transition = status_ledger.get("current_transition")
+        if isinstance(transition, dict):
+            controller_phase = str(
+                transition.get("phase") or ""
+            ).strip().upper()
+            transition_zone = str(
+                transition.get("target_zone") or ""
+            ).strip().upper()
+            blocked_reason = str(
+                transition.get("entry_blocked_reason") or ""
+            ).strip()
+            payload["controller_phase"] = controller_phase or None
+            payload["transition_target_zone"] = transition_zone or None
+            # Only expose a durable entry blocker while the transition is
+            # actually waiting.  Completed/old journal entries must not make
+            # a later decision look blocked.  Zone matching prevents a prior
+            # zone's contract failure from leaking into the current signal.
+            blocking_phases = {
+                "FLAT_WAITING_CONTRACT",
+                "FLAT_WAITING_RECONCILIATION",
+                "REBUILD_REQUIRED",
+                "ENTRY_BLOCKED_RISK",
+            }
+            if (
+                blocked_reason
+                and controller_phase in blocking_phases
+                and (
+                    not engine_zone
+                    or not transition_zone
+                    or transition_zone == engine_zone
+                )
+            ):
+                payload["entry_blocked_reason"] = blocked_reason
+        if mode == "live":
+            no_fill_setup = _trend_score_auto_no_fill_setup(status_ledger)
+        if no_fill_setup:
+            no_fill_retry_payload = {
+                "active": True,
+                "zone": no_fill_setup.get("target_zone"),
+                "attempt_count": _trend_score_auto_no_fill_attempt_count(
+                    no_fill_setup
+                ),
+                "retry_not_before_utc": (
+                    _trend_score_auto_no_fill_retry_not_before(
+                        no_fill_setup
+                    ).isoformat()
+                ),
+                "source_signal_key": no_fill_setup.get("source_signal_key"),
+            }
+    except Exception as exc:
+        # The controller will fail closed on a corrupt ledger.  Keep the
+        # status endpoint readable so the operator can see that condition.
+        setup_lock = None
+        payload["setup_lock_error"] = str(exc)[:300]
+    payload["no_fill_retry"] = no_fill_retry_payload
+    # A setup lock survives Bot Config saves and HOLD readings, but it blocks
+    # only its own actionable zone.  A prior zone's durable record must never
+    # make the reset control claim that the current setup is locked.
+    lock_zone = (
+        str(setup_lock.get("target_zone") or "").strip().upper()
+        if setup_lock else ""
+    )
+    engine_zone_is_actionable = engine_zone in {
+        TREND_SCORE_CE_ZONE,
+        TREND_SCORE_PE_ZONE,
+        TREND_SCORE_MOVE_ZONE,
+    }
+    lock_stale = bool(
+        setup_lock
+        and engine_zone_is_actionable
+        and lock_zone != engine_zone
+    )
+    lock_active = bool(
+        setup_lock
+        and active_mode
+        and not lock_stale
+    )
+    if setup_lock:
+        payload["setup_lock"] = {
+            "active": lock_active,
+            "zone": lock_zone,
+            "current_zone": engine_zone or None,
+            "stale": lock_stale,
+            "recorded_at_utc": setup_lock.get("recorded_at_utc"),
+            "source_signal_key": setup_lock.get("source_signal_key"),
+        }
+    else:
+        payload["setup_lock"] = {"active": False}
     position_status = str(state.get("status") or "IDLE").upper()
     controller_state = bool(
         ownership
@@ -11860,6 +14828,10 @@ def api_trend_engine_score_auto_status():
         and state.get("entry_trigger") == TREND_SCORE_AUTO_TRIGGER
     )
     if controller_state and position_status in {"OPEN", "ENTRY_PENDING"}:
+        # A controller journal may briefly retain its prior waiting phase
+        # while the position state has already become authoritative.  Once a
+        # trade is open/pending there is no entry blocker to show.
+        payload.pop("entry_blocked_reason", None)
         payload.update({
             "current_zone": state.get("trend_score_zone"),
             "engine_zone": payload.get("engine_zone")
@@ -11879,6 +14851,431 @@ def api_trend_engine_score_auto_status():
     else:
         payload.setdefault("position_status", position_status)
     return jsonify(payload)
+
+
+@app.route("/api/trend-engine/score-auto/setup-lock/reset", methods=["POST"])
+def api_trend_engine_score_auto_setup_lock_reset():
+    """Explicitly allow one fresh entry in the current score zone.
+
+    This endpoint is deliberately narrow: it never changes a position, sends
+    an order, changes configuration, or emits a Telegram alert.  It only
+    clears the durable setup lock while holding the same account-entry lock as
+    the automated controllers, so an operator reset cannot race an entry.
+    """
+    user = _active_user()
+    try:
+        cfg = _user_cfg()
+        mode = _trend_score_auto_mode(cfg)
+        if mode not in {"dry_run", "live"}:
+            return jsonify({
+                "ok": False,
+                "error": (
+                    "Enable DRY RUN or LIVE automatic score trading before "
+                    "resetting its setup lock"
+                ),
+            }), 409
+        config_error = _trend_score_auto_config_error(cfg)
+        if config_error:
+            return jsonify({"ok": False, "error": config_error}), 409
+
+        dry_run = mode == "dry_run"
+        account_dir = _user_dir()
+        owner = (
+            f"trend-score-setup-reset:{user}:{os.getpid()}:{time.time_ns()}"
+        )
+        with account_entry_lock(account_dir, owner) as acquired:
+            if not acquired:
+                return jsonify({
+                    "ok": False,
+                    "error": (
+                        "Another account entry or recovery is in progress; "
+                        "retry the setup reset shortly"
+                    ),
+                }), 409
+
+            # Re-read after the cross-process lock.  A concurrent Save must
+            # not redirect a reset from the selected DRY namespace to LIVE.
+            locked_cfg = _user_cfg()
+            if _trend_score_auto_mode(locked_cfg) != mode:
+                return jsonify({
+                    "ok": False,
+                    "error": "Automation mode changed; reload and retry the setup reset",
+                }), 409
+            data_dir = _mode_data_dir(dry_run)
+            with account_file_lock(
+                data_dir, "score-setup-lock", owner,
+                stale_after_sec=30, wait_sec=0,
+            ) as file_acquired:
+                if not file_acquired:
+                    return jsonify({
+                        "ok": False,
+                        "error": "The score controller is updating its setup lock; retry shortly",
+                    }), 409
+                ledger = _trend_score_auto_ledger(data_dir)
+                previous = _trend_score_auto_setup_lock(ledger)
+                if previous is None:
+                    return jsonify({
+                        "ok": True,
+                        "released": False,
+                        "message": "No score-zone setup lock is active",
+                    })
+                ledger["setup_lock"] = None
+                ledger["setup_lock_last_manual_reset_at_utc"] = (
+                    datetime.now(timezone.utc).isoformat()
+                )
+                _trend_score_auto_write_ledger(data_dir, ledger)
+
+        _trend_audit("trend_score_auto_setup_lock_manual_reset", {
+            "execution_mode": mode,
+            "zone": previous["target_zone"],
+            "source_signal_key": previous.get("source_signal_key"),
+            "order_submitted": False,
+            "exchange_api_called": False,
+        })
+        return jsonify({
+            "ok": True,
+            "released": True,
+            "zone": previous["target_zone"],
+            "message": (
+                "The score-zone setup lock was reset. This did not close a "
+                "position or submit an order."
+            ),
+        })
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)[:300]}), 400
+
+
+@app.route("/api/cockpit/setups")
+def api_cockpit_setups():
+    snapshot = trend_engine_client.get_snapshot("BTCUSD")
+    return jsonify({
+        "data_quality": snapshot.get("data_quality"),
+        "score": snapshot.get("trend_score"),
+        "adx": snapshot.get("trigger_adx"),
+        "regime": snapshot.get("regime"),
+        "setups": _cockpit_setup_eligibility(snapshot),
+    })
+
+
+def _cockpit_reverse_partial_live_fill(result: dict) -> dict:
+    """Reject a partial Cockpit IOC fill after proving the residual is flat.
+
+    Delta's bounded IOC endpoint can accept the visible slice and cancel the
+    remainder.  That is acceptable for automatic execution, where a protected
+    partial position is a valid risk-managed outcome, but it is not what an
+    operator means by a manual Cockpit quantity.  Cockpit therefore requires
+    an all-or-nothing *outcome*: a partial is immediately closed through the
+    same verified reduce-only path used for other emergency reversals.
+    """
+    if (
+        not isinstance(result, dict)
+        or str(result.get("status") or "").upper() != "OPEN"
+        or not result.get("partial_fill")
+    ):
+        return result
+    state = result.get("state")
+    if not isinstance(state, dict):
+        return {
+            **result,
+            "ok": False,
+            "status": "PARTIAL_FILL_STATE_UNVERIFIED",
+            "error": "Cockpit partial fill has no durable position state",
+        }
+    try:
+        filled = int(float(result.get("filled_lots") or state.get("lots") or 0))
+        requested = int(float(state.get("requested_lots") or 0))
+    except (TypeError, ValueError, OverflowError):
+        filled, requested = 0, 0
+    if filled <= 0 or requested <= filled:
+        return {
+            **result,
+            "ok": False,
+            "status": "PARTIAL_FILL_STATE_UNVERIFIED",
+            "error": "Cockpit partial-fill quantity is inconsistent",
+        }
+    try:
+        closed = _trend_score_auto_live_emergency_flatten(
+            state, "cockpit_partial_fill_rejected",
+        )
+    except Exception as exc:
+        return {
+            **result,
+            "ok": False,
+            "status": "PARTIAL_FILL_UNWIND_FAILED",
+            "error": (
+                f"Cockpit filled only {filled}/{requested} lots and the "
+                f"safety close could not be verified: {exc}"
+            )[:500],
+        }
+    return {
+        **result,
+        "ok": False,
+        "status": "PARTIAL_FILL_REVERSED",
+        "state": closed,
+        "flat_verified": bool(closed.get("flat_verified")),
+        "error": (
+            f"Cockpit filled only {filled}/{requested} lots; the partial "
+            "position was immediately closed. No position remains open."
+        ),
+    }
+
+
+@app.route("/api/cockpit/enter", methods=["POST"])
+def api_cockpit_enter():
+    """Place one manually chosen Cockpit trade in the account's active mode.
+
+    LIVE sends the order through the exchange execution seam. DRY RUN writes
+    an isolated simulation that is displayed and protected by the Paper/DRY
+    RUN dashboard; it never calls a private exchange endpoint.
+
+    LIVE reuses the identical execution seam the automated score-auto
+    controller uses -- same risk gating, wallet-affordable sizing, IOC
+    submission, and protection spawn -- tagged with a distinct ownership
+    (``manual_cockpit_live``) so the controller never manages or replaces it
+    (see ``_trend_score_auto_live_owned_position``). Exclusivity is the same
+    non-blocking ``account_entry_lock`` the automated 15s cycle takes before
+    deciding: whichever side acquires it first proceeds, the other is
+    refused immediately -- first-come-first-served, with no new locking
+    primitive.
+    """
+    user = _active_user()
+    request_body = request.get_json(silent=True) or {}
+    action = str(request_body.get("action") or "").strip().lower()
+    setup_id = str(request_body.get("setup") or "").strip().lower()
+    if action not in TREND_SCORE_MANUAL_TRIGGERS:
+        return jsonify({
+            "ok": False,
+            "error": (
+                "action must be buy_ce, buy_pe, buy_move, sell_ce, sell_pe, "
+                "or sell_move"
+            ),
+        }), 400
+
+    initial_mode = _trading_mode_payload()
+    if initial_mode.get("dry_run_mode"):
+        return _cockpit_enter_dry_run(
+            user=user,
+            action=action,
+            setup_id=setup_id,
+            initial_mode=initial_mode,
+        )
+    key, secret = _active_creds()
+    if not key or not secret:
+        return jsonify({
+            "ok": False, "error": "API credentials are not configured",
+        }), 409
+
+    root_dir = _user_dir()
+    owner = f"cockpit-manual:{user}:{os.getpid()}:{time.time_ns()}"
+    try:
+        with account_entry_lock(root_dir, owner) as exposure_lock:
+            if not exposure_lock:
+                return jsonify({
+                    "ok": False,
+                    "error": (
+                        "Another entry, exit, or recovery is in progress; "
+                        "retry shortly"
+                    ),
+                }), 409
+            boundary_mode = _trading_mode_payload()
+            if (
+                boundary_mode.get("dry_run_mode")
+                or boundary_mode.get("mode_revision")
+                != initial_mode.get("mode_revision")
+            ):
+                return jsonify({
+                    "ok": False,
+                    "error": "Trading mode changed; reload and retry",
+                }), 409
+            with account_file_lock(
+                root_dir, "close-trend", owner,
+                stale_after_sec=120, wait_sec=2,
+            ) as close_lock:
+                if not close_lock:
+                    return jsonify({
+                        "ok": False, "error": "The Trend slot is busy",
+                    }), 409
+                states = {
+                    slot: _trend_score_auto_strict_json(_slot_file(slot), {})
+                    for slot in SLOTS
+                }
+
+            for slot in MOVE_SLOTS:
+                blocker = _trend_score_auto_live_other_slot_error(
+                    slot, states[slot],
+                )
+                if blocker:
+                    return jsonify({"ok": False, "error": blocker}), 409
+            # A manual entry may never open over ANY existing occupant --
+            # bot-owned (owned truthy; the automated cycle is allowed to
+            # replace its own position via plan_score_transition, but a
+            # manual click never may) or blocked for any other reason
+            # (manual/adopted-external/pending/unresolved).
+            owned = _trend_score_auto_live_owned_position(states["trend"])
+            if owned:
+                return jsonify({
+                    "ok": False,
+                    "error": "A bot-managed Trend position is already open",
+                }), 409
+            blocker = _trend_score_auto_live_previous_state_error(
+                states["trend"],
+            )
+            if blocker:
+                return jsonify({"ok": False, "error": blocker}), 409
+
+            try:
+                _cockpit_require_eligible_setup(setup_id, action)
+            except ValueError as exc:
+                return jsonify({"ok": False, "error": str(exc)}), 400
+            except RuntimeError as exc:
+                return jsonify({"ok": False, "error": str(exc)}), 409
+            snapshot = _cockpit_market_snapshot()
+            prepared = _cockpit_prepare_manual_entry(
+                action, snapshot, setup_id=setup_id,
+            )
+            signal = _cockpit_manual_signal(action, snapshot)
+            signal["zone"] = prepared["zone"]
+            signal["mode"] = dict(initial_mode)
+            transition_id = _trend_score_auto_transition_id(
+                user, signal["signal_key"], prepared["zone"],
+            )
+            result = _trend_score_auto_live_execute(
+                user=user,
+                signal=signal,
+                prepared=prepared,
+                transition_id=transition_id,
+                initial_revision=initial_mode.get("mode_revision"),
+                existing_state=states["trend"],
+                ownership=TREND_SCORE_MANUAL_LIVE_OWNERSHIP,
+            )
+            margin_retry = _cockpit_margin_retry_entry(prepared, result)
+            if margin_retry is not None:
+                prepared = margin_retry
+                signal = _cockpit_manual_signal(action, snapshot)
+                signal["zone"] = prepared["zone"]
+                signal["mode"] = dict(initial_mode)
+                transition_id = _trend_score_auto_transition_id(
+                    user, signal["signal_key"], prepared["zone"],
+                )
+                retry_state = _trend_score_auto_strict_json(
+                    _slot_file("trend"), {},
+                )
+                result = _trend_score_auto_live_execute(
+                    user=user,
+                    signal=signal,
+                    prepared=prepared,
+                    transition_id=transition_id,
+                    initial_revision=initial_mode.get("mode_revision"),
+                    existing_state=retry_state,
+                    ownership=TREND_SCORE_MANUAL_LIVE_OWNERSHIP,
+                )
+                result["margin_retry"] = {
+                    "attempted_lots": margin_retry[
+                        "live_affordability"
+                    ].get("exchange_rejected_lots"),
+                    "retried_lots": margin_retry["lots"],
+                }
+            result = _cockpit_reverse_partial_live_fill(result)
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)[:300]}), 400
+
+    ok = bool(result.get("ok")) and str(result.get("status") or "").upper() == "OPEN"
+    _trend_audit("cockpit_manual_entry", {
+        "action": action,
+        "signal_key": signal["signal_key"],
+        "status": result.get("status"),
+        "order_submitted": bool(result.get("order_submitted")),
+        "filled_lots": result.get("filled_lots"),
+        "bot_automation_changed": False,
+        "bot_automation_mode": _trend_score_auto_mode() if ok else None,
+        "exchange_api_called": True,
+        "margin_retry": result.get("margin_retry"),
+    })
+    if ok:
+        state = result.get("state") if isinstance(result.get("state"), dict) else {}
+        lots = state.get("lots")
+        lines = [
+            f"🕹️ <b>COCKPIT MANUAL ENTRY — {user.upper()}</b>",
+            f"Trade » <code>{action}</code>",
+            f"Symbol » <code>{state.get('symbol')}</code>",
+        ]
+        if isinstance(lots, int):
+            lines.append(f"Lots » <code>{lots:,}</code>")
+        lines.append(
+            "Bot automation » <b>setting unchanged</b>"
+        )
+        _trend_score_auto_notify("\n".join(lines))
+    return jsonify({
+        "ok": ok,
+        "status": result.get("status"),
+        "error": result.get("error"),
+        "state": result.get("state"),
+        "margin_retry": result.get("margin_retry"),
+        "bot_automation_mode": _trend_score_auto_mode() if ok else None,
+    }), (200 if ok else 409)
+
+
+@app.route("/api/cockpit/preview", methods=["POST"])
+def api_cockpit_preview():
+    """Resolve the exact contract and price one Cockpit trade type would
+    use right now, without submitting anything.
+
+    Read-only: no entry lock, no state writes. Lets the confirmation prompt
+    show the operator what they are about to trade before
+    ``/api/cockpit/enter`` actually places it. Market conditions can move
+    between preview and the real entry -- which re-resolves and
+    re-validates everything fresh regardless, exactly as if this preview
+    had never been called.
+    """
+    request_body = request.get_json(silent=True) or {}
+    action = str(request_body.get("action") or "").strip().lower()
+    setup_id = str(request_body.get("setup") or "").strip().lower()
+    if action not in TREND_SCORE_MANUAL_TRIGGERS:
+        return jsonify({
+            "ok": False,
+            "error": (
+                "action must be buy_ce, buy_pe, buy_move, sell_ce, sell_pe, "
+                "or sell_move"
+            ),
+        }), 400
+    mode = _trading_mode_payload()
+    dry_run = bool(mode.get("dry_run_mode"))
+    key, secret = _active_creds()
+    if not dry_run and (not key or not secret):
+        return jsonify({
+            "ok": False, "error": "API credentials are not configured",
+        }), 409
+    try:
+        _cockpit_require_eligible_setup(setup_id, action)
+        if dry_run:
+            snapshot = _cockpit_market_snapshot(dry_run=True)
+            prepared = _cockpit_prepare_manual_entry(
+                action, snapshot, dry_run=True, setup_id=setup_id,
+            )
+        else:
+            snapshot = _cockpit_market_snapshot()
+            prepared = _cockpit_prepare_manual_entry(
+                action, snapshot, setup_id=setup_id,
+            )
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)[:300]}), 400
+    return jsonify({
+        "ok": True,
+        "action": action,
+        "symbol": prepared.get("symbol"),
+        "option_type": prepared.get("option_type"),
+        "side": prepared.get("side"),
+        "instrument_kind": prepared.get("instrument_kind"),
+        "strike": prepared.get("strike"),
+        "lots": prepared.get("lots"),
+        "entry_price": prepared.get("entry_price"),
+        "contract_value": prepared.get("contract_value"),
+        "dry_run": dry_run,
+        "execution_mode": "dry_run" if dry_run else "live",
+        "destination": "dry_run_dashboard" if dry_run else "delta_exchange",
+    })
 
 
 def _trend_auto_loop() -> None:
@@ -11902,6 +15299,8 @@ def _trend_auto_loop() -> None:
                         if recovery_claimed:
                             continue
                         score_mode = _trend_score_auto_mode()
+                        if score_mode in {"dry_run", "live"}:
+                            _maybe_daily_reset_trend_score_setup_lock()
                         # Publish the displayed 5M/15M/live-1H state for the
                         # Morning MOVE rule even when Trend auto-entry itself
                         # is disabled. The 15-second cache limits API traffic.
@@ -12000,14 +15399,23 @@ def api_all_positions():
             except Exception:
                 mark = 0.0
             pnl = (mark - entry) * cv * size   # signed size handles long vs short
+            # margin/liquidation_price/bankruptcy_price field names are an
+            # unverified assumption (docs/assumptions.md A9) — this workstation's
+            # IP isn't whitelisted for the API key, so the live shape is
+            # unconfirmed. Read defensively; missing or zero renders as "not
+            # reported" in the UI rather than a fabricated number.
+            margin           = float(p.get("margin") or 0) or None
+            liquidation_price = float(p.get("liquidation_price") or 0) or None
             out.append({
-                "symbol":       symbol,
-                "product_id":   product_id,
-                "side":         "LONG" if size > 0 else "SHORT",
-                "size":         abs(size),
-                "entry_price":  entry,
-                "mark_price":   mark,
-                "live_pnl":     round(pnl, 2),
+                "symbol":            symbol,
+                "product_id":        product_id,
+                "side":              "LONG" if size > 0 else "SHORT",
+                "size":              abs(size),
+                "entry_price":       entry,
+                "mark_price":        mark,
+                "live_pnl":          round(pnl, 2),
+                "margin":            margin,
+                "liquidation_price": liquidation_price,
             })
         return jsonify(out)
     except Exception as e:
@@ -12099,6 +15507,11 @@ _CONFIG_NUMERIC_BOUNDS = {
     "TREND_BOOK_PARTICIPATION_PCT": (0.1, 100),
     "TREND_QUOTE_MAX_AGE_SECS": (1, 300), "TREND_MAX_MARK_IV": (0, 10),
     "TREND_RISK_BUDGET_USD": (1, 10_000_000),
+    "TREND_DRY_RUN_CAPITAL_USD": (1, 10_000_000),
+    "TREND_SCORE_AUTO_LOTS": (1, 5_000),
+    "TREND_TP_PREMIUM_PCT": (0.01, 1_000),
+    "TREND_SL_PREMIUM_PCT": (0.01, 1_000),
+    "TREND_TSL_PCT": (0.01, 1_000),
     "TREND_MAX_SLIPPAGE_PCT": (0.01, 20), "TREND_ORDER_CHUNK_LOTS": (1, 5000),
     "MAX_ORDER_LOTS": (1, 5000),
     "TREND_REENTRY_COOLDOWN_MIN": (0, 1440),
@@ -12187,6 +15600,16 @@ def _validate_config_update(data: dict, current: dict) -> str | None:
                 "Trend Engine score mode cannot change while a LIVE score "
                 "entry identity is pending exact exchange recovery"
             )
+        # Defense in depth for the Cockpit's Bot ON/OFF toggle: it disables
+        # itself client-side while a Trend position (bot or manual) is open,
+        # but a stale page or a direct API call must not be able to bypass
+        # that. Checked here, not only in the UI, so it holds regardless of
+        # which client makes the request.
+        if str(live_trend_state.get("status") or "").upper() == "OPEN":
+            return (
+                "Trend Engine score mode cannot change while a Trend "
+                "position is open"
+            )
     for key in (
         "MOVE_ALLOW_LONG", "MOVE_REQUIRE_NO_OPEN_ORDERS", "MOVE_REQUIRE_FLAT",
     ):
@@ -12204,6 +15627,12 @@ def _validate_config_update(data: dict, current: dict) -> str | None:
             return f"{key} must be numeric"
         if not math.isfinite(value) or not low <= value <= high:
             return f"{key} must be between {low} and {high}"
+    if "TREND_SCORE_AUTO_LOTS" in data:
+        try:
+            if not float(data["TREND_SCORE_AUTO_LOTS"]).is_integer():
+                return "Order size must be a whole number of lots"
+        except (TypeError, ValueError, OverflowError):
+            return "Order size must be a whole number of lots"
     merged = {**current, **data}
     if score_auto_mode in {"dry_run", "live"}:
         score_auto_error = _trend_score_auto_config_error(merged)
@@ -12281,6 +15710,10 @@ def _save_config_data(data: dict):
     purely as the global default for keys an account hasn't set). The
     account's bot instance watches its config.json and self-reloads."""
     data = _normalize_config_update_aliases(data)
+    # One account has one score-zone controller. Persist the retirement of
+    # old time-window/legacy controllers with every save so an operator does
+    # not need to discover or maintain hidden compatibility settings.
+    data.update(SCORE_ZONE_LEGACY_DISABLED_SETTINGS)
     user_dir = _user_dir()
     with account_file_lock(
         user_dir,
@@ -12346,7 +15779,40 @@ def _save_config_data(data: dict):
                 state = _load_json(state_path, {})
                 if (state.get("status") == "OPEN"
                         and _is_dry_record(state) is dry_run):
-                    state["protection_config"] = _tp_policy(slot)
+                    existing_policy = state.get("protection_config")
+                    automatic_policy = bool(
+                        slot == "trend"
+                        and isinstance(existing_policy, dict)
+                        and existing_policy.get("protection_source")
+                        == "automatic_filled_premium"
+                    )
+                    poll_key = (
+                        "TP_POLL_SECS_MORNING" if slot == "morning"
+                        else "TP_POLL_SECS_TREND" if slot == "trend"
+                        else "TP_POLL_SECS"
+                    )
+                    manual_values_changed = bool(
+                        (keys - {poll_key}) & set(data)
+                    )
+                    if automatic_policy and not manual_values_changed:
+                        # A polling-frequency-only update must not silently
+                        # replace a filled-premium policy with legacy fixed
+                        # dollar values. The entry formula stays intact.
+                        policy = dict(existing_policy)
+                        policy["poll_secs"] = _tp_policy(slot)["poll_secs"]
+                    else:
+                        policy = _tp_policy(slot)
+                        if slot == "trend" and manual_values_changed:
+                            policy.update({
+                                "protection_mode": "manual_override_v1",
+                                "protection_source": "manual_override",
+                                "manual_override_at_utc": datetime.now(
+                                    timezone.utc
+                                ).isoformat(),
+                                "automatic_entry_protection_replaced": automatic_policy,
+                                "manual_override_allowed": True,
+                            })
+                    state["protection_config"] = policy
                     if dry_run:
                         # A saved paper policy must become effective on the
                         # next scheduler tick, not after the old interval.
@@ -12459,7 +15925,7 @@ def test_telegram():
             f"https://api.telegram.org/bot{token}/sendMessage",
             json={
                 "chat_id":    chat_id,
-                "text":       "✅ <b>NITHI-BOT</b> — Telegram alerts are connected!\n<code>Test message from dashboard.</code>",
+                "text":       "✅ <b>BTC BOT</b> — Telegram alerts are connected!\n<code>Test message from dashboard.</code>",
                 "parse_mode": "HTML",
             },
             timeout=8,
@@ -12550,6 +16016,27 @@ def _dry_run_protection_cycle(
         _import_legacy_dry_records()
     except Exception:
         pass
+    # Recover a close left between the journal and history by a prior process
+    # before evaluating fresh protection.  Entry and slot locks use the same
+    # order as the score controller, preventing a close/re-entry interleave.
+    recovery_owner = f"dry-protection-recovery:{os.getpid()}:{time.time_ns()}"
+    with account_entry_lock(_user_dir(), recovery_owner) as exposure_lock:
+        if exposure_lock:
+            with ExitStack() as recovery_locks:
+                all_slots_locked = True
+                for slot in SLOTS:
+                    acquired = recovery_locks.enter_context(account_file_lock(
+                        _mode_data_dir(True), f"close-{slot}", recovery_owner,
+                        stale_after_sec=30, wait_sec=0,
+                    ))
+                    if not acquired:
+                        all_slots_locked = False
+                        break
+                if all_slots_locked:
+                    try:
+                        _recover_closed_dry_trade_outbox(owner=recovery_owner)
+                    except Exception as exc:
+                        print(f"Dry-run close recovery warning for {_active_user()}: {exc}")
     for slot in SLOTS:
         state_path = _slot_file(slot, dry_run=True)
         state = _load_json(state_path, {})
@@ -12597,8 +16084,28 @@ def _dry_run_protection_cycle(
         arm = policy["tsl_arm_pnl"]
         trail = policy["tsl_trail_pnl"]
         locked = policy["tsl_lock_min_pnl"]
-        tsl_armed = bool(arm and trail and peak >= arm)
-        tsl_floor = max(peak - trail, locked) if tsl_armed else None
+        nimmathi_tsl = (
+            policy["protection_mode"]
+            == "filled_premium_percent_peak_trail_v2"
+        )
+        entry_basis = policy["entry_premium_usd"]
+        if entry_basis <= 0:
+            entry_basis = abs(
+                _as_float(state.get("entry_mark"), 0)
+                * _as_float(state.get("contract_value"), 0.001)
+                * abs(_as_float(state.get("lots"), 0))
+            )
+        tsl_pct = policy["tsl_pct"]
+        peak_pct = peak / entry_basis * 100.0 if entry_basis > 0 else 0.0
+        tsl_armed = bool(
+            peak_pct > 0 and tsl_pct > 0
+            if nimmathi_tsl else arm and trail and peak >= arm
+        )
+        tsl_floor = (
+            max(-sl, peak - entry_basis * tsl_pct / 100.0)
+            if tsl_armed and nimmathi_tsl else
+            max(peak - trail, locked) if tsl_armed else None
+        )
         trigger = None
         if tp and pnl >= tp:
             trigger = "take_profit_simulated"
@@ -12618,10 +16125,20 @@ def _dry_run_protection_cycle(
             except (TypeError, ValueError):
                 pass
 
-        with account_file_lock(
-            _mode_data_dir(True), f"close-{slot}",
-            f"dry-protection:{os.getpid()}", stale_after_sec=30, wait_sec=0,
-        ) as acquired:
+        close_owner = f"dry-protection:{slot}:{os.getpid()}:{time.time_ns()}"
+        with ExitStack() as protection_locks:
+            # Only a real close changes account exposure.  Taking the account
+            # entry mutex first serializes it with a score-zone replacement.
+            if trigger:
+                exposure_lock = protection_locks.enter_context(account_entry_lock(
+                    _user_dir(), close_owner,
+                ))
+                if not exposure_lock:
+                    continue
+            acquired = protection_locks.enter_context(account_file_lock(
+                _mode_data_dir(True), f"close-{slot}", close_owner,
+                stale_after_sec=30, wait_sec=0,
+            ))
             if not acquired:
                 continue
             latest = _load_json(state_path, {})
@@ -12643,7 +16160,10 @@ def _dry_run_protection_cycle(
                     round(tsl_floor, 8) if tsl_floor is not None else None),
             })
             if trigger:
-                _close_dry_simulation_locked(slot, latest, trigger=trigger)
+                closed_state = _close_dry_simulation_locked(
+                    slot, latest, trigger=trigger,
+                )
+                _notify_dry_run_close_once(slot, closed_state)
                 closed += 1
             else:
                 _atomic_write_json(state_path, latest)
@@ -12677,7 +16197,7 @@ def _dry_run_protection_loop() -> None:
 # ─────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     print("=" * 50)
-    print("  NITHI-BOT — MV-BTC Straddle Dashboard")
+    print("  BTC BOT — MV-BTC Straddle Dashboard")
     print("  http://localhost:5001")
     print("=" * 50)
     _revive_tp_monitors()

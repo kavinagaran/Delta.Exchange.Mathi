@@ -1,4 +1,4 @@
-/* NITHI-BOT dashboard — shared helpers + topbar live data */
+/* BTC BOT dashboard — shared helpers + topbar live data */
 
 async function jget(url) {
   const r = await fetch(url, { cache: 'no-store' });
@@ -18,15 +18,23 @@ async function jpost(url, body) {
 
 /* ── Persistent site theme ──────────────────────────────── */
 const THEME_STORAGE_KEY = 'nithi-theme';
+const THEME_CHOICES = ['red', 'blue', 'green', 'violet', 'amber'];
+
+function normalizeTheme(theme) {
+  const candidate = theme === 'dark' ? 'blue' : (theme === 'light' ? 'red' : theme);
+  return THEME_CHOICES.includes(candidate) ? candidate : 'blue';
+}
 
 function currentTheme() {
-  return document.documentElement?.dataset?.theme === 'dark' ? 'dark' : 'light';
+  return normalizeTheme(document.documentElement?.dataset?.palette ||
+    (document.documentElement?.dataset?.theme === 'dark' ? 'blue' : 'red'));
 }
 
 function applyTheme(theme, persist = true) {
-  const next = theme === 'dark' ? 'dark' : 'light';
-  if (next === 'dark') document.documentElement.dataset.theme = 'dark';
-  else delete document.documentElement.dataset.theme;
+  const next = normalizeTheme(theme);
+  document.documentElement.dataset.palette = next;
+  if (next === 'red') delete document.documentElement.dataset.theme;
+  else document.documentElement.dataset.theme = 'dark';
   if (persist) {
     try { localStorage.setItem(THEME_STORAGE_KEY, next); } catch (_) { /* storage unavailable */ }
   }
@@ -34,20 +42,82 @@ function applyTheme(theme, persist = true) {
   return next;
 }
 
-function initThemeToggle() {
-  const toggle = document.getElementById('theme-toggle');
-  if (!toggle) return;
+function initThemePicker() {
+  const picker = document.getElementById('theme-picker');
+  if (!picker) return;
   const sync = () => {
-    const dark = currentTheme() === 'dark';
-    toggle.setAttribute('aria-pressed', String(dark));
-    toggle.setAttribute('aria-label', `Switch to ${dark ? 'Red' : 'Blue'} theme`);
-    toggle.title = `Switch to ${dark ? 'Red' : 'Blue'} theme`;
+    const active = currentTheme();
+    picker.querySelectorAll('[data-theme-choice]').forEach(swatch => {
+      const selected = swatch.dataset.themeChoice === active;
+      swatch.setAttribute('aria-checked', String(selected));
+      swatch.classList.toggle('is-selected', selected);
+    });
   };
   sync();
-  toggle.addEventListener('click', () => {
-    applyTheme(currentTheme() === 'dark' ? 'light' : 'dark');
+  picker.addEventListener('click', event => {
+    const swatch = event.target.closest?.('[data-theme-choice]');
+    if (!swatch) return;
+    applyTheme(swatch.dataset.themeChoice);
     sync();
   });
+}
+
+/* ── Shared depth + motion interactions ───────────────────
+   CSS owns the visual treatment. This small delegated controller only feeds
+   pointer position into the active surface and creates a short click ripple,
+   so cards rendered later by API responses receive the same behaviour. */
+function initDynamicSurfaces() {
+  const root = document.documentElement;
+  const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+  const finePointer = window.matchMedia?.('(hover: hover) and (pointer: fine)').matches;
+
+  document.body.classList.add('motion-ready');
+  if (reduceMotion) return;
+
+  let activeSurface = null;
+  const surfaceSelector = '.card, .stat, .dry-run-hero, .section-title, .trend-box';
+
+  if (finePointer) {
+    document.addEventListener('pointermove', event => {
+      const surface = event.target.closest?.(surfaceSelector);
+      if (activeSurface && activeSurface !== surface) {
+        activeSurface.style.removeProperty('--tilt-x');
+        activeSurface.style.removeProperty('--tilt-y');
+      }
+      activeSurface = surface;
+      if (!surface) return;
+      const rect = surface.getBoundingClientRect();
+      if (!rect.width || !rect.height) return;
+      const x = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
+      const y = Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height));
+      surface.style.setProperty('--surface-x', `${(x * 100).toFixed(1)}%`);
+      surface.style.setProperty('--surface-y', `${(y * 100).toFixed(1)}%`);
+      surface.style.setProperty('--tilt-x', `${((.5 - y) * 1.25).toFixed(2)}deg`);
+      surface.style.setProperty('--tilt-y', `${((x - .5) * 1.25).toFixed(2)}deg`);
+    }, { passive: true });
+
+    document.addEventListener('pointerout', event => {
+      if (!activeSurface || event.relatedTarget?.closest?.(surfaceSelector) === activeSurface) return;
+      activeSurface.style.removeProperty('--tilt-x');
+      activeSurface.style.removeProperty('--tilt-y');
+      activeSurface = null;
+    }, { passive: true });
+  }
+
+  document.addEventListener('pointerdown', event => {
+    const target = event.target.closest?.('.btn, .nav a, .theme-swatch');
+    if (!target || target.matches(':disabled')) return;
+    const rect = target.getBoundingClientRect();
+    const ripple = document.createElement('span');
+    ripple.className = 'surface-ripple';
+    ripple.setAttribute('aria-hidden', 'true');
+    ripple.style.left = `${event.clientX - rect.left}px`;
+    ripple.style.top = `${event.clientY - rect.top}px`;
+    target.appendChild(ripple);
+    ripple.addEventListener('animationend', () => ripple.remove(), { once: true });
+  });
+
+  root.classList.add('dynamic-surfaces');
 }
 
 function setTradingModeIndicator(mode, dryRunMode) {
@@ -71,6 +141,59 @@ const fN = (v, d = 0) => (v == null || isNaN(+v)) ? '—' : (+v).toLocaleString(
 const f$ = v => (v == null || isNaN(+v)) ? '—' : (v < 0 ? '-$' : '+$') + Math.abs(+v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const pnlCls = v => v == null ? 'c-muted' : (+v >= 0 ? 'c-pos' : 'c-neg');
 const esc = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+/* Trade origin chip: M = manual, A = automated, E = external/adopted. */
+const ORIGIN_BADGE_META = {
+  M: ['manual', 'Manual trade — opened from the Cockpit or outside this dashboard'],
+  A: ['auto', 'Automated trade — opened by the Trend Engine / bot'],
+  E: ['external', 'External position — detected on the exchange and adopted'],
+};
+function originBadge(trade) {
+  const meta = ORIGIN_BADGE_META[String(trade?.origin_label || '').trim()];
+  if (!meta) return '';
+  return `<span class="badge origin ${meta[0]}" title="${esc(meta[1])}">${esc(meta[0] === 'manual' ? 'M' : meta[0] === 'auto' ? 'A' : 'E')}</span> `;
+}
+
+/* Origin filter chips: narrow a trade table to manual / automated / external
+ * rows. '' (All) keeps every row, including legacy records with no label. */
+const ORIGIN_FILTERS = [
+  ['', 'All', 'Show every trade regardless of origin'],
+  ['M', 'Manual', 'Show only manual trades — Cockpit or placed outside this dashboard'],
+  ['A', 'Auto', 'Show only automated trades — opened by the Trend Engine / bot'],
+  ['E', 'External', 'Show only positions detected on the exchange and adopted'],
+];
+function originFilterChipsHtml(active) {
+  const current = String(active || '').trim();
+  return ORIGIN_FILTERS.map(([key, label, title]) =>
+    `<button type="button" class="origin-filter${current === key ? ' active' : ''}"` +
+    ` data-origin="${esc(key)}" title="${esc(title)}"` +
+    ` aria-pressed="${current === key}">${esc(label)}</button>`).join('');
+}
+function matchesOriginFilter(trade, origin) {
+  const key = String(origin || '').trim();
+  if (!key) return true;
+  return String(trade?.origin_label || '').trim() === key;
+}
+function filterByOrigin(trades, origin) {
+  return (Array.isArray(trades) ? trades : []).filter(trade => matchesOriginFilter(trade, origin));
+}
+/* Renders the chips into #containerId and wires click handling. Returns a
+ * getter for the currently active filter so async reloads (polling, refresh
+ * buttons) can keep honouring the selection. */
+function mountOriginFilter(containerId, onChange) {
+  let active = '';
+  const container = document.getElementById(containerId);
+  const render = () => { if (container) container.innerHTML = originFilterChipsHtml(active); };
+  container?.addEventListener('click', event => {
+    const chip = event.target.closest('.origin-filter');
+    if (!chip) return;
+    active = String(chip.dataset.origin || '');
+    render();
+    onChange(active);
+  });
+  render();
+  return () => active;
+}
 
 function toast(msg, type = 'ok') {
   let el = document.getElementById('toast');
@@ -131,12 +254,28 @@ function _closedAtMs(trade) {
   return Number.isFinite(parsed) ? parsed : Number.NEGATIVE_INFINITY;
 }
 
+function setBtcMarketPill(el, rawPrice, rawChange) {
+  if (!el) return;
+  const price = Number(rawPrice);
+  const change = Number(rawChange);
+  const validPrice = rawPrice !== null && rawPrice !== undefined && rawPrice !== '' &&
+    Number.isFinite(price) && price > 0;
+  const validChange = rawChange !== null && rawChange !== undefined && rawChange !== '' &&
+    Number.isFinite(change);
+  const direction = validChange ? (change > 0 ? 'up' : (change < 0 ? 'down' : 'flat')) : 'flat';
+  const changeLabel = validChange ? `${change >= 0 ? '+' : ''}${fN(change, 2)}%` : '—';
+  el.className = `chip btc-market ${direction}`;
+  el.setAttribute('aria-label', `Bitcoin ${validPrice ? `$${fN(price)}` : 'price unavailable'}, 24-hour change ${changeLabel}`);
+  el.innerHTML = `BTC <b>$${fN(validPrice ? price : null)}</b><small>${changeLabel}</small>`;
+}
+
 function statusFromSlots(st) {
   const slots = [st.morning || {}, { ...st, morning: undefined, trend: undefined }, st.trend || {}];
   const realOpen = slots.filter(s => s && s.status === 'OPEN' && !s.dry_run);
   if (realOpen.length) {
     const pnl = realOpen.reduce((a, s) => a + (+s.live_pnl || 0), 0);
-    return { cls: 'live', text: `LIVE ${f$(pnl)}`, pnl };
+    const cls = pnl > 0 ? 'live-profit' : (pnl < 0 ? 'live-loss' : 'live');
+    return { cls, text: `LIVE ${f$(pnl)}`, pnl };
   }
   if (st.latest_closed_trade) return _closedPill(st.latest_closed_trade);
   const closed = slots.filter(s => s && s.status === 'CLOSED' && !s.dry_run);
@@ -151,19 +290,11 @@ async function refreshTopbar() {
   try {
     const st = await jget('/api/status');
     setTradingModeIndicator(st.trading_mode, st.dry_run_mode);
-    const btc = document.getElementById('tb-btc');
-    if (btc) {
-      const price = +st.btc_futures_price;
-      const previous = window._lastBtcPrice;
-      const valid = Number.isFinite(price) && price > 0;
-      btc.classList.remove('btc-up', 'btc-down');
-      if (valid && Number.isFinite(previous)) {
-        if (price > previous) btc.classList.add('btc-up');
-        else if (price < previous) btc.classList.add('btc-down');
-      }
-      if (valid) window._lastBtcPrice = price;
-      btc.innerHTML = `BTC <b>$${fN(valid ? price : null)}</b>`;
-    }
+    setBtcMarketPill(
+      document.getElementById('tb-btc'),
+      st.btc_futures_price,
+      st.btc_futures_change_pct,
+    );
     const pill = document.getElementById('tb-pill');
     if (pill) {
       const s = statusFromSlots(st);
@@ -193,7 +324,8 @@ function tickClock() {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
-  initThemeToggle();
+  initDynamicSurfaces();
+  initThemePicker();
   tickClock();
   setInterval(tickClock, 10_000);
   refreshTopbar();

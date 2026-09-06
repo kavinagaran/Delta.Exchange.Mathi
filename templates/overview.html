@@ -1,451 +1,828 @@
 {% extends "base.html" %}
 
-{% block head %}
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
-{% endblock %}
-
 {% block content %}
-<div class="greeting">
-  <div class="greeting-txt">
-    <h2>Welcome Back, {{ display_name }} 👋</h2>
-    <p>Trend Engine-driven MOVE and CE/PE positions, grouped by actual IST trade time.</p>
-  </div>
-</div>
+<div class="overview-page" aria-label="Today trading dashboard">
+  <div class="today-layout">
+    <article class="card today-current-trade-card" aria-labelledby="today-current-trade-title">
+      <div class="card-hd slot-hd">
+        <span aria-hidden="true">◉</span>
+        <span id="today-current-trade-title">Current Trade</span>
+        <span class="spacer"></span>
+        <span class="hint">One active position at a time</span>
+      </div>
+      <div class="card-bd today-current-trade-body">
+        <div id="today-current-position" aria-live="polite">
+          <div class="no-pos">Loading current trade…</div>
+        </div>
+      </div>
+    </article>
 
-<div class="stats" id="stats"></div>
+    <div class="today-right-col">
+      <article class="card today-engine-decision-card" aria-labelledby="today-engine-decision-title">
+        <div class="card-hd slot-hd">
+          <span aria-hidden="true">◈</span>
+          <span id="today-engine-decision-title">Latest Engine Decision</span>
+        </div>
+        <div class="card-bd">
+          <div id="today-engine-decision" aria-live="polite">
+            <div class="no-pos">Loading decision…</div>
+          </div>
+        </div>
+      </article>
 
-<div class="section-title">
-  <span>Trend Engine positions</span>
-  <small>MOVE positions are grouped by actual IST trade time; CE/PE positions remain separate</small>
-</div>
-<div class="grid cols-2">
-  <div class="card">
-    <div class="card-hd slot-hd">🌅 <span>Morning MOVE</span></div>
-    <div class="card-bd" id="slot-morning"><div class="no-pos">Loading…</div></div>
-  </div>
-  <div class="card">
-    <div class="card-hd slot-hd">🌇 <span>Evening MOVE</span></div>
-    <div class="card-bd" id="slot-evening"><div class="no-pos">Loading…</div></div>
-  </div>
-</div>
-
-<div class="card trend-position-card">
-  <div class="card-hd slot-hd">📈 <span>Trend-based position (CE / PE)</span></div>
-  <div class="card-bd" id="slot-trend"><div class="no-pos">Loading…</div></div>
-</div>
-
-<div class="card external-options-card" id="external-options-card" style="display:none">
-  <div class="card-hd slot-hd">🔗 <span>External / manual BTC options</span><span class="when">Unrelated exposure · not managed by Trend</span></div>
-  <div class="card-bd" id="external-options"></div>
-</div>
-
-<div class="modal-back" id="payoff-modal" onclick="if(event.target===this)closePayoff()">
-  <div class="modal">
-    <div class="modal-hd">
-      <h3 id="payoff-title">Payoff at settlement</h3>
-      <button class="x" onclick="closePayoff()" aria-label="Close">×</button>
     </div>
-    <div class="chart-box" style="height:300px"><canvas id="payoff-chart"></canvas></div>
-    <div class="payoff-facts" id="payoff-facts"></div>
   </div>
-</div>
 
-<div class="card">
-  <div class="card-hd">Today's Trades</div>
-  <div class="tbl-wrap">
-    <table>
-      <thead><tr>
-        <th>Contract</th><th>Strike</th><th>Lots</th><th>Entry</th><th>Exit / Mark</th><th>P&L</th><th>Status</th>
-      </tr></thead>
-      <tbody id="today-body"><tr class="empty-row"><td colspan="7">Loading…</td></tr></tbody>
-    </table>
+  <div class="stats today-summary" id="today-summary" aria-label="Today's trading summary">
+    <div class="stat performance-stat accent" data-metric="trades">
+      <span class="today-stat-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" focusable="false">
+          <path d="M4 7h15m0 0-3-3m3 3-3 3M20 17H5m0 0 3-3m-3 3 3 3"/>
+        </svg>
+      </span>
+      <div class="lbl">Trades today</div>
+      <div class="val" id="today-trade-total">—</div>
+      <div class="sub">Entries since the last 5:30 pm IST rollover</div>
+    </div>
+    <div class="stat performance-stat neutral" data-metric="open">
+      <span class="today-stat-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" focusable="false">
+          <circle cx="12" cy="12" r="8"/>
+          <path d="M12 7.5V12l3.5 2"/>
+        </svg>
+      </span>
+      <div class="lbl">Open trades</div>
+      <div class="val" id="today-open-total">—</div>
+      <div class="sub">Currently running</div>
+    </div>
+    <div class="stat performance-stat neutral" data-metric="closed">
+      <span class="today-stat-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" focusable="false">
+          <circle cx="12" cy="12" r="8"/>
+          <path d="m8.5 12.2 2.3 2.3 4.9-5"/>
+        </svg>
+      </span>
+      <div class="lbl">Closed trades</div>
+      <div class="val" id="today-closed-total">—</div>
+      <div class="sub" id="today-result-note">—</div>
+    </div>
+    <div class="stat performance-stat neutral today-pnl-stat" data-metric="pnl">
+      <span class="today-stat-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" focusable="false">
+          <path d="M4 17.5 9 12l3.2 3.2L20 7"/>
+          <path d="M15.5 7H20v4.5"/>
+        </svg>
+      </span>
+      <div class="lbl">Day P&amp;L</div>
+      <div class="val" id="today-pnl">—</div>
+      <div class="sub">Open mark plus realised P&amp;L</div>
+    </div>
+  </div>
+
+  <div class="card overview-today-card today-trades-card">
+    <div class="card-hd">
+      <span aria-hidden="true">◉</span>
+      Today's Trades
+      <span class="hint today-window-note">Trading day: 5:30 pm IST → 5:30 pm IST next day</span>
+      <div class="origin-filters" id="today-origin-filter" role="group" aria-label="Filter today's trades by origin"></div>
+      <span class="spacer"></span>
+      <span class="hint" id="today-table-count">Loading…</span>
+    </div>
+    <div class="tbl-wrap">
+      <table class="today-trades-table" aria-label="All trades opened in the trading day since the last 5:30 pm IST rollover">
+        <thead><tr>
+          <th>Opened</th><th>Closed</th><th>Contract</th><th>Direction</th><th class="numeric">Lots</th>
+          <th class="numeric">Entry</th><th class="numeric">Exit / Mark</th>
+          <th class="numeric">Gross P/L</th><th class="numeric">Net P/L</th>
+          <th class="numeric">Fees</th><th>Status</th>
+        </tr></thead>
+        <tbody id="today-trades-body" aria-live="polite">
+          <tr class="empty-row"><td colspan="11">Loading today's trades…</td></tr>
+        </tbody>
+      </table>
+    </div>
   </div>
 </div>
 {% endblock %}
 
 {% block scripts %}
 <script>
-/* ── Slot cards ──────────────────────────────────────────── */
-function liveMoveDisplaySlotFromUtc(entryTimeUtc, fallback = 'evening') {
-  const raw = String(entryTimeUtc || '').trim();
-  let hour;
-  let minute;
-  if (raw.includes('T') || raw.includes(' ')) {
-    const parsed = new Date(raw.endsWith('Z') || /[+-]\d\d:\d\d$/.test(raw)
-      ? raw : raw + 'Z');
-    if (Number.isFinite(parsed.getTime())) {
-      hour = parsed.getUTCHours();
-      minute = parsed.getUTCMinutes();
-    }
-  } else {
-    const parts = raw.split(':').map(Number);
-    if (parts.length >= 2 && parts.every(Number.isFinite)) {
-      [hour, minute] = parts;
-    }
-  }
-  if (!Number.isFinite(hour) || !Number.isFinite(minute)) {
-    return fallback === 'morning' ? 'morning' : 'evening';
-  }
-  const istMinutes = (hour * 60 + minute + 330) % 1440;
-  return istMinutes < 11 * 60 ? 'morning' : 'evening';
+const TODAY_CONTROL_SLOTS = new Set(['morning', 'evening', 'trend']);
+const todayClosing = new Set();
+let todayProtectionEvents = null;
+let todayRows = [];
+let todayCurrentIndex = -1;
+
+const todayOrigin = mountOriginFilter('today-origin-filter', origin =>
+  renderTodayTrades(filterByOrigin(todayRows, origin)));
+
+function todayTradePnl(trade) {
+  return +(trade?._live ? trade.live_pnl : trade?.pnl_usd) || 0;
 }
 
-function liveEntryUtcClock(state) {
-  const explicit = String(state?.entry_at_utc || '').trim();
-  if (explicit) {
-    const entered = new Date(
-      explicit.endsWith('Z') || /[+-]\d\d:\d\d$/.test(explicit)
-        ? explicit : explicit + 'Z',
-    );
-    if (Number.isFinite(entered.getTime())) {
-      return [
-        entered.getUTCHours(),
-        entered.getUTCMinutes(),
-        entered.getUTCSeconds(),
-      ].map(value => String(value).padStart(2, '0')).join(':');
-    }
+function todayTradePnlPercent(trade, protection, pnl = todayTradePnl(trade)) {
+  const reportedPremium = Number(
+    protection?.entry_premium_usd ?? trade?.entry_premium_usd,
+  );
+  let entryPremium = Number.isFinite(reportedPremium) && reportedPremium > 0
+    ? reportedPremium : null;
+  if (entryPremium == null) {
+    const entry = Number(trade?.entry_mark);
+    const lots = Number(trade?.lots);
+    const contractValue = Number(trade?.contract_value ?? 0.001);
+    const calculated = entry * lots * contractValue;
+    if (Number.isFinite(calculated) && calculated > 0) entryPremium = calculated;
   }
-  const clock = String(state?.entry_time_utc || state?.entry_time || '').trim();
-  if (clock && !clock.includes('T') && !clock.includes(' ')) return clock;
-  const stamp = clock;
-  if (!stamp) return '';
-  const parsed = new Date(stamp.endsWith('Z') || /[+-]\d\d:\d\d$/.test(stamp)
-    ? stamp : stamp + 'Z');
-  if (!Number.isFinite(parsed.getTime())) return '';
-  return [parsed.getUTCHours(), parsed.getUTCMinutes(), parsed.getUTCSeconds()]
-    .map(value => String(value).padStart(2, '0')).join(':');
+  const value = Number(pnl);
+  return entryPremium != null && Number.isFinite(value)
+    ? value / entryPremium * 100 : null;
 }
 
-function liveTradeTimeIst(state) {
-  return utcToIst(liveEntryUtcClock(state)) || '—';
+function todaySignedPercent(value) {
+  if (!Number.isFinite(value)) return '—';
+  return `${value > 0 ? '+' : ''}${fN(value, 2)}%`;
 }
 
-function liveDisplaySlot(state, fallback = 'evening') {
-  const symbol = String(state?.symbol || '').toUpperCase();
-  const instrument = String(state?.instrument_kind || '').toUpperCase();
-  const optionType = String(state?.option_type || '').toUpperCase();
-  if (instrument === 'BTC_OPTION' || ['CE', 'PE', 'CALL', 'PUT'].includes(optionType)
-      || symbol.startsWith('C-BTC') || symbol.startsWith('P-BTC')) {
-    return 'trend';
+function todayControlSlot(trade) {
+  for (const value of [trade?.control_slot, trade?.slot]) {
+    const slot = String(value || '').toLowerCase();
+    if (TODAY_CONTROL_SLOTS.has(slot)) return slot;
   }
-  if (instrument === 'BTC_MOVE' || optionType === 'MOVE' || symbol.startsWith('MV-BTC')) {
-    return liveMoveDisplaySlotFromUtc(
-      state?.entry_at_utc || state?.entry_time_utc || state?.entry_time,
-      fallback,
-    );
-  }
-  return ['morning', 'evening', 'trend'].includes(fallback)
-    ? fallback : 'evening';
+  return '';
 }
 
-function tpRow(displaySlot, tp, positionOpen = true, cleanState = false,
-               controlSlot = displaySlot) {
-  const t = (tp || {})[controlSlot] || {};
-  const on = cleanState ? false : !!t.running;
-  const protectedLots = +t.protected_lots || 0;
-  const botLots = +t.bot_entry_lots || protectedLots;
-  const externalLots = +t.external_protected_lots || 0;
-  const coverageLabel = !on ? 'STOPPED'
-    : t.coverage_status === 'exchange_protected' ? 'PROTECTED'
-    : t.coverage_status === 'local_fallback' ? 'LOCAL FALLBACK'
-    : t.coverage_status === 'resizing' ? 'RESIZING'
-    : 'VERIFYING';
-  const coverageNote = cleanState ? ''
-    : t.lot_attribution_status === 'fungible_after_reduction'
-    ? `<b class="c-pos">${fN(protectedLots)} aggregate lots targeted</b> · original bot entry ${fN(botLots)} lots · remaining-lot attribution is fungible · `
-    : externalLots > 0
-      ? `<b class="c-pos">${fN(protectedLots)} aggregate lots targeted = ${fN(botLots)} bot entry + ${fN(externalLots)} externally added matching lots</b> · `
-      : '';
-  const coverageState = cleanState ? ''
-    : t.coverage_status === 'exchange_protected'
-    ? '<b class="c-pos">Full-size exchange coverage confirmed</b> · '
-    : t.coverage_status === 'local_fallback'
-      ? '<b class="c-muted">Executable full-position local fallback active</b> · '
-      : (on && positionOpen ? '<b class="c-neg">Full-size protection is being verified</b> · ' : '');
-  const protectionNote = cleanState ? ''
-    : (t.tsl_armed
-        ? `<b class="c-pos">TSL armed — floor ${f$(t.tsl_floor)}${t.tsl_on_exchange ? ' · resting stop on exchange' : ''}</b> · `
-        : (t.sl_on_exchange ? `<b class="c-neg">SL resting on exchange</b> · ` : ''))
-      + (t.tp_on_exchange ? '<b class="c-pos">TP resting on exchange</b> · ' : '')
-      + (t.monitor_error ? `<b class="c-neg">Monitor: ${esc(t.monitor_error)}</b> · ` : '');
-  return `<div class="tp-box">
-    <div class="tp-box-hd">
-      <span class="tp-title">TP / SL / TSL Monitor</span>
-      <span class="pill ${on && t.protection_established ? 'live' : 'idle'} mini"><span class="dot"></span>${coverageLabel}</span>
-    </div>
-    <div class="tp-control-row">
-      <div class="tp-fields">
-        <label class="fld"><span>Take profit $</span><input id="tp-target-${displaySlot}" type="number" step="1" min="1" value="${t.target_pnl ?? ''}"></label>
-        <label class="fld"><span>Stop loss $</span><input id="tp-sl-${displaySlot}" type="number" step="1" min="0" value="${t.sl_pnl ?? 0}" placeholder="0 = off"></label>
-        <label class="fld"><span>TSL arm P&amp;L $</span><input id="tp-tsl-arm-${displaySlot}" type="number" step="1" min="0" value="${t.tsl_arm_pnl ?? t.tsl_pnl ?? 0}" placeholder="0 = off"></label>
-        <label class="fld"><span>TSL trail $</span><input id="tp-tsl-trail-${displaySlot}" type="number" step="1" min="0" value="${t.tsl_trail_pnl ?? t.tsl_pnl ?? 0}" placeholder="0 = off"></label>
-        <label class="fld"><span>Minimum locked $</span><input id="tp-tsl-lock-${displaySlot}" type="number" step="1" min="0" value="${t.tsl_lock_min_pnl ?? 0}"></label>
-        <label class="fld"><span>Poll secs</span><input id="tp-poll-${displaySlot}" type="number" step="5" min="10" value="${t.poll_secs ?? ''}"></label>
-      </div>
-      <span class="tp-actions">
-        <button class="btn secondary sm" onclick="saveTp('${displaySlot}', '${controlSlot}')">Save</button>
-        <button class="btn ${on ? 'warn' : 'success'} sm" onclick="toggleTp('${controlSlot}', ${on})" ${positionOpen ? '' : 'disabled title="Opens automatically with the position"'}>${on ? 'Stop' : (positionOpen ? 'Start' : 'Auto-starts on entry')}</button>
-      </span>
-    </div>
-    <div class="tp-note">${coverageNote}${coverageState}${protectionNote}0 disables that protection · TSL activation, allowed giveback and minimum locked profit are configured independently.</div>
-  </div>`;
+function todayTradeMoment(trade, phase = 'entry') {
+  const exiting = phase === 'exit';
+  const stamp = String(exiting
+    ? trade?.exit_at_utc || trade?.closed_at_utc || ''
+    : trade?.entry_at_utc || trade?.opened_at_utc || '').trim();
+  if (stamp) {
+    const parsed = new Date(stamp);
+    if (!Number.isNaN(parsed.getTime())) return parsed;
+  }
+  const date = String(exiting
+    ? trade?.exit_date || trade?.entry_date || trade?.date || ''
+    : trade?.entry_date || trade?.date || '').trim();
+  const clock = String(exiting
+    ? trade?.exit_time_utc || trade?.exit_time || ''
+    : trade?.entry_time_utc || trade?.entry_time || '').trim();
+  if (!date || !clock) return null;
+  const parsed = new Date(`${date}T${clock.replace(/Z$/, '')}Z`);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
 }
 
-function slotHtml(s, slot, tp) {
-  const controlSlot = ['morning', 'evening', 'trend'].includes(s?.control_slot)
-    ? s.control_slot : slot;
-  if (!s || !s.status || s.status === 'IDLE'
-      || (s.status === 'CLOSED' && s.dashboard_visible === false)) {
-    return `<div class="no-pos"><span class="icon">💤</span>No position</div>`;
-  }
-  if (s.status === 'OPEN' && s.dry_run) {
-    return `<div class="sim-note">⚠ SIMULATED entry — no real order was placed<br>
-      <span class="hint">${esc(s.symbol)} · Mode was DRY RUN at entry time</span></div>
-      <div class="btn-row center"><button class="btn danger sm" onclick="squareOff('${controlSlot}', '${slot}', 'dry_run')">Exit</button></div>`;
-  }
-  if (s.status === 'OPEN') {
-    const pnl = s.live_pnl;
-    return `
-      <div class="big-pnl ${pnlCls(pnl)}">${f$(pnl)}<small>Live P&amp;L</small></div>
-      <dl class="kv">
-        <dt>Time of trade</dt><dd>${esc(liveTradeTimeIst(s))}</dd>
-        <dt>Contract</dt><dd>${esc(s.symbol)}</dd>
-        <dt>Side</dt><dd><span class="badge ${s.side === 'short' ? 'short' : 'long'}">${(s.side || 'long').toUpperCase()}</span></dd>
-        <dt>Lots</dt><dd>${fN(s.lots)}</dd>
-        <dt>Entry mark</dt><dd>$${fN(s.entry_mark, 4)}</dd>
-        <dt>Current mark</dt><dd>$${fN(s.current_mark, 4)}</dd>
-        <dt>Cost</dt><dd>$${fN(s.total_cost_usd, 2)}</dd>
-      </dl>
-      <div class="btn-row center">
-        <button class="btn danger" onclick="squareOff('${controlSlot}', '${slot}', 'live')">Exit</button>
-        <button class="btn secondary" onclick="showPayoff('${slot}')" title="Payoff at settlement">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18M7 14l4-6 4 3 5-8"/></svg>
-          Payoff
-        </button>
-      </div>
-      ${tpRow(slot, tp, true, false, controlSlot)}`;
-  }
-  if (s.status === 'OWNERSHIP_AMBIGUOUS') {
-    return `<div class="sim-note">⚠ Original Trend cycle closed before this same-product position appeared<br>
-      <span class="hint">Automation was detached and its old protection orders are being removed. The current exposure is shown under External / manual BTC options.</span></div>`;
-  }
-  if (s.status === 'CLOSED' && s.dry_run) {
-    return `<div class="sim-note">⚠ SIMULATED — no real trade occurred<br><span class="hint">${esc(s.symbol)}</span></div>`;
-  }
-  if (s.status !== 'CLOSED') {
-    return `<div class="no-pos"><span class="icon">◇</span>${esc(
-      String(s.status || 'Position unavailable').replace(/_/g, ' ')
-    )}</div>`;
-  }
-  /* CLOSED real */
-  const pnl = +s.pnl_usd;
-  return `
-    <div class="big-pnl ${pnlCls(pnl)}">${f$(pnl)}<small>Closed ${esc(utcToIst(s.exit_time_utc))}</small></div>
-    <dl class="kv">
-      <dt>Time of trade</dt><dd>${esc(liveTradeTimeIst(s))}</dd>
-      <dt>Contract</dt><dd>${esc(s.symbol)}</dd>
-      <dt>Lots</dt><dd>${fN(s.lots)}</dd>
-      <dt>Entry → Exit</dt><dd>$${fN(s.entry_mark, 2)} → $${fN(s.exit_mark, 2)}</dd>
-      <dt>Trigger</dt><dd>${esc(s.exit_trigger || '—')}</dd>
-    </dl>`;
+function todayTradeTimeIst(trade, phase = 'entry') {
+  const moment = todayTradeMoment(trade, phase);
+  if (moment) return moment.toLocaleTimeString('en-IN', {
+    timeZone: 'Asia/Kolkata', hour: 'numeric', minute: '2-digit', hour12: true,
+  }) + ' IST';
+  const clock = String(phase === 'exit'
+    ? trade?.exit_time_utc || trade?.exit_time || ''
+    : trade?.entry_time_utc || trade?.entry_time || '').trim();
+  if (!clock) return '—';
+  if (typeof utcToIst === 'function') return utcToIst(clock) || '—';
+  const parts = clock.split(':').map(Number);
+  if (parts.length < 2 || parts.some(value => !Number.isFinite(value))) return clock;
+  const total = (parts[0] * 60 + parts[1] + 330) % 1440;
+  const hour = Math.floor(total / 60);
+  const minute = total % 60;
+  return `${(hour + 11) % 12 + 1}:${String(minute).padStart(2, '0')} ${hour >= 12 ? 'PM' : 'AM'} IST`;
 }
 
-function renderExternalOptions(rows) {
-  const card = document.getElementById('external-options-card');
-  const body = document.getElementById('external-options');
-  if (!rows || !rows.length) { card.style.display = 'none'; body.innerHTML = ''; return; }
-  card.style.display = '';
-  body.innerHTML = `<div class="external-option-grid">${rows.map(p => `
-    <div class="external-option-row">
-      <div><strong>${esc(p.symbol)}</strong><small>${esc((p.side || '').toUpperCase())} · ${fN(p.lots)} lots</small></div>
-       <div><span class="${pnlCls(p.live_pnl)}">${f$(p.live_pnl)}</span><small>Live net P&amp;L · Mark $${fN(p.mark_price, 2)}</small></div>
-      <span class="badge sim">NOT BOT-OWNED</span>
-    </div>`).join('')}</div>`;
+function todayTableTimestamp(trade, phase = 'entry') {
+  const moment = todayTradeMoment(trade, phase);
+  if (!moment) return '—';
+  const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true,
+  }).formatToParts(moment).filter(part => part.type !== 'literal')
+    .map(part => [part.type, part.value]));
+  return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second} ${parts.dayPeriod}`;
 }
 
-async function loadSlots() {
-  const [st, tp] = await Promise.all([jget('/api/status'), jget('/api/tp-monitor').catch(() => ({}))]);
-  window._dryRunMode = st.dry_run_mode === true;
-  window._modeRevision = st.mode_revision || '';
-  const rawEvening = { ...st };
-  delete rawEvening.morning;
-  delete rawEvening.trend;
-  delete rawEvening.display_slots;
-  delete rawEvening.display_conflicts;
-  const displaySlots = st.display_slots || {
-    morning: st.morning || {},
-    evening: rawEvening,
-    trend: st.trend || {},
+function todayTradeType(trade) {
+  const symbol = String(trade?.symbol || '').toUpperCase();
+  if (symbol.startsWith('MV-')) return 'MV';
+  if (symbol.startsWith('C-')) return 'CE';
+  if (symbol.startsWith('P-')) return 'PE';
+  return String(trade?.trade_type || trade?.trend_score_zone || '—').toUpperCase();
+}
+
+function todayKnownNumber(value) {
+  return value !== null && value !== undefined && value !== '' &&
+    Number.isFinite(Number(value));
+}
+
+function todayProtectionAgeHtml(value) {
+  const checked = Date.parse(value || '');
+  if (!Number.isFinite(checked)) {
+    return '<span class="today-telemetry-warn">First check pending</span>';
+  }
+  const age = Math.max(Math.floor((Date.now() - checked) / 1000), 0);
+  const ageText = age < 60 ? `${age}s` : `${Math.floor(age / 60)}m`;
+  return `Checked <strong class="today-telemetry-time">${ageText}</strong> ago`;
+}
+
+function todayInlineProtectionHtml(protection) {
+  if (!protection) {
+    return `<section class="dry-protection-box today-inline-protection unavailable">
+      <div class="dry-protection-hd"><div><span>Live protection</span>
+      <strong>TP / SL / TSL Monitor</strong></div>
+      <span class="pill closed-loss mini">UNAVAILABLE</span></div>
+      <p>Protection details could not be loaded. The dashboard will retry automatically.</p>
+    </section>`;
+  }
+  const health = protection.health || {
+    heartbeat_utc: protection.last_check_utc,
+    peak_pnl: protection.peak_pnl_usd,
   };
-  const morning = displaySlots.morning || {};
-  const evening = displaySlots.evening || {};
-  const trend = displaySlots.trend || {};
-  window._slots = {
-    morning,
-    evening,
-    trend,
-    btc: +st.btc_futures_price || 0,
-  };
-  document.getElementById('slot-morning').innerHTML = slotHtml(morning, 'morning', tp);
-  document.getElementById('slot-evening').innerHTML = slotHtml(evening, 'evening', tp);
-  document.getElementById('slot-trend').innerHTML = slotHtml(trend, 'trend', tp);
-  renderExternalOptions(st.external_options || []);
+  const running = protection.running === true;
+  const armed = protection.stream_tsl_armed === true || protection.tsl_armed === true;
+  const status = armed ? 'TSL ARMED' : running ? 'RUNNING' : 'NOT RUNNING';
+  const statusClass = armed || running ? 'live' : 'closed-loss';
+  const value = (raw, fallback = 0) =>
+    todayKnownNumber(raw) ? fN(Number(raw), 4) : fN(fallback, 4);
+  const peakValue = todayKnownNumber(protection.stream_tsl_peak)
+    ? Number(protection.stream_tsl_peak)
+    : todayKnownNumber(health.peak_pnl) ? Number(health.peak_pnl) : null;
+  const peak = peakValue !== null
+    ? `Peak <strong class="${peakValue >= 0 ? 'today-telemetry-positive' : 'today-telemetry-negative'}">${esc(f$(peakValue))}</strong>`
+    : '<span class="today-telemetry-warn">Peak pending</span>';
+  const floorValue = protection.stream_tsl_floor ?? protection.tsl_floor ??
+    protection.tsl_floor_usd ?? health.stop_floor;
+  const floor = armed && todayKnownNumber(floorValue)
+    ? `TSL floor <strong class="today-telemetry-tsl">${esc(f$(Number(floorValue)))}</strong>`
+    : '<span class="today-telemetry-warn">TSL not armed</span>';
+  const every = Number(protection.poll_secs || health.next_poll_secs || 0);
+  const streaming = protection.streaming === true;
+  const cadence = Number(protection.stream_expected_interval_secs || 2);
+  const timing = streaming
+    ? `${todayProtectionAgeHtml(protection.stream_event_utc)} · live mark every ` +
+      `<strong class="today-telemetry-time">~${esc(fN(cadence))}s</strong>`
+    : `${todayProtectionAgeHtml(health.heartbeat_utc)}` +
+      (every > 0 ? ` · watchdog every <strong class="today-telemetry-time">${esc(fN(every))}s</strong>` : '');
+  const rawCoverage = String(
+    protection.coverage_status || (protection.running ? 'protected' : 'verifying')
+  ).trim().toLowerCase();
+  const coverage = rawCoverage === 'local_fallback' ? ''
+    : rawCoverage.replaceAll('_', ' ').toUpperCase();
+  const coverageHtml = coverage
+    ? ` · <strong class="today-telemetry-coverage">${esc(coverage)}</strong>`
+    : '';
+  const nimmathiTsl = protection.nimmathi_tsl === true;
+  const peakCard = peakValue !== null ? esc(f$(peakValue)) : '—';
+  const floorCard = armed && todayKnownNumber(floorValue)
+    ? esc(f$(Number(floorValue))) : '—';
+  const givebackValue = armed && peakValue !== null && todayKnownNumber(floorValue)
+    ? Math.max(peakValue - Number(floorValue), 0) : null;
+  const givebackCard = givebackValue !== null ? esc(f$(givebackValue)) : '—';
+  return `<section class="dry-protection-box today-inline-protection" aria-label="Live TP, SL and TSL monitor">
+    <div class="dry-protection-hd">
+      <div><span>Live protection</span><strong>TP / SL / TSL Monitor</strong></div>
+      <span class="pill ${statusClass} mini"><span class="dot"></span>${status}</span>
+    </div>
+    <div class="today-protection-grid">
+      <div class="today-protection-metric tone-tp"><span>Take profit $</span>
+        <strong>${value(protection.target_pnl ?? protection.tp_target_pnl)}</strong></div>
+      <div class="today-protection-metric tone-sl"><span>Stop loss $</span>
+        <strong>${value(protection.sl_pnl ?? protection.sl_target_pnl)}</strong></div>
+      <div class="today-protection-metric tone-tsl-arm ${nimmathiTsl ? 'is-trail-value' : ''}"><span>${nimmathiTsl ? 'Peak P&amp;L $' : 'TSL arm P&amp;L $'}</span>
+        <strong>${nimmathiTsl ? peakCard : value(protection.tsl_arm_pnl)}</strong></div>
+      <div class="today-protection-metric tone-tsl-trail ${nimmathiTsl ? 'is-trail-value' : ''}"><span>${nimmathiTsl ? 'TSL giveback $' : 'TSL trail $'}</span>
+        <strong>${nimmathiTsl ? givebackCard : value(protection.tsl_trail_pnl)}</strong></div>
+      <div class="today-protection-metric tone-lock ${nimmathiTsl ? 'is-trail-value' : ''}"><span>${nimmathiTsl ? 'TSL floor $' : 'Minimum locked $'}</span>
+        <strong>${nimmathiTsl ? floorCard : value(protection.tsl_lock_min_pnl)}</strong></div>
+      <div class="today-protection-metric tone-poll"><span>Price feed</span>
+        <strong>${streaming ? `LIVE · ~${fN(cadence)}s` : `WATCHDOG · ${fN(every || 0)}s`}</strong></div>
+    </div>
+    <div class="dry-protection-telemetry">
+      <span>${timing}</span><span>${nimmathiTsl ? coverageHtml.replace(/^ · /, '') : `${peak} · ${floor}${coverageHtml}`}</span>
+    </div>
+  </section>`;
 }
 
-/* ── Stat tiles ─────────────────────────────────────────── */
-async function loadStats() {
-  const s = await jget('/api/summary');
-  const el = document.getElementById('stats');
-  if (!s || !s.total_days) { el.innerHTML = ''; return; }
-  el.innerHTML = `
-    <div class="stat"><div class="lbl">Total P&L</div><div class="val ${pnlCls(s.total_pnl)}">${f$(s.total_pnl)}</div><div class="sub">${s.total_days} trades</div></div>
-    <div class="stat"><div class="lbl">Win rate</div><div class="val">${fN(s.win_rate, 1)}%</div><div class="sub">${s.wins} W / ${s.losses} L</div></div>
-    <div class="stat"><div class="lbl">Avg win</div><div class="val c-pos">${f$(s.avg_win)}</div><div class="sub">Avg loss ${f$(s.avg_loss)}</div></div>
-    <div class="stat"><div class="lbl">Risk / reward</div><div class="val">${fN(s.rr, 2)}</div><div class="sub">Reward per $1 risked</div></div>
-    <div class="stat"><div class="lbl">Max drawdown</div><div class="val c-neg">${f$(s.max_dd)}</div><div class="sub">Peak to trough</div></div>`;
-}
-
-/* ── Today's trades ─────────────────────────────────────── */
-async function loadToday() {
-  const rows = await jget('/api/today-trades');
-  const body = document.getElementById('today-body');
-  if (!rows.length) {
-    body.innerHTML = '<tr class="empty-row"><td colspan="7">No trades today</td></tr>';
+function renderTodayCurrentTrade(trade, index, protection = null) {
+  const root = document.getElementById('today-current-position');
+  if (!trade) {
+    root.innerHTML = `<div class="no-pos score-zone-empty">
+      <span class="icon">◇</span><strong>No trade is open</strong>
+      <small>The next approved engine entry will appear here.</small>
+    </div>`;
     return;
   }
-  body.innerHTML = rows.map(t => {
-    const displaySlot = liveDisplaySlot(t, t.slot);
-    const icon = displaySlot === 'morning' ? '🌅 '
-      : displaySlot === 'evening' ? '🌇 '
-      : displaySlot === 'trend' ? '📈 ' : '';
-    if (t.dry_run) {
-      return `<tr><td>${icon}${esc(t.symbol)}</td><td>$${fN(t.strike)}</td>
-        <td>—</td><td>—</td><td>—</td><td>—</td>
-        <td><span class="badge sim">SIMULATED</span></td></tr>`;
-    }
-    const live = t._live;
-    const pnl  = live ? t.live_pnl : t.pnl_usd;
-    const exit = live ? t.current_mark : t.exit_mark;
-    const status = live ? '<span class="badge live">LIVE</span>'
-                 : (+pnl >= 0 ? '<span class="badge win">WIN</span>' : '<span class="badge loss">LOSS</span>');
+  const pnl = todayTradePnl(trade);
+  const pnlPercent = todayTradePnlPercent(trade, protection, pnl);
+  const direction = String(trade.side || '—').toUpperCase();
+  const directionClass = direction === 'SHORT' ? 'short' : 'long';
+  const slot = todayControlSlot(trade);
+  const simulated = trade.dry_run === true ||
+    String(trade.execution_mode || '').toLowerCase() === 'dry_run';
+  root.innerHTML = `<div class="dry-state-line">
+      <span class="badge ${simulated ? 'sim' : 'live'}">${simulated ? 'SIMULATED OPEN' : 'LIVE OPEN'}</span>
+      <span>${simulated ? 'Dry Run position · no exchange exposure' : 'Exchange position'}</span>
+    </div>
+    <div class="big-pnl ${pnlCls(pnl)}">${f$(pnl)}${pnlPercent == null ? '' :
+      `<span class="pnl-percent">(${todaySignedPercent(pnlPercent)})</span>`}<small>Live P&amp;L</small></div>
+    <dl class="kv">
+      <dt>Time of trade</dt><dd>${esc(todayTradeTimeIst(trade))}</dd>
+      <dt>Trade type</dt><dd>${esc(todayTradeType(trade))}</dd>
+      <dt>Contract</dt><dd>${esc(trade.symbol || '—')}</dd>
+      <dt>Side</dt><dd><span class="badge ${directionClass}">${esc(direction)}</span></dd>
+      <dt>Lots</dt><dd>${fN(trade.lots)}</dd>
+      <dt>Entry</dt><dd>$${fN(trade.entry_mark, 4)}</dd>
+      <dt>Current mark</dt><dd>$${fN(trade.current_mark, 4)}</dd>
+    </dl>
+    ${slot ? `<div class="today-current-actions">
+      <button class="btn danger sm today-exit-btn" type="button" onclick="closeTodayLiveTrade(${index})">Exit</button>
+    </div>` : ''}
+    ${slot ? todayInlineProtectionHtml(protection) : ''}`;
+}
+
+function renderTodayTrades(rows) {
+  const trades = [...(Array.isArray(rows) ? rows : [])].sort((left, right) =>
+    (todayTradeMoment(right, 'entry')?.getTime() || 0) -
+    (todayTradeMoment(left, 'entry')?.getTime() || 0));
+  const body = document.getElementById('today-trades-body');
+  const count = document.getElementById('today-table-count');
+  count.textContent = `${trades.length.toLocaleString()} trade${trades.length === 1 ? '' : 's'} today`;
+  if (!trades.length) {
+    body.innerHTML = `<tr class="today-ledger-empty"><td colspan="11"><div>
+      <span>◇</span><strong>No trades this trading day</strong>
+      <small>Nothing opened since the last 5:30 pm IST rollover. The next completed or open trade will appear here.</small>
+    </div></td></tr>`;
+    return;
+  }
+  body.innerHTML = trades.map(trade => {
+    const open = trade._live || String(trade.status || '').toUpperCase() === 'OPEN';
+    const direction = String(trade.side || '—').toUpperCase();
+    const directionClass = direction === 'SHORT' ? 'short' : 'long';
+    const gross = todayKnownNumber(trade.gross_pnl_usd)
+      ? Number(trade.gross_pnl_usd) : open ? todayTradePnl(trade) : Number(trade.pnl_usd || 0);
+    const net = open ? todayTradePnl(trade) : todayKnownNumber(trade.pnl_usd)
+      ? Number(trade.pnl_usd) : gross;
+    const fees = todayKnownNumber(trade.fees_usd)
+      ? Number(trade.fees_usd) : (!open && todayKnownNumber(gross) && todayKnownNumber(net)
+        ? Math.max(gross - net, 0) : null);
+    const exit = open ? trade.current_mark : trade.exit_mark;
     return `<tr>
-      <td>${icon}${esc(t.symbol)}</td>
-      <td>$${fN(t.strike)}</td>
-      <td>${fN(t.lots)}</td>
-      <td>$${fN(t.entry_mark, 2)}</td>
-      <td>$${fN(exit, 2)}</td>
-      <td class="${pnlCls(pnl)}">${f$(pnl)}</td>
-      <td>${status}</td></tr>`;
+      <td>${esc(todayTableTimestamp(trade))}</td>
+      <td>${open ? '—' : esc(todayTableTimestamp(trade, 'exit'))}</td>
+      <td>${originBadge(trade)}<strong>${esc(trade.symbol || '—')}</strong></td>
+      <td><span class="badge ${directionClass}">${esc(direction)}</span></td>
+      <td class="numeric">${fN(trade.lots, 6)}</td>
+      <td class="numeric">${fN(trade.entry_mark, 8)}</td>
+      <td class="numeric">${todayKnownNumber(exit) ? fN(exit, 8) : '—'}</td>
+      <td class="numeric ${pnlCls(gross)}">${todayKnownNumber(gross) ? f$(gross) : '—'}</td>
+      <td class="numeric ${pnlCls(net)}">${todayKnownNumber(net) ? f$(net) : '—'}</td>
+      <td class="numeric">${fees == null ? '—' : `${fN(fees, 8)} USD`}</td>
+      <td><span class="badge ${open ? 'live' : 'closed'}">${open ? 'OPEN' : 'CLOSED'}</span></td>
+    </tr>`;
   }).join('');
 }
 
-/* ── Actions ────────────────────────────────────────────── */
-async function squareOff(controlSlot, displaySlot = controlSlot, targetMode = 'live') {
-  const s = (window._slots || {})[displaySlot] || {};
-  const adopted = +s.externally_added_lots_adopted || 0;
-  const scope = adopted > 0
-    ? `\n\nThis closes the complete ${fN(s.lots)}-lot aggregate, including externally added matching lots.`
-    : '';
-  if (!confirm(`Manually exit the ${displaySlot.toUpperCase()} position now at market price?${scope}`)) return;
-  const d = await jpost('/api/square-off?slot=' + controlSlot, {
-    target_mode: targetMode
-  });
-  if (d.ok) { toast(`Manual exit completed — P&L ${f$(d.pnl)}`, 'ok'); loadAll(); }
-  else toast('Manual exit failed: ' + JSON.stringify(d.error), 'err');
+function todayScoreColor(value, quality) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return 'var(--muted)';
+  const score = Math.max(-100, Math.min(100, numeric));
+  // Shading strength (how vivid vs. how washed-out the tone reads) scales
+  // with |score| -- a near-zero score blends toward a neutral slate, and
+  // only an extreme score reaches the fully saturated red/green endpoint.
+  const strength = Math.abs(score) / 100;
+  const pure = score < 0 ? [255, 97, 114] : [0, 194, 110];
+  const weak = [143, 163, 188];
+  const red = Math.round(weak[0] + (pure[0] - weak[0]) * strength);
+  const green = Math.round(weak[1] + (pure[1] - weak[1]) * strength);
+  const blue = Math.round(weak[2] + (pure[2] - weak[2]) * strength);
+  return `rgb(${red}, ${green}, ${blue})`;
 }
 
-async function toggleTp(slot, running) {
-  const d = await jpost(`/api/tp-monitor/${running ? 'stop' : 'start'}?slot=` + slot);
-  if (d.ok) { toast(`TP monitor ${running ? 'stopped' : 'started'} (${slot})`, 'ok'); loadSlots(); }
-  else toast(d.error || 'TP monitor action failed', 'err');
+function todayScoreFillAngles(score) {
+  // The dial always starts its fill at 12 o'clock (0deg in conic-gradient
+  // terms) and sweeps clockwise for a positive score. A negative score
+  // sweeps anti-clockwise from 12 instead -- expressed here as colouring
+  // the *last* `magnitude` degrees before completing the circle, which is
+  // the same visual arc as going backward from 12 (conic-gradient itself
+  // can only paint in the increasing/clockwise direction).
+  const magnitude = Math.abs(score) * 3.6;
+  return score < 0
+    ? { start: 360 - magnitude, end: 360 }
+    : { start: 0, end: magnitude };
 }
 
-async function saveTp(displaySlot, controlSlot = displaySlot) {
-  const keys = controlSlot === 'morning'
-    ? { t: 'TP_TARGET_PNL_MORNING', p: 'TP_POLL_SECS_MORNING', s: 'SL_TARGET_PNL_MORNING',
-        a: 'TSL_ARM_PNL_MORNING', tr: 'TSL_TRAIL_PNL_MORNING', l: 'TSL_LOCK_MIN_PNL_MORNING' }
-    : controlSlot === 'trend'
-      ? { t: 'TP_TARGET_PNL_TREND', p: 'TP_POLL_SECS_TREND', s: 'SL_TARGET_PNL_TREND',
-          a: 'TSL_ARM_PNL_TREND', tr: 'TSL_TRAIL_PNL_TREND', l: 'TSL_LOCK_MIN_PNL_TREND' }
-      : { t: 'TP_TARGET_PNL', p: 'TP_POLL_SECS', s: 'SL_TARGET_PNL',
-          a: 'TSL_ARM_PNL', tr: 'TSL_TRAIL_PNL', l: 'TSL_LOCK_MIN_PNL' };
-  const body = {};
-  body[keys.t]  = document.getElementById(`tp-target-${displaySlot}`).value;
-  body[keys.p]  = document.getElementById(`tp-poll-${displaySlot}`).value;
-  body[keys.s]  = document.getElementById(`tp-sl-${displaySlot}`).value || '0';
-  body[keys.a]  = document.getElementById(`tp-tsl-arm-${displaySlot}`).value || '0';
-  body[keys.tr] = document.getElementById(`tp-tsl-trail-${displaySlot}`).value || '0';
-  body[keys.l]  = document.getElementById(`tp-tsl-lock-${displaySlot}`).value || '0';
-  const d = await jpost('/api/config', body);
-  if (d.ok) toast('TP/SL settings saved' + (d.tp_restarted?.length ? ' — monitor restarted' : ''), 'ok');
-  else toast('Save failed', 'err');
+function todayScoreDial(label, value, quality) {
+  const numeric = Number(value);
+  const available = Number.isFinite(numeric);
+  const score = available ? Math.max(-100, Math.min(100, numeric)) : 0;
+  const color = todayScoreColor(available ? score : null, quality);
+  const accessible = available ? score.toFixed(1) : 'unavailable';
+  const meterValue = available ? ` aria-valuenow="${esc(accessible)}"` : '';
+  const fill = todayScoreFillAngles(score);
+  return `<div class="today-score-dial-item">
+    <div class="today-score-dial" role="meter" aria-label="${esc(label)} score" aria-valuemin="-100" aria-valuemax="100"${meterValue}
+      style="--today-score-fill-start:${fill.start}deg;--today-score-fill-end:${fill.end}deg;--today-score-tone:${color}">
+      <div class="today-score-dial-core">
+        <span>${esc(label)}</span>
+        <strong aria-label="${esc(accessible)}">${available ? esc(`${score > 0 ? '+' : ''}${score.toFixed(1)}`) : '—'}</strong>
+      </div>
+    </div>
+  </div>`;
 }
 
-/* ── Payoff chart ───────────────────────────────────────── */
-let payoffChart = null;
-
-function _intrinsic(symbol, strike, S) {
-  // MV = move option (straddle): pays |move from strike|. C/P = vanilla.
-  if (symbol.startsWith('MV-')) return Math.abs(S - strike);
-  if (symbol.startsWith('P-'))  return Math.max(strike - S, 0);
-  return Math.max(S - strike, 0);
+function todayEngineScoreDials(snapshot, liveView, status) {
+  const liveScore = liveView?.available !== false ? liveView?.live_score : null;
+  const committedScore = Number.isFinite(Number(snapshot?.trend_score))
+    ? snapshot.trend_score : status?.direction_score;
+  return `<div class="today-engine-score-dials" aria-label="Trend Engine scores">
+    ${todayScoreDial('Live preview', liveScore, liveView?.data_quality || snapshot?.data_quality)}
+    ${todayScoreDial('Committed decision', committedScore, snapshot?.data_quality)}
+  </div>`;
 }
 
-function showPayoff(slot) {
-  const s = (window._slots || {})[slot];
-  if (!s || s.status !== 'OPEN') { toast('No open position to chart', 'err'); return; }
-  const symbol = s.symbol || '';
-  const strike = +s.strike, entry = +s.entry_mark;
-  const lots   = +s.lots, cv = +s.contract_value || 0.001;
-  const sign   = s.side === 'short' ? -1 : 1;
-  const btc    = (window._slots || {}).btc || strike;
+function todayAdxPill(snapshot) {
+  const raw = snapshot?.trigger_adx;
+  const available = raw !== null && raw !== undefined && raw !== '' && Number.isFinite(Number(raw));
+  const value = available ? Number(raw).toFixed(1) : '—';
+  return `<div class="dial-adx-row"><div class="dial-adx-pill" title="Latest completed 15-minute ADX" aria-label="15-minute ADX ${value}">
+    <span>ADX <small>15M</small></span><strong>${value}</strong></div></div>`;
+}
 
-  // Sweep settlement prices around strike & spot
-  const lo = Math.min(strike, btc) * 0.955, hi = Math.max(strike, btc) * 1.045;
-  const N = 120, xs = [], ys = [];
-  for (let i = 0; i <= N; i++) {
-    const S = lo + (hi - lo) * i / N;
-    xs.push(S);
-    ys.push(+((_intrinsic(symbol, strike, S) - entry) * cv * lots * sign).toFixed(2));
+function todayTradeDecisionPill(status, snapshot) {
+  const score = Number(snapshot?.trend_score ?? status?.direction_score);
+  const tone = todayScoreColor(Number.isFinite(score) ? score : null, snapshot?.data_quality);
+  const zone = String(snapshot?.zone || status?.engine_zone || '');
+  const controllerReason = String(status?.entry_blocked_reason || '').trim();
+  const allowed = snapshot?.zone_action_allowed === true && !controllerReason;
+  const reason = controllerReason || String(snapshot?.zone_reason || status?.last_action || '');
+  let label = 'NO DECISION';
+  if (zone === 'HOLD') label = 'HOLD — NO NEW TRADE';
+  else if (!allowed && zone === 'SHORT_MOVE' && /premium/i.test(reason)) label = 'WAIT — MOVE PREMIUM BELOW $300';
+  else if (!allowed && zone === 'SHORT_MOVE' && /5:30\s*PM|midnight|entry window/i.test(reason)) label = 'WAIT — WEEKDAY ENTRY WINDOW';
+  else if (!allowed && /today(?:'s|-expiry).*expiry|today's-expiry/i.test(reason)) label = "WAIT — TODAY'S EXPIRY UNAVAILABLE";
+  else if (!allowed && zone === 'SHORT_MOVE' && /90 minutes|expiry too close/i.test(reason)) label = 'WAIT — EXPIRY TOO CLOSE';
+  else if (!allowed && zone === 'SHORT_MOVE' && /ADX/i.test(reason)) label = 'WAIT — 15M ADX NOT CALM';
+  else if (!allowed) label = 'WAIT — CHECKS BLOCKED';
+  else if (zone === 'CE_2_ITM') label = 'BUY 2-STEP ITM CE';
+  else if (zone === 'PE_2_ITM' || zone === 'PE_3_ITM') label = 'BUY 2-STEP ITM PE';
+  else if (zone === 'SHORT_MOVE') label = 'SELL ATM MOVE';
+  return `<div class="today-trade-decision-row"><div class="today-trade-decision-pill"
+    style="--today-decision-tone:${tone}">${esc(label)}</div></div>`;
+}
+
+function renderTodayEngineDecision(status, snapshot, liveView) {
+  const root = document.getElementById('today-engine-decision');
+  if (!status) {
+    root.innerHTML = `<section class="dry-engine-panel is-unavailable">
+      <div class="dry-engine-hd"><div><span>TREND SCORE AUTOMATION</span>
+      <strong>Decision status is unavailable</strong></div><span class="dry-engine-decision">WAITING</span></div>
+      ${todayEngineScoreDials(snapshot, liveView, status)}
+      ${todayAdxPill(snapshot)}
+    </section>`;
+    return;
   }
-  const pnlNow = +((_intrinsic(symbol, strike, btc) - entry) * cv * lots * sign).toFixed(2);
+  const zone = String(status.engine_zone || status.current_zone || '').toUpperCase();
+  const tone = zone === 'CE_2_ITM' ? 'is-buy-ce' : zone === 'PE_2_ITM' ? 'is-buy-pe'
+    : zone === 'HOLD' ? 'is-hold' : 'is-waiting';
+  root.innerHTML = `<section class="dry-engine-panel today-decision-panel ${tone}" data-zone="${esc(zone || 'WAITING')}" aria-label="Latest live engine decision">
+    <div class="dry-engine-hd"><div><span>TREND SCORE AUTOMATION · LIVE</span>
+      <strong>Entries, exits and trade transitions happen automatically</strong></div></div>
+    ${todayEngineScoreDials(snapshot, liveView, status)}
+    ${todayTradeDecisionPill(status, snapshot)}
+    ${todayAdxPill(snapshot)}
+  </section>`;
+}
 
-  // Breakevens: where intrinsic == entry
-  const bes = symbol.startsWith('MV-') ? [strike - entry, strike + entry]
-            : symbol.startsWith('P-')  ? [strike - entry]
-            : [strike + entry];
+function setTodaySummaryTone(elementId, tone) {
+  const value = document.getElementById(elementId);
+  const card = value?.closest('.stat');
+  if (card) card.className = `stat performance-stat ${tone}${elementId === 'today-pnl' ? ' today-pnl-stat' : ''}`;
+}
 
-  document.getElementById('payoff-title').textContent =
-    `Payoff at settlement — ${symbol} (${(s.side || 'long').toUpperCase()} ${fN(lots)} lots)`;
-  document.getElementById('payoff-facts').innerHTML =
+function updateTodaySummary(rows) {
+  const trades = Array.isArray(rows) ? rows : [];
+  const open = trades.filter(trade => trade?._live);
+  const closed = trades.filter(trade => !trade?._live);
+  const wins = closed.filter(trade => todayTradePnl(trade) > 0).length;
+  const losses = closed.filter(trade => todayTradePnl(trade) < 0).length;
+  const pnl = trades.reduce((total, trade) => total + todayTradePnl(trade), 0);
+
+  document.getElementById('today-trade-total').textContent = fN(trades.length);
+  document.getElementById('today-open-total').textContent = fN(open.length);
+  document.getElementById('today-closed-total').textContent = fN(closed.length);
+  document.getElementById('today-result-note').textContent =
+    closed.length ? `${wins} win${wins === 1 ? '' : 's'} · ${losses} loss${losses === 1 ? '' : 'es'}` : 'No closed trades';
+
+  const pnlEl = document.getElementById('today-pnl');
+  pnlEl.textContent = f$(pnl);
+  pnlEl.className = `val ${pnlCls(pnl)}`;
+
+  setTodaySummaryTone('today-trade-total', trades.length ? 'accent' : 'neutral');
+  setTodaySummaryTone('today-open-total', open.length ? 'warning' : 'neutral');
+  setTodaySummaryTone('today-closed-total', closed.length ? 'accent' : 'neutral');
+  setTodaySummaryTone('today-pnl', pnl > 0 ? 'positive' : pnl < 0 ? 'negative' : 'neutral');
+}
+
+async function loadToday() {
+  const [rows, engineStatus, protectionStatus, engineSnapshot, engineLive] = await Promise.all([
+    jget('/api/today-trades'),
+    jget('/api/trend-engine/score-auto/status').catch(() => null),
+    jget('/api/tp-monitor').catch(() => null),
+    jget('/api/engine/snapshot').catch(() => null),
+    jget('/api/engine/live').catch(() => ({available: false})),
+  ]);
+  updateTodaySummary(rows);
+  todayRows = Array.isArray(rows) ? rows : [];
+  window._todayLiveTrades = {};
+  const currentIndex = rows.findIndex(trade => trade?._live);
+  todayCurrentIndex = currentIndex;
+  const currentTrade = currentIndex >= 0 ? rows[currentIndex] : null;
+  if (currentTrade) {
+    const controlSlot = todayControlSlot(currentTrade);
+    if (controlSlot) window._todayLiveTrades[currentIndex] = { ...currentTrade, controlSlot };
+  }
+  const currentSlot = currentTrade ? todayControlSlot(currentTrade) : '';
+  const currentProtection = currentTrade?.dry_run
+    ? currentTrade.dry_protection : currentSlot ? protectionStatus?.[currentSlot] : null;
+  renderTodayCurrentTrade(currentTrade, currentIndex, currentProtection);
+  renderTodayTrades(filterByOrigin(todayRows, todayOrigin()));
+  renderTodayEngineDecision(engineStatus, engineSnapshot, engineLive);
+  return rows;
+}
+
+function applyTodayProtectionEvent(payload) {
+  if (!payload || todayCurrentIndex < 0 || !todayRows[todayCurrentIndex]) return;
+  const trade = todayRows[todayCurrentIndex];
+  if (trade.dry_run === true) return;
+  const slot = todayControlSlot(trade);
+  const protection = slot ? payload[slot] : null;
+  if (!protection) return;
+  if (protection.streaming && todayKnownNumber(protection.live_mark)) {
+    trade.current_mark = Number(protection.live_mark);
+  }
+  if (protection.streaming && todayKnownNumber(protection.live_pnl)) {
+    trade.live_pnl = Number(protection.live_pnl);
+  }
+  window._todayLiveTrades[todayCurrentIndex] = { ...trade, controlSlot: slot };
+  renderTodayCurrentTrade(trade, todayCurrentIndex, protection);
+  renderTodayTrades(filterByOrigin(todayRows, todayOrigin()));
+  updateTodaySummary(todayRows);
+}
+
+function connectTodayProtectionStream() {
+  if (!window.EventSource || todayProtectionEvents) return;
+  todayProtectionEvents = new EventSource('/api/stream/protection');
+  todayProtectionEvents.addEventListener('protection', event => {
+    try { applyTodayProtectionEvent(JSON.parse(event.data)); } catch (_) { /* REST watchdog remains active */ }
+  });
+  todayProtectionEvents.onerror = () => {
+    // EventSource reconnects automatically. The 12-second REST refresh below
+    // remains the authoritative fallback while the connection is recovering.
+  };
+}
+
+function todayLiveTrade(index) {
+  return (window._todayLiveTrades || {})[index] || null;
+}
+
+async function closeTodayLiveTrade(index) {
+  const trade = todayLiveTrade(index);
+  if (!trade || !trade.controlSlot || todayClosing.has(index)) {
+    if (!trade) toast('This LIVE trade is no longer available', 'err');
+    return;
+  }
+  const adopted = +trade.externally_added_lots_adopted || 0;
+  const simulated = trade.dry_run === true ||
+    String(trade.execution_mode || '').toLowerCase() === 'dry_run';
+  const scope = adopted > 0
+    ? `\n\nThis closes all ${fN(trade.lots)} matching lots, including ${fN(adopted)} externally added lots.`
+    : '';
+  if (!confirm(simulated
+      ? `Exit the ${trade.symbol} dry-run trade at its current mark?\n\nNo exchange order will be placed.`
+      : `Close ${trade.symbol} manually at market price?` +
+        `\n\nThis submits a reduce-only LIVE exit order.${scope}`)) return;
+  todayClosing.add(index);
+  try {
+    const result = await jpost(
+      '/api/square-off?slot=' + encodeURIComponent(trade.controlSlot),
+      { target_mode: simulated ? 'dry_run' : 'live' },
+    );
+    if (result.ok) {
+      toast(`${simulated ? 'Dry Run' : 'LIVE'} position closed — P&L ${f$(result.pnl)}`, 'ok');
+      await loadAll();
+    } else {
+      toast(result.error || `Manual ${simulated ? 'dry-run' : 'LIVE'} close failed`, 'err');
+    }
+  } finally {
+    todayClosing.delete(index);
+  }
+}
+
+function protectionSourceLabel(record) {
+  const source = String(record?.protection_source || '').toLowerCase();
+  if (source === 'automatic_filled_premium') return 'Automatic premium-based';
+  if (source === 'manual_override') return 'Manual override';
+  return 'Configured protection';
+}
+
+function renderTodayProtectionContext(trade, record) {
+  const monitorTone = record.running ? 'c-pos' : 'c-neg';
+  const coverage = String(record.coverage_status || 'verifying')
+    .replaceAll('_', ' ').toUpperCase();
+  const premium = +record.entry_premium_usd > 0
+    ? ` · Entry premium $${fN(record.entry_premium_usd, 2)}` : '';
+  document.getElementById('today-protection-context').innerHTML = `
+    <strong>${esc(trade.symbol)}</strong>
+    <span>${fN(trade.lots)} lots · ${esc(protectionSourceLabel(record))}${premium}</span>
+    <span class="${monitorTone}">Monitor ${record.running ? 'ACTIVE' : 'NOT RUNNING'} · ${esc(coverage)}</span>`;
+}
+
+async function openTodayProtection(index) {
+  const trade = todayLiveTrade(index);
+  if (!trade) {
+    toast('This LIVE trade is no longer available', 'err');
+    return;
+  }
+  const back = document.getElementById('today-protection-back');
+  back.classList.add('show');
+  document.getElementById('today-protection-title').textContent =
+    `Protection — ${trade.symbol}`;
+  document.getElementById('today-protection-context').textContent =
+    'Loading active protection…';
+  document.getElementById('today-protection-fields').innerHTML = '';
+  try {
+    const status = await jget('/api/tp-monitor');
+    const record = status?.[trade.controlSlot];
+    if (!record) throw new Error('Protection status is unavailable');
+    todayProtection = { trade, record };
+    renderTodayProtectionContext(trade, record);
+    document.getElementById('today-protection-fields').innerHTML =
+      protectionDrawerFieldsHtml(record);
+    document.getElementById('today-protection-start').hidden = !!record.running;
+    document.getElementById('today-protection-save').disabled = false;
+  } catch (error) {
+    todayProtection = null;
+    document.getElementById('today-protection-context').innerHTML =
+      `<span class="c-neg">${esc(error.message || 'Protection status is unavailable')}</span>`;
+    document.getElementById('today-protection-save').disabled = true;
+    document.getElementById('today-protection-start').hidden = true;
+  }
+}
+
+function closeTodayProtection() {
+  document.getElementById('today-protection-back').classList.remove('show');
+  todayProtection = null;
+}
+
+async function refreshTodayProtection() {
+  if (!todayProtection) return;
+  const trade = todayProtection.trade;
+  const status = await jget('/api/tp-monitor');
+  const record = status?.[trade.controlSlot];
+  if (!record) throw new Error('Protection status is unavailable');
+  todayProtection = { trade, record };
+  renderTodayProtectionContext(trade, record);
+  document.getElementById('today-protection-fields').innerHTML =
+    protectionDrawerFieldsHtml(record);
+  document.getElementById('today-protection-start').hidden = !!record.running;
+}
+
+async function saveTodayProtection() {
+  if (!todayProtection) return;
+  const save = document.getElementById('today-protection-save');
+  save.disabled = true;
+  try {
+    const values = readProtectionInputs(protectionDrawerIdFor());
+    const result = await saveProtectionConfig(
+      todayProtection.trade.controlSlot, values);
+    if (!result.ok) {
+      toast(result.error || 'Protection update failed', 'err');
+      return;
+    }
+    toast(
+      'LIVE protection updated' +
+      (result.tp_restarted?.length ? ' — monitor restarted' : ''),
+      'ok',
+    );
+    await refreshTodayProtection();
+  } finally {
+    save.disabled = false;
+  }
+}
+
+async function startTodayProtection() {
+  if (!todayProtection) return;
+  const result = await jpost(
+    '/api/tp-monitor/start?slot=' +
+      encodeURIComponent(todayProtection.trade.controlSlot),
+  );
+  if (!result.ok) {
+    toast(result.error || 'Protection monitor could not be started', 'err');
+    return;
+  }
+  toast('LIVE protection monitor started', 'ok');
+  await refreshTodayProtection();
+}
+
+function todayIntrinsic(symbol, strike, settlement) {
+  const upper = String(symbol || '').toUpperCase();
+  if (upper.startsWith('MV-')) return Math.abs(settlement - strike);
+  if (upper.startsWith('P-')) return Math.max(strike - settlement, 0);
+  return Math.max(settlement - strike, 0);
+}
+
+async function showTodayPayoff(index) {
+  const trade = todayLiveTrade(index);
+  if (!trade) {
+    toast('This LIVE trade is no longer available', 'err');
+    return;
+  }
+  let btc = +window._lastStatus?.btc_futures_price;
+  if (!Number.isFinite(btc) || btc <= 0) {
+    try {
+      const status = await jget('/api/status');
+      btc = +status.btc_futures_price;
+    } catch (_) { /* use strike fallback below */ }
+  }
+  const symbol = String(trade.symbol || '');
+  const strike = +trade.strike;
+  const entry = +trade.entry_mark;
+  const lots = +trade.lots;
+  const contractValue = +trade.contract_value || 0.001;
+  const sign = String(trade.side || 'long').toLowerCase() === 'short' ? -1 : 1;
+  if (![strike, entry, lots, contractValue].every(
+      value => Number.isFinite(value) && value > 0)) {
+    toast('Payoff inputs are incomplete for this LIVE trade', 'err');
+    return;
+  }
+  if (!Number.isFinite(btc) || btc <= 0) btc = strike;
+
+  const low = Math.min(strike, btc) * 0.955;
+  const high = Math.max(strike, btc) * 1.045;
+  const count = 120;
+  const prices = [];
+  const payoffs = [];
+  for (let i = 0; i <= count; i += 1) {
+    const settlement = low + (high - low) * i / count;
+    prices.push(settlement);
+    payoffs.push(
+      +((todayIntrinsic(symbol, strike, settlement) - entry) *
+        contractValue * lots * sign).toFixed(2),
+    );
+  }
+  const currentPnl = +((todayIntrinsic(symbol, strike, btc) - entry) *
+    contractValue * lots * sign).toFixed(2);
+  const breakevens = symbol.toUpperCase().startsWith('MV-')
+    ? [strike - entry, strike + entry]
+    : symbol.toUpperCase().startsWith('P-')
+      ? [strike - entry] : [strike + entry];
+
+  document.getElementById('today-payoff-title').textContent =
+    `Payoff — ${symbol}`;
+  document.getElementById('today-payoff-facts').innerHTML =
+    `<span class="f">Side <b>${esc(String(trade.side || 'long').toUpperCase())}</b></span>` +
     `<span class="f">Strike <b>$${fN(strike)}</b></span>` +
-    `<span class="f">Entry mark <b>$${fN(entry, 2)}</b></span>` +
-    bes.map(b => `<span class="f">Breakeven <b>$${fN(b)}</b></span>`).join('') +
-    `<span class="f">BTC now <b>$${fN(btc)}</b></span>` +
-    `<span class="f">At current BTC <b class="${pnlCls(pnlNow)}">${f$(pnlNow)}</b></span>`;
+    `<span class="f">Entry <b>$${fN(entry, 2)}</b></span>` +
+    breakevens.map(value =>
+      `<span class="f">Breakeven <b>$${fN(value, 2)}</b></span>`).join('') +
+    `<span class="f">BTC now <b>$${fN(btc, 2)}</b></span>` +
+    `<span class="f">At current BTC <b class="${pnlCls(currentPnl)}">${f$(currentPnl)}</b></span>`;
 
   const css = getComputedStyle(document.documentElement);
-  const POS = css.getPropertyValue('--pos').trim(), NEG = css.getPropertyValue('--neg').trim();
-  const MUTED = css.getPropertyValue('--muted').trim();
-  const ACCENT = css.getPropertyValue('--accent').trim();
-  const GRID = css.getPropertyValue('--chart-grid').trim();
-  const ZERO = css.getPropertyValue('--chart-zero').trim();
-  const ctx = document.getElementById('payoff-chart').getContext('2d');
-  if (payoffChart) payoffChart.destroy();
-  payoffChart = new Chart(ctx, {
+  const positive = css.getPropertyValue('--pos').trim();
+  const negative = css.getPropertyValue('--neg').trim();
+  const muted = css.getPropertyValue('--muted').trim();
+  const accent = css.getPropertyValue('--accent').trim();
+  const grid = css.getPropertyValue('--chart-grid').trim();
+  const zero = css.getPropertyValue('--chart-zero').trim();
+  const context = document.getElementById('today-payoff-chart').getContext('2d');
+  if (todayPayoffChart) todayPayoffChart.destroy();
+  todayPayoffChart = new Chart(context, {
     type: 'line',
     data: {
-      labels: xs.map(v => Math.round(v)),
+      labels: prices.map(value => Math.round(value)),
       datasets: [
-        { label: 'P&L at settlement', data: ys, borderWidth: 2.5, pointRadius: 0, tension: 0,
-          borderColor: POS,
-          segment: { borderColor: c => (c.p1.parsed.y >= 0 ? POS : NEG) },
-          fill: { target: 'origin',
-                  above: 'rgba(8,135,93,.10)', below: 'rgba(217,45,32,.10)' } },
-        { label: 'Current BTC', data: xs.map((v, i) =>
-            (i === xs.reduce((a, _, j) => Math.abs(xs[j] - btc) < Math.abs(xs[a] - btc) ? j : a, 0)) ? pnlNow : null),
-          pointRadius: 5, pointBackgroundColor: ACCENT, borderColor: ACCENT,
-          showLine: false },
+        {
+          label: 'P&L at settlement', data: payoffs, borderWidth: 2.5,
+          pointRadius: 0, tension: 0, borderColor: positive,
+          segment: {
+            borderColor: context => context.p1.parsed.y >= 0
+              ? positive : negative,
+          },
+          fill: {
+            target: 'origin',
+            above: 'rgba(56,217,154,.12)',
+            below: 'rgba(255,97,114,.12)',
+          },
+        },
+        {
+          label: 'Current BTC',
+          data: prices.map((value, i) => i === prices.reduce(
+            (best, _, candidate) =>
+              Math.abs(prices[candidate] - btc) <
+              Math.abs(prices[best] - btc) ? candidate : best, 0,
+          ) ? currentPnl : null),
+          pointRadius: 5, pointBackgroundColor: accent,
+          borderColor: accent, showLine: false,
+        },
       ],
     },
     options: {
@@ -453,33 +830,56 @@ function showPayoff(slot) {
       interaction: { mode: 'index', intersect: false },
       plugins: {
         legend: { display: false },
-        tooltip: { callbacks: {
-          title: items => 'BTC $' + fN(+items[0].label),
-          label: c => c.datasetIndex === 0 ? ` P&L: ${f$(c.raw)}` : ` Current BTC: ${f$(c.raw)}`,
-        } },
+        tooltip: {
+          callbacks: {
+            title: items => `BTC $${fN(+items[0].label)}`,
+            label: context => context.datasetIndex === 0
+              ? ` P&L: ${f$(context.raw)}`
+              : ` Current BTC: ${f$(context.raw)}`,
+          },
+        },
       },
       scales: {
-        x: { ticks: { color: MUTED, font: { size: 10 }, maxTicksLimit: 10 },
-             grid: { color: GRID },
-             title: { display: true, text: 'BTC price at settlement', color: MUTED, font: { size: 11 } } },
-        y: { ticks: { color: MUTED, font: { size: 10 },
-               callback: v => (v >= 0 ? '+$' : '-$') + Math.abs(v).toLocaleString() },
-              grid: { color: c => c.tick.value === 0 ? ZERO : GRID,
-                     lineWidth: c => c.tick.value === 0 ? 1.5 : 1 } },
+        x: {
+          ticks: { color: muted, font: { size: 10 }, maxTicksLimit: 10 },
+          grid: { color: grid },
+          title: {
+            display: true, text: 'BTC price at settlement',
+            color: muted, font: { size: 11 },
+          },
+        },
+        y: {
+          ticks: {
+            color: muted, font: { size: 10 },
+            callback: value =>
+              `${value >= 0 ? '+$' : '-$'}${Math.abs(value).toLocaleString()}`,
+          },
+          grid: {
+            color: context => context.tick.value === 0 ? zero : grid,
+            lineWidth: context => context.tick.value === 0 ? 1.5 : 1,
+          },
+        },
       },
     },
   });
-  document.getElementById('payoff-modal').classList.add('show');
+  document.getElementById('today-payoff-back').classList.add('show');
 }
 
-function closePayoff() {
-  document.getElementById('payoff-modal').classList.remove('show');
+function closeTodayPayoff() {
+  document.getElementById('today-payoff-back').classList.remove('show');
+  if (todayPayoffChart) {
+    todayPayoffChart.destroy();
+    todayPayoffChart = null;
+  }
 }
-document.addEventListener('keydown', e => { if (e.key === 'Escape') closePayoff(); });
 
-function loadAll() { loadSlots(); loadStats(); loadToday(); refreshTopbar(); }
+async function loadAll() {
+  await loadToday();
+  refreshTopbar();
+}
+
 loadAll();
-setInterval(() => { loadSlots(); loadToday(); }, 12_000);
-setInterval(loadStats, 60_000);
+connectTodayProtectionStream();
+setInterval(loadAll, 12_000);
 </script>
 {% endblock %}

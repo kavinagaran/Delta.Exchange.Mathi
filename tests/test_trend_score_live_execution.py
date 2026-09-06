@@ -12,6 +12,7 @@ from trend_score_live_execution import (
     LiveScoreExecutionError,
     bounded_ioc_payload,
     execute_or_recover_entry,
+    premium_percent_protection_policy,
     score_close_client_id,
     score_entry_client_id,
     switch_entry_gate,
@@ -62,6 +63,36 @@ def _prepared(zone: str = "CE_2_ITM") -> dict:
             "instrument_kind": "BTC_OPTION",
             "entry_price": 240.0,
         }
+    elif zone == "SHORT_CE":
+        values = {
+            "symbol": "C-BTC-65800-230726",
+            "product_id": 104,
+            "strike": 65_800,
+            "side": "short",
+            "option_type": "CE",
+            "instrument_kind": "BTC_OPTION",
+            "entry_price": 210.0,
+        }
+    elif zone == "SHORT_PE":
+        values = {
+            "symbol": "P-BTC-65800-230726",
+            "product_id": 105,
+            "strike": 65_800,
+            "side": "short",
+            "option_type": "PE",
+            "instrument_kind": "BTC_OPTION",
+            "entry_price": 205.0,
+        }
+    elif zone == "LONG_MOVE":
+        values = {
+            "symbol": "MV-BTC-65800-230726",
+            "product_id": 103,
+            "strike": 65_800,
+            "side": "long",
+            "option_type": "MOVE",
+            "instrument_kind": "BTC_MOVE",
+            "entry_price": 445.0,
+        }
     else:
         values = {
             "symbol": "MV-BTC-65800-230726",
@@ -83,8 +114,9 @@ def _prepared(zone: str = "CE_2_ITM") -> dict:
 
 
 def _quote(zone: str = "CE_2_ITM") -> dict:
-    if zone == "SHORT_MOVE":
-        bid, ask = 445.0, 446.0
+    if zone in {"SHORT_MOVE", "SHORT_CE", "SHORT_PE"}:
+        entry = _prepared(zone)["entry_price"]
+        bid, ask = entry, entry + 1.0
     else:
         entry = _prepared(zone)["entry_price"]
         bid, ask = entry - 1.0, entry
@@ -117,6 +149,7 @@ def _order(
     product_id: int = 101,
     side: str = "buy",
     filled: int = 1_000,
+    requested: int = 1_000,
     state: str = "filled",
     price: float = 220.0,
 ) -> dict:
@@ -124,14 +157,14 @@ def _order(
         "id": 9_001,
         "client_order_id": client_id,
         "product_id": product_id,
-        "size": 1_000,
+        "size": requested,
         "side": side,
         "order_type": "limit_order",
         "time_in_force": "ioc",
         "reduce_only": False,
         "state": state,
         "filled_size": filled,
-        "unfilled_size": 1_000 - filled,
+        "unfilled_size": requested - filled,
         "average_fill_price": price if filled else None,
         "paid_commission": 1.25 if filled else 0,
     }
@@ -155,7 +188,9 @@ def _run(
     load_state=None,
     final_preflight=None,
     audit=None,
+    protection_config_override=_UNSET,
     terminal_timeout_sec: float = 0,
+    ownership: str = "trend_score_auto_live",
 ):
     transition = transition_override
     client_id = score_entry_client_id("alice", transition)
@@ -177,11 +212,17 @@ def _run(
     )
     side = "sell" if zone == "SHORT_MOVE" else "buy"
     price = baseline_prepared["entry_price"]
+    requested_lots = int(
+        prepared.get("lots", LIVE_SCORE_LOTS)
+        if isinstance(prepared, dict) else LIVE_SCORE_LOTS
+    )
     filled_order = _order(
         client_id,
         product_id=baseline_prepared["product_id"],
         side=side,
         price=price,
+        filled=requested_lots,
+        requested=requested_lots,
     )
     saved = []
     durable = {"state": copy.deepcopy(existing_state)}
@@ -206,7 +247,7 @@ def _run(
             copy.deepcopy(filled_order), True
         )
     )
-    signed_size = -1_000 if side == "sell" else 1_000
+    signed_size = -requested_lots if side == "sell" else requested_lots
     get_position = get_position or (
         lambda product_id: {
             "product_id": product_id,
@@ -242,7 +283,10 @@ def _run(
         prepared=prepared,
         transition_id=transition,
         fresh_quote=fresh_quote,
-        protection_config=_policy(),
+        protection_config=(
+            _policy() if protection_config_override is _UNSET
+            else protection_config_override
+        ),
         risk_snapshot={"proposed_risk_usd": 250, "allowed": True},
         existing_state=existing_state,
         persist_state=persist_state,
@@ -260,6 +304,7 @@ def _run(
         clock=lambda: clock_value,
         terminal_timeout_sec=terminal_timeout_sec,
         sleeper=lambda _: None,
+        ownership=ownership,
     )
     return result, saved, client_id, filled_order
 
@@ -279,34 +324,83 @@ def test_transition_client_ids_are_stable_scoped_and_delta_sized():
     assert len(close_zero) <= 32
 
 
+def test_custom_ownership_is_persisted_and_survives_to_open():
+    """The Cockpit's manual entries pass a distinct ownership literal so the
+    LIVE score-auto controller never mistakes a manual trade for its own
+    (see dashboard.py's _trend_score_auto_live_owned_position). This proves
+    the executor actually threads a non-default ownership value through to
+    the durable OPEN state, not just the ENTRY_PENDING journal entry.
+    """
+    result, saved, _client_id, _order = _run(ownership="manual_cockpit_live")
+    assert result["status"] == "OPEN"
+    assert result["state"]["ownership"] == "manual_cockpit_live"
+    assert saved[-1]["ownership"] == "manual_cockpit_live"
+
+
+def test_filled_premium_policy_uses_exact_percentages_and_actual_fill_basis():
+    requested = premium_percent_protection_policy(
+        300.0, 0.001, LIVE_SCORE_LOTS, poll_secs=15,
+        tp_percent=80, sl_percent=40,
+        tsl_trail_percent=10,
+    )
+    assert requested["entry_premium_usd"] == 300.0
+    assert requested["tp_target_pnl"] == 240.0
+    assert requested["sl_target_pnl"] == 120.0
+    assert requested["tsl_arm_pnl"] == 0.0
+    assert requested["tsl_trail_pnl"] == 30.0
+    assert requested["tsl_pct"] == 10.0
+    assert requested["poll_secs"] == 15
+
+    # The selected quote was $300, but Delta filled at $220. The durable OPEN
+    # state must be recomputed from the exchange basis rather than retaining
+    # a stale selected-price target.
+    result, _, _, _ = _run(protection_config_override=requested)
+    assert result["status"] == "OPEN"
+    policy = result["state"]["protection_config"]
+    assert policy["entry_premium_usd"] == 220.0
+    assert policy["tp_target_pnl"] == 176.0
+    assert policy["sl_target_pnl"] == 88.0
+    assert policy["tsl_arm_pnl"] == 0.0
+    assert policy["tsl_trail_pnl"] == 22.0
+    assert policy["tp_percent_of_entry_premium"] == 80.0
+    assert policy["sl_percent_of_entry_premium"] == 40.0
+    assert policy["tsl_trail_percent_of_entry_premium"] == 10.0
+    assert policy["tsl_pct"] == 10.0
+    assert policy["protection_mode"] == "filled_premium_percent_peak_trail_v2"
+    assert policy["protection_source"] == "automatic_filled_premium"
+
+
 @pytest.mark.parametrize(
     "zone",
-    ("CE_2_ITM", "PE_3_ITM", "SHORT_MOVE"),
+    (
+        "CE_2_ITM", "PE_3_ITM", "SHORT_MOVE", "LONG_MOVE",
+        "SHORT_CE", "SHORT_PE",
+    ),
 )
-def test_fixed_entry_validation_accepts_only_exact_policy_contract(zone):
+def test_entry_validation_accepts_configured_size_for_exact_policy_contract(zone):
     normalized = validate_fixed_entry(_prepared(zone))
     assert normalized["lots"] == 1_000
     assert normalized["exchange_side"] == (
-        "sell" if zone == "SHORT_MOVE" else "buy"
+        "sell" if zone in {"SHORT_MOVE", "SHORT_CE", "SHORT_PE"} else "buy"
     )
 
-    wrong_lots = _prepared(zone)
-    wrong_lots["lots"] = 999
-    with pytest.raises(LiveScoreExecutionError, match="exactly 1,000"):
-        validate_fixed_entry(wrong_lots)
+    configured_lots = _prepared(zone)
+    configured_lots["lots"] = 999
+    assert validate_fixed_entry(configured_lots)["lots"] == 999
 
     wrong_contract = _prepared(zone)
     wrong_contract["symbol"] = (
         "C-BTC-65400-230726"
-        if zone == "SHORT_MOVE"
+        if zone in ("SHORT_MOVE", "LONG_MOVE")
         else "MV-BTC-65800-230726"
     )
     with pytest.raises(LiveScoreExecutionError, match="score zone"):
         validate_fixed_entry(wrong_contract)
 
     low_limit = _prepared(zone)
+    low_limit["lots"] = 1_000
     low_limit["max_order_lots"] = 999
-    with pytest.raises(LiveScoreExecutionError, match="1,000-lot order"):
+    with pytest.raises(LiveScoreExecutionError, match="requested order size"):
         validate_fixed_entry(low_limit)
 
 
@@ -344,14 +438,69 @@ def test_bounded_ioc_is_exactly_1000_and_rounds_inside_slippage(
     assert snapshot["limit_price"] == expected_limit
 
 
+def test_bounded_ioc_reanchors_to_fresh_executable_touch():
+    prepared = _prepared()
+    quote = {**_quote(), "bid": 222.0, "ask": 223.0}
+
+    payload, snapshot = bounded_ioc_payload(
+        prepared,
+        quote,
+        client_order_id=score_entry_client_id("alice", "transition"),
+        max_slippage_pct=1,
+        max_spread_pct=3,
+        max_quote_age_sec=20,
+    )
+
+    assert payload["limit_price"] == "225.2"
+    assert snapshot["selection_reference_price"] == 220.0
+    assert snapshot["executable_reference_price"] == 223.0
+    assert snapshot["reference_price"] == 223.0
+
+
+def test_bounded_ioc_uses_affordable_size_beyond_top_of_book_depth():
+    prepared = _prepared()
+    prepared["lots"] = 750
+    quote = {**_quote(), "ask_size": 4}
+
+    payload, snapshot = bounded_ioc_payload(
+        prepared,
+        quote,
+        client_order_id=score_entry_client_id("alice", "transition"),
+        max_slippage_pct=1,
+        max_spread_pct=3,
+        max_quote_age_sec=20,
+    )
+
+    assert payload["size"] == 750
+    assert snapshot["entry_depth"] == 4
+
+
+def test_configured_order_size_survives_live_intent_fill_and_protection():
+    prepared = _prepared()
+    prepared["lots"] = 400
+    policy = premium_percent_protection_policy(
+        prepared["entry_price"], prepared["contract_value"], 400,
+    )
+
+    result, saved, _, _ = _run(
+        prepared_override=prepared,
+        protection_config_override=policy,
+    )
+
+    assert result["status"] == "OPEN"
+    assert saved[0]["pending_entry_payload"]["size"] == 400
+    assert result["state"]["requested_lots"] == 400
+    assert result["state"]["lots"] == 400
+    assert result["state"]["execution_snapshot"]["requested"] == 400
+    assert result["state"]["protection_config"]["entry_premium_usd"] == 88.0
+
+
 @pytest.mark.parametrize(
     ("change", "message"),
     (
         ({"quote_age_secs": 21}, "stale"),
         ({"bid": 200, "ask": 220}, "spread"),
-        ({"ask_size": 999}, "1,000-lot IOC"),
         ({"trading_status": "halted"}, "not operational"),
-        ({"ask": 223}, "bounded buy limit"),
         ({"price_band": {"upper_limit": 221}}, "price band"),
     ),
 )
@@ -1016,7 +1165,7 @@ def test_persisted_payload_corruption_blocks_recovery_before_exchange_calls():
     submit = Mock(side_effect=AssertionError("corrupt intent submitted"))
     lookup = Mock(side_effect=AssertionError("corrupt intent looked up"))
 
-    with pytest.raises(LiveScoreExecutionError, match="exactly 1,000"):
+    with pytest.raises(LiveScoreExecutionError, match="requested lots"):
         _run(
             existing_state=pending,
             fresh_quote_override=None,
@@ -1301,3 +1450,94 @@ def test_missing_entry_fee_marks_accounting_pending_and_blocks_switch():
     )
     assert allowed is False
     assert "accounting" in reason.lower()
+
+
+# ── zone execution table (2026-07-26 zone spec) ─────────────────────────
+def test_pe_2_itm_is_executable_alongside_the_legacy_pe_3_itm():
+    """The zone spec moved puts from 3-step to 2-step ITM. Before this, the
+    validator rejected PE_2_ITM outright, so the bearish leg could not place
+    an order at all."""
+    from trend_score_live_execution import ZONE_EXECUTION
+
+    assert "PE_2_ITM" in ZONE_EXECUTION
+    # PE_3_ITM stays executable: a position opened under the old policy must
+    # remain closable.
+    assert "PE_3_ITM" in ZONE_EXECUTION
+    assert ZONE_EXECUTION["PE_2_ITM"].instrument_match == \
+           ZONE_EXECUTION["PE_3_ITM"].instrument_match
+
+
+def test_both_pe_zones_are_labelled_down_and_buy_pe():
+    from trend_score_live_execution import ZONE_EXECUTION
+
+    for zone in ("PE_2_ITM", "PE_3_ITM"):
+        assert ZONE_EXECUTION[zone].direction == "down", zone
+        assert ZONE_EXECUTION[zone].policy_decision == "BUY_PE", zone
+
+
+def test_an_unknown_zone_is_refused_rather_than_booked_as_a_short_straddle():
+    """Regression guard. The old `else` fallthrough labelled ANY unrecognised
+    zone neutral/SELL_MOVE, so a mislabelled long put would have been written
+    into the durable order audit trail as a short straddle."""
+    from trend_score_live_execution import ZONE_EXECUTION
+
+    assert ZONE_EXECUTION.get("PE_9_ITM") is None
+    assert ZONE_EXECUTION.get("") is None
+    # And the only zone that may ever be labelled SELL_MOVE is SHORT_MOVE.
+    sellers = [z for z, p in ZONE_EXECUTION.items()
+               if p.policy_decision == "SELL_MOVE"]
+    assert sellers == ["SHORT_MOVE"]
+
+
+def test_every_executable_zone_has_a_consistent_instrument_and_side():
+    from trend_score_live_execution import ZONE_EXECUTION
+
+    for zone, policy in ZONE_EXECUTION.items():
+        instrument, option_type, side, prefix = policy.instrument_match
+        if zone == "SHORT_MOVE":
+            assert (instrument, option_type, side) == ("BTC_MOVE", "MOVE", "short")
+            assert prefix == "MV-BTC-"
+        elif zone == "LONG_MOVE":
+            assert (instrument, option_type, side) == ("BTC_MOVE", "MOVE", "long")
+            assert prefix == "MV-BTC-"
+        elif zone in {"SHORT_CE", "SHORT_PE"}:
+            assert instrument == "BTC_OPTION" and side == "short"
+            assert option_type in ("CE", "PE")
+            assert prefix == ("C-BTC-" if option_type == "CE" else "P-BTC-")
+        else:
+            assert instrument == "BTC_OPTION" and side == "long"
+            assert option_type in ("CE", "PE")
+            assert prefix == ("C-BTC-" if option_type == "CE" else "P-BTC-")
+
+
+def test_long_move_is_the_only_buy_move_zone_and_is_a_distinct_instrument_from_short_move():
+    """Regression guard for the Cockpit's manual Buy MOVE trade.
+
+    LONG_MOVE and SHORT_MOVE share a symbol prefix (MV-BTC-) but must never
+    share a side -- swapping them would book a bought straddle as sold, or
+    vice versa, in the durable order audit trail.
+    """
+    from trend_score_live_execution import ZONE_EXECUTION
+
+    buyers = [z for z, p in ZONE_EXECUTION.items() if p.policy_decision == "BUY_MOVE"]
+    assert buyers == ["LONG_MOVE"]
+    assert (
+        ZONE_EXECUTION["LONG_MOVE"].instrument_match[2]
+        != ZONE_EXECUTION["SHORT_MOVE"].instrument_match[2]
+    )
+
+    mismatched = _prepared("SHORT_MOVE")
+    mismatched["zone"] = "LONG_MOVE"
+    with pytest.raises(LiveScoreExecutionError, match="score zone"):
+        validate_fixed_entry(mismatched)
+
+
+def test_validate_fixed_entry_rejects_an_unsupported_zone():
+    from trend_score_live_execution import LiveScoreExecutionError, validate_fixed_entry
+
+    with pytest.raises(LiveScoreExecutionError, match="unsupported"):
+        validate_fixed_entry({
+            "product_id": 1, "symbol": "P-BTC-64000-260726", "zone": "PE_9_ITM",
+            "side": "long", "instrument_kind": "BTC_OPTION", "option_type": "PE",
+            "lots": 1000, "entry_price": "100", "contract_value": "0.001",
+        })

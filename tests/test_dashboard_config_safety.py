@@ -58,25 +58,25 @@ def test_environment_or_legacy_flag_cannot_default_account_to_live(
     monkeypatch.setenv("TREND_AUTO_ENTRY_MODE", "live")
     monkeypatch.setenv("TREND_AUTO_ENTRY_ENABLED", "true")
     monkeypatch.setenv("MOVE_AUTO_ENTRY_MODE", "live")
-    assert dashboard._trend_auto_mode() == "shadow"
-    assert dashboard._user_cfg()["MOVE_AUTO_ENTRY_MODE"] == "shadow"
+    assert dashboard._trend_auto_mode() == "disabled"
+    assert dashboard._user_cfg()["MOVE_AUTO_ENTRY_MODE"] == "disabled"
 
     _write_json(isolated_account / "config.json", {
         "TREND_AUTO_ENTRY_ENABLED": "true",
     })
-    assert dashboard._trend_auto_mode() == "shadow"
+    assert dashboard._trend_auto_mode() == "disabled"
     assert dashboard._user_cfg()["TREND_AUTO_ENTRY_ENABLED"] == "false"
-    assert dashboard._user_cfg()["MOVE_AUTO_ENTRY_MODE"] == "shadow"
+    assert dashboard._user_cfg()["MOVE_AUTO_ENTRY_MODE"] == "disabled"
 
 
-def test_only_explicit_valid_per_account_mode_enables_live(isolated_account):
+def test_legacy_modes_stay_disabled_even_when_saved_as_live(isolated_account):
     _write_json(isolated_account / "config.json", {
         "TREND_AUTO_ENTRY_MODE": "live",
         "MOVE_AUTO_ENTRY_MODE": "live",
     })
-    assert dashboard._trend_auto_mode() == "live"
-    assert dashboard._user_cfg()["TREND_AUTO_ENTRY_ENABLED"] == "true"
-    assert dashboard._user_cfg()["MOVE_AUTO_ENTRY_MODE"] == "live"
+    assert dashboard._trend_auto_mode() == "disabled"
+    assert dashboard._user_cfg()["TREND_AUTO_ENTRY_ENABLED"] == "false"
+    assert dashboard._user_cfg()["MOVE_AUTO_ENTRY_MODE"] == "disabled"
 
 
 def test_move_decision_dashboard_view_is_mode_isolated_and_compact(
@@ -205,10 +205,13 @@ def test_config_page_is_fail_safe_until_verified_load():
     assert re.search(r'<select id="c-DRY_RUN"[^>]*\bdisabled\b', html)
     assert _select_markup(html, "c-DRY_RUN").lstrip().startswith(
         '<option value="true">')
-    assert _select_markup(html, "c-MORNING_ENABLED").lstrip().startswith(
-        '<option value="false">')
-    assert _select_markup(html, "c-EVENING_ENABLED").lstrip().startswith(
-        '<option value="false">')
+    assert _select_markup(
+        html, "c-TREND_ENGINE_SCORE_AUTO_MODE").lstrip().startswith(
+            '<option value="disabled">')
+    assert 'id="c-MORNING_ENABLED"' not in html
+    assert 'id="c-EVENING_ENABLED"' not in html
+    assert 'id="c-MOVE_AUTO_ENTRY_MODE"' not in html
+    assert 'id="c-TREND_AUTO_ENTRY_MODE"' not in html
     assert re.search(r'<button[^>]+id="config-save"[^>]+disabled', html)
     assert re.search(r'<button[^>]+id="config-reset"[^>]+disabled', html)
     assert "let configReady = false" in html
@@ -216,8 +219,18 @@ def test_config_page_is_fail_safe_until_verified_load():
     assert "saveButton.disabled = false" in html
     assert "resetButton.disabled = false" in html
     assert "Configuration could not be verified — Save remains locked" in html
-    assert "function shortMoveUi()" in html
-    assert "Short MOVE is enabled. Enter a positive Maximum short risk $" in html
+    assert "function scoreAutoModeError(" in html
+    assert "Configure {{ display_name }}’s Trend Engine." in html
+    assert "These settings apply only to" not in html
+    assert "Order safety ceiling" not in html
+    assert ">Reset Zone Lock<" in html
+    assert re.search(
+        r'<button[^>]+id="score-setup-lock-reset"[^>]+\bdisabled\b', html,
+    )
+    assert 'id="score-setup-lock-hint"' in html
+    assert 'class="btn setup-lock-reset"' in html
+    assert "function refreshScoreZoneSetupLock()" in html
+    assert "lock.active === true" in html
 
 
 def test_config_reset_profile_covers_every_page_field_and_is_fail_safe():
@@ -225,16 +238,9 @@ def test_config_reset_profile_covers_every_page_field_and_is_fail_safe():
         encoding="utf-8")
     page_keys = set(re.findall(r'id="c-([A-Z0-9_]+)"', html))
     preserved = set(dashboard.CONFIG_PAGE_PRESERVED_KEYS)
-    time_keys = {
-        "MORNING_H_UTC", "MORNING_M_UTC",
-        "MORNING_EXIT_H_UTC", "MORNING_EXIT_M_UTC",
-        "ENTRY_H_UTC", "ENTRY_M_UTC", "EXIT_H_UTC", "EXIT_M_UTC",
-    }
-
-    assert len(page_keys) == 66
+    assert len(page_keys) == 28
     assert preserved == {"TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"}
-    assert page_keys - preserved == set(dashboard.CONFIG_PAGE_DEFAULTS) - time_keys
-    assert time_keys <= set(dashboard.CONFIG_PAGE_DEFAULTS)
+    assert page_keys - preserved == set(dashboard.CONFIG_PAGE_DEFAULTS)
     assert set(dashboard.CONFIG_PAGE_DEFAULTS) <= set(dashboard.CONFIG_KEYS)
     internal_move_keys = {
         "MOVE_FORECAST_LOOKBACK_DAYS",
@@ -255,42 +261,44 @@ def test_config_reset_profile_covers_every_page_field_and_is_fail_safe():
 
     defaults = dashboard.CONFIG_PAGE_DEFAULTS
     assert defaults["DRY_RUN"] == "true"
-    assert defaults["MORNING_ENABLED"] == "false"
-    assert defaults["EVENING_ENABLED"] == "false"
-    assert defaults["MORNING_EXIT_ENABLED"] == "false"
-    assert defaults["EVENING_EXIT_ENABLED"] == "false"
+    assert defaults["TREND_ENGINE_SCORE_AUTO_MODE"] == "disabled"
+    assert defaults["TREND_SCORE_AUTO_LOTS"] == "1000"
+    assert defaults["TREND_TP_PREMIUM_PCT"] == "100"
+    assert defaults["TREND_SL_PREMIUM_PCT"] == "50"
+    assert defaults["TREND_TSL_PCT"] == "25"
     assert "MORNING_SIDE" not in page_keys
     assert "EVENING_SIDE" not in page_keys
-    assert defaults["MOVE_AUTO_ENTRY_MODE"] == "shadow"
-    assert defaults["MOVE_DRY_RUN_CAPITAL_USD"] == "1000"
-    assert defaults["TREND_AUTO_ENTRY_MODE"] == "shadow"
-    assert defaults["ALLOW_SHORT_MOVE"] == "false"
-    assert defaults["SHORT_MAX_RISK_USD"] == "0"
+    assert "MORNING_ENABLED" not in page_keys
+    assert "EVENING_ENABLED" not in page_keys
+    assert "MOVE_AUTO_ENTRY_MODE" not in page_keys
+    assert "TREND_AUTO_ENTRY_MODE" not in page_keys
+    assert defaults["SHORT_MAX_RISK_USD"] == "50"
+    assert defaults["TREND_DRY_RUN_CAPITAL_USD"] == "1000"
+    assert "TREND_MOVE_MIN_EDGE_PCT" not in defaults
+    assert "TREND_MOVE_MAX_JUMP_PROBABILITY" not in defaults
     assert defaults["RISK_FAIL_CLOSED"] == "true"
     assert defaults["SAFE_EXECUTION_ENABLED"] == "true"
     assert defaults["ALLOW_EXTERNAL_POSITIONS_WITH_BOT"] == "false"
-    assert defaults["TREND_ALLOW_MISSING_BOOK"] == "false"
-    assert defaults["TREND_MARKET_FALLBACK_ENABLED"] == "false"
+    assert defaults["TREND_MAX_SPREAD_PCT"] == "12"
 
     hazardous_current = {
         "DRY_RUN": "false", "MORNING_ENABLED": "true",
         "EVENING_ENABLED": "true", "TREND_AUTO_ENTRY_MODE": "live",
-        "ALLOW_SHORT_MOVE": "true", "SHORT_MAX_RISK_USD": "0",
+        "ALLOW_SHORT_MOVE": "true", "SHORT_MAX_RISK_USD": "50",
     }
     assert dashboard._validate_config_update(
         dict(defaults), hazardous_current) is None
 
     assert "function resetToDefaults()" in html
-    assert "RESET_PRESERVED_KEYS.has(k)" in html
+    assert "RESET_PRESERVED_KEYS.has(key)" in html
     assert "function rememberSavedPreservedValues(savedBody = null)" in html
     assert "rememberSavedPreservedValues();" in html
     assert "rememberSavedPreservedValues(body);" in html
-    assert "hasOwnProperty.call(savedBody, k)" in html
-    assert "el.value = window._loadedPreservedValues[k]" in html
-    assert "Reset only fills this form; it does not close open" in html
-    assert "will no longer have a scheduled" in html
-    assert "including the displayed schedules" in html
-    assert "Recommended defaults loaded — review them, then Save configuration" in html
+    assert "hasOwnProperty.call(savedBody, key)" in html
+    assert "element.value = window._loadedPreservedValues[key]" in html
+    assert "does not close an open position" in html
+    assert "keeps all retired controllers disabled" in html
+    assert "Safe Trend Engine defaults loaded — review them, then Save configuration" in html
 
 
 def test_saving_reset_profile_preserves_credentials_and_off_page_protection(
@@ -325,10 +333,13 @@ def test_saving_reset_profile_preserves_credentials_and_off_page_protection(
     assert saved["TP_TARGET_PNL"] == "250"
     assert saved["SL_TARGET_PNL"] == "200"
     assert saved["TSL_TARGET_PNL"] == "100"
+    # Per-entry score protection now derives from the filled premium; the
+    # retired fixed-dollar value is intentionally off-page and preserved.
     assert saved["TP_TARGET_PNL_TREND"] == "125"
     assert saved["DYNAMIC_LOTS"] == "true"
     assert saved["MAX_TRADES_PER_DAY"] == "3"
-    assert saved["TREND_AUTO_ENTRY_ENABLED"] == "False"
+    for key, value in dashboard.SCORE_ZONE_LEGACY_DISABLED_SETTINGS.items():
+        assert saved[key] == value
 
 
 @pytest.mark.parametrize("slot", dashboard.SLOTS)
@@ -784,11 +795,11 @@ def test_config_template_refreshes_mode_lock_and_preserves_locked_mode_on_save_r
     assert "let lastModeAvailability" in html
     assert html.count("refreshModeAvailability(") >= 2
     assert re.search(
-        r"k\s*===\s*['\"]DRY_RUN['\"]\s*&&\s*!modeChangeAllowed",
+        r"key\s*===\s*['\"]DRY_RUN['\"]\s*&&\s*!modeChangeAllowed",
         html,
     )
-    assert "el.value = loadedDryRun" in html
-    assert "modeChangeAllowed && el.value !== loadedDryRun" in html
+    assert "element.value = loadedDryRun" in html
+    assert "modeChangeAllowed && element.value !== loadedDryRun" in html
 
 
 def test_tp_save_snapshots_open_state_under_close_lock_and_restarts_after_release(
@@ -865,6 +876,62 @@ def test_tp_save_snapshots_open_state_under_close_lock_and_restarts_after_releas
     assert saved_state["pending_tp_protection"] == pending_intent
     assert saved_state["pending_close_client_order_id"] == "close-journal-1"
     assert saved_state["orphan_protection_order_ids"] == [77]
+
+
+def test_automatic_filled_premium_policy_survives_poll_edit_and_allows_manual_override(
+        isolated_account, monkeypatch):
+    _write_json(isolated_account / "config.json", {
+        "DRY_RUN": "false",
+        "TP_POLL_SECS_TREND": "30",
+    })
+    state_path = isolated_account / "trend_state.json"
+    automatic = {
+        "tp_target_pnl": 220.0,
+        "sl_target_pnl": 110.0,
+        "tsl_arm_pnl": 55.0,
+        "tsl_trail_pnl": 55.0,
+        "tsl_lock_min_pnl": 0.0,
+        "poll_secs": 30,
+        "protection_source": "automatic_filled_premium",
+        "protection_mode": "filled_premium_percent_v1",
+        "entry_premium_usd": 220.0,
+        "manual_override_allowed": True,
+    }
+    _write_json(state_path, {
+        "slot": "trend", "status": "OPEN", "dry_run": False,
+        "product_id": 42, "lots": 1_000,
+        "protection_config": automatic,
+    })
+    monkeypatch.setattr(dashboard, "_tp_running", lambda *_: False)
+
+    with dashboard.app.test_request_context(
+            "/api/config", method="POST",
+            json={"TP_POLL_SECS_TREND": "15"}):
+        payload, status = _response(dashboard.set_config())
+    assert status == 200 and payload["ok"] is True
+    saved = json.loads(state_path.read_text(encoding="utf-8"))
+    assert saved["protection_config"]["protection_source"] \
+        == "automatic_filled_premium"
+    assert saved["protection_config"]["tp_target_pnl"] == 220.0
+    assert saved["protection_config"]["sl_target_pnl"] == 110.0
+    assert saved["protection_config"]["poll_secs"] == 15
+
+    with dashboard.app.test_request_context(
+            "/api/config", method="POST", json={
+                "TP_TARGET_PNL_TREND": "300",
+                "SL_TARGET_PNL_TREND": "150",
+                "TSL_ARM_PNL_TREND": "75",
+                "TSL_TRAIL_PNL_TREND": "75",
+                "TSL_LOCK_MIN_PNL_TREND": "0",
+            }):
+        payload, status = _response(dashboard.set_config())
+    assert status == 200 and payload["ok"] is True
+    saved = json.loads(state_path.read_text(encoding="utf-8"))
+    manual = saved["protection_config"]
+    assert manual["protection_source"] == "manual_override"
+    assert manual["automatic_entry_protection_replaced"] is True
+    assert manual["tp_target_pnl"] == 300.0
+    assert manual["sl_target_pnl"] == 150.0
 
 
 def test_short_move_requires_explicit_positive_risk_cap():

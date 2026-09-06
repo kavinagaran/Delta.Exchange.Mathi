@@ -15,17 +15,29 @@ two-step option into a different strike.
 from __future__ import annotations
 
 import math
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Collection, Mapping, Sequence
 
+from btc_trend_engine.signals.regime import CALM_ADX_MAX
 
-PE_3_ITM = "PE_3_ITM"
+
+PE_3_ITM = "PE_3_ITM"   # legacy strike policy; still closable, never opened
+PE_2_ITM = "PE_2_ITM"   # 2026-07-26 spec
 SHORT_MOVE = "SHORT_MOVE"
 CE_2_ITM = "CE_2_ITM"
-SCORE_ZONES = frozenset({PE_3_ITM, SHORT_MOVE, CE_2_ITM})
+HOLD = "HOLD"
+# Manual-only zone: the Cockpit's Buy MOVE trade.  Never produced by the
+# score-band policy (score_zone() below never returns it) and never entered
+# by the automated controller -- it exists so a long MOVE position can be
+# validated, sized, and read back like any other owned position.
+LONG_MOVE = "LONG_MOVE"
+SCORE_ZONES = frozenset(
+    {PE_3_ITM, PE_2_ITM, SHORT_MOVE, CE_2_ITM, HOLD, LONG_MOVE}
+)
 
 AUTO_TRADE_LOTS = 1_000
 MIN_TIME_TO_EXPIRY_SECONDS = 90 * 60
+IST_TIMEZONE = timezone(timedelta(hours=5, minutes=30))
 
 
 class TrendScoreAutoInputError(ValueError):
@@ -72,12 +84,37 @@ def _iso_utc(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def is_current_ist_expiry(expiry: Any, now: Any) -> bool:
+    """Return whether settlement belongs to today's IST calendar date.
+
+    Daily BTC automation must never roll to tomorrow merely because today's
+    contract is too close to settlement or temporarily unavailable.
+    """
+
+    settlement = _utc_time(expiry, "expiry")
+    current = _utc_time(now, "now")
+    return (
+        settlement.astimezone(IST_TIMEZONE).date()
+        == current.astimezone(IST_TIMEZONE).date()
+    )
+
+
 def score_zone(score: Any) -> str:
     """Return the exact approved action zone for a validated engine score.
 
-    ``-25`` belongs to the bearish PE zone and ``+25`` belongs to the bullish
-    CE zone.  A missing/invalid score is never treated as neutral because that
-    would turn a feed failure into permission to short MOVE.
+    Thresholds come from ``btc_trend_engine.signals.zones`` — the single
+    source of truth for the 2026-07-29 operator spec — rather than being
+    duplicated here, so the two modules cannot drift apart:
+
+        |score| > 40    directional (CE_2_ITM / PE_2_ITM, both 2-step ITM),
+                        independent of ADX
+        |score| <= 30   SHORT_MOVE candidate (the engine must also confirm
+                        15m ADX is at or below 25)
+        otherwise       HOLD (no new action; any open position, directional
+                        or SHORT_MOVE, is kept until a real zone change)
+
+    A missing/invalid score is never treated as neutral, because that would
+    turn a feed failure into permission to short MOVE.
     """
 
     value = _finite(score, "direction_score")
@@ -85,11 +122,27 @@ def score_zone(score: Any) -> str:
         raise TrendScoreAutoInputError(
             "direction_score must be between -100 and 100"
         )
-    if value <= -25:
-        return PE_3_ITM
-    if value >= 25:
-        return CE_2_ITM
-    return SHORT_MOVE
+    from btc_trend_engine.signals import zones
+
+    return zones.zone_for_score(value)
+
+
+def short_move_adx_exit_required(adx: Any) -> bool:
+    """Whether a committed 15-minute ADX invalidates an open SHORT_MOVE.
+
+    SHORT_MOVE entry requires a calm reading at or below ``CALM_ADX_MAX``.
+    An open MOVE is therefore no longer a calm-market trade as soon as the
+    committed ADX is above 25. Missing
+    or invalid ADX is rejected instead of being guessed into an exit.
+    """
+
+    if adx is None:
+        return False
+    try:
+        value = _finite(adx, "15m ADX")
+    except TrendScoreAutoInputError:
+        return False
+    return value > CALM_ADX_MAX
 
 
 def completed_candle_signal_key(
@@ -157,15 +210,31 @@ def _listed_vanilla_products(
     raw_products: Sequence[Mapping[str, Any]],
     *,
     now: datetime,
+    today_only: bool = False,
+    min_time_to_expiry_seconds: float = MIN_TIME_TO_EXPIRY_SECONDS,
 ) -> dict[datetime, dict[str, Any]]:
-    """Normalize the authoritative raw strike ladder by exact settlement."""
+    """Normalize the authoritative raw strike ladder by exact settlement.
+
+    ``today_only=True`` restricts the ladder to the single *nearest* listed
+    expiry -- never a later one -- rather than to settlements whose IST
+    calendar date happens to equal today's. Those are not the same thing:
+    Delta delists each daily contract at its own settlement (12:00 UTC /
+    17:30 IST), so for the rest of that IST calendar day the earliest
+    listed contract is dated *tomorrow*. Requiring a literal calendar-date
+    match made every selection fail closed from 17:30 IST until midnight
+    IST daily -- a real production incident, not a theoretical edge case.
+    Comparing against the nearest listed settlement instead preserves the
+    actual intent (never silently substitute a later expiry for one that's
+    merely inconvenient) without assuming any relationship between a
+    settlement's calendar date and the wall-clock date.
+    """
 
     if not isinstance(raw_products, Sequence) or isinstance(
         raw_products, (str, bytes)
     ):
         raise TrendScoreAutoInputError("raw_products must be a list")
 
-    by_expiry: dict[datetime, dict[str, Any]] = {}
+    rows: list[tuple[datetime, float, int, str, str, Mapping[str, Any]]] = []
     for index, product in enumerate(raw_products):
         if not isinstance(product, Mapping):
             raise TrendScoreAutoInputError(
@@ -206,7 +275,15 @@ def _listed_vanilla_products(
             raise TrendScoreAutoInputError(
                 f"raw_products[{index}].strike_price must be positive"
             )
-        if (expiry - now).total_seconds() < MIN_TIME_TO_EXPIRY_SECONDS:
+        rows.append((expiry, strike, product_id, symbol, option_type, product))
+
+    nearest_expiry = min((row[0] for row in rows), default=None)
+
+    by_expiry: dict[datetime, dict[str, Any]] = {}
+    for expiry, strike, product_id, symbol, option_type, product in rows:
+        if today_only and expiry != nearest_expiry:
+            continue
+        if (expiry - now).total_seconds() < min_time_to_expiry_seconds:
             continue
 
         expiry_group = by_expiry.setdefault(
@@ -241,24 +318,64 @@ def select_directional_option(
     spot: Any,
     zone: str,
     now: datetime,
+    lots: int = AUTO_TRADE_LOTS,
+    today_only: bool = False,
+    min_time_to_expiry_seconds: float = MIN_TIME_TO_EXPIRY_SECONDS,
+    manual_itm_steps: int | None = None,
 ) -> dict[str, Any] | None:
     """Select the exact policy strike or return ``None`` without substitution.
 
-    The earliest listed operational expiry with at least 90 minutes remaining
+    The earliest listed operational expiry meeting ``min_time_to_expiry_seconds``
     is authoritative.  CE selects ``ATM index - 2`` and PE selects
-    ``ATM index + 3``.  If that exact product is absent or not executable for
-    all 1,000 lots, the function returns ``None``; it never shifts strike or
-    tries a later expiry.
+    ``ATM index + 2`` (2026-07-26 spec; PE was ``+3`` before, making the
+    policy asymmetric).  ``PE_3_ITM`` is still accepted so a position opened
+    under the old policy can be selected and closed.  If that exact product
+    is absent or not executable for the requested lot count, the function returns
+    ``None``; it never shifts strike or tries a later expiry.
+
+    ``manual_itm_steps`` is reserved for an operator-selected Cockpit trade.
+    It may choose the same option type at a specific non-negative strike
+    offset (including ATM with ``0``) without weakening the automated zone's
+    fixed two-step policy; automated callers leave it as ``None``.
+
+    ``today_only=True`` additionally restricts the ladder to the single
+    *nearest* listed expiry -- never a later one -- used by the automated
+    controller so it never rolls forward to a more distant contract merely
+    because the near one is temporarily unavailable or too close to
+    settlement. This is deliberately not "settlement's IST calendar date
+    equals today's": Delta delists each daily contract at its own
+    settlement (12:00 UTC / 17:30 IST), so for the rest of that IST
+    calendar day the nearest listed contract is dated *tomorrow* -- a
+    literal calendar-date match would fail closed every single day from
+    17:30 IST to midnight IST. ``min_time_to_expiry_seconds`` can be
+    lowered (e.g. to ``0``) for a caller that substitutes its own
+    real-time judgement for the standard 90-minute liquidity floor.
     """
+
+    try:
+        requested_lots = _positive_integer(lots, "requested lots")
+    except TrendScoreAutoInputError:
+        return None
 
     if zone == CE_2_ITM:
         option_type, steps, direction = "CE", 2, -1
+    elif zone == PE_2_ITM:
+        option_type, steps, direction = "PE", 2, 1
     elif zone == PE_3_ITM:
         option_type, steps, direction = "PE", 3, 1
     else:
         raise TrendScoreAutoInputError(
-            "zone must be CE_2_ITM or PE_3_ITM for option selection"
+            "zone must be CE_2_ITM, PE_2_ITM or PE_3_ITM for option selection"
         )
+    if manual_itm_steps is not None:
+        try:
+            override = int(manual_itm_steps)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if isinstance(manual_itm_steps, bool) or override != manual_itm_steps \
+                or override < 0:
+            return None
+        steps = override
     current = _utc_time(now, "now")
     current_spot = _finite(spot, "spot")
     if current_spot <= 0:
@@ -268,7 +385,12 @@ def select_directional_option(
     ):
         raise TrendScoreAutoInputError("executable_contracts must be a list")
 
-    by_expiry = _listed_vanilla_products(raw_products, now=current)
+    by_expiry = _listed_vanilla_products(
+        raw_products,
+        now=current,
+        today_only=today_only,
+        min_time_to_expiry_seconds=min_time_to_expiry_seconds,
+    )
     if not by_expiry:
         return None
     expiry = min(by_expiry)
@@ -323,7 +445,7 @@ def select_directional_option(
         or contract_strike != target_strike
         or contract_expiry != expiry
         or str(contract.get("option_type") or "").strip().upper() != option_type
-        or order_limit < AUTO_TRADE_LOTS
+        or order_limit < requested_lots
     ):
         return None
     status = str(contract.get("trading_status") or "operational").strip().lower()
@@ -335,7 +457,7 @@ def select_directional_option(
         )
     except TrendScoreAutoInputError:
         return None
-    if AUTO_TRADE_LOTS % lot_size:
+    if requested_lots % lot_size:
         return None
 
     return {
@@ -344,7 +466,7 @@ def select_directional_option(
         "side": "buy",
         "option_type": option_type,
         "itm_steps": steps,
-        "lots": AUTO_TRADE_LOTS,
+        "lots": requested_lots,
         "symbol": symbol,
         "product_id": product_id,
         "spot": current_spot,
@@ -366,15 +488,30 @@ def select_move_contract(
     *,
     spot: Any,
     now: datetime,
+    lots: int = AUTO_TRADE_LOTS,
+    today_only: bool = False,
+    min_time_to_expiry_seconds: float = MIN_TIME_TO_EXPIRY_SECONDS,
 ) -> dict[str, Any] | None:
-    """Select the nearest-expiry ATM BTC MOVE contract for a 1,000-lot short.
+    """Select the nearest-expiry ATM BTC MOVE contract for a short entry.
 
     Eligibility depends only on the authoritative listing, exact settlement
     timestamp, and product limits.  There is deliberately no morning/evening
-    session argument.  The current expiry remains eligible at exactly 90
-    minutes and is skipped only below that floor; no maximum DTE is imposed.
+    session argument. The current expiry is eligible only when more than
+    ``min_time_to_expiry_seconds`` remains; no maximum DTE is imposed.
+
+    ``today_only=True`` additionally restricts eligibility to the single
+    *nearest* listed expiry -- never a later one -- rather than to
+    settlements whose IST calendar date happens to equal today's; see
+    ``select_directional_option`` for why those are not the same thing.
+    Lowering ``min_time_to_expiry_seconds`` (e.g. to ``0``) lets a caller
+    substitute its own real-time judgement for the standard 90-minute
+    liquidity floor.
     """
 
+    try:
+        requested_lots = _positive_integer(lots, "requested lots")
+    except TrendScoreAutoInputError:
+        return None
     current = _utc_time(now, "now")
     current_spot = _finite(spot, "spot")
     if current_spot <= 0:
@@ -384,7 +521,7 @@ def select_move_contract(
     ):
         raise TrendScoreAutoInputError("raw_products must be a list")
 
-    by_expiry: dict[datetime, list[dict[str, Any]]] = {}
+    rows: list[tuple[datetime, float, Mapping[str, Any]]] = []
     for index, product in enumerate(raw_products):
         if not isinstance(product, Mapping):
             raise TrendScoreAutoInputError(
@@ -414,10 +551,18 @@ def select_move_contract(
             raise TrendScoreAutoInputError(
                 f"raw_products[{index}].strike_price must be positive"
             )
-        if (expiry - current).total_seconds() < MIN_TIME_TO_EXPIRY_SECONDS:
+        rows.append((expiry, strike, product))
+
+    nearest_expiry = min((row[0] for row in rows), default=None)
+
+    by_expiry: dict[datetime, list[dict[str, Any]]] = {}
+    for expiry, strike, product in rows:
+        if today_only and expiry != nearest_expiry:
+            continue
+        if (expiry - current).total_seconds() <= min_time_to_expiry_seconds:
             continue
         by_expiry.setdefault(expiry, []).append({
-            "symbol": symbol,
+            "symbol": str(product.get("symbol") or "").strip(),
             "strike": strike,
             "raw": dict(product),
         })
@@ -457,14 +602,14 @@ def select_move_contract(
         )
     except TrendScoreAutoInputError:
         return None
-    if contract_value <= 0 or position_limit < AUTO_TRADE_LOTS:
+    if contract_value <= 0 or position_limit < requested_lots:
         return None
 
     return {
         "zone": SHORT_MOVE,
         "instrument": "BTC_MOVE",
         "side": "sell",
-        "lots": AUTO_TRADE_LOTS,
+        "lots": requested_lots,
         "symbol": target["symbol"],
         "product_id": product_id,
         "spot": current_spot,
@@ -500,6 +645,8 @@ def position_score_zone(position: Mapping[str, Any]) -> str:
         return PE_3_ITM
     if symbol.startswith("MV-BTC-") and side in {"short", "sell"}:
         return SHORT_MOVE
+    if symbol.startswith("MV-BTC-") and side in {"long", "buy"}:
+        return LONG_MOVE
     raise TrendScoreAutoInputError(
         "owned position cannot be mapped to an approved score zone"
     )
@@ -511,6 +658,7 @@ def plan_score_transition(
     signal_key: str,
     owned_positions: Sequence[Mapping[str, Any]],
     consumed_signal_keys: Collection[str] | Mapping[str, Any] = (),
+    short_move_adx: Any = None,
 ) -> dict[str, Any]:
     """Plan one idempotent transition for zero or one owned position.
 
@@ -519,7 +667,8 @@ def plan_score_transition(
     ledger atomically with the resulting state.
     """
 
-    target = score_zone(score)
+    value = _finite(score, "direction_score")
+    target = score_zone(value)
     key = str(signal_key or "").strip()
     if not key:
         raise TrendScoreAutoInputError("signal_key is required")
@@ -547,6 +696,54 @@ def plan_score_transition(
                 position_score_zone(owned_positions[0])
                 if owned_positions else None
             ),
+            "close_position": None,
+            "open_zone": None,
+            "consume_signal": False,
+        }
+
+    current = (
+        position_score_zone(owned_positions[0]) if owned_positions else None
+    )
+    if target == SHORT_MOVE and short_move_adx_exit_required(short_move_adx):
+        if current == SHORT_MOVE:
+            return {
+                "action": "CLOSE",
+                "reason": "SHORT_MOVE_ADX_NO_LONGER_CALM",
+                "signal_key": key,
+                "target_zone": target,
+                "current_zone": current,
+                "close_position": dict(owned_positions[0]),
+                "open_zone": None,
+                "consume_signal": True,
+            }
+        # Directional ADX blocks a new SHORT_MOVE but must never manufacture
+        # an exit or replacement for a CE/PE position.
+        return {
+            "action": "NOOP",
+            "reason": "SHORT_MOVE_BLOCKED_BY_DIRECTIONAL_ADX",
+            "signal_key": key,
+            "target_zone": target,
+            "current_zone": current,
+            "close_position": None,
+            "open_zone": None,
+            "consume_signal": False,
+        }
+
+    if target == HOLD:
+        # A HOLD band always keeps the position, directional or SHORT_MOVE
+        # alike: HOLD means the score has no current opinion, not that the
+        # prior one was invalidated.  Only a real zone change (to another
+        # actionable zone) closes a position — see zones.should_exit.
+        #
+        # This guard also prevents an ordinary HOLD reading from falling
+        # through to CLOSE_THEN_OPEN below, where it would flatten a valid
+        # position and then fail to select a nonexistent HOLD contract.
+        return {
+            "action": "NOOP",
+            "reason": "SCORE_IN_HOLD_BAND",
+            "signal_key": key,
+            "target_zone": target,
+            "current_zone": current,
             "close_position": None,
             "open_zone": None,
             "consume_signal": False,
@@ -601,6 +798,7 @@ __all__ = [
     "plan_score_transition",
     "position_score_zone",
     "score_zone",
+    "short_move_adx_exit_required",
     "select_directional_option",
     "select_move_contract",
 ]

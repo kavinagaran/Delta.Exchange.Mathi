@@ -1,0 +1,51 @@
+# BTC Trend Engine — EC2 unit (ADR 0001).
+#
+#   sudo cp deploy/systemd/btc-trend-engine.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now btc-trend-engine
+#
+# Paths below match the actual deploy host (/home/ubuntu/mathi — NOT
+# /home/ubuntu/Delta.Exchange.Mathi; that path never existed on the box and
+# was a stale assumption in an earlier draft of this file, caught only once
+# an actual deploy needed it). Adjust User/paths if deploying elsewhere.
+#
+# StartLimitIntervalSec/StartLimitBurst belong in [Unit], not [Service] —
+# systemd silently ignores them ("Unknown key ... in section [Service]") if
+# misplaced there, which was also caught only by deploying for real: the
+# unit ran fine either way, so nothing *looked* wrong, but the crash-loop
+# protection they provide was quietly inactive.
+#
+# The StartLimit pair itself is deliberate: if the engine crash-loops 10
+# times in 5 minutes systemd STOPS retrying, the dashboard sees
+# ENGINE_UNREACHABLE, and trading fails closed. Do not "fix" a crash loop by
+# removing the limit.
+
+[Unit]
+Description=BTC Trend Engine (market data + trend signals, loopback only)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+# Adjust User/paths to the deploy host.
+User=ubuntu
+WorkingDirectory=/home/ubuntu/mathi
+# Deliberately NO EnvironmentFile=. The host's .env is written in
+# "KEY   = value" style (spaces around =), which systemd's EnvironmentFile
+# parser does not accept the way a shell or python-dotenv does — it would
+# either fail the unit or import keys with trailing spaces. The engine reads
+# .env itself via api/app.py::_load_dotenv_stdlib, which strips whitespace,
+# so the token arrives correctly without systemd's parser in the path.
+ExecStart=/home/ubuntu/mathi/.venv-engine/bin/python -m btc_trend_engine.api.app
+Restart=always
+RestartSec=5
+# Graceful: SIGTERM cancels tasks, flushes the event store, closes the WS.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+StandardOutput=append:/home/ubuntu/mathi/logs/engine.log
+StandardError=append:/home/ubuntu/mathi/logs/engine.log
+
+[Install]
+WantedBy=multi-user.target

@@ -6,7 +6,7 @@ or a real exchange connection.
 
 The important invariants are:
 
-* every submitted entry requests exactly 1,000 lots;
+* every submitted entry uses the exact validated per-user lot request;
 * entries are bounded IOC limit orders (never an implicit market fallback);
 * a deterministic client id and ``ENTRY_PENDING`` state are durable before
   the POST;
@@ -43,6 +43,72 @@ from typing import Any, Callable, Mapping
 
 
 LIVE_SCORE_LOTS = 1_000
+# Version the policy saved with a position.  Existing positions retain the
+# old dollar arm/trail behaviour; only new entries use the Nimmathi peak-P&L
+# percentage trail below.
+PREMIUM_PERCENT_PROTECTION_MODE = "filled_premium_percent_peak_trail_v2"
+
+
+def premium_percent_protection_policy(
+    entry_price: Any,
+    contract_value: Any,
+    lots: Any,
+    *,
+    poll_secs: Any = 30,
+    tp_percent: Any = 100,
+    sl_percent: Any = 50,
+    tsl_trail_percent: Any = 25,
+) -> dict[str, Any]:
+    """Build the score-zone protection snapshot from an entry premium.
+
+    The monitor stores dollar P&L thresholds, while the strategy rule is
+    expressed as percentages of the selected option/MOVE premium.  Converting
+    once at entry keeps protection stable when account defaults change later:
+
+    The percentage values are captured at entry, so future Bot Config changes
+    never alter an open position's protection.
+
+    ``entry_price`` is the actual exchange fill for LIVE positions.  This
+    helper is deliberately in the irreversible-entry module so recovery of a
+    filled pending order cannot fall back to a stale quote or configuration.
+    """
+    premium = (
+        _finite(entry_price, "entry premium", positive=True)
+        * _finite(contract_value, "contract value", positive=True)
+        * _positive_int(lots, "entry lots")
+    )
+    try:
+        interval = max(int(float(poll_secs)), 10)
+    except (TypeError, ValueError, OverflowError):
+        interval = 30
+    def percentage(value: Any, label: str) -> float:
+        result = _finite(value, label, positive=True)
+        if result > 1_000:
+            raise LiveScoreExecutionError(f"{label} must not exceed 1000%")
+        return result
+    tp_pct = percentage(tp_percent, "take-profit percentage")
+    sl_pct = percentage(sl_percent, "stop-loss percentage")
+    trail_pct = percentage(tsl_trail_percent, "trailing percentage")
+    return {
+        "tp_target_pnl": round(premium * tp_pct / 100.0, 8),
+        "sl_target_pnl": round(premium * sl_pct / 100.0, 8),
+        # Compatibility fields for older status clients.  v2 does not use a
+        # dollar arm or a fixed-dollar trail: it arms above 0% P&L and trails
+        # by ``tsl_pct`` from the peak P&L percentage.
+        "tsl_arm_pnl": 0.0,
+        "tsl_trail_pnl": round(premium * trail_pct / 100.0, 8),
+        "tsl_lock_min_pnl": 0.0,
+        "tsl_target_pnl": round(premium * trail_pct / 100.0, 8),
+        "poll_secs": interval,
+        "protection_mode": PREMIUM_PERCENT_PROTECTION_MODE,
+        "protection_source": "automatic_filled_premium",
+        "entry_premium_usd": round(premium, 8),
+        "tp_percent_of_entry_premium": tp_pct,
+        "sl_percent_of_entry_premium": sl_pct,
+        "tsl_trail_percent_of_entry_premium": trail_pct,
+        "tsl_pct": trail_pct,
+        "manual_override_allowed": True,
+    }
 
 _ACTIVE_ORDER_STATES = {
     "open",
@@ -204,6 +270,52 @@ def score_close_client_id(user: str, transition_id: str, sequence: int = 0) -> s
     return f"trend-{clean_user}-{digest}-x"[:32]
 
 
+@dataclass(frozen=True)
+class ZoneExecutionPolicy:
+    """How one score zone maps onto an executable instrument.
+
+    ``instrument_match`` is the (instrument_kind, option_type, side,
+    symbol_prefix) tuple an order must satisfy before this module will place
+    it — the last check standing between a signal and an irreversible order.
+    """
+
+    instrument_match: tuple[str, str, str, str]
+    direction: str
+    policy_decision: str
+
+
+# Canonical table of executable zones. PE_2_ITM joined PE_3_ITM on 2026-07-26
+# when the zone spec moved puts from 3-step to 2-step ITM; both are listed
+# because a position opened under the old policy must still be closable.
+#
+# Lookups are strict: an unlisted zone raises. This previously fell through an
+# `else` that labelled ANY unrecognised zone as neutral/SELL_MOVE, which would
+# have booked a long put as a short straddle in the order audit trail.
+ZONE_EXECUTION: dict[str, ZoneExecutionPolicy] = {
+    "CE_2_ITM": ZoneExecutionPolicy(
+        ("BTC_OPTION", "CE", "long", "C-BTC-"), "up", "BUY_CE"),
+    "PE_2_ITM": ZoneExecutionPolicy(
+        ("BTC_OPTION", "PE", "long", "P-BTC-"), "down", "BUY_PE"),
+    "PE_3_ITM": ZoneExecutionPolicy(
+        ("BTC_OPTION", "PE", "long", "P-BTC-"), "down", "BUY_PE"),
+    "SHORT_MOVE": ZoneExecutionPolicy(
+        ("BTC_MOVE", "MOVE", "short", "MV-BTC-"), "neutral", "SELL_MOVE"),
+    # Manual-only: the Cockpit's Buy MOVE trade. Never produced by the score
+    # policy, never entered by the automated controller -- it exists so a
+    # long MOVE position has the same zone/instrument/side/prefix proof
+    # every other executable zone has.
+    "LONG_MOVE": ZoneExecutionPolicy(
+        ("BTC_MOVE", "MOVE", "long", "MV-BTC-"), "neutral", "BUY_MOVE"),
+    # Manual-only Cockpit entries. These ATM option sells are never produced
+    # by score automation, but retain the same strict instrument/side/prefix
+    # proof and protection lifecycle as every other LIVE entry.
+    "SHORT_CE": ZoneExecutionPolicy(
+        ("BTC_OPTION", "CE", "short", "C-BTC-"), "down", "SELL_CE"),
+    "SHORT_PE": ZoneExecutionPolicy(
+        ("BTC_OPTION", "PE", "short", "P-BTC-"), "up", "SELL_PE"),
+}
+
+
 def validate_fixed_entry(prepared: Mapping[str, Any]) -> dict[str, Any]:
     """Validate the selected contract and normalize its LIVE order direction."""
 
@@ -211,9 +323,9 @@ def validate_fixed_entry(prepared: Mapping[str, Any]) -> dict[str, Any]:
         raise LiveScoreExecutionError("prepared entry must be an object")
     row = copy.deepcopy(dict(prepared))
     lots = _positive_int(row.get("lots"), "prepared lots")
-    if lots != LIVE_SCORE_LOTS:
+    if lots > 5_000:
         raise LiveScoreExecutionError(
-            "LIVE Trend score entry must request exactly 1,000 lots"
+            "LIVE Trend score entry must not exceed 5,000 lots"
         )
     product_id = _positive_int(row.get("product_id"), "product_id")
     symbol = str(row.get("symbol") or "").strip()
@@ -222,14 +334,10 @@ def validate_fixed_entry(prepared: Mapping[str, Any]) -> dict[str, Any]:
     instrument = str(row.get("instrument_kind") or "").strip().upper()
     option_type = str(row.get("option_type") or "").strip().upper()
 
-    if zone == "CE_2_ITM":
-        expected = ("BTC_OPTION", "CE", "long", "C-BTC-")
-    elif zone == "PE_3_ITM":
-        expected = ("BTC_OPTION", "PE", "long", "P-BTC-")
-    elif zone == "SHORT_MOVE":
-        expected = ("BTC_MOVE", "MOVE", "short", "MV-BTC-")
-    else:
+    execution_policy = ZONE_EXECUTION.get(zone)
+    if execution_policy is None:
         raise LiveScoreExecutionError("prepared score zone is unsupported")
+    expected = execution_policy.instrument_match
     if (instrument, option_type, side) != expected[:3] or not symbol.startswith(
         expected[3]
     ):
@@ -250,9 +358,9 @@ def validate_fixed_entry(prepared: Mapping[str, Any]) -> dict[str, Any]:
         if isinstance(raw_product, Mapping):
             order_limit_value = raw_product.get("position_size_limit")
     max_order_lots = _positive_int(order_limit_value, "contract order limit")
-    if max_order_lots < LIVE_SCORE_LOTS:
+    if max_order_lots < lots:
         raise LiveScoreExecutionError(
-            "selected contract cannot accept the fixed 1,000-lot order"
+            "selected contract cannot accept the requested order size"
         )
 
     normalized = {
@@ -302,7 +410,12 @@ def bounded_ioc_payload(
     max_spread_pct: float,
     max_quote_age_sec: float,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Build the one permitted fixed-size, slippage-bounded IOC payload."""
+    """Build the one permitted affordable-size, slippage-bounded IOC payload.
+
+    The touch quantity is recorded but does not cap the request.  An IOC limit
+    order may execute against every book level priced within the bounded limit,
+    not only the quantity resting at the best bid or ask.
+    """
 
     entry = validate_fixed_entry(prepared)
     if not isinstance(quote, Mapping):
@@ -336,15 +449,23 @@ def bounded_ioc_payload(
     side = entry["exchange_side"]
     depth_key = "ask_size" if side == "buy" else "bid_size"
     depth = _finite(quote.get(depth_key), f"fresh {depth_key}", positive=True)
-    if depth < LIVE_SCORE_LOTS:
-        raise LiveScoreExecutionError(
-            f"fresh {depth_key} cannot cover the fixed 1,000-lot IOC"
-        )
 
     slippage = _finite(max_slippage_pct, "maximum slippage")
     if slippage < 0:
         raise LiveScoreExecutionError("maximum slippage cannot be negative")
-    reference = entry["entry_price"]
+    # Contract selection can precede submission by several seconds.  Anchor
+    # the IOC guard to the fresh executable touch instead of the older
+    # selection mark; otherwise a valid, liquid order is guaranteed to miss
+    # whenever the option moves beyond the selection mark before submission.
+    # The configured slippage remains bounded against the price that can
+    # actually be traded now, and the caller risk-checks this same touch.
+    selection_reference = entry["entry_price"]
+    executable_reference = ask if side == "buy" else bid
+    reference = (
+        max(selection_reference, executable_reference)
+        if side == "buy"
+        else min(selection_reference, executable_reference)
+    )
     boundary = (
         reference * (1 + slippage / 100.0)
         if side == "buy"
@@ -381,7 +502,7 @@ def bounded_ioc_payload(
 
     payload = {
         "product_id": entry["product_id"],
-        "size": LIVE_SCORE_LOTS,
+        "size": entry["lots"],
         "side": side,
         "order_type": "limit_order",
         "limit_price": str(limit),
@@ -395,6 +516,8 @@ def bounded_ioc_payload(
         "ask": ask,
         "spread_pct": spread,
         "entry_depth": depth,
+        "selection_reference_price": selection_reference,
+        "executable_reference_price": executable_reference,
         "reference_price": reference,
         "slippage_boundary": boundary,
         "limit_price": limit,
@@ -442,16 +565,18 @@ def build_pending_entry_state(
         raise LiveScoreExecutionError(
             "entry payload does not use the deterministic transition identity"
         )
-    if int(payload.get("size") or 0) != LIVE_SCORE_LOTS:
-        raise LiveScoreExecutionError("entry payload is not exactly 1,000 lots")
+    requested_lots = entry["lots"]
+    if int(payload.get("size") or 0) != requested_lots:
+        raise LiveScoreExecutionError("entry payload size differs from the requested lots")
     if not isinstance(protection_config, Mapping):
         raise LiveScoreExecutionError("protection configuration is required")
-    for key in (
-        "tp_target_pnl",
-        "sl_target_pnl",
-        "tsl_arm_pnl",
-        "tsl_trail_pnl",
-    ):
+    required_policy_fields = ("tp_target_pnl", "sl_target_pnl", "tsl_pct")
+    if protection_config.get("protection_mode") != PREMIUM_PERCENT_PROTECTION_MODE:
+        # A journaled pre-v2 entry must remain recoverable after deployment.
+        required_policy_fields = (
+            "tp_target_pnl", "sl_target_pnl", "tsl_arm_pnl", "tsl_trail_pnl",
+        )
+    for key in required_policy_fields:
         _finite(protection_config.get(key), key, positive=True)
 
     decision = signal.get("decision")
@@ -461,20 +586,15 @@ def build_pending_entry_state(
     if not signal_key:
         raise LiveScoreExecutionError("signal_key is required")
     score = _finite(signal.get("score"), "direction score")
-    direction = (
-        "up"
-        if entry["zone"] == "CE_2_ITM"
-        else "down"
-        if entry["zone"] == "PE_3_ITM"
-        else "neutral"
-    )
-    policy_decision = (
-        "BUY_CE"
-        if entry["zone"] == "CE_2_ITM"
-        else "BUY_PE"
-        if entry["zone"] == "PE_3_ITM"
-        else "SELL_MOVE"
-    )
+    entry_policy = ZONE_EXECUTION.get(entry["zone"])
+    if entry_policy is None:
+        # Never guess. The previous `else` branch labelled any unrecognised
+        # zone neutral/SELL_MOVE, so a long put would have been recorded as a
+        # short straddle in the durable order audit trail.
+        raise LiveScoreExecutionError(
+            f"cannot label an order for unsupported zone {entry['zone']!r}")
+    direction = entry_policy.direction
+    policy_decision = entry_policy.policy_decision
     proposed_risk = None
     if isinstance(risk_snapshot, Mapping):
         for key in ("proposed_risk_usd", "risk_at_entry_usd"):
@@ -496,8 +616,15 @@ def build_pending_entry_state(
         "strike": entry["strike"],
         "settlement": entry.get("settlement") or entry.get("expiry"),
         "contract_value": entry["contract_value"],
-        "lots": LIVE_SCORE_LOTS,
-        "requested_lots": LIVE_SCORE_LOTS,
+        "lots": requested_lots,
+        "requested_lots": requested_lots,
+        "configured_lots": entry.get("configured_lots", requested_lots),
+        "affordability_limited": bool(
+            entry.get("affordability_limited")
+        ),
+        "live_affordability": copy.deepcopy(
+            entry.get("live_affordability")
+        ),
         "owned_entry_lots": 0,
         "protection_lots": 0,
         "entry_mark": None,
@@ -548,7 +675,7 @@ def build_pending_entry_state(
         },
         "pending_entry_client_order_id": client_id,
         "pending_entry_order_id": None,
-        "pending_entry_requested_lots": LIVE_SCORE_LOTS,
+        "pending_entry_requested_lots": requested_lots,
         "pending_entry_side": entry["exchange_side"],
         "pending_entry_payload": copy.deepcopy(dict(payload)),
         "pending_entry_submission_state": "prepared",
@@ -557,9 +684,9 @@ def build_pending_entry_state(
         "pending_entry_started_at_utc": _iso(now),
         "execution_snapshot": {
             "kind": "bounded_ioc_limit",
-            "requested": LIVE_SCORE_LOTS,
+            "requested": requested_lots,
             "filled": 0,
-            "unfilled": LIVE_SCORE_LOTS,
+            "unfilled": requested_lots,
             "client_order_id": client_id,
             "order_id": None,
             "limit_price": payload.get("limit_price"),
@@ -583,6 +710,7 @@ def _validate_order_identity(
     client_order_id: str,
     side: str,
     expected_limit_price: Any,
+    expected_lots: int = LIVE_SCORE_LOTS,
 ) -> dict[str, Any]:
     if not isinstance(order, Mapping) or not order.get("id"):
         raise LiveScoreExecutionError(
@@ -613,9 +741,9 @@ def _validate_order_identity(
     if tif and tif != "ioc":
         raise LiveScoreExecutionError("entry order is not IOC")
     if result.get("size") not in (None, ""):
-        if _positive_int(result.get("size"), "exchange order size") != LIVE_SCORE_LOTS:
+        if _positive_int(result.get("size"), "exchange order size") != expected_lots:
             raise LiveScoreExecutionError(
-                "exchange order size differs from fixed 1,000 lots"
+                "exchange order size differs from the requested lots"
             )
     _validate_returned_limit_price(result, expected_limit_price)
     return result
@@ -646,6 +774,7 @@ def _validate_persisted_entry_payload(
     product_id: int,
     client_order_id: str,
     side: str,
+    expected_lots: int = LIVE_SCORE_LOTS,
 ) -> dict[str, Any]:
     """Verify the immutable order intent without needing a current quote."""
 
@@ -665,9 +794,9 @@ def _validate_persisted_entry_payload(
         raise LiveScoreExecutionError(
             "pending LIVE entry payload has a different product"
         )
-    if _positive_int(payload.get("size"), "persisted order size") != LIVE_SCORE_LOTS:
+    if _positive_int(payload.get("size"), "persisted order size") != expected_lots:
         raise LiveScoreExecutionError(
-            "pending LIVE entry payload is not exactly 1,000 lots"
+            "pending LIVE entry payload differs from the requested lots"
         )
     if str(payload.get("side") or "").strip().lower() != side:
         raise LiveScoreExecutionError(
@@ -750,6 +879,7 @@ def _wait_terminal(
     client_order_id: str,
     side: str,
     expected_limit_price: Any,
+    expected_lots: int,
     lookup_order: Callable[[Any, str, int], Any],
     timeout_sec: float,
     poll_sec: float,
@@ -766,7 +896,7 @@ def _wait_terminal(
     deadline = monotonic() + timeout
     lookup_conclusive = True
     while True:
-        filled = terminal_filled_lots(latest)
+        filled = terminal_filled_lots(latest, requested=expected_lots)
         if filled is not None:
             fill_price_valid = filled <= 0
             if filled > 0:
@@ -798,6 +928,7 @@ def _wait_terminal(
                 client_order_id=client_order_id,
                 side=side,
                 expected_limit_price=expected_limit_price,
+                expected_lots=expected_lots,
             )
         elif not lookup.conclusive:
             return latest, None, False
@@ -845,6 +976,12 @@ def _open_state_from_fill(
     position: Mapping[str, Any],
 ) -> dict[str, Any]:
     product_id = int(pending["product_id"])
+    requested_lots = _positive_int(
+        pending.get("pending_entry_requested_lots")
+        or pending.get("requested_lots")
+        or pending.get("lots"),
+        "requested lots",
+    )
     expected = filled if pending.get("pending_entry_side") == "buy" else -filled
     actual = _position_size(position, product_id)
     if actual != expected:
@@ -901,11 +1038,33 @@ def _open_state_from_fill(
     entered, entry_time_source = _entry_timestamp(pending, order)
     fee, fee_source = _commission(order)
     state = copy.deepcopy(dict(pending))
+    configured_protection = state.get("protection_config")
+    if (
+        isinstance(configured_protection, Mapping)
+        and configured_protection.get("protection_mode")
+        == PREMIUM_PERCENT_PROTECTION_MODE
+    ):
+        # The pending state uses the selected quote for the pre-POST risk
+        # check.  Once filled, protection must use the real exchange basis
+        # and actual partial-fill quantity instead.
+        configured_protection = premium_percent_protection_policy(
+            exchange_entry,
+            state["contract_value"],
+            filled,
+            poll_secs=configured_protection.get("poll_secs", 30),
+            tp_percent=configured_protection.get(
+                "tp_percent_of_entry_premium", 100
+            ),
+            sl_percent=configured_protection.get(
+                "sl_percent_of_entry_premium", 50
+            ),
+            tsl_trail_percent=configured_protection.get("tsl_pct", 25),
+        )
     state.update(
         {
             "status": "OPEN",
             "lots": filled,
-            "requested_lots": LIVE_SCORE_LOTS,
+            "requested_lots": requested_lots,
             "owned_entry_lots": filled,
             "original_owned_entry_lots": filled,
             "protection_lots": filled,
@@ -926,6 +1085,11 @@ def _open_state_from_fill(
             "original_bot_entry_fee_usd": fee,
             "original_bot_entry_fee_source": fee_source,
             "pnl_includes_fees": False,
+            "protection_config": configured_protection,
+            "protection_risk_at_entry_usd": (
+                configured_protection.get("sl_target_pnl")
+                if isinstance(configured_protection, Mapping) else None
+            ),
             "order_id": order.get("id"),
             "order_ids": [order.get("id")],
             "client_order_id": pending.get("pending_entry_client_order_id"),
@@ -944,10 +1108,10 @@ def _open_state_from_fill(
             "continuity_status": "awaiting_monitor_verification",
             "execution_snapshot": {
                 **copy.deepcopy(dict(state.get("execution_snapshot") or {})),
-                "requested": LIVE_SCORE_LOTS,
+                "requested": requested_lots,
                 "filled": filled,
-                "unfilled": LIVE_SCORE_LOTS - filled,
-                "partial_fill": filled < LIVE_SCORE_LOTS,
+                "unfilled": requested_lots - filled,
+                "partial_fill": filled < requested_lots,
                 "order_submitted": True,
                 "exchange_api_called": True,
                 "order_id": order.get("id"),
@@ -1116,6 +1280,7 @@ def execute_or_recover_entry(
             product_id=entry["product_id"],
             client_order_id=client_id,
             side=entry["exchange_side"],
+            expected_lots=entry["lots"],
         )
         durable_limit_price = persisted_payload["limit_price"]
         identity = (
@@ -1123,7 +1288,7 @@ def execute_or_recover_entry(
             == client_id
             and int(existing.get("product_id") or 0) == entry["product_id"]
             and int(existing.get("pending_entry_requested_lots") or 0)
-            == LIVE_SCORE_LOTS
+            == entry["lots"]
             and str(existing.get("pending_entry_side") or "")
             == entry["exchange_side"]
         )
@@ -1203,6 +1368,7 @@ def execute_or_recover_entry(
                     client_order_id=client_id,
                     side=entry["exchange_side"],
                     expected_limit_price=durable_limit_price,
+                    expected_lots=entry["lots"],
                 )
             else:
                 # Once ``submitting`` is durable, even a conclusive immediate
@@ -1307,7 +1473,16 @@ def execute_or_recover_entry(
                     "product_id": entry["product_id"],
                     "symbol": entry["symbol"],
                     "side": entry["exchange_side"],
-                    "size": LIVE_SCORE_LOTS,
+                    "size": entry["lots"],
+                    "configured_size": entry.get(
+                        "configured_lots", entry["lots"]
+                    ),
+                    "affordability_limited": bool(
+                        entry.get("affordability_limited")
+                    ),
+                    "affordability": copy.deepcopy(
+                        entry.get("live_affordability")
+                    ),
                     "limit_price": payload["limit_price"],
                     "time_in_force": "ioc",
                 },
@@ -1356,6 +1531,7 @@ def execute_or_recover_entry(
                 client_order_id=client_id,
                 side=entry["exchange_side"],
                 expected_limit_price=durable_limit_price,
+                expected_lots=entry["lots"],
             )
         else:
             if isinstance(response, tuple) and len(response) >= 2:
@@ -1394,6 +1570,7 @@ def execute_or_recover_entry(
                         client_order_id=client_id,
                         side=entry["exchange_side"],
                         expected_limit_price=durable_limit_price,
+                        expected_lots=entry["lots"],
                     )
                 else:
                     rejection = (
@@ -1545,6 +1722,7 @@ def execute_or_recover_entry(
                     client_order_id=client_id,
                     side=entry["exchange_side"],
                     expected_limit_price=durable_limit_price,
+                    expected_lots=entry["lots"],
                 )
             except LiveScoreExecutionError:
                 # A response that omits/garbles the client id is not accepted
@@ -1587,6 +1765,7 @@ def execute_or_recover_entry(
                     client_order_id=client_id,
                     side=entry["exchange_side"],
                     expected_limit_price=durable_limit_price,
+                    expected_lots=entry["lots"],
                 )
 
         state.update(
@@ -1608,6 +1787,7 @@ def execute_or_recover_entry(
         client_order_id=client_id,
         side=entry["exchange_side"],
         expected_limit_price=durable_limit_price,
+        expected_lots=entry["lots"],
         lookup_order=lookup_order,
         timeout_sec=terminal_timeout_sec,
         poll_sec=terminal_poll_sec,
@@ -1825,7 +2005,7 @@ def execute_or_recover_entry(
             "order_submitted": submitted_this_call,
             "consume_signal": True,
             "filled_lots": filled,
-            "partial_fill": filled < LIVE_SCORE_LOTS,
+            "partial_fill": filled < entry["lots"],
             "protection_verified": bool(protected),
             "error": error,
         }
@@ -1841,7 +2021,7 @@ def execute_or_recover_entry(
             "order_submitted": submitted_this_call,
             "consume_signal": True,
             "filled_lots": filled,
-            "partial_fill": filled < LIVE_SCORE_LOTS,
+            "partial_fill": filled < entry["lots"],
             "protection_verified": bool(protected),
             "closed_during_protection_setup": True,
         }
@@ -1868,9 +2048,9 @@ def execute_or_recover_entry(
                     "client_order_id": client_id,
                     "order_id": order.get("id"),
                     "symbol": entry["symbol"],
-                    "requested_lots": LIVE_SCORE_LOTS,
+                    "requested_lots": entry["lots"],
                     "filled_lots": filled,
-                    "partial_fill": filled < LIVE_SCORE_LOTS,
+                    "partial_fill": filled < entry["lots"],
                     "protection_verified": True,
                 },
             )
@@ -1882,7 +2062,7 @@ def execute_or_recover_entry(
             "order_submitted": submitted_this_call,
             "consume_signal": True,
             "filled_lots": filled,
-            "partial_fill": filled < LIVE_SCORE_LOTS,
+            "partial_fill": filled < entry["lots"],
             "protection_verified": True,
         }
 
@@ -1920,7 +2100,7 @@ def execute_or_recover_entry(
                 "order_submitted": submitted_this_call,
                 "consume_signal": True,
                 "filled_lots": filled,
-                "partial_fill": filled < LIVE_SCORE_LOTS,
+                "partial_fill": filled < entry["lots"],
                 "protection_verified": False,
                 "flat_verified": True,
             }
@@ -1939,7 +2119,7 @@ def execute_or_recover_entry(
             "order_submitted": submitted_this_call,
             "consume_signal": True,
             "filled_lots": filled,
-            "partial_fill": filled < LIVE_SCORE_LOTS,
+            "partial_fill": filled < entry["lots"],
             "protection_verified": False,
             "error": str(exc),
         }
@@ -1960,7 +2140,7 @@ def execute_or_recover_entry(
             "order_submitted": submitted_this_call,
             "consume_signal": True,
             "filled_lots": filled,
-            "partial_fill": filled < LIVE_SCORE_LOTS,
+            "partial_fill": filled < entry["lots"],
             "protection_verified": False,
             "flat_verified": True,
         }
@@ -1980,7 +2160,7 @@ def execute_or_recover_entry(
             "order_submitted": submitted_this_call,
             "consume_signal": True,
             "filled_lots": filled,
-            "partial_fill": filled < LIVE_SCORE_LOTS,
+            "partial_fill": filled < entry["lots"],
             "protection_verified": False,
             "error": "emergency flatten is not verified flat",
         }
@@ -1998,7 +2178,7 @@ def execute_or_recover_entry(
         "order_submitted": submitted_this_call,
         "consume_signal": True,
         "filled_lots": filled,
-        "partial_fill": filled < LIVE_SCORE_LOTS,
+        "partial_fill": filled < entry["lots"],
         "protection_verified": False,
         "flat_verified": False,
         "error": (
@@ -2011,10 +2191,12 @@ def execute_or_recover_entry(
 __all__ = [
     "ExactOrderLookup",
     "LIVE_SCORE_LOTS",
+    "PREMIUM_PERCENT_PROTECTION_MODE",
     "LiveScoreExecutionError",
     "bounded_ioc_payload",
     "build_pending_entry_state",
     "execute_or_recover_entry",
+    "premium_percent_protection_policy",
     "score_close_client_id",
     "score_entry_client_id",
     "switch_entry_gate",

@@ -8,6 +8,8 @@ import pytest
 from trend_score_auto import (
     AUTO_TRADE_LOTS,
     CE_2_ITM,
+    HOLD,
+    PE_2_ITM,
     PE_3_ITM,
     SHORT_MOVE,
     TrendScoreAutoInputError,
@@ -16,6 +18,7 @@ from trend_score_auto import (
     score_zone,
     select_directional_option,
     select_move_contract,
+    short_move_adx_exit_required,
 )
 
 
@@ -78,17 +81,32 @@ def _move_product(expiry, strike, *, product_id=20_001, **changes):
 @pytest.mark.parametrize(
     ("score", "expected"),
     [
-        (-100, PE_3_ITM),
-        (-25, PE_3_ITM),
-        (-24.999, SHORT_MOVE),
+        # Directional only beyond |40|; exact +/-40 and every intermediate
+        # score are HOLD. Only +/-30 is a SHORT_MOVE candidate.
+        (-100, PE_2_ITM),
+        (-40, HOLD),
+        (-39.999, HOLD),
+        (-30.001, HOLD),
+        (-30, SHORT_MOVE),
         (0, SHORT_MOVE),
-        (24.999, SHORT_MOVE),
-        (25, CE_2_ITM),
+        (30, SHORT_MOVE),
+        (30.001, HOLD),
+        (39.999, HOLD),
+        (40, HOLD),
         (100, CE_2_ITM),
     ],
 )
-def test_score_zone_uses_inclusive_directional_boundaries(score, expected):
+def test_score_zone_uses_strict_directional_boundaries(score, expected):
     assert score_zone(score) == expected
+
+
+def test_score_zone_delegates_to_the_engine_so_thresholds_cannot_drift():
+    """The bands are defined once, in btc_trend_engine.signals.zones. Two
+    copies of a trading threshold is how they end up disagreeing."""
+    from btc_trend_engine.signals import zones
+
+    for score in (-100, -40, -35, -30, 0, 30, 35, 40, 100):
+        assert score_zone(score) == zones.zone_for_score(float(score))
 
 
 @pytest.mark.parametrize("score", [None, True, float("nan"), float("inf"), -100.01, 100.01])
@@ -203,6 +221,105 @@ def test_sub_ninety_minute_expiry_is_skipped_without_maximum_dte():
     assert selected["expiry"] == distant.isoformat().replace("+00:00", "Z")
 
 
+def test_directional_today_only_never_falls_forward_to_a_distant_expiry():
+    # today_only=True restricts the ladder to the single *nearest* listed
+    # expiry. The nearest one here (soon) is still too close to settlement
+    # for the default 90-minute floor, and today_only forbids falling back
+    # to the distant one as a substitute, so nothing is selected.
+    soon = NOW + timedelta(minutes=89, seconds=59)
+    distant = NOW + timedelta(days=30)
+    products = (
+        _products(soon, [64200, 64400, 64600, 64800, 65000, 65200])
+        + _products(distant, [64200, 64400, 64600, 64800, 65000, 65200])
+    )
+    distant_target = next(
+        row for row in products
+        if row["symbol"].startswith("C-BTC-64400-")
+        and row["settlement_time"] == distant.isoformat()
+    )
+    assert select_directional_option(
+        products, [_executable(distant_target)], spot=64850, zone=CE_2_ITM,
+        now=NOW, today_only=True,
+    ) is None
+
+
+@pytest.mark.parametrize("zone", [CE_2_ITM, PE_2_ITM])
+def test_directional_today_only_accepts_the_sole_listing_even_if_dated_tomorrow(
+    zone,
+):
+    # Regression test for a real production incident: Delta delists each
+    # daily contract at its own settlement, so for the rest of that IST
+    # calendar day the earliest -- and only -- listed contract is dated
+    # "tomorrow". today_only must mean "nearest listed", not "settles on
+    # today's calendar date", or every selection fails closed daily from
+    # 17:30 IST to midnight IST.
+    tomorrow = NOW + timedelta(days=1)
+    products = _products(
+        tomorrow, [64200, 64400, 64600, 64800, 65000, 65200, 65400]
+    )
+    prefix = "C-BTC-64400-" if zone == CE_2_ITM else "P-BTC-65200-"
+    target = next(row for row in products if row["symbol"].startswith(prefix))
+    selected = select_directional_option(
+        products, [_executable(target)], spot=64850, zone=zone, now=NOW,
+        today_only=True,
+    )
+    assert selected is not None
+    assert selected["expiry"] == tomorrow.isoformat().replace("+00:00", "Z")
+
+
+def test_directional_zero_floor_still_selects_todays_near_expiry():
+    # Mirrors the Cockpit call shape: today_only=True (never roll to
+    # tomorrow) but min_time_to_expiry_seconds=0 (no liquidity floor) --
+    # a contract one minute from settlement is still selected, and a
+    # same-universe tomorrow listing is still correctly ignored in favour
+    # of it.
+    soon = NOW + timedelta(minutes=1)
+    tomorrow = NOW + timedelta(days=1)
+    products = (
+        _products(soon, [64200, 64400, 64600, 64800, 65000, 65200])
+        + _products(tomorrow, [64200, 64400, 64600, 64800, 65000, 65200])
+    )
+    target = next(
+        row for row in products
+        if row["symbol"].startswith("C-BTC-64400-")
+        and row["settlement_time"] == soon.isoformat()
+    )
+    selected = select_directional_option(
+        products, [_executable(target)], spot=64850, zone=CE_2_ITM, now=NOW,
+        today_only=True, min_time_to_expiry_seconds=0,
+    )
+    assert selected is not None
+    assert selected["expiry"] == soon.isoformat().replace("+00:00", "Z")
+
+
+@pytest.mark.parametrize(
+    ("zone", "prefix", "option_type"),
+    (
+        (CE_2_ITM, "C-BTC-64800-", "CE"),
+        (PE_2_ITM, "P-BTC-64800-", "PE"),
+    ),
+)
+def test_manual_zero_step_override_selects_atm_without_changing_zone_policy(
+    zone, prefix, option_type,
+):
+    expiry = NOW + timedelta(hours=6)
+    products = _products(
+        expiry, [64200, 64400, 64600, 64800, 65000, 65200],
+    )
+    target = next(row for row in products if row["symbol"].startswith(prefix))
+
+    selected = select_directional_option(
+        products, [_executable(target)], spot=64850, zone=zone, now=NOW,
+        manual_itm_steps=0,
+    )
+
+    assert selected is not None
+    assert selected["strike"] == 64800
+    assert selected["atm_strike"] == 64800
+    assert selected["itm_steps"] == 0
+    assert selected["option_type"] == option_type
+
+
 def test_missing_exact_target_does_not_substitute_a_strike_or_later_expiry():
     first = NOW + timedelta(hours=6)
     later = NOW + timedelta(days=1)
@@ -283,14 +400,12 @@ def test_move_uses_earliest_eligible_expiry_and_lower_atm_tie():
     assert selected["lots"] == 1000
 
 
-def test_move_accepts_exactly_ninety_minutes_without_a_session_window():
+def test_move_requires_more_than_ninety_minutes_without_a_session_window():
     expiry = NOW + timedelta(minutes=90)
     product = _move_product(expiry, 64800)
-    # 10:00 UTC is intentionally neither legacy scheduled entry time. The
-    # selector has no slot or time-window input and remains eligible.
-    selected = select_move_contract([product], spot=64820, now=NOW)
-    assert selected is not None
-    assert selected["time_to_expiry_hours"] == 1.5
+    # Exactly 90 minutes is intentionally excluded; there is no legacy
+    # morning/evening window involved in this decision.
+    assert select_move_contract([product], spot=64820, now=NOW) is None
 
 
 def test_move_skips_sub_ninety_minutes_and_has_no_maximum_dte():
@@ -303,6 +418,51 @@ def test_move_skips_sub_ninety_minutes_and_has_no_maximum_dte():
     selected = select_move_contract([soon, distant], spot=64900, now=NOW)
     assert selected["symbol"] == distant["symbol"]
     assert selected["time_to_expiry_hours"] == 30 * 24
+
+
+def test_move_today_only_never_falls_forward_to_a_distant_expiry():
+    # today_only=True restricts the ladder to the single *nearest* listed
+    # expiry. The nearest one here (soon) is still too close for the
+    # default 90-minute floor, and today_only forbids falling back to the
+    # distant one as a substitute, so nothing is selected.
+    soon = _move_product(
+        NOW + timedelta(minutes=89, seconds=59), 64800, product_id=20_001,
+    )
+    distant = _move_product(
+        NOW + timedelta(days=30), 65000, product_id=20_002,
+    )
+    assert select_move_contract(
+        [soon, distant], spot=64900, now=NOW, today_only=True,
+    ) is None
+
+
+def test_move_today_only_accepts_the_sole_listing_even_if_dated_tomorrow():
+    # Regression test for a real production incident: see the matching
+    # directional test above for why today_only cannot mean "settles on
+    # today's calendar date".
+    tomorrow = _move_product(
+        NOW + timedelta(days=1), 65000, product_id=20_002,
+    )
+    selected = select_move_contract(
+        [tomorrow], spot=64900, now=NOW, today_only=True,
+    )
+    assert selected is not None
+    assert selected["symbol"] == tomorrow["symbol"]
+
+
+def test_move_zero_floor_still_selects_todays_near_expiry():
+    soon = _move_product(
+        NOW + timedelta(minutes=1), 64800, product_id=20_001,
+    )
+    tomorrow = _move_product(
+        NOW + timedelta(days=1), 65000, product_id=20_002,
+    )
+    selected = select_move_contract(
+        [soon, tomorrow], spot=64900, now=NOW,
+        today_only=True, min_time_to_expiry_seconds=0,
+    )
+    assert selected is not None
+    assert selected["symbol"] == soon["symbol"]
 
 
 @pytest.mark.parametrize(
@@ -378,12 +538,98 @@ def test_transition_closes_then_opens_new_zone_on_same_signal():
         "trend_score_zone": SHORT_MOVE,
     }
     plan = plan_score_transition(
-        score=-40, signal_key="signal-3", owned_positions=[move]
+        score=-40.1, signal_key="signal-3", owned_positions=[move]
     )
     assert plan["action"] == "CLOSE_THEN_OPEN"
     assert plan["current_zone"] == SHORT_MOVE
-    assert plan["open_zone"] == PE_3_ITM
+    assert plan["open_zone"] == PE_2_ITM
     assert plan["close_position"] == move
+
+
+@pytest.mark.parametrize(
+    ("adx", "expected"),
+    ((24.9, False), (25.0, False), (25.1, True), (40.0, True), (None, False), ("bad", False)),
+)
+def test_short_move_adx_exit_uses_the_complementary_calm_boundary(adx, expected):
+    assert short_move_adx_exit_required(adx) is expected
+
+
+def test_non_calm_committed_adx_closes_only_an_open_short_move():
+    move = {
+        "symbol": "MV-BTC-64800-230726",
+        "side": "short",
+        "trend_score_zone": SHORT_MOVE,
+    }
+    plan = plan_score_transition(
+        score=0,
+        signal_key="signal-adx-exit",
+        owned_positions=[move],
+        short_move_adx=25.1,
+    )
+    assert plan["action"] == "CLOSE"
+    assert plan["reason"] == "SHORT_MOVE_ADX_NO_LONGER_CALM"
+    assert plan["close_position"] == move
+    assert plan["open_zone"] is None
+
+
+@pytest.mark.parametrize("score", [30.1, 40.0, -30.1, -40.0])
+def test_score_leaving_neutral_range_into_hold_keeps_short_move_open(score):
+    """HOLD means the score has no current opinion, not that SHORT_MOVE was
+    invalidated -- only a real zone change (to CE_2_ITM/PE_2_ITM) closes it."""
+    move = {
+        "symbol": "MV-BTC-64800-230726",
+        "side": "short",
+        "trend_score_zone": SHORT_MOVE,
+    }
+    plan = plan_score_transition(
+        score=score,
+        signal_key=f"signal-score-exit-{score}",
+        owned_positions=[move],
+        short_move_adx=20.0,
+    )
+    assert plan["action"] == "NOOP"
+    assert plan["reason"] == "SCORE_IN_HOLD_BAND"
+    assert plan["target_zone"] == HOLD
+    assert plan["close_position"] is None
+    assert plan["open_zone"] is None
+
+
+@pytest.mark.parametrize("score", [40.1, 80.0, -40.1, -80.0])
+@pytest.mark.parametrize("adx", [None, 10.0, 24.9, 25.0, 60.0])
+def test_directional_transition_is_independent_of_adx(score, adx):
+    plan = plan_score_transition(
+        score=score,
+        signal_key=f"signal-directional-{score}-{adx}",
+        owned_positions=[],
+        short_move_adx=adx,
+    )
+    assert plan["action"] == "OPEN"
+    assert plan["open_zone"] == (CE_2_ITM if score > 0 else PE_2_ITM)
+
+
+def test_non_calm_short_move_signal_cannot_close_or_open_other_positions():
+    call = {
+        "symbol": "C-BTC-64400-230726",
+        "side": "long",
+        "trend_score_zone": CE_2_ITM,
+    }
+    held = plan_score_transition(
+        score=0,
+        signal_key="signal-adx-ce",
+        owned_positions=[call],
+        short_move_adx=45.0,
+    )
+    flat = plan_score_transition(
+        score=0,
+        signal_key="signal-adx-flat",
+        owned_positions=[],
+        short_move_adx=45.0,
+    )
+    assert held["action"] == "NOOP"
+    assert held["close_position"] is None
+    assert held["open_zone"] is None
+    assert flat["action"] == "NOOP"
+    assert flat["open_zone"] is None
 
 
 def test_transition_fails_closed_for_multiple_or_unrecognized_positions():
@@ -401,3 +647,126 @@ def test_transition_fails_closed_for_multiple_or_unrecognized_positions():
             signal_key="signal-4",
             owned_positions=[{"symbol": "UNKNOWN", "side": "long"}],
         )
+
+
+def test_pe_2_itm_selects_two_steps_above_atm():
+    """2026-07-26 spec: puts are 2-step ITM, symmetric with calls. The legacy
+    PE_3_ITM path stays alive only so an old position remains closable."""
+    expiry = NOW + timedelta(hours=6)
+    products = _products(
+        expiry, [64200, 64400, 64600, 64800, 65000, 65200, 65400, 65600]
+    )
+    target = next(row for row in products if row["symbol"].startswith("P-BTC-65200-"))
+    selected = select_directional_option(
+        products, [_executable(target)], spot=64850, zone=PE_2_ITM, now=NOW
+    )
+    assert selected["atm_strike"] == 64800
+    assert selected["strike"] == 65200
+    assert selected["itm_steps"] == 2
+
+
+def test_call_and_put_step_depth_are_now_symmetric():
+    expiry = NOW + timedelta(hours=6)
+    strikes = [64200, 64400, 64600, 64800, 65000, 65200, 65400]
+    products = _products(expiry, strikes)
+    call = next(r for r in products if r["symbol"].startswith("C-BTC-64400-"))
+    put = next(r for r in products if r["symbol"].startswith("P-BTC-65200-"))
+    ce = select_directional_option(products, [_executable(call)], spot=64850,
+                                   zone=CE_2_ITM, now=NOW)
+    pe = select_directional_option(products, [_executable(put)], spot=64850,
+                                   zone=PE_2_ITM, now=NOW)
+    assert ce["itm_steps"] == pe["itm_steps"] == 2
+    # Equidistant from ATM, in opposite directions.
+    assert ce["atm_strike"] - ce["strike"] == pe["strike"] - pe["atm_strike"]
+
+
+def test_hold_band_keeps_an_open_position_instead_of_closing_it():
+    """The hold band means 'no new action, keep what is open'.
+
+    Without an explicit guard an open position falls through to
+    CLOSE_THEN_OPEN (current != HOLD), and that path CLOSES FIRST -- so a
+    score drifting into 30..40 would flatten the position and only then fail
+    to open a 'HOLD' contract. Net effect: the hysteresis band would cause
+    the exact churn it exists to prevent, plus a real exit.
+    """
+    position = {"trend_score_zone": CE_2_ITM, "symbol": "C-BTC-64000-260726",
+                "side": "long"}
+    plan = plan_score_transition(
+        score=35, signal_key="sig-hold", owned_positions=[position])
+    assert plan["action"] == "NOOP"
+    assert plan["reason"] == "SCORE_IN_HOLD_BAND"
+    assert plan["close_position"] is None
+    assert plan["open_zone"] is None
+    # The signal is NOT consumed: the same candle must stay actionable if the
+    # score leaves the band on a later evaluation.
+    assert plan["consume_signal"] is False
+
+
+def test_hold_band_opens_nothing_when_flat():
+    plan = plan_score_transition(
+        score=-35, signal_key="sig-hold-flat", owned_positions=[])
+    assert plan["action"] == "NOOP"
+    assert plan["open_zone"] is None
+
+
+def test_opposite_hold_band_keeps_directional_position_open():
+    """HOLD is never a zone change, even on the opposite side of the band --
+    only a real transition to another actionable zone closes a position."""
+    position = {"trend_score_zone": CE_2_ITM, "symbol": "C-BTC-64000-260726",
+                "side": "long"}
+    plan = plan_score_transition(
+        score=-35, signal_key="sig-directional-invalidation",
+        owned_positions=[position])
+    assert plan["action"] == "NOOP"
+    assert plan["reason"] == "SCORE_IN_HOLD_BAND"
+    assert plan["current_zone"] == CE_2_ITM
+    assert plan["target_zone"] == HOLD
+    assert plan["close_position"] is None
+    assert plan["open_zone"] is None
+    assert plan["consume_signal"] is False
+
+
+def test_a_persisted_pe_2_itm_zone_is_not_misread_as_the_legacy_pe_3():
+    """Both PE zones share the P-BTC- symbol prefix, so symbol inference
+    alone cannot tell them apart. If a PE_2_ITM position were read back as
+    PE_3_ITM the planner would see a zone change on the very next candle and
+    close/reopen the same put every 5 minutes. The persisted
+    trend_score_zone (written by trend_score_live_execution) prevents that.
+    """
+    from trend_score_auto import position_score_zone
+
+    live = {"trend_score_zone": PE_2_ITM, "symbol": "P-BTC-65200-260726",
+            "side": "long"}
+    assert position_score_zone(live) == PE_2_ITM
+
+    plan = plan_score_transition(score=-60, signal_key="k", owned_positions=[live])
+    assert plan["action"] == "HOLD"          # already matches, no churn
+    assert plan["close_position"] is None
+
+    # A position predating the zone field falls back to the symbol, and
+    # PE_3_ITM is the right guess there -- it was opened under that policy.
+    legacy = {"symbol": "P-BTC-65400-260726", "side": "long"}
+    assert position_score_zone(legacy) == PE_3_ITM
+
+
+def test_long_move_is_a_registered_zone_never_produced_by_score_bands():
+    """LONG_MOVE exists only for the Cockpit's manual Buy MOVE trade.
+
+    It must round-trip through position_score_zone (both persisted and via
+    symbol/side fallback) like every other owned-position zone, but
+    score_zone() -- the automated score-band policy -- must never produce it;
+    the automated controller has no long-MOVE action.
+    """
+    from trend_score_auto import LONG_MOVE, SCORE_ZONES, position_score_zone
+
+    assert LONG_MOVE in SCORE_ZONES
+
+    owned = {"trend_score_zone": LONG_MOVE, "symbol": "MV-BTC-64400-050826",
+             "side": "long"}
+    assert position_score_zone(owned) == LONG_MOVE
+
+    fallback = {"symbol": "MV-BTC-64400-050826", "side": "long"}
+    assert position_score_zone(fallback) == LONG_MOVE
+
+    for score in (-100, -60, -30, -1, 0, 1, 30, 60, 100):
+        assert score_zone(score) != LONG_MOVE

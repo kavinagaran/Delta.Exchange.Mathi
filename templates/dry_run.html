@@ -1,15 +1,15 @@
 {% extends "base.html" %}
 
 {% block head %}
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script src="/static/js/vendor/chart.umd.min.js?v={{ asset_v('js/vendor/chart.umd.min.js') }}"></script>
 {% endblock %}
 
 {% block content %}
 <section class="dry-run-hero" aria-labelledby="dry-run-title">
   <div class="dry-run-hero-copy">
-    <span class="strategy-kicker">ISOLATED SIMULATION WORKSPACE</span>
-    <h2 id="dry-run-title">Dry Run Dashboard</h2>
-    <p>Trend Engine-driven MOVE and CE/PE simulations are collected here, completely separate from real positions and real P&amp;L.</p>
+    <span class="strategy-kicker">DRY RUN TRADING SIMULATION WORKSPACE</span>
+    <h2 id="dry-run-title">Dry Run Trading</h2>
+    <p>The Trend Engine selects one dry-run trade at a time for this user: a 2-step ITM Call, 2-step ITM Put, or ATM MOVE straddle. All dry-run activity remains separate from real positions and P&amp;L.</p>
   </div>
   <div class="dry-run-hero-actions">
     <span class="pill idle" id="dry-page-mode" role="status" aria-live="polite">
@@ -23,49 +23,46 @@
   <span class="dry-separation-icon" aria-hidden="true">◇</span>
   <div>
     <strong>Simulation only — no exchange orders are placed</strong>
-    <p>Values are paper outcomes calculated from market prices. They never affect real balances, positions, risk totals, or Trades &amp; P&amp;L.</p>
+    <p>Values are dry-run outcomes calculated from market prices. They never affect real balances, positions, risk totals, or Trades &amp; P&amp;L.</p>
   </div>
 </div>
 
-<div class="section-title">
-  <span>Simulated strategies</span>
-  <small>Trend Engine entries only · MOVE positions are grouped by actual IST trade time</small>
-</div>
-
-<div class="dry-slot-grid">
-  <article class="card dry-slot-card">
-    <div class="card-hd slot-hd">
-      <span aria-hidden="true">🌅</span>
-      <span>Morning MOVE</span>
-    </div>
-    <div class="card-bd dry-slot-body" id="dry-slot-morning" aria-live="polite">
-      <div class="no-pos">Loading simulation…</div>
-    </div>
-  </article>
-
-  <article class="card dry-slot-card">
-    <div class="card-hd slot-hd">
-      <span aria-hidden="true">🌇</span>
-      <span>Evening MOVE</span>
-    </div>
-    <div class="card-bd dry-slot-body" id="dry-slot-evening" aria-live="polite">
-      <div class="no-pos">Loading simulation…</div>
-    </div>
-  </article>
-
-  <article class="card dry-slot-card">
-    <div class="card-hd slot-hd">
-      <span aria-hidden="true">📈</span>
-      <span>Trend-based position (CE / PE)</span>
-    </div>
-    <div class="card-bd dry-slot-body" id="dry-slot-trend" aria-live="polite">
-      <div class="no-pos">Loading simulation…</div>
-    </div>
-  </article>
+<div class="stats" id="dry-status-tiles">
+  <div class="stat"><div class="lbl">Trading mode</div><div class="val" id="dry-tile-mode">—</div></div>
+  <div class="stat"><div class="lbl">Engine health</div><div class="val" id="dry-tile-engine">—</div></div>
+  <div class="stat"><div class="lbl">Day P&amp;L (simulated)</div><div class="val" id="dry-tile-day-pnl">—</div><div class="sub" id="dry-tile-day-pnl-note"></div></div>
 </div>
 
 <div class="section-title">
-  <span>Paper performance</span>
+  <span>Dry Run trade</span>
+  <small>One automated dry-run position per user — the Trend Engine controls entries, exits, and switches.</small>
+</div>
+
+<article class="card score-zone-trade-card">
+    <div class="card-hd slot-hd">
+      <span aria-hidden="true">◉</span>
+      <span>Dry Run trade</span>
+      <span class="spacer"></span>
+      <span class="hint">One position at a time for this user</span>
+    </div>
+    <div class="card-bd score-zone-trade-body">
+      <section class="score-zone-position-pane" aria-labelledby="score-zone-position-title">
+        <h3 id="score-zone-position-title">Current position</h3>
+        <div id="dry-score-zone-position" aria-live="polite">
+          <div class="no-pos">Loading simulation…</div>
+        </div>
+      </section>
+      <section class="score-zone-decision-pane" aria-labelledby="score-zone-decision-title">
+        <h3 id="score-zone-decision-title">Latest engine decision</h3>
+        <div id="dry-score-zone-decision" aria-live="polite">
+          <div class="no-pos">Loading decision…</div>
+        </div>
+      </section>
+    </div>
+</article>
+
+<div class="section-title">
+  <span>Dry Run performance</span>
   <small>Simulated values only</small>
 </div>
 <div class="stats" id="dry-stats" aria-live="polite">
@@ -76,7 +73,7 @@
   <div class="card-hd">
     Simulated P&amp;L — day-wise
     <span class="spacer"></span>
-    <span class="badge sim">PAPER ONLY</span>
+    <span class="badge sim">DRY RUN ONLY</span>
   </div>
   <div class="card-bd">
     <div class="chart-box dry-chart-box">
@@ -88,7 +85,8 @@
 
 <div class="card">
   <div class="card-hd">
-    Today's Simulations
+    Today's Dry Run Trades
+    <div class="origin-filters" id="dry-today-origin-filter" role="group" aria-label="Filter today's dry-run trades by origin"></div>
     <span class="spacer"></span>
     <span class="hint" id="dry-today-count"></span>
   </div>
@@ -96,12 +94,13 @@
     <table>
       <thead>
         <tr>
-          <th>Strategy</th><th>Contract</th><th>Side</th><th>Lots</th>
+          <th>Entry time</th><th>Exit time</th>
+          <th>Trade type</th><th>Contract</th><th>Side</th><th>Lots</th>
           <th>Entry</th><th>Exit / Mark</th><th>Sim P&amp;L</th><th>Status</th>
         </tr>
       </thead>
       <tbody id="dry-today-body">
-        <tr class="empty-row"><td colspan="8">Loading simulations…</td></tr>
+        <tr class="empty-row"><td colspan="10">Loading simulations…</td></tr>
       </tbody>
     </table>
   </div>
@@ -109,7 +108,8 @@
 
 <div class="card">
   <div class="card-hd">
-    Dry Run History
+    Dry Run Trade History
+    <div class="origin-filters" id="dry-history-origin-filter" role="group" aria-label="Filter dry-run trade history by origin"></div>
     <span class="spacer"></span>
     <span class="hint" id="dry-trade-count"></span>
   </div>
@@ -117,12 +117,13 @@
     <table>
       <thead>
         <tr>
-          <th>Date</th><th>Strategy</th><th>Contract</th><th>Side</th><th>Lots</th>
+          <th>Date</th><th>Entry time</th><th>Exit time</th>
+          <th>Trade type</th><th>Contract</th><th>Side</th><th>Lots</th>
           <th>Entry</th><th>Exit</th><th>Sim P&amp;L</th><th>Cumulative</th><th>Result</th>
         </tr>
       </thead>
       <tbody id="dry-history-body">
-        <tr class="empty-row"><td colspan="10">Loading dry-run history…</td></tr>
+        <tr class="empty-row"><td colspan="12">Loading dry-run history…</td></tr>
       </tbody>
     </table>
   </div>
@@ -133,39 +134,19 @@
 <script>
 let dryModeActive = false;
 let dryStatus = {};
-let dryTrendEnginePreview = null;
-let dryTrendApplying = false;
 let dryTrendScoreAutoStatus = null;
 let dryTrendScoreAutoReachable = false;
 let dryRunChart = null;
 let dryHistory = [];
+let dryTodayRows = [];
 let dryStatusRefreshPending = false;
 let dryStatusRefreshQueued = false;
 const dryProtectionSaving = new Set();
 
-function dryMoveDisplaySlotFromUtc(entryTimeUtc, fallback = 'evening') {
-  const raw = String(entryTimeUtc || '').trim();
-  let hour;
-  let minute;
-  if (raw.includes('T') || raw.includes(' ')) {
-    const parsed = new Date(raw.endsWith('Z') || /[+-]\d\d:\d\d$/.test(raw)
-      ? raw : raw + 'Z');
-    if (Number.isFinite(parsed.getTime())) {
-      hour = parsed.getUTCHours();
-      minute = parsed.getUTCMinutes();
-    }
-  } else {
-    const parts = raw.split(':').map(Number);
-    if (parts.length >= 2 && parts.every(Number.isFinite)) {
-      [hour, minute] = parts;
-    }
-  }
-  if (!Number.isFinite(hour) || !Number.isFinite(minute)) {
-    return fallback === 'morning' ? 'morning' : 'evening';
-  }
-  const istMinutes = (hour * 60 + minute + 330) % 1440;
-  return istMinutes < 11 * 60 ? 'morning' : 'evening';
-}
+const dryTodayOrigin = mountOriginFilter('dry-today-origin-filter', origin =>
+  renderDryToday(filterByOrigin(dryTodayRows, origin)));
+const dryHistoryOrigin = mountOriginFilter('dry-history-origin-filter', origin =>
+  renderDryHistory(filterByOrigin(dryHistory, origin)));
 
 function dryEntryUtcClock(state) {
   const clock = String(state?.entry_time_utc || state?.entry_time || '').trim();
@@ -183,19 +164,17 @@ function dryTradeTimeIst(state) {
   return utcToIst(dryEntryUtcClock(state)) || '—';
 }
 
-function drySlotLabel(slot, symbol = '', entryTimeUtc = '') {
-  const contract = String(symbol || '').toUpperCase();
-  if (contract.startsWith('C-BTC') || contract.startsWith('P-BTC')) {
-    return 'Trend CE / PE';
-  }
-  if (contract.startsWith('MV-BTC')) {
-    const displaySlot = dryMoveDisplaySlotFromUtc(entryTimeUtc, slot);
-    return displaySlot === 'morning' ? 'Morning MOVE' : 'Evening MOVE';
-  }
-  if (slot === 'morning') return 'Morning MOVE';
-  if (slot === 'evening') return 'Evening MOVE';
-  if (slot === 'trend') return 'Trend CE / PE';
-  return 'MOVE';
+function dryScoreZoneLabel(record = {}) {
+  const zone = String(record.trend_score_zone || record.engine_zone || '')
+    .trim().toUpperCase();
+  if (zone === 'CE_2_ITM') return 'CE';
+  if (zone === 'PE_2_ITM') return 'PE';
+  if (zone === 'SHORT_MOVE') return 'MV';
+  const contract = String(record.symbol || '').toUpperCase();
+  if (contract.startsWith('C-BTC')) return 'CE';
+  if (contract.startsWith('P-BTC')) return 'PE';
+  if (contract.startsWith('MV-BTC')) return 'MV';
+  return 'Trade pending';
 }
 
 function dryKnownNumber(value) {
@@ -244,6 +223,10 @@ function dryProtectionHtml(state, displaySlot, controlSlot = displaySlot) {
     ? `TSL floor ${f$(Number(p.tsl_floor_usd))}` : 'TSL not armed';
   const error = p.last_error
     ? `<div class="dry-protection-error">${esc(p.last_error)}</div>` : '';
+  const automaticallySized = p.protection_source === 'automatic_filled_premium';
+  const policyCopy = automaticallySized
+    ? 'Automatic from the filled premium: TP +100%, SL −50%, TSL arm +25% / trail 25%. Edit and Save to override this open dry-run trade.'
+    : 'Dry-run-only monitor · always active while this simulation is open. Zero disables SL or TSL.';
   return `<section class="dry-protection-box" aria-label="Simulated TP, SL and TSL monitor">
     <div class="dry-protection-hd">
       <div>
@@ -282,23 +265,30 @@ function dryProtectionHtml(state, displaySlot, controlSlot = displaySlot) {
               onclick="saveDryProtection('${displaySlot}', '${controlSlot}')">Save</button>
     </div>
     ${error}
-    <p>Paper-only monitor · always active while this simulation is open. Zero disables SL or TSL.</p>
+    <p>${esc(policyCopy)}</p>
   </section>`;
 }
 
-function drySlotIsEditing(slot) {
-  const root = document.getElementById(`dry-slot-${slot}`);
-  return dryProtectionSaving.has(slot) ||
+function dryScoreZoneIsEditing() {
+  const root = document.getElementById('dry-score-zone-position');
+  return dryProtectionSaving.has('trend') ||
     (root && document.activeElement && root.contains(document.activeElement) &&
      document.activeElement.matches('.dry-protection-box input'));
 }
 
-function dryPositionDetails(state, slot) {
-  const controlSlot = ['morning', 'evening', 'trend'].includes(state?.control_slot)
-    ? state.control_slot : slot;
+function dryPositionDetails(state, legacyBlockers = []) {
+  const controlSlot = 'trend';
   if (!dryStateIsVisible(state)) {
-    const copy = dryModeActive ? 'No active simulation' : 'No saved simulation';
-    return `<div class="no-pos"><span class="icon">◇</span>${copy}</div>`;
+    const copy = dryModeActive
+      ? 'No dry-run trade is open'
+      : 'Dry-run trading is paused';
+    const detail = dryModeActive
+      ? 'Waiting for the next approved trading signal.'
+      : 'Enable automatic score trading in Bot Config to begin.';
+    const blockers = legacyBlockers.length
+      ? `<div class="dry-legacy-blocker"><strong>Legacy dry-run state detected</strong><span>${esc(legacyBlockers.join(' · '))}. It blocks a new dry-run entry until it is resolved.</span></div>`
+      : '';
+    return `<div class="no-pos score-zone-empty"><span class="icon">◇</span><strong>${copy}</strong><small>${detail}</small>${blockers}</div>`;
   }
 
   if (state.status === 'OPEN') {
@@ -306,11 +296,12 @@ function dryPositionDetails(state, slot) {
     const mark = state.current_mark ?? state.mark_price;
     return `<div class="dry-state-line">
         <span class="badge sim">SIMULATED OPEN</span>
-        <span>Paper position · no exchange exposure</span>
+        <span>Dry Run position · no exchange exposure</span>
       </div>
       <div class="big-pnl ${pnlCls(pnl)}">${f$(pnl)}<small>Simulated live P&amp;L</small></div>
       <dl class="kv">
         <dt>Time of trade</dt><dd>${esc(dryTradeTimeIst(state))}</dd>
+        <dt>Trade type</dt><dd>${esc(dryScoreZoneLabel(state))}</dd>
         <dt>Contract</dt><dd>${esc(state.symbol || '—')}</dd>
         <dt>Side</dt><dd><span class="badge ${state.side === 'short' ? 'short' : 'long'}">${esc(String(state.side || 'long').toUpperCase())}</span></dd>
         <dt>Lots</dt><dd>${fN(state.lots)}</dd>
@@ -319,12 +310,12 @@ function dryPositionDetails(state, slot) {
       </dl>
       <div class="btn-row center">
         <button class="btn danger sm" type="button"
-                aria-label="Manual exit ${esc(drySlotLabel(slot))}"
-                onclick="endDrySimulation('${controlSlot}', '${slot}')">
+                aria-label="Manual exit dry-run trade"
+                onclick="endDrySimulation('${controlSlot}')">
           Exit
         </button>
       </div>
-      ${dryProtectionHtml(state, slot, controlSlot)}`;
+      ${dryProtectionHtml(state, 'trend', controlSlot)}`;
   }
 
   if (state.status === 'CLOSED') {
@@ -336,6 +327,7 @@ function dryPositionDetails(state, slot) {
       <div class="big-pnl ${pnlCls(pnl)}">${f$(pnl)}<small>Simulated close ${esc(utcToIst(state.exit_time_utc) || '')}</small></div>
       <dl class="kv">
         <dt>Time of trade</dt><dd>${esc(dryTradeTimeIst(state))}</dd>
+        <dt>Trade type</dt><dd>${esc(dryScoreZoneLabel(state))}</dd>
         <dt>Contract</dt><dd>${esc(state.symbol || '—')}</dd>
         <dt>Lots</dt><dd>${fN(state.lots)}</dd>
         <dt>Entry → Exit</dt><dd>$${fN(state.entry_mark, 4)} → $${fN(state.exit_mark, 4)}</dd>
@@ -358,14 +350,15 @@ function dryTrendScoreAutoEnabled() {
 }
 
 function dryTrendScoreTarget(status) {
-  if (dryKnownNumber(status?.direction_score)) {
-    const score = Number(status.direction_score);
-    if (score <= -40) return 'Buy 3-step ITM PUT';
-    if (score >= 40) return 'Buy 2-step ITM CALL';
-    return 'Sell MOVE';
-  }
   const zone = String(status?.engine_zone || '').trim();
-  return zone ? dryEngineDecisionLabel(zone) : 'Waiting for a valid closed-bar score';
+  const labels = {
+    CE_2_ITM: 'Buy 2-step ITM Call',
+    PE_2_ITM: 'Buy 2-step ITM Put',
+    SHORT_MOVE: 'Sell ATM MOVE straddle',
+    HOLD: 'Hold the open position — no new entry',
+  };
+  if (labels[zone]) return labels[zone];
+  return 'Waiting for a valid closed-bar score';
 }
 
 function dryTrendScoreTimestamp(value) {
@@ -379,7 +372,16 @@ function dryTrendScoreTimestamp(value) {
 }
 
 function dryTrendScoreAutoHtml() {
-  if (!dryTrendScoreAutoStatus) return '';
+  if (!dryTrendScoreAutoStatus) {
+    return `<section class="dry-engine-panel dry-slot-footer-panel is-unavailable"
+                     aria-label="Trend Engine score automation status">
+      <div class="dry-engine-hd">
+        <div><span>TREND SCORE AUTOMATION · DRY RUN</span><strong>Decision status is unavailable</strong></div>
+        <span class="dry-engine-decision">WAITING</span>
+      </div>
+      <p>Refresh the page after the Trend Engine controller becomes reachable. No new dry-run trade will be started until its status is available.</p>
+    </section>`;
+  }
 
   const active = dryTrendScoreAutoEnabled();
   if (!active) {
@@ -389,7 +391,8 @@ function dryTrendScoreAutoHtml() {
         <div><span>TREND SCORE AUTOMATION · DRY RUN</span><strong>Automatic score trading is off</strong></div>
         <span class="dry-engine-decision">DISABLED</span>
       </div>
-      <p>The Phase-1 decision preview remains available below for manual paper simulation.</p>
+      <p>No dry-run simulation can start until automatic score trading is enabled for DRY RUN in Bot Config.</p>
+      <div class="dry-engine-actions"><a href="/config" class="btn secondary sm">Open Bot Config</a></div>
     </section>`;
   }
 
@@ -398,8 +401,9 @@ function dryTrendScoreAutoHtml() {
     ? fN(dryTrendScoreAutoStatus.direction_score, 1) : 'Waiting';
   const regime = dryTrendScoreAutoStatus.market_regime
     ? dryEngineDecisionLabel(dryTrendScoreAutoStatus.market_regime) : 'Waiting';
-  const zone = dryTrendScoreAutoStatus.engine_zone
-    ? dryEngineDecisionLabel(dryTrendScoreAutoStatus.engine_zone) : 'Waiting';
+  const zoneCode = String(dryTrendScoreAutoStatus.engine_zone || '')
+    .trim().toUpperCase();
+  const zone = zoneCode ? dryEngineDecisionLabel(zoneCode) : 'Waiting';
   const symbol = dryTrendScoreAutoStatus.symbol || 'Waiting for an eligible contract';
   const lots = dryKnownNumber(dryTrendScoreAutoStatus.lots)
     ? fN(dryTrendScoreAutoStatus.lots) : '—';
@@ -417,7 +421,7 @@ function dryTrendScoreAutoHtml() {
     <div class="dry-engine-hd">
       <div>
         <span>TREND SCORE AUTOMATION · DRY RUN ONLY</span>
-        <strong>Entries, exits and score-zone switches happen automatically</strong>
+        <strong>Entries, exits and trade transitions happen automatically</strong>
       </div>
       <span class="dry-engine-decision">${esc(statusText)}</span>
     </div>
@@ -425,7 +429,7 @@ function dryTrendScoreAutoHtml() {
       <div class="wide"><dt>Current automatic action</dt><dd>${esc(dryTrendScoreTarget(dryTrendScoreAutoStatus))}</dd></div>
       <div><dt>Direction score</dt><dd>${esc(score)}</dd></div>
       <div><dt>Market regime</dt><dd>${esc(regime)}</dd></div>
-      <div><dt>Score zone</dt><dd>${esc(zone)}</dd></div>
+      <div><dt>Trade type</dt><dd>${esc(dryScoreZoneLabel({ trend_score_zone: zoneCode }))}</dd></div>
       <div><dt>Lots</dt><dd>${esc(lots)}</dd></div>
       <div class="wide"><dt>Selected / open contract</dt><dd>${esc(symbol)}</dd></div>
       <div class="wide"><dt>Last automatic action</dt><dd>${esc(lastAction)}</dd></div>
@@ -433,121 +437,9 @@ function dryTrendScoreAutoHtml() {
       <div><dt>Last controller cycle</dt><dd>${esc(dryTrendScoreTimestamp(dryTrendScoreAutoStatus.last_cycle_utc))}</dd></div>
     </dl>
     ${reachability}${error}
-    <p class="dry-engine-action-copy">No confirmation is required. The older Phase-1 manual “Start simulation” control is disabled while this controller is active.</p>
+    <p class="dry-engine-action-copy">This is the only dry-run trading workflow on this page. One user-owned dry-run position may be open at a time.</p>
     <div class="dry-engine-actions">
-      <a href="/trend-engine" class="btn secondary sm">View full analysis</a>
-    </div>
-    <small>Simulation only — no exchange order will be placed and no real balance will be affected.</small>
-  </section>`;
-}
-
-function dryEngineDateTime(value) {
-  if (!value) return 'Not proposed for this decision';
-  const parsed = new Date(value);
-  return Number.isNaN(parsed.getTime())
-    ? String(value)
-    : parsed.toLocaleString('en-IN', {
-        timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short',
-      });
-}
-
-function dryEnginePair(first, second, digits = 4) {
-  if (!dryKnownNumber(first) && !dryKnownNumber(second)) {
-    return 'Not proposed for this decision';
-  }
-  const left = dryKnownNumber(first) ? `$${fN(first, digits)}` : '—';
-  const right = dryKnownNumber(second) ? `$${fN(second, digits)}` : '—';
-  return `${left} / ${right}`;
-}
-
-function dryTrendEngineHtml(preview) {
-  if (!dryModeActive) {
-    return `<section class="dry-engine-panel dry-slot-footer-panel is-unavailable">
-      <div class="dry-engine-hd">
-        <div><span>TREND ENGINE · PAPER ONLY</span><strong>Dry Run is not active</strong></div>
-        <span class="dry-engine-decision">UNAVAILABLE</span>
-      </div>
-      <p>Historical results remain available. Enable DRY RUN in Bot Config to evaluate a new paper simulation.</p>
-      <small>Simulation only — no exchange order will be placed and no real balance will be affected.</small>
-    </section>`;
-  }
-  if (!preview || preview.ok !== true || preview.dry_run !== true) {
-    const unavailable = preview?.apply_reason || preview?.error ||
-      'The latest Trend Engine decision could not be loaded.';
-    return `<section class="dry-engine-panel dry-slot-footer-panel is-unavailable">
-      <div class="dry-engine-hd">
-        <div><span>TREND ENGINE · DRY RUN</span><strong>Decision unavailable</strong></div>
-        <span class="dry-engine-decision">UNAVAILABLE</span>
-      </div>
-      <p>${esc(unavailable)} No simulation can be started.</p>
-      <small>Simulation only — no exchange order will be placed and no real balance will be affected.</small>
-    </section>`;
-  }
-
-  const decision = String(preview.decision || 'NO_TRADE').toUpperCase();
-  const label = dryEngineDecisionLabel(decision);
-  const contract = preview.selected_contract || {};
-  const plan = preview.order_plan || {};
-  const trendOpen = dryStatus.trend && dryStatus.trend.status === 'OPEN';
-  const buyDecision = decision === 'BUY_CE' || decision === 'BUY_PE';
-  const canStart = buyDecision && preview.can_apply === true &&
-    Boolean(preview.confirmation_token) && Boolean(preview.mode_revision) &&
-    !trendOpen && !dryTrendApplying && !dryTrendScoreAutoEnabled();
-  const tone = decision === 'BUY_CE' ? 'is-buy-ce'
-    : decision === 'BUY_PE' ? 'is-buy-pe'
-    : decision === 'HOLD' ? 'is-hold'
-    : decision === 'EXIT' ? 'is-exit' : 'is-waiting';
-  const contractName = contract.symbol || 'No entry contract selected';
-  const tradeScore = dryKnownNumber(preview.trade_score)
-    ? fN(preview.trade_score, 1)
-    : 'Not calculated — this decision did not reach entry scoring.';
-  const lots = dryKnownNumber(plan.quantity_lots) && Number(plan.quantity_lots) > 0
-    ? fN(plan.quantity_lots)
-    : 'Not proposed for this decision';
-  let actionCopy = '';
-  if (trendOpen && buyDecision) {
-    actionCopy = 'A Trend simulation is already open. New entries remain blocked until it is manually closed.';
-  } else if (buyDecision && preview.can_apply === true) {
-    actionCopy = 'Ready for confirmation. Starting this creates one paper position from this exact engine decision.';
-  } else if (buyDecision) {
-    actionCopy = `This BUY decision cannot be applied: ${preview.apply_reason ||
-      'its confirmation expired or required entry details are incomplete.'}`;
-  } else if (decision === 'NO_TRADE') {
-    actionCopy = 'No simulation will be started. Wait for a BUY CE or BUY PE decision that passes every entry check.';
-  } else if (decision === 'HOLD') {
-    actionCopy = trendOpen
-      ? 'Keep the current simulated Trend position open and continue monitoring its saved stop, target and time limit.'
-      : 'HOLD does not create a new simulation.';
-  } else if (decision === 'EXIT') {
-    actionCopy = trendOpen
-      ? 'Review the open simulated position now. Use the Exit button above to close it manually; the engine will not close it automatically in Phase 1.'
-      : 'EXIT is advisory in Phase 1. No simulated position will be changed automatically.';
-  } else {
-    actionCopy = 'This decision cannot create a simulation.';
-  }
-
-  return `<section class="dry-engine-panel dry-slot-footer-panel ${tone}" aria-label="Trend Engine DRY RUN decision">
-    <div class="dry-engine-hd">
-      <div><span>TREND ENGINE · DRY RUN</span><strong>${esc(preview.decision_summary || actionCopy)}</strong></div>
-      <span class="dry-engine-decision">${esc(label)}</span>
-    </div>
-    <dl class="dry-engine-metrics">
-      <div><dt>Contract</dt><dd>${esc(contractName)}</dd></div>
-      <div><dt>Lots</dt><dd>${esc(lots)}</dd></div>
-      <div><dt>Direction score</dt><dd>${dryKnownNumber(preview.direction_score) ? fN(preview.direction_score, 1) : 'Not available'}</dd></div>
-      <div><dt>Contract score</dt><dd>${dryKnownNumber(contract.contract_score) ? fN(contract.contract_score, 1) : 'Not calculated'}</dd></div>
-      <div class="wide"><dt>Combined trade score</dt><dd>${esc(tradeScore)}</dd></div>
-      <div class="wide"><dt>Entry / maximum</dt><dd>${esc(dryEnginePair(plan.entry_price, plan.maximum_entry_price))}</dd></div>
-      <div class="wide"><dt>Stop / target</dt><dd>${esc(dryEnginePair(plan.stop_option_price, plan.target_option_price))}</dd></div>
-      <div class="wide"><dt>Planned exit</dt><dd>${esc(dryEngineDateTime(plan.time_exit))}</dd></div>
-    </dl>
-    <p class="dry-engine-action-copy">${esc(actionCopy)}</p>
-    <div class="dry-engine-actions">
-      <a href="/trend-engine" class="btn secondary sm">View full analysis</a>
-      ${canStart ? `<button class="btn ${decision === 'BUY_CE' ? 'success' : 'danger'} sm"
-        id="dry-trend-engine-start" type="button" onclick="startDryTrendEngineSimulation()">
-        Start ${decision === 'BUY_CE' ? 'CE' : 'PE'} simulation
-      </button>` : ''}
+      <a href="/trend-engine" class="btn secondary sm">View Trend Engine</a>
     </div>
     <small>Simulation only — no exchange order will be placed and no real balance will be affected.</small>
   </section>`;
@@ -567,7 +459,7 @@ function renderDryMode(status) {
     ? 'Simulation only — no exchange orders are placed'
     : 'Dry Run is currently off — no new simulations';
   notice.querySelector('p').textContent = dryModeActive
-    ? 'Values are paper outcomes calculated from market prices. They never affect real balances, positions, risk totals, or Trades & P&L.'
+    ? 'Values are dry-run outcomes calculated from market prices. They never affect real balances, positions, risk totals, or Trades & P&L.'
     : 'Historical results remain available, and an already-open simulation may still be ended here. Switch Trading Mode to DRY RUN to start new simulations.';
 }
 
@@ -582,8 +474,8 @@ async function loadDryTrendScoreAutoStatus() {
       dryTrendScoreAutoReachable = false;
     }
   } catch (_) {
-    // Keep a previously known active state so a transient status failure cannot
-    // accidentally expose the legacy manual-start action alongside automation.
+    // Keep the most recently rendered controller state through a transient
+    // status failure; the position remains read-only until the next refresh.
     dryTrendScoreAutoReachable = false;
   }
 }
@@ -598,48 +490,26 @@ async function loadDryStatus(refreshTrend = true) {
   try {
     status = await jget('/api/dry-run/status');
   } catch (error) {
-    for (const slot of ['morning', 'evening', 'trend']) {
-      document.getElementById(`dry-slot-${slot}`).innerHTML =
-        '<div class="no-pos c-neg">Dry-run status is unavailable</div>';
-    }
+    document.getElementById('dry-score-zone-position').innerHTML =
+      '<div class="no-pos c-neg">Dry-run status is unavailable</div>';
+    document.getElementById('dry-score-zone-decision').innerHTML =
+      '<div class="no-pos c-neg">Automatic decision status is unavailable</div>';
     dryStatusRefreshPending = false;
     return;
   }
   try {
     dryStatus = status || {};
-    const displaySlots = dryStatus.display_slots || dryStatus;
     renderDryMode(dryStatus);
     await loadDryTrendScoreAutoStatus();
-    if (!dryModeActive) dryTrendEnginePreview = null;
-    if (dryTrendScoreAutoEnabled()) {
-      dryTrendEnginePreview = null;
-    } else if (refreshTrend) {
-      dryTrendEnginePreview = null;
-      if (dryModeActive) {
-        try {
-          dryTrendEnginePreview = await jget('/api/trend-engine/dry-run-preview');
-        } catch (error) {
-          dryTrendEnginePreview = {
-            ok: false, dry_run: true,
-            error: error?.message || 'Trend Engine preview is unavailable',
-          };
-        }
-      }
+    if (!dryScoreZoneIsEditing()) {
+      document.getElementById('dry-score-zone-position').innerHTML =
+        dryPositionDetails(
+          dryStatus.score_zone_position || dryStatus.trend || {},
+          dryStatus.legacy_position_blockers || [],
+        );
     }
-    if (!drySlotIsEditing('morning')) {
-      document.getElementById('dry-slot-morning').innerHTML =
-        dryPositionDetails(displaySlots.morning || {}, 'morning');
-    }
-    if (!drySlotIsEditing('evening')) {
-      document.getElementById('dry-slot-evening').innerHTML =
-        dryPositionDetails(displaySlots.evening || {}, 'evening');
-    }
-    if (!drySlotIsEditing('trend')) {
-      document.getElementById('dry-slot-trend').innerHTML =
-        dryPositionDetails(displaySlots.trend || {}, 'trend') +
-        dryTrendScoreAutoHtml() +
-        (dryTrendScoreAutoEnabled() ? '' : dryTrendEngineHtml(dryTrendEnginePreview));
-    }
+    document.getElementById('dry-score-zone-decision').innerHTML =
+      dryTrendScoreAutoHtml();
   } finally {
     dryStatusRefreshPending = false;
     if (dryStatusRefreshQueued) {
@@ -649,83 +519,13 @@ async function loadDryStatus(refreshTrend = true) {
   }
 }
 
-async function startDryTrendEngineSimulation() {
-  if (typeof dryTrendScoreAutoEnabled === 'function' && dryTrendScoreAutoEnabled()) {
-    toast('Trend Engine score automation is active; entries and switches happen automatically', 'err');
-    return;
-  }
-  const preview = dryTrendEnginePreview;
-  const decision = String(preview?.decision || '').toUpperCase();
-  const contract = preview?.selected_contract || {};
-  const plan = preview?.order_plan || {};
-  const trendOpen = dryStatus.trend && dryStatus.trend.status === 'OPEN';
-  if (dryTrendApplying || !dryModeActive || preview?.ok !== true ||
-      preview?.dry_run !== true || preview?.can_apply !== true ||
-      !['BUY_CE', 'BUY_PE'].includes(decision) ||
-      !preview?.confirmation_token || !preview?.mode_revision || trendOpen) {
-    toast('This Trend Engine decision is no longer eligible for a new simulation', 'err');
-    return;
-  }
-  const optionType = decision === 'BUY_CE' ? 'CE' : 'PE';
-  const message = `START DRY RUN TREND ${optionType} SIMULATION?\n\n` +
-    `Decision:             ${dryEngineDecisionLabel(decision)}\n` +
-    `Contract:             ${contract.symbol || '—'}\n` +
-    `Direction score:      ${fN(preview.direction_score, 1)}\n` +
-    `Contract score:       ${fN(contract.contract_score, 1)}\n` +
-    `Combined trade score: ${fN(preview.trade_score, 1)}\n` +
-    `Lots:                 ${fN(plan.quantity_lots)}\n` +
-    `Entry / maximum:      ${dryEnginePair(plan.entry_price, plan.maximum_entry_price)}\n` +
-    `Stop / target:        ${dryEnginePair(plan.stop_option_price, plan.target_option_price)}\n` +
-    `Planned exit:         ${dryEngineDateTime(plan.time_exit)}\n\n` +
-    'This creates a simulated paper position only.\n' +
-    'No exchange order will be placed and no real balance will be affected.';
-  if (!confirm(message)) return;
-  dryTrendApplying = true;
-  const button = document.getElementById('dry-trend-engine-start');
-  if (button) {
-    button.disabled = true;
-    button.textContent = 'Starting paper simulation…';
-  }
-  let started = false;
-  try {
-    const result = await jpost('/api/trend-engine/dry-run-entry', {
-      confirmation_token: preview.confirmation_token,
-      expected_mode: 'dry_run',
-      mode_revision: preview.mode_revision,
-    });
-    if (result.ok && result.dry_run) {
-      started = true;
-      toast(`Trend ${result.option_type || optionType} paper simulation started: ${fN(result.lots)} lots`, 'ok');
-      dryTrendEnginePreview = null;
-    } else {
-      toast('Trend simulation was not started: ' + (result.error || result.apply_reason ||
-        'the decision changed during confirmation'), 'err');
-    }
-  } catch (error) {
-    toast('Trend simulation was not started: ' + (error?.message || 'request failed'), 'err');
-  } finally {
-    dryTrendApplying = false;
-    try {
-      if (started) {
-        await Promise.all([loadDryStatus(true), loadDryToday()]);
-      } else {
-        await loadDryStatus(true);
-      }
-    } catch (error) {
-      if (started) {
-        toast('Paper simulation started, but the page could not refresh. Reload to see it.', 'err');
-      }
-    }
-  }
-}
-
-async function endDrySimulation(controlSlot, displaySlot = controlSlot) {
-  if (!confirm(`Manually exit the ${drySlotLabel(displaySlot).toUpperCase()} simulation at the current mark?\n\nNo exchange order will be placed.`)) return;
+async function endDrySimulation(controlSlot) {
+  if (!confirm('Manually exit the dry-run trade at the current mark?\n\nNo exchange order will be placed.')) return;
   const result = await jpost('/api/square-off?slot=' + encodeURIComponent(controlSlot), {
     target_mode: 'dry_run',
   });
   if (result.ok && result.dry_run) {
-    toast(`Manual exit completed — paper P&L ${f$(result.pnl)}`, 'ok');
+    toast(`Manual exit completed — dry-run P&L ${f$(result.pnl)}`, 'ok');
     await Promise.all([loadDryStatus(), loadDryResults(), loadDryToday()]);
   } else {
     toast('Manual exit failed: ' + (result.error || 'Trading Mode is no longer DRY RUN'), 'err');
@@ -733,33 +533,21 @@ async function endDrySimulation(controlSlot, displaySlot = controlSlot) {
 }
 
 async function saveDryProtection(displaySlot, controlSlot = displaySlot) {
-  const keys = controlSlot === 'morning'
-    ? { tp: 'TP_TARGET_PNL_MORNING', sl: 'SL_TARGET_PNL_MORNING',
-        arm: 'TSL_ARM_PNL_MORNING', trail: 'TSL_TRAIL_PNL_MORNING',
-        lock: 'TSL_LOCK_MIN_PNL_MORNING', poll: 'TP_POLL_SECS_MORNING' }
-    : controlSlot === 'trend'
-      ? { tp: 'TP_TARGET_PNL_TREND', sl: 'SL_TARGET_PNL_TREND',
-          arm: 'TSL_ARM_PNL_TREND', trail: 'TSL_TRAIL_PNL_TREND',
-          lock: 'TSL_LOCK_MIN_PNL_TREND', poll: 'TP_POLL_SECS_TREND' }
-      : { tp: 'TP_TARGET_PNL', sl: 'SL_TARGET_PNL',
-          arm: 'TSL_ARM_PNL', trail: 'TSL_TRAIL_PNL',
-          lock: 'TSL_LOCK_MIN_PNL', poll: 'TP_POLL_SECS' };
-  const read = id => Number(document.getElementById(id)?.value);
-  const values = {
-    tp: read(`dry-tp-${displaySlot}`),
-    sl: read(`dry-sl-${displaySlot}`),
-    arm: read(`dry-tsl-arm-${displaySlot}`),
-    trail: read(`dry-tsl-trail-${displaySlot}`),
-    lock: read(`dry-tsl-lock-${displaySlot}`),
-    poll: read(`dry-poll-${displaySlot}`),
+  /* Key-name table + validation thresholds now live once, in protection.js
+   * (protectionConfigKeys / protectionValuesError) — this used to be a
+   * locally duplicated copy, byte-identical to overview.html's equivalent. */
+  const idFor = {
+    tp: `dry-tp-${displaySlot}`, sl: `dry-sl-${displaySlot}`,
+    arm: `dry-tsl-arm-${displaySlot}`, trail: `dry-tsl-trail-${displaySlot}`,
+    lock: `dry-tsl-lock-${displaySlot}`, poll: `dry-poll-${displaySlot}`,
   };
-  if (!Number.isFinite(values.tp) || values.tp < 1 ||
-      !Number.isFinite(values.poll) || values.poll < 10 ||
-      ['sl', 'arm', 'trail', 'lock'].some(
-        key => !Number.isFinite(values[key]) || values[key] < 0)) {
-    toast('Enter TP of at least $1, poll of at least 10 seconds, and non-negative SL/TSL values', 'err');
+  const values = readProtectionInputs(idFor);
+  const validationError = protectionValuesError(values);
+  if (validationError) {
+    toast(validationError, 'err');
     return;
   }
+  const keys = protectionConfigKeys(controlSlot);
   const body = {
     [keys.tp]: values.tp,
     [keys.sl]: values.sl,
@@ -780,7 +568,7 @@ async function saveDryProtection(displaySlot, controlSlot = displaySlot) {
       toast('Protection save failed: ' + (result.error || 'unknown error'), 'err');
       return;
     }
-    toast(`${drySlotLabel(displaySlot)} simulated protection updated`, 'ok');
+    toast('Dry-run trade simulated protection updated', 'ok');
   } catch (error) {
     toast('Protection save failed: ' + (error?.message || 'request error'), 'err');
   } finally {
@@ -793,18 +581,18 @@ function renderDryStats(summary) {
   const el = document.getElementById('dry-stats');
   if (!summary || !summary.total_days) {
     el.innerHTML = `<div class="stat dry-empty-stat">
-      <div class="lbl">Paper performance</div>
+      <div class="lbl">Dry Run performance</div>
       <div class="val">—</div>
       <div class="sub">No completed simulations yet</div>
     </div>`;
     return;
   }
   el.innerHTML = `
-    <div class="stat"><div class="lbl">Simulated P&amp;L</div><div class="val ${pnlCls(summary.total_pnl)}">${f$(summary.total_pnl)}</div><div class="sub">${summary.total_days} paper trades</div></div>
+    <div class="stat"><div class="lbl">Simulated P&amp;L</div><div class="val ${pnlCls(summary.total_pnl)}">${f$(summary.total_pnl)}</div><div class="sub">${summary.total_days} dry-run trades</div></div>
     <div class="stat"><div class="lbl">Simulated win rate</div><div class="val">${fN(summary.win_rate, 1)}%</div><div class="sub">${summary.wins} W / ${summary.losses} L</div></div>
     <div class="stat"><div class="lbl">Average win</div><div class="val c-pos">${f$(summary.avg_win)}</div><div class="sub">Average loss ${f$(summary.avg_loss)}</div></div>
-    <div class="stat"><div class="lbl">Paper risk / reward</div><div class="val">${fN(summary.rr, 2)}</div><div class="sub">Reward per $1 simulated risk</div></div>
-    <div class="stat"><div class="lbl">Simulated drawdown</div><div class="val c-neg">${f$(summary.max_dd)}</div><div class="sub">Paper peak to trough</div></div>`;
+    <div class="stat"><div class="lbl">Dry Run risk / reward</div><div class="val">${fN(summary.rr, 2)}</div><div class="sub">Reward per $1 simulated risk</div></div>
+    <div class="stat"><div class="lbl">Simulated drawdown</div><div class="val c-neg">${f$(summary.max_dd)}</div><div class="sub">Dry Run peak to trough</div></div>`;
 }
 
 function dryTradeTimestamp(trade) {
@@ -814,12 +602,51 @@ function dryTradeTimestamp(trade) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+function dryUtcMoment(trade, phase) {
+  const stamp = String(trade?.[`${phase}_at_utc`] || '').trim();
+  if (stamp) {
+    const parsed = new Date(stamp.endsWith('Z') || /[+-]\d\d:\d\d$/.test(stamp)
+      ? stamp : stamp + 'Z');
+    if (Number.isFinite(parsed.getTime())) return parsed;
+  }
+  const date = String(trade?.[`${phase}_date`] ||
+    (phase === 'entry' ? (trade?.entry_date || trade?.date || '') : '')).trim();
+  const time = String(trade?.[`${phase}_time_utc`] ||
+    (phase === 'entry' ? (trade?.entry_time || '') : '')).trim();
+  if (!date || !time) return null;
+  const parsed = new Date(`${date}T${time}Z`);
+  return Number.isFinite(parsed.getTime()) ? parsed : null;
+}
+
+function dryIstDateTime(trade, phase) {
+  const moment = dryUtcMoment(trade, phase);
+  if (!moment) return { date: '—', time: '—' };
+  const dateParts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(moment).reduce((parts, part) => {
+    parts[part.type] = part.value;
+    return parts;
+  }, {});
+  const timeParts = new Intl.DateTimeFormat('en-IN', {
+    timeZone: 'Asia/Kolkata', hour: 'numeric', minute: '2-digit', second: '2-digit',
+    hour12: true,
+  }).formatToParts(moment).reduce((parts, part) => {
+    parts[part.type] = part.value;
+    return parts;
+  }, {});
+  return {
+    date: `${dateParts.year}-${dateParts.month}-${dateParts.day}`,
+    time: `${timeParts.hour}:${timeParts.minute}:${timeParts.second} ${
+      String(timeParts.dayPeriod || '').toUpperCase()}`.trim(),
+  };
+}
+
 function renderDryHistory(trades) {
   const body = document.getElementById('dry-history-body');
   document.getElementById('dry-trade-count').textContent =
     `${trades.length} simulation${trades.length === 1 ? '' : 's'}`;
   if (!trades.length) {
-    body.innerHTML = '<tr class="empty-row"><td colspan="10">No completed dry-run trades yet</td></tr>';
+    body.innerHTML = '<tr class="empty-row"><td colspan="12">No completed dry-run trades yet</td></tr>';
     return;
   }
   const ordered = [...trades].sort((a, b) => dryTradeTimestamp(a) - dryTradeTimestamp(b));
@@ -831,18 +658,19 @@ function renderDryHistory(trades) {
     return { ...trade, _pnl: pnl, _cumulative: cumulative };
   }).reverse();
   body.innerHTML = rows.map(trade => {
+    const entryIst = dryIstDateTime(trade, 'entry');
+    const exitIst = dryIstDateTime(trade, 'exit');
     const known = trade._pnl !== null;
     const result = !known ? '<span class="badge sim">PENDING</span>'
       : trade._pnl > 0 ? '<span class="badge win">WIN</span>'
       : trade._pnl < 0 ? '<span class="badge loss">LOSS</span>'
       : '<span class="badge sim">FLAT</span>';
     return `<tr>
-      <td>${esc(trade.date || trade.entry_date || '—')}</td>
-      <td>${esc(drySlotLabel(
-        trade.slot, trade.symbol,
-        trade.entry_at_utc || trade.entry_time_utc || trade.entry_time
-      ))}</td>
-      <td>${esc(trade.symbol || '—')}</td>
+      <td>${esc(entryIst.date)}</td>
+      <td>${esc(entryIst.time)}</td>
+      <td>${esc(exitIst.time)}</td>
+      <td>${esc(dryScoreZoneLabel(trade))}</td>
+      <td>${originBadge(trade)}${esc(trade.symbol || '—')}</td>
       <td>${trade.side ? `<span class="badge ${String(trade.side).toLowerCase() === 'short' ? 'short' : 'long'}">${esc(String(trade.side).toUpperCase())}</span>` : '—'}</td>
       <td>${fN(trade.lots)}</td>
       <td>$${fN(trade.entry_mark, 4)}</td>
@@ -930,12 +758,12 @@ async function loadDryResults() {
     ]);
   } catch (_) {
     document.getElementById('dry-history-body').innerHTML =
-      '<tr class="empty-row"><td colspan="10">Dry-run history is unavailable</td></tr>';
+      '<tr class="empty-row"><td colspan="12">Dry-run history is unavailable</td></tr>';
     return;
   }
   dryHistory = Array.isArray(trades) ? trades : [];
   renderDryStats(summary);
-  renderDryHistory(dryHistory);
+  renderDryHistory(filterByOrigin(dryHistory, dryHistoryOrigin()));
   drawDryChart(dryHistory);
 }
 
@@ -944,10 +772,12 @@ function renderDryToday(rows) {
   document.getElementById('dry-today-count').textContent =
     `${rows.length} simulation${rows.length === 1 ? '' : 's'}`;
   if (!rows.length) {
-    body.innerHTML = '<tr class="empty-row"><td colspan="8">No dry-run trades today</td></tr>';
+    body.innerHTML = '<tr class="empty-row"><td colspan="10">No dry-run trades today</td></tr>';
     return;
   }
   body.innerHTML = rows.map(trade => {
+    const entryIst = dryIstDateTime(trade, 'entry');
+    const exitIst = dryIstDateTime(trade, 'exit');
     const live = trade._live || trade.status === 'OPEN';
     const pnl = live ? trade.live_pnl : trade.pnl_usd;
     const mark = live ? (trade.current_mark ?? trade.mark_price) : trade.exit_mark;
@@ -958,11 +788,10 @@ function renderDryToday(rows) {
       : Number(pnl) < 0 ? '<span class="badge loss">LOSS</span>'
       : '<span class="badge sim">FLAT</span>';
     return `<tr>
-      <td>${esc(drySlotLabel(
-        trade.slot, trade.symbol,
-        trade.entry_at_utc || trade.entry_time_utc || trade.entry_time
-      ))}</td>
-      <td>${esc(trade.symbol || '—')}</td>
+      <td>${esc(entryIst.time)}</td>
+      <td>${live ? '—' : esc(exitIst.time)}</td>
+      <td>${esc(dryScoreZoneLabel(trade))}</td>
+      <td>${originBadge(trade)}${esc(trade.symbol || '—')}</td>
       <td>${trade.side ? `<span class="badge ${String(trade.side).toLowerCase() === 'short' ? 'short' : 'long'}">${esc(String(trade.side).toUpperCase())}</span>` : '—'}</td>
       <td>${fN(trade.lots)}</td>
       <td>$${fN(trade.entry_mark, 4)}</td>
@@ -976,20 +805,56 @@ function renderDryToday(rows) {
 async function loadDryToday() {
   try {
     const rows = await jget('/api/dry-run/today-trades');
-    renderDryToday(Array.isArray(rows) ? rows : []);
+    dryTodayRows = Array.isArray(rows) ? rows : [];
+    renderDryToday(filterByOrigin(dryTodayRows, dryTodayOrigin()));
   } catch (_) {
     document.getElementById('dry-today-body').innerHTML =
-      '<tr class="empty-row"><td colspan="8">Today’s dry-run results are unavailable</td></tr>';
+      '<tr class="empty-row"><td colspan="10">Today’s dry-run results are unavailable</td></tr>';
+  }
+}
+
+/* Status tiles are independent from the score-zone position and controller
+ * cards so a temporary statistics refresh cannot affect trade visibility. */
+async function loadDryStatusTiles() {
+  const modeEl = document.getElementById('dry-tile-mode');
+  modeEl.textContent = dryModeActive ? 'DRY RUN' : 'LIVE';
+  modeEl.className = 'val ' + (dryModeActive ? 'c-warn' : 'c-pos');
+
+  try {
+    const rows = await jget('/api/dry-run/today-trades');
+    const dayPnl = (Array.isArray(rows) ? rows : []).reduce((sum, t) => {
+      const live = t._live || t.status === 'OPEN';
+      const value = live ? t.live_pnl : t.pnl_usd;
+      return dryKnownNumber(value) ? sum + Number(value) : sum;
+    }, 0);
+    const pnlEl = document.getElementById('dry-tile-day-pnl');
+    pnlEl.textContent = f$(dayPnl);
+    pnlEl.className = 'val ' + pnlCls(dayPnl);
+    document.getElementById('dry-tile-day-pnl-note').textContent =
+      `${(rows || []).length} simulation(s) today`;
+  } catch (e) { /* transient */ }
+
+  try {
+    const health = await jget('/api/engine/health');
+    const el = document.getElementById('dry-tile-engine');
+    el.textContent = health.ok ? 'Reachable' : 'Unreachable';
+    el.className = 'val ' + (health.ok ? 'c-pos' : 'c-muted');
+  } catch (e) {
+    const el = document.getElementById('dry-tile-engine');
+    el.textContent = 'Unreachable';
+    el.className = 'val c-muted';
   }
 }
 
 function loadDryDashboard() {
-  loadDryStatus();
+  loadDryStatus().then(loadDryStatusTiles);
   loadDryResults();
   loadDryToday();
 }
 
-window.addEventListener('themechange', () => {
+/* app.js dispatches themechange on `document`, not `window` — see charts.js.
+ * onThemeChange() subscribes correctly; the old window listener never fired. */
+onThemeChange(() => {
   if (dryHistory.length) drawDryChart(dryHistory);
 });
 loadDryDashboard();
@@ -997,5 +862,6 @@ setInterval(() => loadDryStatus(false), 4_000);
 setInterval(() => loadDryStatus(true), 20_000);
 setInterval(loadDryToday, 12_000);
 setInterval(loadDryResults, 60_000);
+setInterval(loadDryStatusTiles, 12_000);
 </script>
 {% endblock %}

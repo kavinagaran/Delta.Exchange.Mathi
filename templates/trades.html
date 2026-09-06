@@ -1,30 +1,47 @@
 {% extends "base.html" %}
 
 {% block head %}
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script src="/static/js/vendor/chart.umd.min.js?v={{ asset_v('js/vendor/chart.umd.min.js') }}"></script>
 {% endblock %}
 
 {% block content %}
-<div class="stats" id="stats"></div>
+<div class="performance-page">
+<div class="performance-source" id="performance-source" role="status" aria-live="polite">
+  <div>
+    <strong>Delta Exchange · trade history</strong>
+    <span>Loading completed and open trades from the exchange…</span>
+  </div>
+  <button class="btn secondary sm" id="refresh-history" type="button">↻ Refresh history</button>
+</div>
+
+<div class="stats performance-metrics" id="stats"></div>
 
 <div class="card">
-  <div class="card-hd">P&L Chart — day-wise</div>
+  <div class="card-hd">
+    Daily P/L — day-wise
+    <span class="spacer"></span><span class="badge closed">REAL TRADES</span>
+  </div>
   <div class="card-bd">
     <div class="chart-box"><canvas id="pnl-chart"></canvas></div>
   </div>
 </div>
 
-<div class="card">
-  <div class="card-hd">Trade History <span class="spacer"></span><span class="hint" id="trade-count"></span></div>
+<div class="card performance-history-card">
+  <div class="card-hd">
+    Trade History
+    <div class="origin-filters" id="history-origin-filter" role="group" aria-label="Filter trade history by origin"></div>
+    <span class="spacer"></span><span class="hint" id="trade-count"></span>
+  </div>
   <div class="tbl-wrap">
-    <table>
+    <table class="exchange-history-table">
       <thead><tr>
-        <th>Date</th><th>Contract</th><th>Strike</th><th>Side</th><th>Lots</th>
-        <th>Entry</th><th>Exit</th><th>P&L</th><th>Cumulative</th><th>Result</th>
+        <th>Opened</th><th>Closed</th><th>Contract</th><th>Direction</th><th class="numeric">Lots</th>
+        <th class="numeric">Entry</th><th class="numeric">Exit</th><th class="numeric">Gross P/L</th><th class="numeric">Net P/L</th><th class="numeric">Fees</th><th>Status</th>
       </tr></thead>
-      <tbody id="tbl-body"><tr class="empty-row"><td colspan="10">Loading…</td></tr></tbody>
+      <tbody id="tbl-body"><tr class="empty-row"><td colspan="11">Loading complete Delta Exchange trade history…</td></tr></tbody>
     </table>
   </div>
+</div>
 </div>
 {% endblock %}
 
@@ -32,118 +49,239 @@
 <script>
 let chart = null, latestTrades = [];
 
-function drawChart(trades) {
-  /* One bar per calendar day (all of that day's real trades summed);
-     cumulative line runs over the daily sums. Simulated rows excluded. */
+document.getElementById('refresh-history').addEventListener('click', () => load(true));
+
+const historyOrigin = mountOriginFilter('history-origin-filter', origin =>
+  renderTable(filterByOrigin(latestTrades, origin)));
+
+function dailyTradeSeries(trades) {
   const byDay = new Map();
-  for (const t of trades) {
-    if (t.dry_run) continue;
-    const d = t.date || t.entry_date;
-    if (!d) continue;
-    byDay.set(d, (byDay.get(d) || 0) + (+(t.pnl_usd || 0)));
+  for (const trade of trades) {
+    if (!trade.date) continue;
+    const current = byDay.get(trade.date) || { trades: 0, lots: 0, pnl: 0, valued: 0 };
+    current.trades += 1;
+    current.lots += Math.abs(+(trade.lots || 0));
+    if (trade.net_pnl_usd != null && Number.isFinite(+trade.net_pnl_usd)) {
+      current.pnl += +trade.net_pnl_usd;
+      current.valued += 1;
+    }
+    byDay.set(trade.date, current);
   }
-  if (!byDay.size) return;
   const labels = [...byDay.keys()].sort();
-  const daily  = labels.map(d => +byDay.get(d).toFixed(2));
-  let run = 0;
-  const cumu = daily.map(v => +(run += v).toFixed(2));
+  return {
+    labels,
+    trades: labels.map(day => byDay.get(day).trades),
+    lots: labels.map(day => +byDay.get(day).lots.toFixed(6)),
+    pnl: labels.map(day => byDay.get(day).valued ? +byDay.get(day).pnl.toFixed(2) : null),
+  };
+}
+
+function drawChart(trades) {
+  const { labels, pnl } = dailyTradeSeries(trades);
+  if (!labels.length) { if (chart) { chart.destroy(); chart = null; } return; }
 
   const css = getComputedStyle(document.documentElement);
-  const POS = css.getPropertyValue('--pos').trim(), NEG = css.getPropertyValue('--neg').trim();
   const MUTED = css.getPropertyValue('--muted').trim();
-  const WARN = css.getPropertyValue('--warn').trim();
   const GRID = css.getPropertyValue('--chart-grid').trim();
+  let running = 0;
+  const cumulative = pnl.map(value => value == null ? null : Number((running += value).toFixed(2)));
+  const POS = css.getPropertyValue('--pos').trim();
+  const NEG = css.getPropertyValue('--neg').trim();
+  const WARN = css.getPropertyValue('--warn').trim();
   const ctx = document.getElementById('pnl-chart').getContext('2d');
   if (chart) chart.destroy();
   chart = new Chart(ctx, {
-    data: {
-      labels,
-      datasets: [
-        { type: 'bar', label: 'Daily P&L', data: daily, yAxisID: 'yD',
-          backgroundColor: daily.map(v => v >= 0 ? 'rgba(8,135,93,.55)' : 'rgba(217,45,32,.5)'),
-          borderColor: daily.map(v => v >= 0 ? POS : NEG), borderWidth: 1, borderRadius: 4,
-          maxBarThickness: 46 },
-        { type: 'line', label: 'Cumulative P&L', data: cumu, yAxisID: 'yC',
-          borderColor: WARN, backgroundColor: 'rgba(180,83,9,.06)',
-          borderWidth: 2.5, pointRadius: 3, pointBackgroundColor: WARN, tension: .3, fill: true },
-      ],
-    },
+    data: { labels, datasets: [
+      { type: 'bar', label: 'Daily net P/L', data: pnl, yAxisID: 'daily',
+        backgroundColor: pnl.map(value => value == null ? 'rgba(140,160,180,.25)' : value >= 0 ? 'rgba(8,135,93,.5)' : 'rgba(217,45,32,.45)'),
+        borderColor: pnl.map(value => value == null ? MUTED : value >= 0 ? POS : NEG),
+        borderWidth: 1, borderRadius: 4, maxBarThickness: 44 },
+      { type: 'line', label: 'Cumulative net P/L', data: cumulative, yAxisID: 'cumulative',
+        borderColor: WARN, backgroundColor: 'rgba(180,83,9,.07)', borderWidth: 2.5,
+        pointRadius: 3, pointBackgroundColor: WARN, tension: .3, fill: true },
+    ] },
     options: {
       responsive: true, maintainAspectRatio: false,
-      interaction: { mode: 'index', intersect: false },
       plugins: {
         legend: { labels: { color: MUTED, font: { size: 12 } } },
-        tooltip: { callbacks: { label: c => ` ${c.dataset.label}: ${f$(c.raw)}` } },
+        tooltip: { callbacks: { label: context => ` ${context.dataset.label}: ${f$(context.raw)}` } },
       },
       scales: {
-        x:  { ticks: { color: MUTED, font: { size: 11 } }, grid: { color: GRID } },
-        yD: { position: 'left', title: { display: true, text: 'Daily P&L', color: MUTED },
-              ticks: { color: MUTED, callback: v => (v >= 0 ? '+$' : '-$') + Math.abs(v).toLocaleString() },
-              grid: { color: GRID } },
-        yC: { position: 'right', title: { display: true, text: 'Cumulative P&L', color: WARN },
-              ticks: { color: WARN, callback: v => '$' + v.toLocaleString() },
-              grid: { drawOnChartArea: false } },
+        x: { ticks: { color: MUTED, font: { size: 11 } }, grid: { color: GRID } },
+        daily: { position: 'left', ticks: { color: MUTED, callback: value => f$(value) }, grid: { color: GRID } },
+        cumulative: { position: 'right', ticks: { color: WARN, callback: value => f$(value) }, grid: { drawOnChartArea: false } },
       },
     },
   });
+}
+
+function feeLabel(trade) {
+  const fees = Array.isArray(trade.fees) ? trade.fees : [];
+  if (!fees.length) return '—';
+  return fees.map(fee => `${fN(fee.amount, 8)} ${esc(fee.asset || 'fee units')}`).join(' · ');
+}
+
+function tableTime(value) {
+  return String(value || 'Not reported').replace(/\s+IST\s*$/i, '');
+}
+
+function performanceMetrics(trades) {
+  const symbols = new Set(trades.map(t => t.symbol).filter(Boolean));
+  const lots = trades.reduce((total, trade) => total + Math.abs(+(trade.lots || 0)), 0);
+  const open = trades.filter(trade => trade.status === 'OPEN').length;
+  const closed = trades.length - open;
+  const grossValued = trades.filter(trade => trade.gross_pnl_usd != null && trade.status === 'CLOSED');
+  const valued = trades.filter(trade => trade.net_pnl_usd != null && trade.status === 'CLOSED');
+  const gross = grossValued.reduce((total, trade) => total + +trade.gross_pnl_usd, 0);
+  const net = valued.reduce((total, trade) => total + +trade.net_pnl_usd, 0);
+  const winners = valued.filter(trade => +trade.net_pnl_usd > 0);
+  const losers = valued.filter(trade => +trade.net_pnl_usd < 0);
+  const grossWins = winners.reduce((total, trade) => total + +trade.net_pnl_usd, 0);
+  const grossLosses = Math.abs(losers.reduce((total, trade) => total + +trade.net_pnl_usd, 0));
+  const winRate = valued.length ? winners.length / valued.length * 100 : null;
+  const averageWin = winners.length ? grossWins / winners.length : null;
+  const averageLoss = losers.length ? -grossLosses / losers.length : null;
+  const rewardRisk = averageWin != null && averageLoss != null
+    ? averageWin / Math.abs(averageLoss)
+    : null;
+  const profitFactor = grossLosses > 0 ? grossWins / grossLosses
+    : grossWins > 0 ? Infinity : null;
+  const expectancy = valued.length ? net / valued.length : null;
+
+  const chronological = valued.map((trade, index) => {
+    const parsed = Date.parse(trade.exit_at_utc || '');
+    const fallback = Number.isFinite(+trade.sort_timestamp) ? +trade.sort_timestamp * 1000 : index;
+    return { pnl: +trade.net_pnl_usd, closedAt: Number.isFinite(parsed) ? parsed : fallback, index };
+  }).sort((a, b) => a.closedAt - b.closedAt || a.index - b.index);
+  let equity = 0, peak = 0, maxDrawdown = 0;
+  for (const trade of chronological) {
+    equity += trade.pnl;
+    peak = Math.max(peak, equity);
+    maxDrawdown = Math.max(maxDrawdown, peak - equity);
+  }
+
+  const fees = new Map();
+  for (const trade of trades) {
+    for (const fee of Array.isArray(trade.fees) ? trade.fees : []) {
+      const asset = fee.asset || 'fee units';
+      fees.set(asset, (fees.get(asset) || 0) + +(fee.amount || 0));
+    }
+  }
+  return {
+    symbols: symbols.size, lots, open, closed, grossValued: grossValued.length,
+    valued: valued.length, gross, net, winners: winners.length, losers: losers.length,
+    winRate, averageWin, averageLoss, rewardRisk, profitFactor, expectancy,
+    maxDrawdown, fees,
+  };
+}
+
+function feeMetricText(fees) {
+  if (!fees.size) return 'Not reported';
+  return [...fees].map(([asset, value]) => String(asset).toUpperCase() === 'USD'
+    ? `$${fN(value, 2)}`
+    : `${fN(value, 4)} ${esc(asset)}`).join(' · ');
+}
+
+function ratioText(value, riskPrefix = false) {
+  if (value == null) return '—';
+  if (!Number.isFinite(value)) return riskPrefix ? '1 : ∞' : '∞';
+  return riskPrefix ? `1 : ${fN(value, 2)}` : fN(value, 2);
+}
+
+function ratioTone(value) {
+  if (value == null) return 'neutral';
+  if (!Number.isFinite(value) || value >= 1) return 'positive';
+  return 'negative';
+}
+
+function renderStats(trades) {
+  const el = document.getElementById('stats');
+  const metrics = performanceMetrics(trades);
+  const pnlClass = value => value == null ? 'neutral' : value >= 0 ? 'positive' : 'negative';
+  const valuedText = `${metrics.valued}/${metrics.closed} closed trades valued`;
+  const drawdownText = metrics.valued
+    ? (metrics.maxDrawdown > 0 ? '-$' + fN(metrics.maxDrawdown, 2) : '$0.00')
+    : '—';
+  el.innerHTML = `
+    <div class="stat performance-stat ${pnlClass(metrics.valued ? metrics.net : null)}"><div class="lbl">Total P/L</div><div class="val ${pnlCls(metrics.net)}">${metrics.valued ? f$(metrics.net) : '—'}</div><div class="sub">Net of reported USD fees · ${valuedText}</div></div>
+    <div class="stat performance-stat ${pnlClass(metrics.grossValued ? metrics.gross : null)}"><div class="lbl">Gross P/L</div><div class="val ${pnlCls(metrics.gross)}">${metrics.grossValued ? f$(metrics.gross) : '—'}</div><div class="sub">${metrics.grossValued}/${metrics.closed} before fees</div></div>
+    <div class="stat performance-stat ${metrics.fees.size ? 'warning' : 'neutral'}"><div class="lbl">Total fees &amp; charges</div><div class="val exchange-fees">${feeMetricText(metrics.fees)}</div><div class="sub">All fees reported by Delta</div></div>
+    <div class="stat performance-stat ${metrics.winRate == null ? 'neutral' : metrics.winRate >= 50 ? 'positive' : 'negative'}"><div class="lbl">Win rate</div><div class="val">${metrics.winRate == null ? '—' : fN(metrics.winRate, 1) + '%'}</div><div class="sub">${metrics.winners} wins · ${metrics.losers} losses</div></div>
+    <div class="stat performance-stat ${metrics.averageWin == null ? 'neutral' : 'positive'}"><div class="lbl">Average win</div><div class="val ${metrics.averageWin == null ? '' : 'c-pos'}">${metrics.averageWin == null ? '—' : f$(metrics.averageWin)}</div><div class="sub">Across ${metrics.winners} winning trade${metrics.winners === 1 ? '' : 's'}</div></div>
+    <div class="stat performance-stat ${metrics.averageLoss == null ? 'neutral' : 'negative'}"><div class="lbl">Average loss</div><div class="val ${metrics.averageLoss == null ? '' : 'c-neg'}">${metrics.averageLoss == null ? '—' : f$(metrics.averageLoss)}</div><div class="sub">Across ${metrics.losers} losing trade${metrics.losers === 1 ? '' : 's'}</div></div>
+    <div class="stat performance-stat ${ratioTone(metrics.rewardRisk)}"><div class="lbl">Risk : reward</div><div class="val">${ratioText(metrics.rewardRisk, true)}</div><div class="sub">Average reward for every $1 lost</div></div>
+    <div class="stat performance-stat ${ratioTone(metrics.profitFactor)}"><div class="lbl">Profit factor</div><div class="val">${ratioText(metrics.profitFactor)}</div><div class="sub">Gross wins ÷ gross losses</div></div>
+    <div class="stat performance-stat ${pnlClass(metrics.expectancy)}"><div class="lbl">Expectancy / trade</div><div class="val ${pnlCls(metrics.expectancy)}">${metrics.expectancy == null ? '—' : f$(metrics.expectancy)}</div><div class="sub">Average net result per valued trade</div></div>
+    <div class="stat performance-stat ${metrics.maxDrawdown > 0 ? 'negative' : 'neutral'}"><div class="lbl">Maximum drawdown</div><div class="val ${metrics.maxDrawdown > 0 ? 'c-neg' : ''}">${drawdownText}</div><div class="sub">Largest peak-to-trough net P/L decline</div></div>
+    <div class="stat performance-stat accent"><div class="lbl">Trade cycles</div><div class="val">${fN(trades.length)}</div><div class="sub">${metrics.closed} closed · ${metrics.open} open</div></div>
+    <div class="stat performance-stat ${metrics.open ? 'warning' : 'neutral'}"><div class="lbl">Volume traded</div><div class="val">${fN(metrics.lots, 2)}</div><div class="sub">Lots across ${metrics.symbols} contract${metrics.symbols === 1 ? '' : 's'}</div></div>`;
 }
 
 function renderTable(trades) {
   const body = document.getElementById('tbl-body');
   if (!trades.length) {
-    body.innerHTML = '<tr class="empty-row"><td colspan="10">No trades yet</td></tr>';
+    body.innerHTML = '<tr class="empty-row"><td colspan="11">No Delta Exchange trades match this filter</td></tr>';
+    document.getElementById('trade-count').textContent = '0 trades';
     return;
   }
-  let cum = 0;
-  const withCum = trades.map(t => {
-    if (!t.dry_run) cum += +(t.pnl_usd || 0);
-    return { ...t, cum };
-  });
-  document.getElementById('trade-count').textContent = `${trades.length} trades`;
-  body.innerHTML = [...withCum].reverse().map(t => {
-    if (t.dry_run) {
-      return `<tr><td>${esc(t.date || t.entry_date || '—')}</td><td>${esc(t.symbol)}</td>
-        <td>$${fN(t.strike)}</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td>
-        <td class="${pnlCls(t.cum)}">${f$(t.cum)}</td>
-        <td><span class="badge sim">SIMULATED</span></td></tr>`;
-    }
-    const pnl = +(t.pnl_usd || 0);
+  document.getElementById('trade-count').textContent = `${trades.length.toLocaleString()} trade${trades.length === 1 ? '' : 's'}`;
+  body.innerHTML = [...trades].reverse().map(trade => {
+    const side = String(trade.side || '').toLowerCase();
+    const isOpen = trade.status === 'OPEN';
     return `<tr>
-      <td>${esc(t.date || t.entry_date || '—')}</td>
-      <td>${esc(t.symbol)}</td>
-      <td>${t.strike != null ? '$' + fN(t.strike) : '—'}</td>
-      <td>${t.side ? `<span class="badge ${String(t.side).toLowerCase() === 'short' ? 'short' : 'long'}">${esc(String(t.side).toUpperCase())}</span>` : '—'}</td>
-      <td>${fN(t.lots)}</td>
-      <td>$${fN(t.entry_mark, 2)}</td>
-      <td>$${fN(t.exit_mark, 2)}</td>
-      <td class="${pnlCls(pnl)}">${f$(pnl)}</td>
-      <td class="${pnlCls(t.cum)}">${f$(t.cum)}</td>
-      <td><span class="badge ${pnl >= 0 ? 'win' : 'loss'}">${pnl >= 0 ? 'WIN' : 'LOSS'}</span></td>
+      <td>${esc(tableTime(trade.entry_time_ist))}</td>
+      <td>${isOpen ? '—' : esc(tableTime(trade.exit_time_ist))}</td>
+      <td>${originBadge(trade)}<strong>${esc(trade.symbol || 'Not reported')}</strong></td>
+      <td>${side ? `<span class="badge ${side === 'short' ? 'short' : 'long'}">${esc(side.toUpperCase())}</span>` : '—'}</td>
+      <td class="numeric">${fN(isOpen ? trade.open_lots : trade.lots, 6)}</td>
+      <td class="numeric">${fN(trade.entry_price, 8)}</td>
+      <td class="numeric">${isOpen ? '—' : fN(trade.exit_price, 8)}</td>
+      <td class="numeric ${pnlCls(trade.gross_pnl_usd)}">${f$(trade.gross_pnl_usd)}</td>
+      <td class="numeric ${pnlCls(trade.net_pnl_usd)}">${f$(trade.net_pnl_usd)}</td>
+      <td class="numeric">${feeLabel(trade)}</td>
+      <td><span class="badge ${isOpen ? 'live' : 'closed'}">${isOpen ? 'OPEN' : 'CLOSED'}</span></td>
     </tr>`;
   }).join('');
 }
 
-async function loadStats() {
-  const s = await jget('/api/summary');
-  const el = document.getElementById('stats');
-  if (!s || !s.total_days) { el.innerHTML = ''; return; }
-  el.innerHTML = `
-    <div class="stat"><div class="lbl">Total P&L</div><div class="val ${pnlCls(s.total_pnl)}">${f$(s.total_pnl)}</div><div class="sub">${s.total_days} trades</div></div>
-    <div class="stat"><div class="lbl">Win rate</div><div class="val">${fN(s.win_rate, 1)}%</div><div class="sub">${s.wins} W / ${s.losses} L</div></div>
-    <div class="stat"><div class="lbl">Avg win</div><div class="val c-pos">${f$(s.avg_win)}</div><div class="sub">Avg loss ${f$(s.avg_loss)}</div></div>
-    <div class="stat"><div class="lbl">Risk / reward</div><div class="val">${fN(s.rr, 2)}</div><div class="sub">Reward per $1 risked</div></div>
-    <div class="stat"><div class="lbl">Max drawdown</div><div class="val c-neg">${f$(s.max_dd)}</div><div class="sub">Peak to trough</div></div>`;
+function setSourceStatus(text, kind = '') {
+  const source = document.getElementById('performance-source');
+  source.className = `performance-source ${kind}`;
+  source.querySelector('span').textContent = text;
 }
 
-async function load() {
-  const trades = await jget('/api/trades');
-  latestTrades = trades;
-  drawChart(trades);
-  renderTable(trades);
-  loadStats();
+async function load(manual = false) {
+  const button = document.getElementById('refresh-history');
+  button.disabled = true;
+  setSourceStatus(manual ? 'Refreshing complete trade history…' : 'Loading completed and open trades from the exchange…', 'loading');
+  try {
+    const payload = await jget('/api/performance/delta-trades');
+    if (!payload?.ok || !Array.isArray(payload.records)) {
+      throw new Error(payload?.error || 'Delta Exchange returned an invalid trade history response');
+    }
+    latestTrades = payload.records;
+    const fetched = payload.fetched_at ? new Date(payload.fetched_at) : null;
+    const localTime = fetched && Number.isFinite(fetched.getTime())
+      ? fetched.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', hour12: true }) + ' IST'
+      : 'just now';
+    setSourceStatus(`${payload.count.toLocaleString()} trade${payload.count === 1 ? '' : 's'} loaded from Delta Exchange · updated ${localTime}`, 'ready');
+    drawChart(latestTrades);
+    renderTable(filterByOrigin(latestTrades, historyOrigin()));
+    renderStats(latestTrades);
+  } catch (error) {
+    latestTrades = [];
+    if (chart) { chart.destroy(); chart = null; }
+    renderTable([]);
+    document.getElementById('stats').innerHTML = '';
+    setSourceStatus(error.message || 'Delta Exchange trade history could not be loaded.', 'error');
+  } finally {
+    button.disabled = false;
+  }
 }
-window.addEventListener('themechange', () => { if (latestTrades.length) drawChart(latestTrades); });
+
+/* A full exchange ledger can span many cursor pages. It loads on opening the
+ * tab and on explicit refresh, never through a background polling loop. */
+onThemeChange(() => { if (latestTrades.length) drawChart(latestTrades); });
 load();
-setInterval(load, 60_000);
 </script>
 {% endblock %}
