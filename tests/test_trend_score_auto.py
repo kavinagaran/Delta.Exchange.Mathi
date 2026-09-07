@@ -14,6 +14,7 @@ from trend_score_auto import (
     SHORT_MOVE,
     TrendScoreAutoInputError,
     completed_candle_signal_key,
+    require_auto_entry_window,
     plan_score_transition,
     score_zone,
     select_directional_option,
@@ -23,6 +24,23 @@ from trend_score_auto import (
 
 
 NOW = datetime(2026, 7, 22, 10, 0, tzinfo=timezone.utc)
+
+
+@pytest.mark.parametrize("day", range(7, 14))
+@pytest.mark.parametrize("hour,minute,second,blocked", [
+    (11, 59, 59, False),
+    (12, 0, 0, True),
+    (12, 4, 59, True),
+    (12, 5, 0, False),
+])
+def test_daily_auto_entry_blackout(day, hour, minute, second, blocked):
+    instant = datetime(2026, 9, day, hour, minute, second, tzinfo=timezone.utc)
+    for value in (instant, instant.astimezone(timezone(timedelta(hours=5, minutes=30)))):
+        if blocked:
+            with pytest.raises(RuntimeError, match="Bot entries paused"):
+                require_auto_entry_window(value)
+        else:
+            require_auto_entry_window(value)
 
 
 def _products(expiry, strikes):

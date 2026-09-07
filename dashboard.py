@@ -46,6 +46,7 @@ from trend_score_auto import (
     SHORT_MOVE as TREND_SCORE_MOVE_ZONE,
     TrendScoreAutoInputError,
     completed_candle_signal_key,
+    require_auto_entry_window,
     plan_score_transition,
     position_score_zone,
     score_zone,
@@ -8629,6 +8630,8 @@ def _execute_trend_entry(
     expected: dict | None = None,
 ):
     """Buy the server-derived contract under the cross-process risk lock."""
+    if auto:
+        require_auto_entry_window(datetime.now(timezone.utc))
     user = _active_user()
     with account_entry_lock(_user_dir(), f"trend:{user}") as acquired:
         if not acquired:
@@ -9492,6 +9495,7 @@ def _prepare_trend_score_auto_entry(signal: dict) -> dict:
     quantity is still resolved, still required to be positive, and still
     recorded as ``entry_depth``; it just no longer gates.
     """
+    require_auto_entry_window(datetime.now(timezone.utc))
     if signal.get("zone_action_allowed") is not True:
         reason = str(signal.get("zone_reason") or "").strip()
         raise RuntimeError(
@@ -12798,6 +12802,8 @@ def _trend_score_auto_live_execute(
     if pre_post and not isinstance(selected, dict):
         raise RuntimeError("LIVE score entry has no selected contract")
     if pre_post:
+        if effective_ownership != TREND_SCORE_MANUAL_LIVE_OWNERSHIP:
+            require_auto_entry_window(datetime.now(timezone.utc))
         _trend_score_auto_live_require_tte(
             selected,
             require_min_tte=(
@@ -12834,6 +12840,8 @@ def _trend_score_auto_live_execute(
         max_slippage, max_spread, max_quote_age = 0.0, 0.0, 1.0
 
     def submit_with_verified_credentials(payload: dict):
+        if effective_ownership != TREND_SCORE_MANUAL_LIVE_OWNERSHIP:
+            require_auto_entry_window(datetime.now(timezone.utc))
         if not pre_post:
             raise RuntimeError(
                 "Recovery-only LIVE entry path cannot submit an order"
@@ -14578,6 +14586,7 @@ def _maybe_auto_trend_score_cycle() -> bool:
                     or _trend_score_auto_mode() != "dry_run"
                 ):
                     raise RuntimeError("Controller mode changed before dry-run entry")
+                require_auto_entry_window(datetime.now(timezone.utc))
                 opened = _trend_score_auto_open_state(
                     signal, prepared, transition_id, dry_risk_snapshot,
                 )

@@ -40,6 +40,15 @@ MIN_TIME_TO_EXPIRY_SECONDS = 90 * 60
 IST_TIMEZONE = timezone(timedelta(hours=5, minutes=30))
 
 
+def require_auto_entry_window(now: datetime) -> None:
+    """Block fresh bot entries daily from 17:30 inclusive to 17:35 IST."""
+    if now.tzinfo is None:
+        raise ValueError("Auto entry clock must include a timezone")
+    local = now.astimezone(IST_TIMEZONE)
+    if (17, 30) <= (local.hour, local.minute) < (17, 35):
+        raise RuntimeError("Bot entries paused: 5:30–5:35 PM IST daily")
+
+
 class TrendScoreAutoInputError(ValueError):
     """The controller input is incomplete, ambiguous, or unsafe to use."""
 
