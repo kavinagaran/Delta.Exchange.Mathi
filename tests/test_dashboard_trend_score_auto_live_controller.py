@@ -2060,7 +2060,7 @@ def test_zone_switch_closes_and_stays_flat_when_new_contract_is_unavailable(
     assert ledger["current_transition"]["phase"] == "FLAT_WAITING_CONTRACT"
 
 
-def test_live_signal_in_transition_blocks_follow_on_for_same_signal(
+def test_flat_waiting_contract_retries_follow_on_for_same_signal(
     live_account,
     monkeypatch,
 ):
@@ -2095,11 +2095,7 @@ def test_live_signal_in_transition_blocks_follow_on_for_same_signal(
         )
 
     close_mock = Mock(side_effect=close)
-    execute = Mock(
-        side_effect=AssertionError(
-            "new signal contract must not reach entry while in-flight"
-        )
-    )
+    execute = Mock(return_value=_open_result(signal, _prepared(signal["zone"])))
     monkeypatch.setattr(
         dashboard,
         "_close_move_state_locked",
@@ -2122,16 +2118,16 @@ def test_live_signal_in_transition_blocks_follow_on_for_same_signal(
     health = dashboard._trend_score_auto_health["alice"]
     assert health["status"] == "flat_waiting_contract"
 
-    assert dashboard._maybe_auto_trend_score_cycle() is False
+    assert dashboard._maybe_auto_trend_score_cycle() is True
     assert prepare.call_count == 2
-    assert execute.call_count == 0
+    assert execute.call_count == 1
     ledger = json.loads(
         (live_account / dashboard.TREND_SCORE_AUTO_LEDGER_FILE).read_text(
             encoding="utf-8"
         )
     )
-    assert ledger["current_transition"]["phase"] == "FLAT_WAITING_CONTRACT"
-    assert dashboard._trend_score_auto_health["alice"]["status"] == "signal_consumed"
+    assert ledger["current_transition"]["phase"] == "COMPLETE"
+    assert dashboard._trend_score_auto_health["alice"]["status"] == "position_open"
 
 
 def test_final_preflight_rechecks_daily_contract_tte_at_post_boundary(

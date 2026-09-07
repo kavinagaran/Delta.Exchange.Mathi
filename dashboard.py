@@ -10445,10 +10445,28 @@ def _trend_score_auto_signal_in_flight(
     if str(transition.get("signal_key") or "") != str(signal_key or ""):
         return False
     phase = str(transition.get("phase") or "").strip().upper()
-    # REBUILD_REQUIRED is a durable instruction to discard an unsafe pre-POST
-    # intent and rebuild it from current evidence. Treating it as in-flight
-    # deadlocked the very next retry forever.
-    return bool(phase) and phase not in {"COMPLETE", "REBUILD_REQUIRED"}
+    # REBUILD_REQUIRED and FLAT_WAITING_CONTRACT are durable retry states, not
+    # active order ownership. Treating either as in-flight deadlocks the next
+    # same-signal retry after a temporary contract lookup miss.
+    return bool(phase) and phase not in {
+        "COMPLETE",
+        "REBUILD_REQUIRED",
+        "FLAT_WAITING_CONTRACT",
+    }
+
+
+def _trend_score_auto_retrying_same_signal(
+    ledger: dict,
+    signal_key: str,
+) -> bool:
+    """Return whether a previous same-signal attempt should be retried."""
+    transition = ledger.get("current_transition")
+    if not isinstance(transition, dict):
+        return False
+    if str(transition.get("signal_key") or "") != str(signal_key or ""):
+        return False
+    phase = str(transition.get("phase") or "").strip().upper()
+    return phase in {"REBUILD_REQUIRED", "FLAT_WAITING_CONTRACT"}
 
 
 def _trend_score_auto_register_notification(
@@ -13521,7 +13539,18 @@ def _maybe_auto_trend_score_live_cycle(
                         or states["trend"].get("last_entry_signal_key")
                         or ""
                     )
-                    if durable_key:
+                    retrying_current_signal = (
+                        _trend_score_auto_retrying_same_signal(
+                            ledger, current_signal["signal_key"],
+                        )
+                    )
+                    if (
+                        durable_key
+                        and not (
+                            retrying_current_signal
+                            and durable_key == current_signal["signal_key"]
+                        )
+                    ):
                         consumed.add(durable_key)
                     plan = plan_score_transition(
                         score=current_signal["score"],
@@ -14246,11 +14275,15 @@ def _maybe_auto_trend_score_cycle() -> bool:
                         "signals", {}
                     )
                 )
+                retrying_current_signal = _trend_score_auto_retrying_same_signal(
+                    ledger, signal["signal_key"],
+                )
                 if (
                     str(states["trend"].get("status") or "").upper() == "CLOSED"
                     and states["trend"].get("ownership") == TREND_SCORE_AUTO_OWNERSHIP
                     and states["trend"].get("score_auto_signal_key")
                     == signal["signal_key"]
+                    and not retrying_current_signal
                 ):
                     consumed.add(signal["signal_key"])
                 plan = plan_score_transition(
