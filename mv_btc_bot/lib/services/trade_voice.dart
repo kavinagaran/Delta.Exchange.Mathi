@@ -11,13 +11,21 @@ class TradeVoiceAnnouncements {
     DateTime Function()? now,
   }) : _clock = now ?? DateTime.now {
     final tts = speak == null ? FlutterTts() : null;
+    Future<void>? ready;
     _speaker =
         speak ??
         (message) async {
-          await tts!.setLanguage('en-US');
-          await tts.setSpeechRate(.48);
-          await tts.awaitSpeakCompletion(true);
-          await tts.speak(message);
+          ready ??= () async {
+            await tts!.setLanguage('en-US');
+            await tts.setSpeechRate(.48);
+            await tts.setVolume(1);
+            await tts.awaitSpeakCompletion(true);
+          }();
+          await ready;
+          final result = await tts!.speak(message);
+          if (result != 1) {
+            throw StateError('Android text-to-speech did not start');
+          }
         };
     _stop =
         stop ??
@@ -32,6 +40,11 @@ class TradeVoiceAnnouncements {
     for (final instance in _instances) {
       instance.setEnabled(value);
     }
+  }
+
+  static Future<bool> testForAll() async {
+    if (_instances.isEmpty) return false;
+    return _instances.first.test();
   }
 
   static const _interval = Duration(minutes: 15);
@@ -135,6 +148,19 @@ class TradeVoiceAnnouncements {
           });
     }
     return _queue;
+  }
+
+  /// Speaks immediately from a user action and reports TTS availability.
+  /// This deliberately works while scheduled announcements are OFF so the
+  /// audio path can be checked before saving the preference.
+  Future<bool> test() async {
+    if (_disposed) return false;
+    try {
+      await _speaker('Voice announcements are working.');
+      return true;
+    } catch (_) {
+      return false;
+    }
   }
 
   Future<void> dispose() async {

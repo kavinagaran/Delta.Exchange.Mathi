@@ -192,6 +192,17 @@ class _ConfigScreenState extends State<ConfigScreen> {
     );
   }
 
+  Future<void> _testAnnouncement() async {
+    final started = await TradeVoiceAnnouncements.testForAll();
+    if (!mounted) return;
+    _toast(
+      started
+          ? 'Test announcement played'
+          : 'Text-to-speech is unavailable. Check the Android speech engine and media volume.',
+      started,
+    );
+  }
+
   void _toast(String message, bool ok) {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
@@ -374,16 +385,29 @@ class _ConfigScreenState extends State<ConfigScreen> {
           const SizedBox(height: Gap.md),
           AppCard(
             title: 'Voice announcements',
-            child: SwitchListTile.adaptive(
-              contentPadding: EdgeInsets.zero,
-              title: const Text('Announcements', style: AppText.body),
-              subtitle: Text(
-                '${_announcements ? 'ON' : 'OFF'} · Entries, exits and P&L every 15 minutes while the app is active. Save to apply to this account.',
-              ),
-              value: _announcements,
-              onChanged: (value) {
-                setState(() => _announcements = value);
-              },
+            child: Column(
+              children: [
+                SwitchListTile.adaptive(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('Announcements', style: AppText.body),
+                  subtitle: Text(
+                    '${_announcements ? 'ON' : 'OFF'} · Entries, exits and P&L every 15 minutes while the app is active. Save to apply to this account.',
+                  ),
+                  value: _announcements,
+                  onChanged: (value) {
+                    setState(() => _announcements = value);
+                  },
+                ),
+                const SizedBox(height: Gap.sm),
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    onPressed: _testAnnouncement,
+                    icon: const Icon(Icons.volume_up_rounded),
+                    label: const Text('Test Announcement'),
+                  ),
+                ),
+              ],
             ),
           ),
           const SizedBox(height: Gap.md),

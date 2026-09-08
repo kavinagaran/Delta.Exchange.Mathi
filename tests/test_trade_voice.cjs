@@ -27,6 +27,20 @@ test('baseline is silent; entry and 15-minute P&L are spoken', () => {
   s.api.observe([open()]); assert.equal(s.spoken.length, 1);
   s.tick(); s.api.observe([open()]); assert.match(s.spoken[1], /profit of 12.50 dollars/);
 });
+test('Test Announcement unlocks and speaks even while announcements are off', () => {
+  let spoken = [], events = {}, buttons = [];
+  const context = {
+    window: {speechSynthesis: {speak: u => spoken.push(u.text), cancel: () => {}}},
+    document: {addEventListener: (e, fn) => events[e] = fn,
+      createElement: () => ({style: {}}), body: {appendChild: b => buttons.push(b)}},
+    SpeechSynthesisUtterance: function(text) { this.text = text; },
+    Date: {now: () => 0}, jget: async () => [],
+  };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../static/js/trade_voice.js'), 'utf8'), context);
+  events.DOMContentLoaded();
+  assert.equal(context.window.tradeVoiceAnnouncements.test(), true);
+  assert.deepEqual(spoken, ['Voice announcements are working.']);
+});
 test('OFF cancels speech and ON does not replay trades', () => {
   const s = setup(); s.api.observe([]); s.api.setEnabled(false);
   assert.ok(s.cancels() > 0);

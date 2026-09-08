@@ -1,6 +1,7 @@
 /* Presentation-only voice alerts. Never changes orders or protection. */
 (function () {
   const intervalMs = 15 * 60 * 1000;
+  const audioSessionKey = 'btc-bot-voice-audio-enabled';
   let enabled = false, initialized = false, unlocked = false, busy = false;
   let lastPnlAt = 0, mode = null, revision = 0;
   let active = new Map(), pending = new Set();
@@ -18,15 +19,33 @@
     return null;
   }
   const dollars = n => `${n >= 0 ? 'profit' : 'loss'} of ${Math.abs(n).toFixed(2)} dollars`;
-  function speak(text) {
-    if (!enabled || !unlocked || !window.speechSynthesis) return;
+  try { unlocked = sessionStorage.getItem(audioSessionKey) === 'true'; } catch (_) {}
+  function rememberUnlock(value) {
+    unlocked = value;
+    try {
+      if (value) sessionStorage.setItem(audioSessionKey, 'true');
+      else sessionStorage.removeItem(audioSessionKey);
+    } catch (_) { /* storage may be unavailable */ }
+    updateButton();
+  }
+  function speak(text, force = false) {
+    if ((!enabled && !force) || !unlocked || !window.speechSynthesis) return false;
     const utterance = new SpeechSynthesisUtterance(text);
     utterance.lang = 'en-US';
     utterance.onerror = e => {
-      if (e.error === 'not-allowed') { unlocked = false; updateButton(); }
+      if (e.error === 'not-allowed') rememberUnlock(false);
     };
     // Keep the native queue: exits must not be interrupted by a new entry.
     window.speechSynthesis.speak(utterance);
+    return true;
+  }
+  function test() {
+    if (!window.speechSynthesis) return false;
+    // This is called directly by a click, satisfying browser user-gesture
+    // policies. Remember the choice for same-tab page navigation; if a
+    // browser rejects it later, onerror restores the activation button.
+    rememberUnlock(true);
+    return speak('Voice announcements are working.', true);
   }
   function updateButton() {
     if (audioButton) audioButton.hidden = !enabled || unlocked;
@@ -82,9 +101,7 @@
     audioButton.className = 'btn secondary';
     audioButton.textContent = 'Enable voice audio';
     audioButton.style.cssText = 'position:fixed;bottom:16px;right:16px;z-index:900';
-    audioButton.onclick = () => {
-      unlocked = true; updateButton(); speak('Voice announcements enabled.');
-    };
+    audioButton.onclick = test;
     document.body.appendChild(audioButton);
     updateButton();
   });
@@ -106,5 +123,5 @@
     } catch (_) { /* wait for authoritative trade data */ }
     finally { busy = false; }
   });
-  window.tradeVoiceAnnouncements = { observe, setEnabled };
+  window.tradeVoiceAnnouncements = { observe, setEnabled, test };
 })();

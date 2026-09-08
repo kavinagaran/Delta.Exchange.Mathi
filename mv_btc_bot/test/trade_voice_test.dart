@@ -11,6 +11,20 @@ Map<String, dynamic> trade([String id = 'a']) => {
 };
 
 void main() {
+  test(
+    'Test Announcement reports whether speech started while muted',
+    () async {
+      final spoken = <String>[];
+      final voice = TradeVoiceAnnouncements(
+        speak: (message) async => spoken.add(message),
+      );
+
+      expect(await voice.test(), isTrue);
+      expect(spoken, ['Voice announcements are working.']);
+      await voice.dispose();
+    },
+  );
+
   test('entry, timed P&L, mute and no replay', () async {
     var now = DateTime(2026);
     final spoken = <String>[];

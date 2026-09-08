@@ -9,6 +9,14 @@ ROOT = Path(__file__).resolve().parents[1]
 NODE = shutil.which("node")
 
 
+def test_voice_config_has_a_direct_audio_test_action():
+    source = (ROOT / "templates" / "config.html").read_text(encoding="utf-8")
+
+    assert "Test Announcement" in source
+    assert "function testVoiceAnnouncement()" in source
+    assert "tradeVoiceAnnouncements?.test()" in source
+
+
 def test_score_auto_selector_offers_explicit_live_mode_with_warning():
     source = (ROOT / "templates" / "config.html").read_text(encoding="utf-8")
 

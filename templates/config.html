@@ -138,6 +138,7 @@
       <input id="c-VOICE_ANNOUNCEMENTS_ENABLED" type="checkbox" role="switch" style="width:22px;height:22px">
       <span>Announcements ON / OFF</span>
     </label>
+    <button class="btn secondary" type="button" onclick="testVoiceAnnouncement()">🔊 Test Announcement</button>
     <p class="hint">Spoken trade entries, booked P&amp;L at exit, and current P&amp;L every 15 minutes while the dashboard/app is active. Save to apply to this account on web and Android. Browser audio may require a click first.</p>
   </div>
 </section>
@@ -195,6 +196,13 @@ const RESET_PRESERVED_KEYS = new Set({{ config_page_preserved_keys | tojson }});
 function dryBanner() {
   const on = document.getElementById('c-DRY_RUN').value === 'true';
   document.getElementById('dry-banner').style.display = on ? 'flex' : 'none';
+}
+
+function testVoiceAnnouncement() {
+  const started = window.tradeVoiceAnnouncements?.test() === true;
+  toast(started
+    ? 'Test announcement started — browser voice audio is enabled for this tab.'
+    : 'Voice synthesis is unavailable in this browser.', started ? 'ok' : 'err');
 }
 
 function controllerSummary() {
