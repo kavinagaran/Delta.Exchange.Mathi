@@ -72,7 +72,7 @@ const kBlueBackgroundAsset = 'assets/sparkling-blue-dashboard-bg.png';
 
 final appTheme = AppThemeController();
 
-const kWebAssetRevision = '6.3.6+42-voice-audio';
+const kWebAssetRevision = '6.3.7+43-android-tts';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();

@@ -16,14 +16,22 @@ class TradeVoiceAnnouncements {
         speak ??
         (message) async {
           ready ??= () async {
-            await tts!.setLanguage('en-US');
-            await tts.setSpeechRate(.48);
+            // OEM engines differ in which English locale is installed. Keep
+            // the system default if none of these explicit locales exists.
+            for (final locale in const ['en-IN', 'en-US', 'en-GB']) {
+              final language = await tts!.setLanguage(locale);
+              if (language is num && language >= 0) break;
+            }
+            await tts!.setSpeechRate(.48);
             await tts.setVolume(1);
             await tts.awaitSpeakCompletion(true);
           }();
           await ready;
-          final result = await tts!.speak(message);
-          if (result != 1) {
+          final result = await tts!.speak(message, focus: true);
+          // Android's documented failure value is zero. Some OEM engines
+          // return null or another success token, so requiring exactly 1 can
+          // incorrectly report an available engine as missing.
+          if (result == 0) {
             throw StateError('Android text-to-speech did not start');
           }
         };
@@ -42,9 +50,21 @@ class TradeVoiceAnnouncements {
     }
   }
 
-  static Future<bool> testForAll() async {
-    if (_instances.isEmpty) return false;
-    return _instances.first.test();
+  static Future<bool> testDevice() async {
+    // A deliberate test takes priority over queued speech. Clear any native
+    // utterance first; otherwise the Android plugin returns its "busy" value
+    // and the UI mislabels that as a missing speech engine.
+    for (final instance in List<TradeVoiceAnnouncements>.from(_instances)) {
+      instance._queue = Future<void>.value();
+      await instance._stop().catchError((Object _) {});
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 80));
+    final probe = TradeVoiceAnnouncements();
+    try {
+      return await probe.test();
+    } finally {
+      await probe.dispose();
+    }
   }
 
   static const _interval = Duration(minutes: 15);

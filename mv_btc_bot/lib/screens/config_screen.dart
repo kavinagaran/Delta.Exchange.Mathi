@@ -193,7 +193,7 @@ class _ConfigScreenState extends State<ConfigScreen> {
   }
 
   Future<void> _testAnnouncement() async {
-    final started = await TradeVoiceAnnouncements.testForAll();
+    final started = await TradeVoiceAnnouncements.testDevice();
     if (!mounted) return;
     _toast(
       started

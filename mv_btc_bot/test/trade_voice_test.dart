@@ -25,6 +25,15 @@ void main() {
     },
   );
 
+  test('failed Test Announcement is reported without throwing', () async {
+    final voice = TradeVoiceAnnouncements(
+      speak: (_) async => throw StateError('no engine'),
+    );
+
+    expect(await voice.test(), isFalse);
+    await voice.dispose();
+  });
+
   test('entry, timed P&L, mute and no replay', () async {
     var now = DateTime(2026);
     final spoken = <String>[];
