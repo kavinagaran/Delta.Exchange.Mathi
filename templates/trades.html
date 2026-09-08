@@ -7,12 +7,26 @@
 {% block content %}
 <div class="performance-page">
 <div class="performance-source" id="performance-source" role="status" aria-live="polite">
-  <div>
+  <div class="performance-source-copy">
     <strong>Delta Exchange · trade history</strong>
-    <span>Loading completed and open trades from the exchange…</span>
+    <span>Loading trades for the selected period…</span>
   </div>
   <button class="btn secondary sm" id="refresh-history" type="button">↻ Refresh history</button>
 </div>
+
+<form class="performance-range" id="performance-range">
+  <div class="performance-range-heading">
+    <strong>Trade period</strong>
+    <span>Trades opened on these IST dates</span>
+  </div>
+  <label>Start Date
+    <input type="date" id="performance-start-date" name="start_date" required>
+  </label>
+  <label>End Date
+    <input type="date" id="performance-end-date" name="end_date" required>
+  </label>
+  <button class="btn sm" id="submit-performance-range" type="submit">Submit</button>
+</form>
 
 <div class="stats performance-metrics" id="stats"></div>
 
@@ -50,6 +64,30 @@
 let chart = null, latestTrades = [];
 
 document.getElementById('refresh-history').addEventListener('click', () => load(true));
+document.getElementById('performance-range').addEventListener('submit', event => {
+  event.preventDefault();
+  const start = document.getElementById('performance-start-date');
+  const end = document.getElementById('performance-end-date');
+  start.setCustomValidity('');
+  end.setCustomValidity(start.value && end.value && start.value > end.value
+    ? 'End Date must be on or after Start Date.' : '');
+  if (!event.currentTarget.reportValidity()) return;
+  load(true);
+});
+
+function performanceDefaultDates(now = new Date()) {
+  const parts = Object.fromEntries(new Intl.DateTimeFormat('en', {
+    timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(now).filter(part => part.type !== 'literal').map(part => [part.type, part.value]));
+  const end = `${parts.year}-${parts.month}-${parts.day}`;
+  const startDate = new Date(`${end}T00:00:00Z`);
+  startDate.setUTCDate(startDate.getUTCDate() - 29);
+  return { start: startDate.toISOString().slice(0, 10), end };
+}
+
+const initialRange = performanceDefaultDates();
+document.getElementById('performance-start-date').value = initialRange.start;
+document.getElementById('performance-end-date').value = initialRange.end;
 
 const historyOrigin = mountOriginFilter('history-origin-filter', origin =>
   renderTable(filterByOrigin(latestTrades, origin)));
@@ -57,15 +95,16 @@ const historyOrigin = mountOriginFilter('history-origin-filter', origin =>
 function dailyTradeSeries(trades) {
   const byDay = new Map();
   for (const trade of trades) {
-    if (!trade.date) continue;
-    const current = byDay.get(trade.date) || { trades: 0, lots: 0, pnl: 0, valued: 0 };
+    const day = trade.entry_date_ist || trade.date;
+    if (!day) continue;
+    const current = byDay.get(day) || { trades: 0, lots: 0, pnl: 0, valued: 0 };
     current.trades += 1;
     current.lots += Math.abs(+(trade.lots || 0));
     if (trade.net_pnl_usd != null && Number.isFinite(+trade.net_pnl_usd)) {
       current.pnl += +trade.net_pnl_usd;
       current.valued += 1;
     }
-    byDay.set(trade.date, current);
+    byDay.set(day, current);
   }
   const labels = [...byDay.keys()].sort();
   return {
@@ -247,24 +286,30 @@ function renderTable(trades) {
 function setSourceStatus(text, kind = '') {
   const source = document.getElementById('performance-source');
   source.className = `performance-source ${kind}`;
-  source.querySelector('span').textContent = text;
+  source.querySelector('.performance-source-copy span').textContent = text;
 }
 
 async function load(manual = false) {
   const button = document.getElementById('refresh-history');
-  button.disabled = true;
-  setSourceStatus(manual ? 'Refreshing complete trade history…' : 'Loading completed and open trades from the exchange…', 'loading');
+  const submit = document.getElementById('submit-performance-range');
+  const start = document.getElementById('performance-start-date');
+  const end = document.getElementById('performance-end-date');
+  button.disabled = submit.disabled = true;
+  setSourceStatus(manual ? 'Refreshing the selected trade period…' : 'Loading trades for the selected period…', 'loading');
   try {
-    const payload = await jget('/api/performance/delta-trades');
+    const query = new URLSearchParams({ start_date: start.value, end_date: end.value });
+    const payload = await jget(`/api/performance/delta-trades?${query}`);
     if (!payload?.ok || !Array.isArray(payload.records)) {
       throw new Error(payload?.error || 'Delta Exchange returned an invalid trade history response');
     }
+    start.value = payload.start_date || start.value;
+    end.value = payload.end_date || end.value;
     latestTrades = payload.records;
     const fetched = payload.fetched_at ? new Date(payload.fetched_at) : null;
     const localTime = fetched && Number.isFinite(fetched.getTime())
       ? fetched.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', hour12: true }) + ' IST'
       : 'just now';
-    setSourceStatus(`${payload.count.toLocaleString()} trade${payload.count === 1 ? '' : 's'} loaded from Delta Exchange · updated ${localTime}`, 'ready');
+    setSourceStatus(`${payload.count.toLocaleString()} trade${payload.count === 1 ? '' : 's'} opened ${start.value} to ${end.value} IST · updated ${localTime}`, 'ready');
     drawChart(latestTrades);
     renderTable(filterByOrigin(latestTrades, historyOrigin()));
     renderStats(latestTrades);
@@ -275,7 +320,7 @@ async function load(manual = false) {
     document.getElementById('stats').innerHTML = '';
     setSourceStatus(error.message || 'Delta Exchange trade history could not be loaded.', 'error');
   } finally {
-    button.disabled = false;
+    button.disabled = submit.disabled = false;
   }
 }
 

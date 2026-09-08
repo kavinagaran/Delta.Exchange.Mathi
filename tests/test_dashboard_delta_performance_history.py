@@ -1,4 +1,6 @@
-"""Read-only complete Delta trade history used by the Performance page."""
+"""Read-only, date-filtered Delta trade history used by Performance."""
+
+from datetime import datetime, timezone
 
 import dashboard
 
@@ -52,7 +54,8 @@ def test_complete_delta_trade_history_follows_all_cursors_and_hides_fill_details
     monkeypatch.setattr(dashboard.req, "get", fake_get)
     monkeypatch.setattr(dashboard, "_delta_contract_value", lambda product_id: 100.0)
 
-    with dashboard.app.test_request_context("/api/performance/delta-trades"):
+    with dashboard.app.test_request_context(
+            "/api/performance/delta-trades?start_date=2020-01-01&end_date=2030-12-31"):
         payload, status = _result(dashboard.api_performance_delta_trades())
 
     assert status == 200
@@ -121,3 +124,48 @@ def test_delta_fill_history_never_claims_a_repeated_cursor_is_complete(monkeypat
     assert status == 502
     assert payload["ok"] is False
     assert "repeated a cursor" in payload["error"]
+
+
+def test_default_performance_range_is_last_30_ist_calendar_days():
+    start, end = dashboard._performance_date_range(
+        {}, now=datetime(2026, 9, 7, 20, 0, tzinfo=timezone.utc))
+
+    # 20:00 UTC is already the following day in IST.
+    assert start.isoformat() == "2026-08-10"
+    assert end.isoformat() == "2026-09-08"
+    assert (end - start).days == 29
+
+
+def test_performance_endpoint_filters_trade_entry_dates_inclusively(monkeypatch):
+    rows = [
+        {"entry_date_ist": "2026-08-31", "date": "2026-08-31"},
+        {"entry_date_ist": "2026-09-01", "date": "2026-09-01"},
+        {"entry_date_ist": "2026-09-08", "date": "2026-09-08"},
+        {"entry_date_ist": "2026-09-09", "date": "2026-09-09"},
+    ]
+    monkeypatch.setattr(dashboard, "_fetch_complete_delta_fills", lambda: [])
+    monkeypatch.setattr(dashboard, "_reconstruct_delta_trades", lambda fills: rows)
+    monkeypatch.setattr(dashboard, "_performance_origin_index", lambda: {})
+
+    with dashboard.app.test_request_context(
+            "/api/performance/delta-trades?start_date=2026-09-01&end_date=2026-09-08"):
+        payload, status = _result(dashboard.api_performance_delta_trades())
+
+    assert status == 200
+    assert payload["start_date"] == "2026-09-01"
+    assert payload["end_date"] == "2026-09-08"
+    assert [row["entry_date_ist"] for row in payload["records"]] == [
+        "2026-09-01", "2026-09-08",
+    ]
+
+
+def test_performance_endpoint_rejects_incomplete_or_reversed_ranges():
+    for query, message in [
+        ("start_date=2026-09-01", "both required"),
+        ("start_date=2026-09-08&end_date=2026-09-01", "cannot be after"),
+    ]:
+        with dashboard.app.test_request_context(
+                f"/api/performance/delta-trades?{query}"):
+            payload, status = _result(dashboard.api_performance_delta_trades())
+        assert status == 400
+        assert message in payload["error"]

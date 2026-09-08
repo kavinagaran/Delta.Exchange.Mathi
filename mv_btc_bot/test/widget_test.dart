@@ -157,10 +157,11 @@ void main() {
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
 
+    final api = _PerformanceApi();
     await tester.pumpWidget(
       MaterialApp(
         theme: buildAppTheme(blue: true),
-        home: PerformanceScreen(api: _PerformanceApi(), onUnauthorised: () {}),
+        home: PerformanceScreen(api: api, onUnauthorised: () {}),
       ),
     );
     await tester.pumpAndSettle();
@@ -172,6 +173,14 @@ void main() {
     expect(find.text(r'-$40.00'), findsWidgets);
     expect(find.text(r'$22.00'), findsOneWidget);
     expect(find.text('3 trade cycles'), findsOneWidget);
+    expect(find.text('Start Date'), findsOneWidget);
+    expect(find.text('End Date'), findsOneWidget);
+    expect(find.text('Submit'), findsOneWidget);
+    expect(api.startDate, isNotNull);
+    expect(api.endDate, isNotNull);
+    final start = DateTime.parse(api.startDate!);
+    final end = DateTime.parse(api.endDate!);
+    expect(end.difference(start).inDays, 29);
   });
 
   testWidgets(
@@ -600,42 +609,52 @@ class _PerformanceApi extends DashboardApi {
   _PerformanceApi()
     : super(baseUrl: 'https://example.invalid', sessionCookie: null);
 
+  String? startDate;
+  String? endDate;
+
   @override
-  Future<ApiResult<List<dynamic>>> performanceTrades() async => ApiResult.ok([
-    <String, dynamic>{
-      'status': 'CLOSED',
-      'symbol': 'C-BTC-63000-030826',
-      'side': 'long',
-      'lots': 1000,
-      'gross_pnl_usd': 100.0,
-      'net_pnl_usd': 90.0,
-      'exit_at_utc': '2026-08-03T01:00:00Z',
-      'fees': [
-        <String, dynamic>{'asset': 'USD', 'amount': 10.0},
-      ],
-    },
-    <String, dynamic>{
-      'status': 'CLOSED',
-      'symbol': 'P-BTC-63000-030826',
-      'side': 'long',
-      'lots': 1000,
-      'gross_pnl_usd': -30.0,
-      'net_pnl_usd': -40.0,
-      'exit_at_utc': '2026-08-03T02:00:00Z',
-      'fees': [
-        <String, dynamic>{'asset': 'USD', 'amount': 10.0},
-      ],
-    },
-    <String, dynamic>{
-      'status': 'OPEN',
-      'symbol': 'MV-BTC-63000-030826',
-      'side': 'short',
-      'lots': 1000,
-      'fees': [
-        <String, dynamic>{'asset': 'USD', 'amount': 2.0},
-      ],
-    },
-  ]);
+  Future<ApiResult<List<dynamic>>> performanceTrades({
+    String? startDate,
+    String? endDate,
+  }) async {
+    this.startDate = startDate;
+    this.endDate = endDate;
+    return ApiResult.ok([
+      <String, dynamic>{
+        'status': 'CLOSED',
+        'symbol': 'C-BTC-63000-030826',
+        'side': 'long',
+        'lots': 1000,
+        'gross_pnl_usd': 100.0,
+        'net_pnl_usd': 90.0,
+        'exit_at_utc': '2026-08-03T01:00:00Z',
+        'fees': [
+          <String, dynamic>{'asset': 'USD', 'amount': 10.0},
+        ],
+      },
+      <String, dynamic>{
+        'status': 'CLOSED',
+        'symbol': 'P-BTC-63000-030826',
+        'side': 'long',
+        'lots': 1000,
+        'gross_pnl_usd': -30.0,
+        'net_pnl_usd': -40.0,
+        'exit_at_utc': '2026-08-03T02:00:00Z',
+        'fees': [
+          <String, dynamic>{'asset': 'USD', 'amount': 10.0},
+        ],
+      },
+      <String, dynamic>{
+        'status': 'OPEN',
+        'symbol': 'MV-BTC-63000-030826',
+        'side': 'short',
+        'lots': 1000,
+        'fees': [
+          <String, dynamic>{'asset': 'USD', 'amount': 2.0},
+        ],
+      },
+    ]);
+  }
 }
 
 class _TrendApi extends DashboardApi {

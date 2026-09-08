@@ -31,17 +31,24 @@ class _PerformanceScreenState extends State<PerformanceScreen> {
   List<Map<String, dynamic>> _trades = const [];
   String? _error;
   bool _loading = true;
+  late DateTime _startDate;
+  late DateTime _endDate;
 
   @override
   void initState() {
     super.initState();
+    _endDate = _istToday();
+    _startDate = _endDate.subtract(const Duration(days: 29));
     _refresh();
   }
 
   Future<void> _refresh() async {
     if (mounted) setState(() => _loading = true);
 
-    final result = await widget.api.performanceTrades();
+    final result = await widget.api.performanceTrades(
+      startDate: _dateParam(_startDate),
+      endDate: _dateParam(_endDate),
+    );
     if (!mounted) return;
     if (result.unauthorised) {
       widget.onUnauthorised();
@@ -59,19 +66,6 @@ class _PerformanceScreenState extends State<PerformanceScreen> {
 
   @override
   Widget build(BuildContext context) {
-    if (_loading && _trades.isEmpty) {
-      return const Center(child: CircularProgressIndicator(strokeWidth: 2));
-    }
-    if (_error != null && _trades.isEmpty) {
-      return StatePlaceholder(
-        icon: Icons.cloud_off_rounded,
-        message: 'Cannot load performance',
-        detail: _error,
-        onRetry: _refresh,
-        tone: kNegative,
-      );
-    }
-
     final stats = _PerformanceStats.fromTrades(_trades);
 
     return RefreshIndicator(
@@ -80,12 +74,34 @@ class _PerformanceScreenState extends State<PerformanceScreen> {
         physics: const AlwaysScrollableScrollPhysics(),
         padding: const EdgeInsets.fromLTRB(Gap.lg, Gap.md, Gap.lg, Gap.xxl),
         children: [
-          if (_trades.isEmpty)
+          _PerformanceDateRange(
+            startDate: _startDate,
+            endDate: _endDate,
+            loading: _loading,
+            onStartDate: () => _pickDate(isStart: true),
+            onEndDate: () => _pickDate(isStart: false),
+            onSubmit: _refresh,
+          ),
+          const SizedBox(height: Gap.md),
+          if (_loading && _trades.isEmpty)
+            const Padding(
+              padding: EdgeInsets.all(Gap.xxl),
+              child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
+            )
+          else if (_error != null && _trades.isEmpty)
+            StatePlaceholder(
+              icon: Icons.cloud_off_rounded,
+              message: 'Cannot load performance',
+              detail: _error,
+              onRetry: _refresh,
+              tone: kNegative,
+            )
+          else if (_trades.isEmpty)
             const AppCard(
               kicker: 'Performance',
-              title: 'No exchange trades yet',
+              title: 'No trades in this period',
               child: Text(
-                'Delta Exchange trade history will appear here.',
+                'Choose another Start Date and End Date, then tap Submit.',
                 style: AppText.body,
               ),
             )
@@ -102,6 +118,135 @@ class _PerformanceScreenState extends State<PerformanceScreen> {
       ),
     );
   }
+
+  Future<void> _pickDate({required bool isStart}) async {
+    final today = _istToday();
+    final selected = await showDatePicker(
+      context: context,
+      initialDate: isStart ? _startDate : _endDate,
+      firstDate: DateTime(2020),
+      lastDate: today,
+      helpText: isStart ? 'SELECT START DATE' : 'SELECT END DATE',
+    );
+    if (selected == null || !mounted) return;
+    setState(() {
+      if (isStart) {
+        _startDate = selected;
+        if (_endDate.isBefore(selected)) _endDate = selected;
+      } else {
+        _endDate = selected;
+        if (_startDate.isAfter(selected)) _startDate = selected;
+      }
+    });
+  }
+}
+
+class _PerformanceDateRange extends StatelessWidget {
+  const _PerformanceDateRange({
+    required this.startDate,
+    required this.endDate,
+    required this.loading,
+    required this.onStartDate,
+    required this.onEndDate,
+    required this.onSubmit,
+  });
+
+  final DateTime startDate;
+  final DateTime endDate;
+  final bool loading;
+  final VoidCallback onStartDate;
+  final VoidCallback onEndDate;
+  final VoidCallback onSubmit;
+
+  @override
+  Widget build(BuildContext context) {
+    return AppCard(
+      kicker: 'Trade period · IST',
+      title: 'Performance date range',
+      child: Column(
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: _DateButton(
+                  label: 'Start Date',
+                  value: _dateParam(startDate),
+                  onTap: loading ? null : onStartDate,
+                ),
+              ),
+              const SizedBox(width: Gap.sm),
+              Expanded(
+                child: _DateButton(
+                  label: 'End Date',
+                  value: _dateParam(endDate),
+                  onTap: loading ? null : onEndDate,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: Gap.md),
+          SizedBox(
+            width: double.infinity,
+            child: FilledButton.icon(
+              onPressed: loading ? null : onSubmit,
+              icon: loading
+                  ? const SizedBox.square(
+                      dimension: 15,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.filter_alt_rounded, size: 18),
+              label: const Text('Submit'),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _DateButton extends StatelessWidget {
+  const _DateButton({
+    required this.label,
+    required this.value,
+    required this.onTap,
+  });
+
+  final String label;
+  final String value;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) => Material(
+    color: Colors.transparent,
+    child: InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(12),
+      child: Ink(
+        padding: const EdgeInsets.symmetric(
+          horizontal: Gap.md,
+          vertical: Gap.sm,
+        ),
+        decoration: BoxDecoration(
+          border: Border.all(color: Theme.of(context).colorScheme.outline),
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(label, style: AppText.caption),
+            const SizedBox(height: 3),
+            Row(
+              children: [
+                const Icon(Icons.calendar_month_rounded, size: 16),
+                const SizedBox(width: 5),
+                Expanded(child: Text(value, style: AppText.number)),
+              ],
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
 }
 
 class _SummaryCard extends StatelessWidget {
@@ -232,14 +377,15 @@ class _DailyPnlCard extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
+          Wrap(
+            spacing: Gap.md,
+            runSpacing: Gap.xs,
             children: [
               _ChartLegend(
                 label: 'Daily net P&L',
                 colour: kPositive,
                 bar: true,
               ),
-              const SizedBox(width: Gap.md),
               _ChartLegend(label: 'Cumulative net P&L', colour: kWarning),
             ],
           ),
@@ -680,7 +826,9 @@ class _PerformanceStats {
     }
     final dailyTotals = <String, double>{};
     for (final trade in valued) {
-      final rawDate = '${trades[trade.order]['date'] ?? ''}'.trim();
+      final rawDate =
+          '${trades[trade.order]['entry_date_ist'] ?? trades[trade.order]['date'] ?? ''}'
+              .trim();
       final date = rawDate.isNotEmpty
           ? rawDate
           : DateTime.fromMillisecondsSinceEpoch(
@@ -745,6 +893,18 @@ class _PerformanceStats {
         })
         .join(' · ');
   }
+}
+
+String _dateParam(DateTime value) =>
+    '${value.year.toString().padLeft(4, '0')}-'
+    '${value.month.toString().padLeft(2, '0')}-'
+    '${value.day.toString().padLeft(2, '0')}';
+
+DateTime _istToday() {
+  final istNow = DateTime.now().toUtc().add(
+    const Duration(hours: 5, minutes: 30),
+  );
+  return DateTime(istNow.year, istNow.month, istNow.day);
 }
 
 double? _number(Object? value) {

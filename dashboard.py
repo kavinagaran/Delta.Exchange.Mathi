@@ -5194,7 +5194,15 @@ def _delta_trade_row(state: dict, *, status: str,
         "exit_at_utc": exit_at_utc,
         "entry_time_ist": entry_time_ist,
         "exit_time_ist": exit_time_ist,
-        "date": entry_timestamp.strftime("%Y-%m-%d") if entry_timestamp else "",
+        # Performance date ranges are calendar dates as seen by the user in
+        # IST. Keep ``date`` aligned with that same calendar so charts and
+        # filters cannot disagree around the UTC/IST day boundary.
+        "date": (entry_timestamp.astimezone(_IST_TIMEZONE).date().isoformat()
+                 if entry_timestamp else ""),
+        "entry_date_ist": (
+            entry_timestamp.astimezone(_IST_TIMEZONE).date().isoformat()
+            if entry_timestamp else ""
+        ),
         "sort_timestamp": entry_timestamp.timestamp() if entry_timestamp else 0,
     }
 
@@ -5381,12 +5389,50 @@ def _delta_row_origin_label(row: dict, index: dict) -> str:
     return ORIGIN_MANUAL
 
 
+def _performance_date_range(args, *, now: datetime | None = None):
+    """Return an inclusive IST calendar range for Performance history.
+
+    With no query parameters, the window is exactly 30 calendar days: today
+    and the preceding 29 days. Custom ranges require both endpoints so an
+    accidentally half-filled picker never broadens the exchange query.
+    """
+    start_raw = str(args.get("start_date") or "").strip()
+    end_raw = str(args.get("end_date") or "").strip()
+    if bool(start_raw) != bool(end_raw):
+        raise ValueError("Start Date and End Date are both required")
+    if not start_raw:
+        today = (now or datetime.now(timezone.utc)).astimezone(
+            _IST_TIMEZONE).date()
+        return today - timedelta(days=29), today
+    try:
+        start_date = datetime.strptime(start_raw, "%Y-%m-%d").date()
+        end_date = datetime.strptime(end_raw, "%Y-%m-%d").date()
+    except ValueError as exc:
+        raise ValueError("Start Date and End Date must use YYYY-MM-DD") from exc
+    if start_date > end_date:
+        raise ValueError("Start Date cannot be after End Date")
+    return start_date, end_date
+
+
 @app.route("/api/performance/delta-trades")
 @app.route("/api/performance/delta-fills")
 def api_performance_delta_trades():
     """Complete trade-level Delta history for the signed-in account."""
     try:
+        start_date, end_date = _performance_date_range(request.args)
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    try:
         rows = _reconstruct_delta_trades(_fetch_complete_delta_fills())
+        # Reconstruct the complete ledger first. Filtering raw fills would
+        # corrupt entry price, fees and P/L for trades crossing a boundary.
+        rows = [
+            row for row in rows
+            if start_date <= datetime.strptime(
+                str(row.get("entry_date_ist") or row.get("date")),
+                "%Y-%m-%d",
+            ).date() <= end_date
+        ]
         origin_index = _performance_origin_index()
         for row in rows:
             row["origin_label"] = _delta_row_origin_label(row, origin_index)
@@ -5397,6 +5443,9 @@ def api_performance_delta_trades():
             "record_label": "trades",
             "records": rows,
             "count": len(rows),
+            "start_date": start_date.isoformat(),
+            "end_date": end_date.isoformat(),
+            "date_basis": "entry date (IST)",
             "fetched_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         })
     except RuntimeError as exc:

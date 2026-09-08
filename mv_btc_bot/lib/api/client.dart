@@ -162,8 +162,18 @@ class DashboardApi {
   Future<ApiResult<List<dynamic>>> todayTrades() =>
       getList('/api/today-trades');
   Future<ApiResult<List<dynamic>>> trades() => getList('/api/trades');
-  Future<ApiResult<List<dynamic>>> performanceTrades() =>
-      getList('/api/performance/delta-trades');
+  Future<ApiResult<List<dynamic>>> performanceTrades({
+    String? startDate,
+    String? endDate,
+  }) {
+    final query = <String, String>{
+      if (startDate != null && startDate.isNotEmpty) 'start_date': startDate,
+      if (endDate != null && endDate.isNotEmpty) 'end_date': endDate,
+    };
+    final suffix = query.isEmpty ? '' : '?${Uri(queryParameters: query).query}';
+    return getList('/api/performance/delta-trades$suffix');
+  }
+
   Future<ApiResult<List<dynamic>>> allPositions() =>
       getList('/api/all-positions');
   Future<ApiResult<Map<String, dynamic>>> engineSnapshot() =>

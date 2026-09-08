@@ -18,7 +18,7 @@ def test_page_is_registered_as_performance():
     assert "('trades',    '/trades',    'Performance'" in shell
 
 
-def test_page_has_complete_exchange_history_disclosure_without_filters():
+def test_page_has_complete_exchange_history_with_date_range_filter():
     assert '<th>Opened</th><th>Closed</th><th>Contract</th>' in TEMPLATE
     assert "Delta Exchange · trade history" in TEMPLATE
     assert "/api/performance/delta-trades" in TEMPLATE
@@ -47,6 +47,11 @@ def test_page_has_complete_exchange_history_disclosure_without_filters():
     assert "Closed (IST)" not in TEMPLATE
     assert "Trade activity" not in TEMPLATE
     assert "Refresh history" in TEMPLATE
+    assert 'id="performance-start-date"' in TEMPLATE
+    assert 'id="performance-end-date"' in TEMPLATE
+    assert 'id="submit-performance-range"' in TEMPLATE
+    assert "performanceDefaultDates" in TEMPLATE
+    assert "startDate.getUTCDate() - 29" in TEMPLATE
     assert "slot-filter-chips" not in TEMPLATE
     assert "tradeMatchesFilter" not in TEMPLATE
     for forbidden in ("Order ID", "Fill ID", "exchange-fill-details", "exchange_details"):
