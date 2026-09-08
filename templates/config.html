@@ -132,6 +132,17 @@
 </section>
 
 <section class="card">
+  <div class="card-hd">Voice announcements</div>
+  <div class="card-bd">
+    <label class="fld" style="display:flex;align-items:center;gap:12px">
+      <input id="c-VOICE_ANNOUNCEMENTS_ENABLED" type="checkbox" role="switch" style="width:22px;height:22px">
+      <span>Announcements ON / OFF</span>
+    </label>
+    <p class="hint">Spoken trade entries, booked P&amp;L at exit, and current P&amp;L every 15 minutes while the dashboard/app is active. Save to apply to this account on web and Android. Browser audio may require a click first.</p>
+  </div>
+</section>
+
+<section class="card">
   <div class="card-hd">Telegram alerts</div>
   <div class="card-bd form-grid">
     <label class="fld"><span>Alerts</span>
@@ -165,6 +176,7 @@ const KEYS = [
   'TREND_QUOTE_MAX_AGE_SECS', 'MAX_SPREAD_PCT', 'MAX_SLIPPAGE_PCT',
   'MAX_QUOTE_AGE_SEC',
   'TELEGRAM_ALERTS', 'TELEGRAM_BOT_TOKEN', 'TELEGRAM_CHAT_ID',
+  'VOICE_ANNOUNCEMENTS_ENABLED',
 ];
 
 let configReady = false;
@@ -335,7 +347,8 @@ function setControlValue(key, config) {
       ? (['1', 'true', 'yes', 'on'].includes(value.toLowerCase()) ? 'true' : 'false')
       : (value.toLowerCase() || element.options[0].value);
   }
-  element.value = value;
+  if (element.type === 'checkbox') element.checked = ['1', 'true', 'yes', 'on'].includes(value.toLowerCase());
+  else element.value = value;
 }
 
 async function loadConfig() {
@@ -398,7 +411,7 @@ function resetToDefaults() {
     if (!element) continue;
     if (key === 'DRY_RUN' && !modeChangeAllowed) element.value = loadedDryRun;
     else if (RESET_PRESERVED_KEYS.has(key)) element.value = window._loadedPreservedValues[key] || '';
-    else element.value = DEFAULTS[key];
+    else setControlValue(key, DEFAULTS);
   }
   modeDirty = document.getElementById('c-DRY_RUN').value !== loadedDryRun;
   controllerSummary();
@@ -444,7 +457,7 @@ async function saveConfig() {
       if (modeChangeAllowed && element.value !== loadedDryRun) body[key] = element.value;
       continue;
     }
-    body[key] = element.value;
+    body[key] = element.type === 'checkbox' ? String(element.checked) : element.value;
   }
   const saveButton = document.getElementById('config-save');
   const resetButton = document.getElementById('config-reset');
@@ -461,6 +474,7 @@ async function saveConfig() {
       return;
     }
     loadedScoreAutoMode = scoreMode;
+    window.tradeVoiceAnnouncements?.setEnabled(body.VOICE_ANNOUNCEMENTS_ENABLED === 'true');
     if (Object.prototype.hasOwnProperty.call(body, 'DRY_RUN')) {
       loadedDryRun = modeSelect.value;
       modeDirty = false;

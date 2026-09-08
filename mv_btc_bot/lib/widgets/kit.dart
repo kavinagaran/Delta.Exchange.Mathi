@@ -495,23 +495,23 @@ class OriginChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final (letter, tone, tooltip) = switch (
-        '${trade?['origin_label'] ?? ''}'.trim()) {
+    final (letter, tone, tooltip) = switch ('${trade?['origin_label'] ?? ''}'
+        .trim()) {
       'M' => (
-          'M',
-          kWarning,
-          'Manual trade — opened from the Cockpit or outside this dashboard',
-        ),
+        'M',
+        kWarning,
+        'Manual trade — opened from the Cockpit or outside this dashboard',
+      ),
       'A' => (
-          'A',
-          kPositive,
-          'Automated trade — opened by the Trend Engine / bot',
-        ),
+        'A',
+        kPositive,
+        'Automated trade — opened by the Trend Engine / bot',
+      ),
       'E' => (
-          'E',
-          kNeutral,
-          'External position — detected on the exchange and adopted',
-        ),
+        'E',
+        kNeutral,
+        'External position — detected on the exchange and adopted',
+      ),
       _ => ('', kNeutral, ''),
     };
     if (letter.isEmpty) return const SizedBox.shrink();
@@ -645,7 +645,7 @@ class CommittedAdxPill extends StatelessWidget {
     if (value == null || !value.isFinite) {
       return const StatusPill('15M ADX —', colour: kNeutral, dot: false);
     }
-    final calm = value <= 25;
+    final calm = value <= 20;
     final invalidatesMove = !calm && zone == 'SHORT_MOVE';
     final label = invalidatesMove
         ? '15M ADX ${value.toStringAsFixed(1)} · EXIT MOVE'

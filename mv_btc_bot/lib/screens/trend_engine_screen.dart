@@ -138,6 +138,7 @@ class _DecisionHero extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final committed = _number(snapshot['trend_score']);
+    final adx = _number(snapshot['trigger_adx']);
     final preview = live?['available'] == false
         ? null
         : _number(
@@ -182,6 +183,8 @@ class _DecisionHero extends StatelessWidget {
               ),
             ],
           ),
+          const SizedBox(height: Gap.sm),
+          CommittedAdxPill(adx: adx, zone: zone),
           const SizedBox(height: Gap.sm),
           ScoreDecisionPill(label: decision, score: committed),
           const SizedBox(height: Gap.md),
@@ -234,9 +237,9 @@ class _DecisionChartState extends State<_DecisionChart> {
     // up decisions[hoverIndex] for the point at points[hoverIndex], so any
     // entry without a usable score is dropped from both together rather than
     // filtered independently, which would let the two lists drift apart.
-    final decisions = _mapList(widget.history?['decisions'])
-        .where((item) => _number(item['committed_score']) != null)
-        .toList();
+    final decisions = _mapList(
+      widget.history?['decisions'],
+    ).where((item) => _number(item['committed_score']) != null).toList();
     final points = decisions
         .map((item) => _number(item['committed_score'])!)
         .toList();
@@ -355,7 +358,11 @@ class _DecisionChartState extends State<_DecisionChart> {
 /// exactly where a given index sits -- computing this once and threading it
 /// through avoids the crosshair drifting from the line it is pointing at.
 class _ChartGeometry {
-  const _ChartGeometry({required this.plot, required this.low, required this.high});
+  const _ChartGeometry({
+    required this.plot,
+    required this.low,
+    required this.high,
+  });
 
   final Rect plot;
   final double low;
@@ -572,7 +579,11 @@ class _CrosshairPainter extends CustomPainter {
     final lines = [
       TextSpan(
         text: scoreLabel,
-        style: TextStyle(color: tone, fontSize: 12, fontWeight: FontWeight.w900),
+        style: TextStyle(
+          color: tone,
+          fontSize: 12,
+          fontWeight: FontWeight.w900,
+        ),
       ),
       TextSpan(
         text: '  ${_shortZone(zone)}',
@@ -594,7 +605,8 @@ class _CrosshairPainter extends CustomPainter {
     const padding = 6.0;
     final boxWidth =
         math.max(scorePainter.width, timePainter.width) + padding * 2;
-    final boxHeight = scorePainter.height + timePainter.height + padding * 2 + 2;
+    final boxHeight =
+        scorePainter.height + timePainter.height + padding * 2 + 2;
     var boxLeft = px - boxWidth / 2;
     boxLeft = boxLeft.clamp(plot.left, plot.right - boxWidth);
     final boxTop = py - boxHeight - 10 < plot.top

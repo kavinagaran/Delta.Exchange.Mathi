@@ -608,6 +608,7 @@ CONFIG_KEYS = [
     "EVENING_ENABLED", "EVENING_EXIT_ENABLED",
     "ENTRY_H_UTC", "ENTRY_M_UTC", "EXIT_H_UTC", "EXIT_M_UTC",
     "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "TELEGRAM_ALERTS",
+    "VOICE_ANNOUNCEMENTS_ENABLED",
     "TP_TARGET_PNL", "TP_POLL_SECS", "SL_TARGET_PNL", "TSL_TARGET_PNL",
     "MORNING_ENABLED", "MORNING_LOTS", "MORNING_H_UTC", "MORNING_M_UTC",
     "MORNING_EXIT_ENABLED", "MORNING_EXIT_H_UTC", "MORNING_EXIT_M_UTC",
@@ -696,6 +697,7 @@ CONFIG_PAGE_DEFAULTS = {
     "TREND_MAX_SLIPPAGE_PCT": "1",
     # Alert behavior resets, but its account-specific credentials do not.
     "TELEGRAM_ALERTS": "true",
+    "VOICE_ANNOUNCEMENTS_ENABLED": "true",
 }
 CONFIG_PAGE_PRESERVED_KEYS = ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID")
 
@@ -3004,6 +3006,7 @@ def api_status():
         for slot in ("morning", "evening")
     }
     state.update(_trading_mode_payload())
+    state["voice_announcements_enabled"] = _cfg_bool("VOICE_ANNOUNCEMENTS_ENABLED", True)
     # Unrelated C/P positions remain separate. Exact same-product additions
     # disappear from this list only after the Trend monitor confirms adoption.
     state["external_options"] = _external_options.get(_active_user(), [])
@@ -15590,6 +15593,11 @@ _CONFIG_NUMERIC_BOUNDS = {
 
 
 def _validate_config_update(data: dict, current: dict) -> str | None:
+    if "VOICE_ANNOUNCEMENTS_ENABLED" in data:
+        if str(data["VOICE_ANNOUNCEMENTS_ENABLED"]).strip().lower() not in {
+            "true", "false", "1", "0", "yes", "no", "on", "off",
+        }:
+            return "VOICE_ANNOUNCEMENTS_ENABLED must be enabled or disabled"
     if "DRY_RUN" in data:
         raw_value = data.get("DRY_RUN")
         raw_dry_run = str(raw_value if raw_value is not None else "").strip().lower()

@@ -3,6 +3,7 @@ library;
 import 'package:flutter/material.dart';
 
 import '../api/client.dart';
+import '../services/trade_voice.dart';
 import '../theme/design.dart';
 import '../widgets/kit.dart';
 
@@ -69,6 +70,7 @@ class _ConfigScreenState extends State<ConfigScreen> {
   bool _allowExternal = false;
   bool _safeExecution = true;
   bool _telegram = false;
+  bool _announcements = true;
   bool _loading = true;
   bool _saving = false;
   String? _error;
@@ -134,6 +136,12 @@ class _ConfigScreenState extends State<ConfigScreen> {
       _allowExternal = _truth(config['ALLOW_EXTERNAL_POSITIONS_WITH_BOT']);
       _safeExecution = _truth(config['SAFE_EXECUTION_ENABLED'], fallback: true);
       _telegram = _truth(config['TELEGRAM_ALERTS']);
+      _announcements = _truth(
+        config['VOICE_ANNOUNCEMENTS_ENABLED'] == ''
+            ? null
+            : config['VOICE_ANNOUNCEMENTS_ENABLED'],
+        fallback: true,
+      );
       _loading = false;
       _error = null;
     });
@@ -148,6 +156,7 @@ class _ConfigScreenState extends State<ConfigScreen> {
       'ALLOW_EXTERNAL_POSITIONS_WITH_BOT': '$_allowExternal',
       'SAFE_EXECUTION_ENABLED': '$_safeExecution',
       'TELEGRAM_ALERTS': '$_telegram',
+      'VOICE_ANNOUNCEMENTS_ENABLED': '$_announcements',
       for (final entry in _fields.entries) entry.key: entry.value.text.trim(),
     };
     setState(() => _saving = true);
@@ -158,7 +167,10 @@ class _ConfigScreenState extends State<ConfigScreen> {
       result.ok ? 'Configuration saved' : result.error ?? 'Save failed',
       result.ok,
     );
-    if (result.ok) await _load();
+    if (result.ok) {
+      TradeVoiceAnnouncements.setEnabledForAll(_announcements);
+      await _load();
+    }
   }
 
   Future<void> _resetLock() async {
@@ -357,6 +369,21 @@ class _ConfigScreenState extends State<ConfigScreen> {
                   onChanged: (value) => setState(() => _safeExecution = value),
                 ),
               ],
+            ),
+          ),
+          const SizedBox(height: Gap.md),
+          AppCard(
+            title: 'Voice announcements',
+            child: SwitchListTile.adaptive(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Announcements', style: AppText.body),
+              subtitle: Text(
+                '${_announcements ? 'ON' : 'OFF'} · Entries, exits and P&L every 15 minutes while the app is active. Save to apply to this account.',
+              ),
+              value: _announcements,
+              onChanged: (value) {
+                setState(() => _announcements = value);
+              },
             ),
           ),
           const SizedBox(height: Gap.md),

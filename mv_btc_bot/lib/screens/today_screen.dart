@@ -15,6 +15,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../api/client.dart';
+import '../services/trade_voice.dart';
 import '../theme/design.dart';
 import '../widgets/kit.dart';
 
@@ -49,6 +50,7 @@ class _TodayScreenState extends State<TodayScreen> {
   bool _previewLoading = false;
   Timer? _streamReconnect;
   StreamSubscription<ApiResult<Map<String, dynamic>>>? _protectionEvents;
+  final TradeVoiceAnnouncements _voice = TradeVoiceAnnouncements();
 
   @override
   void initState() {
@@ -75,6 +77,7 @@ class _TodayScreenState extends State<TodayScreen> {
     _previewPoll?.cancel();
     _streamReconnect?.cancel();
     _protectionEvents?.cancel();
+    unawaited(_voice.dispose());
     super.dispose();
   }
 
@@ -144,6 +147,7 @@ class _TodayScreenState extends State<TodayScreen> {
       _protection = payload;
       _todayTrades = nextTrades;
     });
+    unawaited(_voice.observe(nextTrades));
   }
 
   Future<void> _refresh({bool quiet = false}) async {
@@ -180,6 +184,13 @@ class _TodayScreenState extends State<TodayScreen> {
       _error = results[0].ok ? null : results[0].error;
     });
     widget.onBtcPrice?.call(_number(nextStatus?['btc_futures_price']));
+    if (results[0].ok) {
+      _voice.configure(
+        nextStatus?['voice_announcements_enabled'] == true,
+        nextStatus?['dry_run_mode'],
+      );
+    }
+    if (results[0].ok && results[1].ok) unawaited(_voice.observe(_todayTrades));
   }
 
   Map<String, dynamic>? get _currentTrade {
@@ -570,6 +581,7 @@ class _EngineCard extends StatelessWidget {
     }
 
     final score = _number(engine!['trend_score']);
+    final adx = _number(engine!['trigger_adx']);
     final preview = _number(
       live?['live_score'] ??
           live?['preview_score'] ??
@@ -613,6 +625,10 @@ class _EngineCard extends StatelessWidget {
                 ),
               ),
             ],
+          ),
+          const SizedBox(height: Gap.sm),
+          Center(
+            child: CommittedAdxPill(adx: adx, zone: zone),
           ),
           const SizedBox(height: Gap.sm),
           ScoreDecisionPill(label: decision, score: score),
