@@ -53,7 +53,8 @@ void main() {
     expect(spoken.single, contains('250 lots'));
     now = now.add(const Duration(minutes: 15));
     await voice.observe([trade()]);
-    expect(spoken.last, contains('profit of 12.50 dollars'));
+    expect(spoken.last, 'Current trade is in profit of 12.50 dollars.');
+    expect(spoken.last, isNot(contains('C-BTC')));
     TradeVoiceAnnouncements.setEnabledForAll(false);
     expect(stopped, greaterThan(0));
     await voice.observe([]);

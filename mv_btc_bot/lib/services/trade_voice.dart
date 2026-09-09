@@ -176,9 +176,7 @@ class TradeVoiceAnnouncements {
       for (final t in open.values) {
         final amount = _pnl(t);
         if (amount != null) {
-          messages.add(
-            'Current trade ${t['symbol'] ?? ''}. ${_dollars(amount)}.',
-          );
+          messages.add('Current trade is in ${_dollars(amount)}.');
         }
       }
       _lastPnlAt = now;

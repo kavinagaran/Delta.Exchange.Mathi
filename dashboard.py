@@ -4617,7 +4617,7 @@ def download_apk():
     response = send_file(
         str(apk),
         as_attachment=True,
-        download_name="btc-bot-6.3.8-44.apk",
+        download_name="btc-bot-6.3.9-45.apk",
         max_age=0,
     )
     # The download URL is intentionally stable. Prevent browsers and Android
