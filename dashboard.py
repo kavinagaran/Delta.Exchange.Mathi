@@ -4614,7 +4614,18 @@ def download_apk():
     apk = BASE / "mv_btc_bot" / "build" / "app" / "outputs" / "flutter-apk" / "app-release.apk"
     if not apk.exists():
         abort(404)
-    return send_file(str(apk), as_attachment=True, download_name="btc-bot.apk")
+    response = send_file(
+        str(apk),
+        as_attachment=True,
+        download_name="btc-bot-6.3.8-44.apk",
+        max_age=0,
+    )
+    # The download URL is intentionally stable. Prevent browsers and Android
+    # download managers from silently reusing an older APK from that URL.
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    return response
 
 
 @app.route("/api/logs")

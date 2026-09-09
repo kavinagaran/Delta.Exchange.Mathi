@@ -24,6 +24,7 @@ class ConfigScreen extends StatefulWidget {
 }
 
 class _ConfigScreenState extends State<ConfigScreen> {
+  static const _appBuild = '6.3.8 (44)';
   static const _numericSections = <String, List<_FieldSpec>>{
     'Position protection': [
       _FieldSpec('TREND_TP_PREMIUM_PCT', 'Take profit', suffix: '%'),
@@ -193,13 +194,28 @@ class _ConfigScreenState extends State<ConfigScreen> {
   }
 
   Future<void> _testAnnouncement() async {
-    final started = await TradeVoiceAnnouncements.testDevice();
+    final result = await TradeVoiceAnnouncements.testDevice();
     if (!mounted) return;
-    _toast(
-      started
-          ? 'Test announcement played'
-          : 'Text-to-speech is unavailable. Check the Android speech engine and media volume.',
-      started,
+    if (result.started) {
+      _toast('Test announcement played · app $_appBuild', true);
+      return;
+    }
+    await showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Voice test failed'),
+        content: Text(
+          'App $_appBuild\n\n${result.detail}\n\n'
+          'Confirm that an Android text-to-speech engine is installed and '
+          'enabled, then try again.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Close'),
+          ),
+        ],
+      ),
     );
   }
 
@@ -391,7 +407,7 @@ class _ConfigScreenState extends State<ConfigScreen> {
                   contentPadding: EdgeInsets.zero,
                   title: const Text('Announcements', style: AppText.body),
                   subtitle: Text(
-                    '${_announcements ? 'ON' : 'OFF'} · Entries, exits and P&L every 15 minutes while the app is active. Save to apply to this account.',
+                    '${_announcements ? 'ON' : 'OFF'} · Entries, exits and P&L every 15 minutes while the app is active. Save to apply to this account. · App $_appBuild',
                   ),
                   value: _announcements,
                   onChanged: (value) {

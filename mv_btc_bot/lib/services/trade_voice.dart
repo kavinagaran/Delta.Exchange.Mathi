@@ -4,6 +4,13 @@ library;
 import 'dart:async';
 import 'package:flutter_tts/flutter_tts.dart';
 
+class TtsTestResult {
+  const TtsTestResult({required this.started, required this.detail});
+
+  final bool started;
+  final String detail;
+}
+
 class TradeVoiceAnnouncements {
   TradeVoiceAnnouncements({
     Future<void> Function(String)? speak,
@@ -16,18 +23,37 @@ class TradeVoiceAnnouncements {
         speak ??
         (message) async {
           ready ??= () async {
-            // OEM engines differ in which English locale is installed. Keep
-            // the system default if none of these explicit locales exists.
-            for (final locale in const ['en-IN', 'en-US', 'en-GB']) {
-              final language = await tts!.setLanguage(locale);
-              if (language is num && language >= 0) break;
+            // Keep the OEM engine's default voice unless an English voice is
+            // actually installed. setLanguage returns 0 when unavailable;
+            // treating that as success leaves some Samsung engines unusable.
+            final available = await tts!.getLanguages.timeout(
+              const Duration(seconds: 8),
+            );
+            if (available is List) {
+              final installed = available.map((value) => '$value').toList();
+              for (final preferred in const ['en-IN', 'en-US', 'en-GB']) {
+                final matches = installed.where(
+                  (locale) => locale.toLowerCase() == preferred.toLowerCase(),
+                );
+                if (matches.isEmpty) continue;
+                final language = await tts.setLanguage(matches.first).timeout(
+                  const Duration(seconds: 8),
+                );
+                if (language is! num || language > 0) break;
+              }
             }
-            await tts!.setSpeechRate(.48);
-            await tts.setVolume(1);
-            await tts.awaitSpeakCompletion(true);
-          }();
+            await tts.setSpeechRate(.48).timeout(const Duration(seconds: 8));
+            await tts.setVolume(1).timeout(const Duration(seconds: 8));
+            await tts
+                .awaitSpeakCompletion(true)
+                .timeout(const Duration(seconds: 8));
+          }().onError((error, stackTrace) {
+            throw StateError('TTS initialization failed: $error');
+          });
           await ready;
-          final result = await tts!.speak(message, focus: true);
+          final result = await tts!
+              .speak(message, focus: true)
+              .timeout(const Duration(seconds: 15));
           // Android's documented failure value is zero. Some OEM engines
           // return null or another success token, so requiring exactly 1 can
           // incorrectly report an available engine as missing.
@@ -50,7 +76,7 @@ class TradeVoiceAnnouncements {
     }
   }
 
-  static Future<bool> testDevice() async {
+  static Future<TtsTestResult> testDevice() async {
     // A deliberate test takes priority over queued speech. Clear any native
     // utterance first; otherwise the Android plugin returns its "busy" value
     // and the UI mislabels that as a missing speech engine.
@@ -59,11 +85,13 @@ class TradeVoiceAnnouncements {
       await instance._stop().catchError((Object _) {});
     }
     await Future<void>.delayed(const Duration(milliseconds: 80));
-    final probe = TradeVoiceAnnouncements();
+    final existing = _instances.where((instance) => !instance._disposed);
+    final ownsProbe = existing.isEmpty;
+    final probe = ownsProbe ? TradeVoiceAnnouncements() : existing.first;
     try {
-      return await probe.test();
+      return await probe.testWithDetails();
     } finally {
-      await probe.dispose();
+      if (ownsProbe) await probe.dispose();
     }
   }
 
@@ -174,12 +202,21 @@ class TradeVoiceAnnouncements {
   /// This deliberately works while scheduled announcements are OFF so the
   /// audio path can be checked before saving the preference.
   Future<bool> test() async {
-    if (_disposed) return false;
+    return (await testWithDetails()).started;
+  }
+
+  Future<TtsTestResult> testWithDetails() async {
+    if (_disposed) {
+      return const TtsTestResult(
+        started: false,
+        detail: 'The voice service has already been disposed.',
+      );
+    }
     try {
       await _speaker('Voice announcements are working.');
-      return true;
-    } catch (_) {
-      return false;
+      return const TtsTestResult(started: true, detail: 'Speech started');
+    } catch (error) {
+      return TtsTestResult(started: false, detail: '$error');
     }
   }
 
