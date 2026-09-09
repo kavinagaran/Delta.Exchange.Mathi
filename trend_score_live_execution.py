@@ -7,7 +7,8 @@ or a real exchange connection.
 The important invariants are:
 
 * every submitted entry uses the exact validated per-user lot request;
-* entries are bounded IOC limit orders (never an implicit market fallback);
+* automated entries are bounded IOC limits; an explicit caller opt-in may use
+  a market entry after the same fresh-quote and spread gates;
 * a deterministic client id and ``ENTRY_PENDING`` state are durable before
   the POST;
 * response-loss recovery uses an exact, conclusive order lookup;
@@ -526,6 +527,76 @@ def bounded_ioc_payload(
     return payload, snapshot
 
 
+def market_entry_payload(
+    prepared: Mapping[str, Any],
+    quote: Mapping[str, Any],
+    *,
+    client_order_id: str,
+    max_slippage_pct: float,
+    max_spread_pct: float,
+    max_quote_age_sec: float,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Build a market entry after the same quote-safety gates as an IOC.
+
+    Market execution is intentionally available only when the caller opts in.
+    The fresh spread, age, operational-status and executable-depth checks stay
+    identical to the bounded IOC path; only the order instruction sent to the
+    exchange changes, so a transient touch-price move cannot cancel a manual
+    Cockpit entry with a zero-fill IOC.
+    """
+
+    bounded, snapshot = bounded_ioc_payload(
+        prepared,
+        quote,
+        client_order_id=client_order_id,
+        max_slippage_pct=max_slippage_pct,
+        max_spread_pct=max_spread_pct,
+        max_quote_age_sec=max_quote_age_sec,
+    )
+    payload = {
+        "product_id": bounded["product_id"],
+        "size": bounded["size"],
+        "side": bounded["side"],
+        "order_type": "market_order",
+        "client_order_id": bounded["client_order_id"],
+    }
+    snapshot = {
+        **snapshot,
+        "entry_order_type": "market_order",
+    }
+    return payload, snapshot
+
+
+def _entry_payload(
+    prepared: Mapping[str, Any],
+    quote: Mapping[str, Any],
+    *,
+    client_order_id: str,
+    max_slippage_pct: float,
+    max_spread_pct: float,
+    max_quote_age_sec: float,
+    entry_order_type: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    order_type = str(entry_order_type or "").strip().lower()
+    builder = (
+        market_entry_payload
+        if order_type == "market_order"
+        else bounded_ioc_payload
+        if order_type == "limit_order"
+        else None
+    )
+    if builder is None:
+        raise LiveScoreExecutionError("entry order type is invalid")
+    return builder(
+        prepared,
+        quote,
+        client_order_id=client_order_id,
+        max_slippage_pct=max_slippage_pct,
+        max_spread_pct=max_spread_pct,
+        max_quote_age_sec=max_quote_age_sec,
+    )
+
+
 def _entry_times(now: datetime, risk_day_offset_minutes: int) -> dict[str, str]:
     local_date = (
         now.astimezone(timezone.utc)
@@ -683,7 +754,11 @@ def build_pending_entry_state(
         "pending_entry_attempts": 0,
         "pending_entry_started_at_utc": _iso(now),
         "execution_snapshot": {
-            "kind": "bounded_ioc_limit",
+            "kind": (
+                "market_order"
+                if payload.get("order_type") == "market_order"
+                else "bounded_ioc_limit"
+            ),
             "requested": requested_lots,
             "filled": 0,
             "unfilled": requested_lots,
@@ -709,7 +784,8 @@ def _validate_order_identity(
     product_id: int,
     client_order_id: str,
     side: str,
-    expected_limit_price: Any,
+    expected_order_type: str = "limit_order",
+    expected_limit_price: Any = None,
     expected_lots: int = LIVE_SCORE_LOTS,
 ) -> dict[str, Any]:
     if not isinstance(order, Mapping) or not order.get("id"):
@@ -734,18 +810,25 @@ def _validate_order_identity(
     reduce_only = result.get("reduce_only")
     if reduce_only not in (None, "", False, 0, "0", "false", "False"):
         raise LiveScoreExecutionError("entry order unexpectedly has reduce_only")
+    expected_type = str(expected_order_type or "").strip().lower()
+    if expected_type not in {"limit_order", "market_order"}:
+        raise LiveScoreExecutionError("persisted entry order type is invalid")
     order_type = str(result.get("order_type") or "").lower()
-    if order_type and order_type != "limit_order":
-        raise LiveScoreExecutionError("entry order is not a limit order")
-    tif = str(result.get("time_in_force") or "").lower()
-    if tif and tif != "ioc":
-        raise LiveScoreExecutionError("entry order is not IOC")
+    if order_type and order_type != expected_type:
+        raise LiveScoreExecutionError(
+            "exchange order type differs from the durable entry intent"
+        )
+    if expected_type == "limit_order":
+        tif = str(result.get("time_in_force") or "").lower()
+        if tif and tif != "ioc":
+            raise LiveScoreExecutionError("entry order is not IOC")
     if result.get("size") not in (None, ""):
         if _positive_int(result.get("size"), "exchange order size") != expected_lots:
             raise LiveScoreExecutionError(
                 "exchange order size differs from the requested lots"
             )
-    _validate_returned_limit_price(result, expected_limit_price)
+    if expected_type == "limit_order":
+        _validate_returned_limit_price(result, expected_limit_price)
     return result
 
 
@@ -802,19 +885,28 @@ def _validate_persisted_entry_payload(
         raise LiveScoreExecutionError(
             "pending LIVE entry payload has a different side"
         )
-    if str(payload.get("order_type") or "").strip().lower() != "limit_order":
+    order_type = str(payload.get("order_type") or "").strip().lower()
+    if order_type not in {"limit_order", "market_order"}:
         raise LiveScoreExecutionError(
-            "pending LIVE entry payload is not a limit order"
+            "pending LIVE entry payload has an invalid order type"
         )
-    if str(payload.get("time_in_force") or "").strip().lower() != "ioc":
+    if order_type == "limit_order":
+        if str(payload.get("time_in_force") or "").strip().lower() != "ioc":
+            raise LiveScoreExecutionError(
+                "pending LIVE entry payload is not IOC"
+            )
+        if payload.get("post_only") is not False:
+            raise LiveScoreExecutionError(
+                "pending LIVE entry payload has an invalid post-only flag"
+            )
+        _positive_decimal(payload.get("limit_price"), "persisted limit price")
+    elif any(
+        payload.get(key) not in (None, "")
+        for key in ("limit_price", "time_in_force", "post_only")
+    ):
         raise LiveScoreExecutionError(
-            "pending LIVE entry payload is not IOC"
+            "pending market entry payload contains limit-order fields"
         )
-    if payload.get("post_only") is not False:
-        raise LiveScoreExecutionError(
-            "pending LIVE entry payload has an invalid post-only flag"
-        )
-    _positive_decimal(payload.get("limit_price"), "persisted limit price")
     return payload
 
 
@@ -878,6 +970,7 @@ def _wait_terminal(
     product_id: int,
     client_order_id: str,
     side: str,
+    expected_order_type: str,
     expected_limit_price: Any,
     expected_lots: int,
     lookup_order: Callable[[Any, str, int], Any],
@@ -927,6 +1020,7 @@ def _wait_terminal(
                 product_id=product_id,
                 client_order_id=client_order_id,
                 side=side,
+                expected_order_type=expected_order_type,
                 expected_limit_price=expected_limit_price,
                 expected_lots=expected_lots,
             )
@@ -999,36 +1093,42 @@ def _open_state_from_fill(
         raise LiveScoreExecutionError(
             "filled LIVE entry has no durable order payload"
         )
-    durable_limit = _positive_decimal(
-        payload.get("limit_price"), "persisted entry limit price"
-    )
     average_fill = _positive_decimal(
         order.get("average_fill_price"), "average fill price"
     )
     execution_side = str(
         pending.get("pending_entry_side") or ""
     ).strip().lower()
-    price_tolerance = max(
-        Decimal("1e-12"),
-        abs(durable_limit) * Decimal("1e-12"),
-    )
-    if (
-        execution_side == "buy"
-        and average_fill > durable_limit + price_tolerance
-    ):
-        raise LiveScoreExecutionError(
-            "average buy fill exceeds the durable entry limit"
-        )
-    if (
-        execution_side == "sell"
-        and average_fill < durable_limit - price_tolerance
-    ):
-        raise LiveScoreExecutionError(
-            "average sell fill is below the durable entry limit"
-        )
     if execution_side not in {"buy", "sell"}:
         raise LiveScoreExecutionError(
             "filled LIVE entry has an invalid durable side"
+        )
+    order_type = str(payload.get("order_type") or "").strip().lower()
+    if order_type == "limit_order":
+        durable_limit = _positive_decimal(
+            payload.get("limit_price"), "persisted entry limit price"
+        )
+        price_tolerance = max(
+            Decimal("1e-12"),
+            abs(durable_limit) * Decimal("1e-12"),
+        )
+        if (
+            execution_side == "buy"
+            and average_fill > durable_limit + price_tolerance
+        ):
+            raise LiveScoreExecutionError(
+                "average buy fill exceeds the durable entry limit"
+            )
+        if (
+            execution_side == "sell"
+            and average_fill < durable_limit - price_tolerance
+        ):
+            raise LiveScoreExecutionError(
+                "average sell fill is below the durable entry limit"
+            )
+    elif order_type != "market_order":
+        raise LiveScoreExecutionError(
+            "filled LIVE entry has an invalid durable order type"
         )
     tolerance = max(0.02, abs(exchange_entry) * 0.0001)
     if abs(exchange_entry - order_entry) > tolerance:
@@ -1200,6 +1300,7 @@ def execute_or_recover_entry(
     max_slippage_pct: float,
     max_spread_pct: float,
     max_quote_age_sec: float,
+    entry_order_type: str = "limit_order",
     ownership: str = "trend_score_auto_live",
     audit: Callable[[str, Mapping[str, Any]], None] | None = None,
     clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
@@ -1282,7 +1383,8 @@ def execute_or_recover_entry(
             side=entry["exchange_side"],
             expected_lots=entry["lots"],
         )
-        durable_limit_price = persisted_payload["limit_price"]
+        durable_order_type = str(persisted_payload["order_type"]).lower()
+        durable_limit_price = persisted_payload.get("limit_price")
         identity = (
             str(existing.get("pending_entry_client_order_id") or "")
             == client_id
@@ -1327,21 +1429,23 @@ def execute_or_recover_entry(
                 raise LiveScoreExecutionError(
                     "a fresh execution quote is required before submission"
                 )
-            payload, quote_snapshot = bounded_ioc_payload(
+            payload, quote_snapshot = _entry_payload(
                 entry,
                 fresh_quote,
                 client_order_id=client_id,
                 max_slippage_pct=max_slippage_pct,
                 max_spread_pct=max_spread_pct,
                 max_quote_age_sec=max_quote_age_sec,
+                entry_order_type=durable_order_type,
             )
-            durable_limit_price = payload["limit_price"]
+            durable_order_type = str(payload["order_type"]).lower()
+            durable_limit_price = payload.get("limit_price")
             state.update(
                 quote_snapshot=copy.deepcopy(quote_snapshot),
                 pending_entry_payload=copy.deepcopy(payload),
                 execution_snapshot={
                     **dict(execution_snapshot),
-                    "limit_price": payload["limit_price"],
+                    "limit_price": payload.get("limit_price"),
                 },
             )
             order = None
@@ -1367,6 +1471,7 @@ def execute_or_recover_entry(
                     product_id=entry["product_id"],
                     client_order_id=client_id,
                     side=entry["exchange_side"],
+                    expected_order_type=durable_order_type,
                     expected_limit_price=durable_limit_price,
                     expected_lots=entry["lots"],
                 )
@@ -1419,15 +1524,17 @@ def execute_or_recover_entry(
             raise LiveScoreExecutionError(
                 "a fresh execution quote is required before submission"
             )
-        payload, quote_snapshot = bounded_ioc_payload(
+        payload, quote_snapshot = _entry_payload(
             entry,
             fresh_quote,
             client_order_id=client_id,
             max_slippage_pct=max_slippage_pct,
             max_spread_pct=max_spread_pct,
             max_quote_age_sec=max_quote_age_sec,
+            entry_order_type=entry_order_type,
         )
-        durable_limit_price = payload["limit_price"]
+        durable_order_type = str(payload["order_type"]).lower()
+        durable_limit_price = payload.get("limit_price")
         state = build_pending_entry_state(
             user=user,
             signal=signal,
@@ -1483,8 +1590,9 @@ def execute_or_recover_entry(
                     "affordability": copy.deepcopy(
                         entry.get("live_affordability")
                     ),
-                    "limit_price": payload["limit_price"],
-                    "time_in_force": "ioc",
+                    "order_type": durable_order_type,
+                    "limit_price": payload.get("limit_price"),
+                    "time_in_force": payload.get("time_in_force"),
                 },
             )
         try:
@@ -1530,6 +1638,7 @@ def execute_or_recover_entry(
                 product_id=entry["product_id"],
                 client_order_id=client_id,
                 side=entry["exchange_side"],
+                expected_order_type=durable_order_type,
                 expected_limit_price=durable_limit_price,
                 expected_lots=entry["lots"],
             )
@@ -1569,6 +1678,7 @@ def execute_or_recover_entry(
                         product_id=entry["product_id"],
                         client_order_id=client_id,
                         side=entry["exchange_side"],
+                        expected_order_type=durable_order_type,
                         expected_limit_price=durable_limit_price,
                         expected_lots=entry["lots"],
                     )
@@ -1708,7 +1818,10 @@ def execute_or_recover_entry(
                         "consume_signal": False,
                         "error": state["pending_entry_last_error"],
                     }
-            if isinstance(acknowledged, Mapping):
+            if (
+                durable_order_type == "limit_order"
+                and isinstance(acknowledged, Mapping)
+            ):
                 # A returned limit mismatch is an execution-invariant breach,
                 # not an incomplete acknowledgement that may be papered over
                 # by a second lookup which omits the limit field.
@@ -1721,6 +1834,7 @@ def execute_or_recover_entry(
                     product_id=entry["product_id"],
                     client_order_id=client_id,
                     side=entry["exchange_side"],
+                    expected_order_type=durable_order_type,
                     expected_limit_price=durable_limit_price,
                     expected_lots=entry["lots"],
                 )
@@ -1764,6 +1878,7 @@ def execute_or_recover_entry(
                     product_id=entry["product_id"],
                     client_order_id=client_id,
                     side=entry["exchange_side"],
+                    expected_order_type=durable_order_type,
                     expected_limit_price=durable_limit_price,
                     expected_lots=entry["lots"],
                 )
@@ -1786,6 +1901,7 @@ def execute_or_recover_entry(
         product_id=entry["product_id"],
         client_order_id=client_id,
         side=entry["exchange_side"],
+        expected_order_type=durable_order_type,
         expected_limit_price=durable_limit_price,
         expected_lots=entry["lots"],
         lookup_order=lookup_order,
@@ -2196,6 +2312,7 @@ __all__ = [
     "bounded_ioc_payload",
     "build_pending_entry_state",
     "execute_or_recover_entry",
+    "market_entry_payload",
     "premium_percent_protection_policy",
     "score_close_client_id",
     "score_entry_client_id",

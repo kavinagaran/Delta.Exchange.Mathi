@@ -1416,6 +1416,59 @@ def test_execute_recovery_derives_ownership_from_the_pending_state_itself(
         )
 
 
+@pytest.mark.parametrize(
+    ("ownership", "expected_order_type"),
+    (
+        (dashboard.TREND_SCORE_MANUAL_LIVE_OWNERSHIP, "market_order"),
+        (dashboard.TREND_SCORE_AUTO_LIVE_OWNERSHIP, "limit_order"),
+    ),
+)
+def test_live_executor_uses_market_only_for_cockpit_entries(
+    live_account, monkeypatch, ownership, expected_order_type,
+):
+    prepared = _prepared(dashboard.TREND_SCORE_CE_ZONE)
+    quote = _execution_quote(prepared)
+    captured = Mock(return_value={"ok": False, "status": "NO_FILL"})
+    monkeypatch.setattr(
+        dashboard, "execute_or_recover_trend_score_live_entry", captured,
+    )
+    monkeypatch.setattr(
+        dashboard, "_trend_score_auto_live_require_tte", Mock(),
+    )
+    monkeypatch.setattr(
+        dashboard, "_trend_score_auto_live_quote", Mock(return_value=quote),
+    )
+    monkeypatch.setattr(
+        dashboard,
+        "_trend_score_auto_live_available_usd",
+        Mock(return_value=10_000),
+    )
+    monkeypatch.setattr(
+        dashboard,
+        "_trend_score_auto_live_risk_snapshot",
+        Mock(return_value={"allowed": True, "proposed_risk_usd": 250}),
+    )
+    monkeypatch.setattr(
+        dashboard,
+        "_trend_score_auto_live_execution_limits",
+        Mock(return_value=(1.0, 12.0, 20.0)),
+    )
+
+    dashboard._trend_score_auto_live_execute(
+        user="alice",
+        signal=_signal(
+            dashboard._trading_mode_payload(), 60,
+        ),
+        prepared=prepared,
+        transition_id="order-type-transition",
+        initial_revision=dashboard._trading_mode_payload()["mode_revision"],
+        existing_state={},
+        ownership=ownership,
+    )
+
+    assert captured.call_args.kwargs["entry_order_type"] == expected_order_type
+
+
 def _execution_quote(prepared: dict, *, quote_epoch: float | None = None) -> dict:
     price = prepared["entry_price"]
     return {
@@ -1763,6 +1816,42 @@ def test_final_preflight_accepts_fresh_identity_bound_book_and_flat_account(
         risk_snapshot=risk,
         prepared=prepared,
         quote=final_quote,
+    )
+
+
+def test_final_preflight_accepts_identity_bound_cockpit_market_order(
+    live_account,
+    monkeypatch,
+):
+    prepared = _prepared(dashboard.TREND_SCORE_CE_ZONE)
+    final_quote = _execution_quote(prepared)
+    _attach_live_affordability(prepared, final_quote)
+    pending = _pending_state()
+    payload, _ = dashboard.build_trend_score_live_market_payload(
+        prepared,
+        final_quote,
+        client_order_id=pending["pending_entry_client_order_id"],
+        max_slippage_pct=1,
+        max_spread_pct=12,
+        max_quote_age_sec=20,
+    )
+    pending["pending_entry_payload"] = payload
+    _write(live_account / "trend_state.json", pending)
+    risk = dashboard._trend_score_auto_live_risk_snapshot(
+        prepared,
+        final_quote,
+        available_usd=10_000,
+    )
+    _mock_flat_final_boundary(monkeypatch, final_quote)
+
+    dashboard._trend_score_auto_live_final_preflight(
+        pending,
+        initial_revision=dashboard._trading_mode_payload()["mode_revision"],
+        risk_snapshot=risk,
+        prepared=prepared,
+        quote=final_quote,
+        require_score_auto_mode=False,
+        require_min_tte=False,
     )
 
 

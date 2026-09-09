@@ -12,6 +12,7 @@ from trend_score_live_execution import (
     LiveScoreExecutionError,
     bounded_ioc_payload,
     execute_or_recover_entry,
+    market_entry_payload,
     premium_percent_protection_policy,
     score_close_client_id,
     score_entry_client_id,
@@ -152,15 +153,15 @@ def _order(
     requested: int = 1_000,
     state: str = "filled",
     price: float = 220.0,
+    order_type: str = "limit_order",
 ) -> dict:
-    return {
+    order = {
         "id": 9_001,
         "client_order_id": client_id,
         "product_id": product_id,
         "size": requested,
         "side": side,
-        "order_type": "limit_order",
-        "time_in_force": "ioc",
+        "order_type": order_type,
         "reduce_only": False,
         "state": state,
         "filled_size": filled,
@@ -168,6 +169,9 @@ def _order(
         "average_fill_price": price if filled else None,
         "paid_commission": 1.25 if filled else 0,
     }
+    if order_type == "limit_order":
+        order["time_in_force"] = "ioc"
+    return order
 
 
 def _run(
@@ -191,6 +195,7 @@ def _run(
     protection_config_override=_UNSET,
     terminal_timeout_sec: float = 0,
     ownership: str = "trend_score_auto_live",
+    entry_order_type: str = "limit_order",
 ):
     transition = transition_override
     client_id = score_entry_client_id("alice", transition)
@@ -223,6 +228,7 @@ def _run(
         price=price,
         filled=requested_lots,
         requested=requested_lots,
+        order_type=entry_order_type,
     )
     saved = []
     durable = {"state": copy.deepcopy(existing_state)}
@@ -300,6 +306,7 @@ def _run(
         max_slippage_pct=1,
         max_spread_pct=3,
         max_quote_age_sec=20,
+        entry_order_type=entry_order_type,
         audit=audit,
         clock=lambda: clock_value,
         terminal_timeout_sec=terminal_timeout_sec,
@@ -455,6 +462,55 @@ def test_bounded_ioc_reanchors_to_fresh_executable_touch():
     assert snapshot["selection_reference_price"] == 220.0
     assert snapshot["executable_reference_price"] == 223.0
     assert snapshot["reference_price"] == 223.0
+
+
+def test_market_entry_keeps_quote_gates_but_removes_ioc_limit_fields():
+    client_id = score_entry_client_id("alice", "market-transition")
+    payload, snapshot = market_entry_payload(
+        _prepared(),
+        _quote(),
+        client_order_id=client_id,
+        max_slippage_pct=1,
+        max_spread_pct=3,
+        max_quote_age_sec=20,
+    )
+
+    assert payload == {
+        "product_id": 101,
+        "size": LIVE_SCORE_LOTS,
+        "side": "buy",
+        "order_type": "market_order",
+        "client_order_id": client_id,
+    }
+    assert snapshot["entry_order_type"] == "market_order"
+
+
+def test_market_entry_fill_is_durable_and_protected_without_limit_check():
+    submitted = []
+
+    def submit(payload):
+        submitted.append(copy.deepcopy(payload))
+        return _order(
+            payload["client_order_id"],
+            price=221.5,
+            order_type="market_order",
+        ), {"success": True}
+
+    result, saved, _client_id, _ = _run(
+        entry_order_type="market_order",
+        submit_order=submit,
+        get_position=lambda product_id: {
+            "product_id": product_id,
+            "size": LIVE_SCORE_LOTS,
+            "entry_price": 221.5,
+        },
+    )
+
+    assert result["status"] == "OPEN"
+    assert submitted[0]["order_type"] == "market_order"
+    assert "limit_price" not in submitted[0]
+    assert saved[0]["execution_snapshot"]["kind"] == "market_order"
+    assert result["state"]["entry_mark"] == 221.5
 
 
 def test_bounded_ioc_uses_affordable_size_beyond_top_of_book_depth():

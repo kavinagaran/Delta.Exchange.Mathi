@@ -58,6 +58,7 @@ from trend_score_live_execution import (
     ExactOrderLookup as TrendScoreExactOrderLookup,
     bounded_ioc_payload as build_trend_score_live_ioc_payload,
     execute_or_recover_entry as execute_or_recover_trend_score_live_entry,
+    market_entry_payload as build_trend_score_live_market_payload,
     premium_percent_protection_policy as build_premium_percent_protection_policy,
     switch_entry_gate as trend_score_live_switch_entry_gate,
 )
@@ -12180,7 +12181,20 @@ def _trend_score_auto_live_final_preflight(
             "Available USD margin or executable depth changed before POST; "
             "the affordable LIVE order will be rebuilt"
         )
-    rebuilt_payload, _ = build_trend_score_live_ioc_payload(
+    pending_payload = pending.get("pending_entry_payload")
+    pending_order_type = str(
+        (pending_payload or {}).get("order_type")
+        if isinstance(pending_payload, dict) else ""
+    ).strip().lower()
+    if pending_order_type == "market_order":
+        payload_builder = build_trend_score_live_market_payload
+    elif pending_order_type == "limit_order":
+        payload_builder = build_trend_score_live_ioc_payload
+    else:
+        raise RuntimeError(
+            "Durable LIVE entry payload has an invalid order type"
+        )
+    rebuilt_payload, _ = payload_builder(
         prepared,
         final_quote,
         client_order_id=str(
@@ -12203,18 +12217,39 @@ def _trend_score_auto_live_final_preflight(
         size = _trend_score_auto_exact_int(
             value.get("size"), "LIVE entry payload size", positive=True,
         )
-        limit = _trend_score_auto_number(
-            value.get("limit_price"), "LIVE entry payload limit price",
-            positive=True,
-        )
+        order_type = str(value.get("order_type") or "").strip().lower()
+        if order_type == "limit_order":
+            limit = round(_trend_score_auto_number(
+                value.get("limit_price"), "LIVE entry payload limit price",
+                positive=True,
+            ), 12)
+            time_in_force = str(
+                value.get("time_in_force") or ""
+            ).strip().lower()
+            post_only_false = value.get("post_only") is False
+        elif order_type == "market_order":
+            if any(
+                value.get(key) not in (None, "")
+                for key in ("limit_price", "time_in_force", "post_only")
+            ):
+                raise RuntimeError(
+                    "Durable market entry payload contains limit-order fields"
+                )
+            limit = None
+            time_in_force = ""
+            post_only_false = False
+        else:
+            raise RuntimeError(
+                "Durable LIVE entry payload has an invalid order type"
+            )
         return (
             product,
             size,
             str(value.get("side") or "").strip().lower(),
-            str(value.get("order_type") or "").strip().lower(),
-            round(limit, 12),
-            str(value.get("time_in_force") or "").strip().lower(),
-            value.get("post_only") is False,
+            order_type,
+            limit,
+            time_in_force,
+            post_only_false,
             str(value.get("client_order_id") or "").strip(),
         )
 
@@ -12226,7 +12261,7 @@ def _trend_score_auto_live_final_preflight(
         != final_payload_identity
     ):
         raise RuntimeError(
-            "The fresh LIVE quote no longer matches the durable bounded IOC; "
+            "The fresh LIVE quote no longer matches the durable entry order; "
             "entry will be rebuilt"
         )
 
@@ -12976,6 +13011,14 @@ def _trend_score_auto_live_execute(
         max_slippage_pct=max_slippage,
         max_spread_pct=max_spread,
         max_quote_age_sec=max_quote_age,
+        # Manual Cockpit entries prioritize immediate execution after all
+        # normal quote, wallet, exposure and risk gates pass. Automated bot
+        # entries remain bounded IOC limits and keep their slippage cap.
+        entry_order_type=(
+            "market_order"
+            if effective_ownership == TREND_SCORE_MANUAL_LIVE_OWNERSHIP
+            else "limit_order"
+        ),
         ownership=effective_ownership,
         audit=lambda event, details: _trend_audit(event, dict(details)),
     )
@@ -15134,9 +15177,12 @@ def api_cockpit_enter():
     RUN dashboard; it never calls a private exchange endpoint.
 
     LIVE reuses the identical execution seam the automated score-auto
-    controller uses -- same risk gating, wallet-affordable sizing, IOC
-    submission, and protection spawn -- tagged with a distinct ownership
-    (``manual_cockpit_live``) so the controller never manages or replaces it
+    controller uses -- same risk gating, wallet-affordable sizing,
+    deterministic submission/reconciliation, and protection spawn -- tagged
+    with a distinct ownership. Cockpit entries use market execution after
+    those gates; automated entries retain bounded IOC limits. The distinct
+    ownership (``manual_cockpit_live``) keeps the controller from managing or
+    replacing the Cockpit position
     (see ``_trend_score_auto_live_owned_position``). Exclusivity is the same
     non-blocking ``account_entry_lock`` the automated 15s cycle takes before
     deciding: whichever side acquires it first proceeds, the other is
@@ -15289,6 +15335,7 @@ def api_cockpit_enter():
         "action": action,
         "signal_key": signal["signal_key"],
         "status": result.get("status"),
+        "error": str(result.get("error") or "")[:500] or None,
         "order_submitted": bool(result.get("order_submitted")),
         "filled_lots": result.get("filled_lots"),
         "bot_automation_changed": False,
