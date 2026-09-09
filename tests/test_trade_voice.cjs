@@ -25,7 +25,9 @@ test('baseline is silent; entry and 15-minute P&L are spoken', () => {
   const s = setup(); s.api.observe([]); s.api.observe([open()]);
   assert.match(s.spoken[0], /Trade taken.*250 lots/);
   s.api.observe([open()]); assert.equal(s.spoken.length, 1);
-  s.tick(); s.api.observe([open()]); assert.match(s.spoken[1], /profit of 12.50 dollars/);
+  s.tick(); s.api.observe([open()]);
+  assert.equal(s.spoken[1], 'Current trade is in profit of 12.50 dollars.');
+  assert.doesNotMatch(s.spoken[1], /C-BTC/);
 });
 test('Test Announcement unlocks and speaks even while announcements are off', () => {
   let spoken = [], events = {}, buttons = [];

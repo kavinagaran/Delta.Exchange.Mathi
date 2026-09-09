@@ -89,7 +89,7 @@
     if (now - lastPnlAt >= intervalMs) {
       for (const t of open.values()) {
         const value = pnl(t);
-        if (value !== null) speak(`Current trade ${t.symbol || ''}. ${dollars(value)}.`);
+        if (value !== null) speak(`Current trade is in ${dollars(value)}.`);
       }
       lastPnlAt = now;
     }
