@@ -421,7 +421,50 @@ body.native-app .toast { left: 12px; right: 12px; bottom: 16px; max-width: none;
 .score-config-hero > div { min-width: 0; }
 .score-config-hero h2 { margin-top: 3px; font-size: 22px; line-height: 1.25; }
 .score-config-hero p { max-width: 760px; margin-top: 4px; color: var(--muted); font-size: 12.5px; line-height: 1.55; }
-.score-config-hero > .pill { flex: 0 0 auto; }
+.score-config-hero-actions {
+  display: flex; align-items: center; justify-content: flex-end; gap: 10px;
+  flex: 0 0 auto; min-width: 0;
+}
+.score-config-hero-actions > .pill { flex: 0 0 auto; }
+.config-bot-toggle {
+  display: flex; align-items: center; gap: 12px; min-width: 238px;
+  padding: 9px 11px 9px 14px; border: 1px solid var(--border);
+  border-radius: 999px; background: color-mix(in srgb, var(--surface-subtle) 82%, transparent);
+  cursor: pointer; user-select: none; box-shadow: inset 0 1px 0 rgba(255,255,255,.07);
+  transition: border-color .2s ease, background .2s ease, box-shadow .2s ease;
+}
+.config-bot-toggle:has(input:checked) {
+  border-color: color-mix(in srgb, var(--pos) 65%, var(--border));
+  background: color-mix(in srgb, var(--pos) 12%, var(--surface-subtle));
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.09), 0 0 18px color-mix(in srgb, var(--pos) 16%, transparent);
+}
+.config-bot-toggle:has(input:disabled) { cursor: wait; opacity: .68; }
+.config-bot-toggle-copy { display: grid; gap: 2px; flex: 1 1 auto; min-width: 0; }
+.config-bot-toggle-copy strong { color: var(--text); font-size: 11.5px; font-weight: 850; letter-spacing: .055em; }
+.config-bot-toggle-copy small { overflow: hidden; color: var(--muted); font-size: 9.5px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.config-bot-toggle input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+.config-bot-toggle-track {
+  position: relative; flex: 0 0 auto; width: 44px; height: 24px;
+  border: 1px solid color-mix(in srgb, var(--muted) 48%, var(--border));
+  border-radius: 999px; background: color-mix(in srgb, var(--muted) 24%, var(--surface));
+  transition: border-color .2s ease, background .2s ease, box-shadow .2s ease;
+}
+.config-bot-toggle-track i {
+  position: absolute; top: 3px; left: 3px; width: 16px; height: 16px;
+  border-radius: 50%; background: var(--muted); box-shadow: 0 2px 6px rgba(0,0,0,.34);
+  transition: transform .22s var(--ease-spring), background .2s ease;
+}
+.config-bot-toggle input:checked + .config-bot-toggle-track {
+  border-color: var(--pos); background: color-mix(in srgb, var(--pos) 38%, var(--surface));
+  box-shadow: 0 0 13px color-mix(in srgb, var(--pos) 26%, transparent);
+}
+.config-bot-toggle input:checked + .config-bot-toggle-track i {
+  transform: translateX(20px); background: var(--pos);
+}
+.config-bot-toggle input:focus-visible + .config-bot-toggle-track {
+  outline: 3px solid color-mix(in srgb, var(--accent) 32%, transparent);
+  outline-offset: 2px;
+}
 .config-static-value {
   display: grid; gap: 3px; min-height: 39px; padding: 8px 10px;
   border: 1px solid var(--border); border-radius: 8px; background: var(--surface-subtle);
@@ -716,7 +759,8 @@ body.native-app .toast { left: 12px; right: 12px; bottom: 16px; max-width: none;
 .grid.cols-2 { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
 @media (max-width: 900px) {
   .grid.cols-2 { grid-template-columns: 1fr; }
-  .score-config-hero { align-items: flex-start; flex-direction: column; }
+  .score-config-hero { align-items: stretch; flex-direction: column; }
+  .score-config-hero-actions { justify-content: space-between; width: 100%; }
   .score-automation-controls { grid-template-columns: 1fr; gap: 14px; }
   .score-zone-band-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .score-execution-grid { grid-template-columns: 1fr; }
@@ -729,6 +773,9 @@ body.native-app .toast { left: 12px; right: 12px; bottom: 16px; max-width: none;
   .brand .name, .brand .sub, .nav a span, .sidebar-foot { display: none; }
 }
 @media (max-width: 560px) {
+  .score-config-hero-actions { align-items: stretch; flex-direction: column; }
+  .config-bot-toggle { box-sizing: border-box; width: 100%; min-width: 0; }
+  .score-config-hero-actions > .pill { align-self: flex-start; }
   .score-zone-band-grid { grid-template-columns: 1fr; }
   .score-zone-lock-row { align-items: flex-start; flex-direction: column; }
   .score-zone-lock-row .hint { align-self: flex-start; }

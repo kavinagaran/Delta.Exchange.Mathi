@@ -7,7 +7,18 @@
     <h2 id="config-title">Bot Config</h2>
     <p>Configure {{ display_name }}’s Trend Engine.</p>
   </div>
-  <span class="pill idle" id="score-config-summary" role="status">Loading configuration…</span>
+  <div class="score-config-hero-actions">
+    <label class="config-bot-toggle" for="config-bot-toggle">
+      <span class="config-bot-toggle-copy">
+        <strong id="config-bot-toggle-label">BOT OFF</strong>
+        <small id="config-bot-toggle-detail">Loading configuration…</small>
+      </span>
+      <input id="config-bot-toggle" type="checkbox" role="switch"
+             onchange="configBotToggleChanged(this.checked)" disabled>
+      <span class="config-bot-toggle-track" aria-hidden="true"><i></i></span>
+    </label>
+    <span class="pill idle" id="score-config-summary" role="status">Loading configuration…</span>
+  </div>
 </section>
 
 <div class="banner warn" id="config-load-banner">Loading verified account configuration — Save is locked.</div>
@@ -188,6 +199,8 @@ let modeDirty = false;
 let modeAvailabilityBusy = false;
 let modeAvailabilityRequestId = 0;
 let lastModeAvailability = null;
+let botToggleBusy = false;
+let configSaveBusy = false;
 let setupLockStatusBusy = false;
 let setupLockStatusRequestId = 0;
 const DEFAULTS = {{ config_page_defaults | tojson }};
@@ -215,7 +228,71 @@ function controllerSummary() {
   const valid = mode === 'disabled' || (mode === 'dry_run') === dryRun;
   summary.className = `pill ${valid ? (mode === 'live' ? 'live' : mode === 'dry_run' ? 'sim' : 'idle') : 'closed-loss'}`;
   summary.textContent = valid ? label : 'MODE MISMATCH — REVIEW';
+  syncConfigBotToggle();
   dryBanner();
+}
+
+function syncConfigBotToggle() {
+  const toggle = document.getElementById('config-bot-toggle');
+  if (!toggle) return;
+  const mode = document.getElementById('c-TREND_ENGINE_SCORE_AUTO_MODE').value;
+  const label = document.getElementById('config-bot-toggle-label');
+  const detail = document.getElementById('config-bot-toggle-detail');
+  toggle.checked = mode !== 'disabled';
+  toggle.disabled = !configReady || botToggleBusy || configSaveBusy;
+  toggle.setAttribute('aria-checked', toggle.checked ? 'true' : 'false');
+  label.textContent = toggle.checked ? 'BOT ON' : 'BOT OFF';
+  detail.textContent = botToggleBusy
+    ? 'Applying…'
+    : mode === 'live'
+      ? 'LIVE automatic orders'
+      : mode === 'dry_run'
+        ? 'DRY RUN automation'
+        : 'Automatic orders disabled';
+}
+
+async function configBotToggleChanged(checked) {
+  const modeSelect = document.getElementById('c-TREND_ENGINE_SCORE_AUTO_MODE');
+  if (!configReady || botToggleBusy || configSaveBusy) {
+    syncConfigBotToggle();
+    return;
+  }
+  const previousMode = modeSelect.value;
+  const dryRun = document.getElementById('c-DRY_RUN').value === 'true';
+  const requestedMode = checked ? (dryRun ? 'dry_run' : 'live') : 'disabled';
+  if (requestedMode === previousMode) {
+    syncConfigBotToggle();
+    return;
+  }
+  if (requestedMode === 'live' && !confirm(
+      'Turn the Bot ON for LIVE automatic trading?\n\n' +
+      'The Trend Engine can place real exchange orders without manual confirmation.')) {
+    syncConfigBotToggle();
+    return;
+  }
+
+  botToggleBusy = true;
+  modeSelect.value = requestedMode;
+  controllerSummary();
+  try {
+    const result = await jpost('/api/config', {
+      TREND_ENGINE_SCORE_AUTO_MODE: requestedMode,
+    });
+    if (!result.ok) throw new Error(result.error || 'Bot mode change failed');
+    loadedScoreAutoMode = requestedMode;
+    toast(checked
+      ? `Bot turned ON in ${dryRun ? 'DRY RUN' : 'LIVE'} mode`
+      : 'Bot turned OFF — no new automatic trades will be opened', 'ok');
+    refreshTopbar();
+  } catch (error) {
+    modeSelect.value = previousMode;
+    controllerSummary();
+    toast('Bot mode change failed: ' +
+      (error && error.message ? error.message : 'network error'), 'err');
+  } finally {
+    botToggleBusy = false;
+    syncConfigBotToggle();
+  }
 }
 
 function modeSelectionChanged() {
@@ -470,6 +547,8 @@ async function saveConfig() {
   const saveButton = document.getElementById('config-save');
   const resetButton = document.getElementById('config-reset');
   const modeSelect = document.getElementById('c-DRY_RUN');
+  configSaveBusy = true;
+  syncConfigBotToggle();
   saveButton.disabled = true;
   resetButton.disabled = true;
   modeSelect.disabled = true;
@@ -501,6 +580,8 @@ async function saveConfig() {
     });
     toast('Save failed: ' + (error && error.message ? error.message : 'network error'), 'err');
   } finally {
+    configSaveBusy = false;
+    syncConfigBotToggle();
     saveButton.disabled = !configReady;
     resetButton.disabled = !configReady;
     if (lastModeAvailability) applyModeSelectionStatus(lastModeAvailability);

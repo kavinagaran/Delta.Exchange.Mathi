@@ -28,6 +28,94 @@ def test_score_auto_selector_offers_explicit_live_mode_with_warning():
     assert "It holds at most one bot-owned position" in source
 
 
+def test_config_header_has_an_immediate_account_scoped_bot_toggle():
+    source = (ROOT / "templates" / "config.html").read_text(encoding="utf-8")
+    styles = (ROOT / "static" / "css" / "app.css").read_text(encoding="utf-8")
+
+    for required in (
+        'id="config-bot-toggle"',
+        'role="switch"',
+        "function configBotToggleChanged(checked)",
+        "TREND_ENGINE_SCORE_AUTO_MODE: requestedMode",
+        "checked ? (dryRun ? 'dry_run' : 'live') : 'disabled'",
+        "Bot turned OFF — no new automatic trades will be opened",
+    ):
+        assert required in source
+    for required in (
+        ".score-config-hero-actions",
+        ".config-bot-toggle",
+        ".config-bot-toggle input:checked + .config-bot-toggle-track",
+    ):
+        assert required in styles
+
+
+@pytest.mark.skipif(NODE is None, reason="Node.js is required for frontend JavaScript tests")
+def test_config_header_toggle_persists_bot_off_immediately():
+    script = r"""
+const fs = require('fs');
+const vm = require('vm');
+const source = fs.readFileSync('templates/config.html', 'utf8');
+const varsStart = source.indexOf('let configReady = false;');
+const varsEnd = source.indexOf('const DEFAULTS =', varsStart);
+const functionsStart = source.indexOf('function controllerSummary()');
+const functionsEnd = source.indexOf('function modeSelectionChanged()', functionsStart);
+if (varsStart < 0 || varsEnd <= varsStart ||
+    functionsStart < 0 || functionsEnd <= functionsStart) {
+  throw new Error('Bot toggle JavaScript was not found');
+}
+
+const elements = {
+  'c-TREND_ENGINE_SCORE_AUTO_MODE': { value: 'live' },
+  'c-DRY_RUN': { value: 'false' },
+  'score-config-summary': { className: '', textContent: '' },
+  'config-bot-toggle': {
+    checked: true, disabled: false,
+    setAttribute(key, value) { this[key] = String(value); },
+  },
+  'config-bot-toggle-label': { textContent: '' },
+  'config-bot-toggle-detail': { textContent: '' },
+};
+global.document = { getElementById(id) { return elements[id] || null; } };
+global.dryBanner = () => {};
+global.confirm = () => true;
+global.refreshTopbar = () => {};
+global.toast = () => {};
+let posted = null;
+global.jpost = async (path, body) => {
+  posted = { path, body };
+  return { ok: true };
+};
+
+vm.runInThisContext(
+  source.slice(varsStart, varsEnd) +
+  source.slice(functionsStart, functionsEnd) +
+  `configReady = true; loadedScoreAutoMode = 'live';`
+);
+
+async function verify() {
+  await configBotToggleChanged(false);
+  if (!posted || posted.path !== '/api/config' ||
+      posted.body.TREND_ENGINE_SCORE_AUTO_MODE !== 'disabled') {
+    throw new Error('Bot OFF was not persisted immediately');
+  }
+  if (elements['c-TREND_ENGINE_SCORE_AUTO_MODE'].value !== 'disabled' ||
+      elements['config-bot-toggle'].checked !== false ||
+      elements['config-bot-toggle-label'].textContent !== 'BOT OFF') {
+    throw new Error('Bot OFF UI did not settle on the saved mode');
+  }
+}
+verify().catch(error => { console.error(error); process.exitCode = 1; });
+"""
+    result = subprocess.run(
+        [NODE, "-e", script],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
 @pytest.mark.skipif(NODE is None, reason="Node.js is required for frontend JavaScript tests")
 def test_score_auto_mode_must_match_account_trading_mode():
     script = r"""
