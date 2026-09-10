@@ -34,7 +34,10 @@ class DashboardApi {
   final String baseUrl;
   final String? sessionCookie;
 
-  static const _timeout = Duration(seconds: 15);
+  // Allow a brief mobile-network/server wake-up without treating one delayed
+  // response as a disconnected app. Screens still prevent overlapping polls,
+  // so this larger ceiling cannot create a request backlog.
+  static const _timeout = Duration(seconds: 25);
 
   /// Request headers, public so the authentication contract is testable.
   ///

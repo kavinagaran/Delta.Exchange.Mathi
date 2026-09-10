@@ -2666,22 +2666,67 @@ def _sync_states_from_exchange_unlocked() -> None:
         pass
 
 
+def _fresh_tp_stream(state: dict) -> dict | None:
+    """Return matching, fresh monitor telemetry without any network I/O."""
+    slot = str(state.get("slot") or "").strip().lower()
+    if slot not in SLOTS or state.get("status") != "OPEN":
+        return None
+    stream = _load_json(
+        USERS_DIR / _active_user() / f"tp_{slot}_stream.json", {},
+    )
+    if not isinstance(stream, dict):
+        return None
+    try:
+        matches = (
+            str(stream.get("product_id") or "")
+            == str(state.get("product_id") or "")
+            and str(stream.get("position_cycle_id") or "")
+            == str(state.get("position_cycle_id") or "")
+            and int(stream.get("protection_revision") or 0)
+            == int(state.get("protection_revision") or 0)
+        )
+        stream_at = datetime.fromisoformat(
+            str(stream.get("event_received_at_utc") or "")
+            .replace("Z", "+00:00")
+        )
+        if stream_at.tzinfo is None:
+            stream_at = stream_at.replace(tzinfo=timezone.utc)
+        age = (
+            datetime.now(timezone.utc) - stream_at.astimezone(timezone.utc)
+        ).total_seconds()
+        stale_after = max(float(stream.get("stale_after_secs") or 6), 6)
+        mark = float(stream.get("mark"))
+        pnl = float(stream.get("pnl"))
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not (
+        matches
+        and age <= stale_after + 2
+        and stream.get("status") in {"live", "rest_fallback"}
+        and math.isfinite(mark)
+        and mark > 0
+        and math.isfinite(pnl)
+    ):
+        return None
+    return stream
+
+
 def _enrich_live(state: dict) -> dict:
-    """Attach current_mark and live_pnl to an OPEN state dict (side-aware)."""
+    """Attach cached monitor mark/P&L without delaying a dashboard request.
+
+    The TP monitor already owns the live market feed and writes a strict,
+    position-revision-scoped snapshot every few seconds. Reusing that snapshot
+    keeps status/today endpoints responsive and avoids multiplying exchange
+    ticker calls for every phone/web poll.
+    """
     if state.get("status") == "OPEN":
-        symbol = state.get("symbol", "")
-        try:
-            r    = req.get(f"{API_BASE}/v2/tickers/{symbol}", timeout=5)
-            mark = float(r.json().get("result", {}).get("mark_price") or 0)
-            cval = float(state.get("contract_value", 0.001))
-            lots = int(state.get("lots", 1000))
-            em   = float(state.get("entry_mark", 0))
-            sign = -1 if state.get("side") == "short" else 1
-            state["current_mark"] = round(mark, 4)
-            state["live_pnl"]     = round((mark - em) * cval * lots * sign, 2) if mark else None
-        except Exception:
-            state["current_mark"] = None
-            state["live_pnl"]     = None
+        stream = _fresh_tp_stream(state)
+        state["current_mark"] = (
+            round(float(stream["mark"]), 4) if stream else None
+        )
+        state["live_pnl"] = (
+            round(float(stream["pnl"]), 2) if stream else None
+        )
     return state
 
 
@@ -2969,10 +3014,12 @@ def api_status():
         _import_legacy_dry_records()
     except Exception as exc:
         print(f"Legacy dry-run import warning for {_active_user()}: {exc}")
-    _sync_states_from_exchange()
     raw_state   = _load_json(_slot_file("evening"), {})
     raw_morning = _load_json(_slot_file("morning"), {})
     raw_trend   = _load_json(_slot_file("trend"), {})
+    raw_state.setdefault("slot", "evening")
+    raw_morning.setdefault("slot", "morning")
+    raw_trend.setdefault("slot", "trend")
     # Explicit legacy simulation rows may remain in the rollback-compatible
     # LIVE files.  They are never presented as real positions.
     raw_state = {} if _is_dry_record(raw_state) else _enrich_live(raw_state)
@@ -16349,6 +16396,36 @@ def _dry_run_protection_loop() -> None:
         time.sleep(1)
 
 
+def _exchange_sync_all_accounts_once() -> int:
+    """Refresh cached exchange state outside user-facing HTTP requests."""
+    synced = 0
+    for account in _load_accounts():
+        user = _safe_user(account.get("username", ""))
+        if not user:
+            continue
+        try:
+            with app.test_request_context("/background/exchange-sync"):
+                g.basic_user = user
+                _sync_states_from_exchange()
+            synced += 1
+        except Exception as exc:
+            print(f"Exchange sync error for {user}: {exc}")
+    return synced
+
+
+def _exchange_sync_loop() -> None:
+    """Continuously reconcile accounts while HTTP serves cached state."""
+    while True:
+        try:
+            _exchange_sync_all_accounts_once()
+        except Exception as exc:
+            print(f"Exchange sync supervisor error: {exc}")
+        # Per-account throttling inside reconciliation enforces the normal
+        # eight-second exchange cadence; this short tick also recovers quickly
+        # when an entry mutex was briefly occupied.
+        time.sleep(2)
+
+
 # ─────────────────────────────────────────────────────────────
 # MAIN
 # ─────────────────────────────────────────────────────────────
@@ -16362,6 +16439,11 @@ if __name__ == "__main__":
     threading.Thread(
         target=_dry_run_protection_loop,
         name="dry-run-protection",
+        daemon=True,
+    ).start()
+    threading.Thread(
+        target=_exchange_sync_loop,
+        name="exchange-state-sync",
         daemon=True,
     ).start()
     app.run(host="0.0.0.0", port=5001, debug=False)

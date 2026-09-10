@@ -25,6 +25,60 @@ def _write(path: Path, value) -> None:
     path.write_text(json.dumps(value), encoding="utf-8")
 
 
+def test_live_enrichment_reuses_fresh_position_scoped_monitor_stream(
+        isolated_status_account, monkeypatch):
+    state = {
+        "slot": "trend",
+        "status": "OPEN",
+        "product_id": 123,
+        "position_cycle_id": "cycle-1",
+        "protection_revision": 4,
+        "entry_mark": 400,
+        "contract_value": 0.001,
+        "lots": 250,
+        "side": "long",
+    }
+    _write(isolated_status_account / "tp_trend_stream.json", {
+        "status": "live",
+        "product_id": 123,
+        "position_cycle_id": "cycle-1",
+        "protection_revision": 4,
+        "event_received_at_utc": datetime.now(timezone.utc).isoformat(),
+        "stale_after_secs": 6,
+        "mark": 431.125,
+        "pnl": 7.78125,
+    })
+    monkeypatch.setattr(
+        dashboard.req,
+        "get",
+        Mock(side_effect=AssertionError("live enrichment must not call Delta")),
+    )
+
+    with dashboard.app.test_request_context("/api/status"):
+        dashboard.g.basic_user = "alice"
+        enriched = dashboard._enrich_live(dict(state))
+
+    assert enriched["current_mark"] == 431.125
+    assert enriched["live_pnl"] == 7.78
+
+
+def test_background_exchange_sync_is_scoped_to_each_account(monkeypatch):
+    observed = []
+    monkeypatch.setattr(dashboard, "_load_accounts", lambda: [
+        {"username": "alice"},
+        {"username": "bob"},
+        {"username": "../invalid"},
+    ])
+    monkeypatch.setattr(
+        dashboard,
+        "_sync_states_from_exchange",
+        lambda: observed.append(dashboard._active_user()),
+    )
+
+    assert dashboard._exchange_sync_all_accounts_once() == 2
+    assert observed == ["alice", "bob"]
+
+
 def test_external_option_uses_exchange_cashflows_for_live_net_pnl():
     # Long option: premium paid at entry is a realized cash outflow, while the
     # current option value is an unrealized cash inflow. Delta's standalone
@@ -190,7 +244,10 @@ def test_status_marks_only_old_closed_cards_hidden_and_keeps_latest_trade(
     _write(isolated_status_account / "trend_state.json", {"status": "IDLE"})
 
     monkeypatch.setattr(dashboard, "datetime", FixedDateTime)
-    monkeypatch.setattr(dashboard, "_sync_states_from_exchange", lambda: None)
+    exchange_sync = Mock(
+        side_effect=AssertionError("status must serve cached exchange state"),
+    )
+    monkeypatch.setattr(dashboard, "_sync_states_from_exchange", exchange_sync)
     monkeypatch.setattr(dashboard, "_revive_tp_monitors", lambda: None)
     monkeypatch.setattr(dashboard, "_user_cfg", lambda: {})
     monkeypatch.setitem(dashboard._last_revive, "ts", time.time())
@@ -205,6 +262,8 @@ def test_status_marks_only_old_closed_cards_hidden_and_keeps_latest_trade(
 
     with dashboard.app.test_request_context("/api/status"):
         payload = dashboard.api_status().get_json()
+
+    exchange_sync.assert_not_called()
 
     assert payload["dashboard_visible"] is False
     assert payload["morning"]["dashboard_visible"] is True

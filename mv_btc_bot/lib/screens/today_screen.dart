@@ -44,6 +44,7 @@ class _TodayScreenState extends State<TodayScreen> {
   List<dynamic> _todayTrades = const [];
   String? _error;
   bool _loading = true;
+  bool _refreshLoading = false;
   bool _closing = false;
   Timer? _poll;
   Timer? _previewPoll;
@@ -151,46 +152,79 @@ class _TodayScreenState extends State<TodayScreen> {
   }
 
   Future<void> _refresh({bool quiet = false}) async {
+    // A slow mobile request must not be joined by the next 10-second timer.
+    // Without this guard, several complete six-request batches can pile up and
+    // make both the phone and a small server progressively less responsive.
+    if (_refreshLoading) return;
+    _refreshLoading = true;
     if (!quiet && mounted) setState(() => _loading = true);
+    try {
+      final results = await Future.wait([
+        widget.api.status(),
+        widget.api.todayTrades(),
+        widget.api.engineSnapshot(),
+        widget.api.engineLive(),
+        widget.api.scoreAutoStatus(),
+        widget.api.protectionStatus(),
+      ]);
+      if (!mounted) return;
 
-    final results = await Future.wait([
-      widget.api.status(),
-      widget.api.todayTrades(),
-      widget.api.engineSnapshot(),
-      widget.api.engineLive(),
-      widget.api.scoreAutoStatus(),
-      widget.api.protectionStatus(),
-    ]);
-    if (!mounted) return;
+      // One expired session anywhere means re-authenticate, not a half-blank
+      // screen showing stale numbers as if they were current.
+      if (results.any((r) => r.unauthorised)) {
+        widget.onUnauthorised();
+        return;
+      }
 
-    // One expired session anywhere means re-authenticate, not a half-blank
-    // screen showing stale numbers as if they were current.
-    if (results.any((r) => r.unauthorised)) {
-      widget.onUnauthorised();
-      return;
+      final nextStatus = results[0].ok
+          ? results[0].data as Map<String, dynamic>?
+          : null;
+      final nextTrades = results[1].ok
+          ? results[1].data as List<dynamic>?
+          : null;
+      setState(() {
+        _loading = false;
+        // A partial refresh must never replace known-good trading state with
+        // null/empty placeholders. Each card advances independently only when
+        // its own endpoint succeeds.
+        if (nextStatus != null) _status = nextStatus;
+        if (nextTrades != null) _todayTrades = nextTrades;
+        if (results[2].ok && results[2].data is Map<String, dynamic>) {
+          _engine = results[2].data as Map<String, dynamic>;
+        }
+        if (results[3].ok && results[3].data is Map<String, dynamic>) {
+          _engineLive = results[3].data as Map<String, dynamic>;
+        }
+        if (results[4].ok && results[4].data is Map<String, dynamic>) {
+          _controller = results[4].data as Map<String, dynamic>;
+        }
+        if (results[5].ok && results[5].data is Map<String, dynamic>) {
+          _protection = results[5].data as Map<String, dynamic>;
+        }
+        // Keep rendering the last successful snapshot during a transient
+        // timeout and make its delayed status explicit in a compact banner.
+        _error = results[0].ok ? null : results[0].error;
+      });
+      if (nextStatus != null) {
+        widget.onBtcPrice?.call(_number(nextStatus['btc_futures_price']));
+        _voice.configure(
+          nextStatus['voice_announcements_enabled'] == true,
+          nextStatus['dry_run_mode'],
+        );
+      }
+      if (results[0].ok && nextTrades != null) {
+        unawaited(_voice.observe(_todayTrades));
+      }
+    } catch (error) {
+      if (mounted) {
+        setState(() {
+          _loading = false;
+          _error = 'Cannot refresh right now: $error';
+        });
+      }
+    } finally {
+      _refreshLoading = false;
     }
-
-    final nextStatus = results[0].data as Map<String, dynamic>?;
-    setState(() {
-      _loading = false;
-      _status = nextStatus;
-      _todayTrades = (results[1].data as List<dynamic>?) ?? const [];
-      _engine = results[2].data as Map<String, dynamic>?;
-      _engineLive = results[3].data as Map<String, dynamic>?;
-      _controller = results[4].data as Map<String, dynamic>?;
-      _protection = results[5].data as Map<String, dynamic>?;
-      // Only the primary call's failure blanks the screen; the engine being
-      // unreachable is itself information and gets its own card.
-      _error = results[0].ok ? null : results[0].error;
-    });
-    widget.onBtcPrice?.call(_number(nextStatus?['btc_futures_price']));
-    if (results[0].ok) {
-      _voice.configure(
-        nextStatus?['voice_announcements_enabled'] == true,
-        nextStatus?['dry_run_mode'],
-      );
-    }
-    if (results[0].ok && results[1].ok) unawaited(_voice.observe(_todayTrades));
   }
 
   Map<String, dynamic>? get _currentTrade {
@@ -281,6 +315,13 @@ class _TodayScreenState extends State<TodayScreen> {
           physics: const AlwaysScrollableScrollPhysics(),
           padding: const EdgeInsets.fromLTRB(Gap.lg, Gap.md, Gap.lg, Gap.xxl),
           children: [
+            if (_error != null && _status != null) ...[
+              _ConnectionDelayedBanner(
+                message: _error!,
+                onRetry: () => _refresh(),
+              ),
+              const SizedBox(height: Gap.md),
+            ],
             if (current == null)
               const AppCard(
                 kicker: 'Current trade',
@@ -327,6 +368,49 @@ class _TodayScreenState extends State<TodayScreen> {
     final slot = '${trade['control_slot'] ?? trade['slot'] ?? 'trend'}';
     final value = _protection?[slot];
     return value is Map<String, dynamic> ? value : null;
+  }
+}
+
+class _ConnectionDelayedBanner extends StatelessWidget {
+  const _ConnectionDelayedBanner({
+    required this.message,
+    required this.onRetry,
+  });
+
+  final String message;
+  final VoidCallback onRetry;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: Gap.md, vertical: Gap.sm),
+      decoration: BoxDecoration(
+        color: kWarning.withValues(alpha: .10),
+        border: Border.all(color: kWarning.withValues(alpha: .55)),
+        borderRadius: BorderRadius.circular(Radii.md),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.cloud_sync_rounded, color: kWarning, size: 20),
+          const SizedBox(width: Gap.sm),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('Connection delayed', style: AppText.title),
+                Text(
+                  'Showing the last update. $message',
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: AppText.caption,
+                ),
+              ],
+            ),
+          ),
+          TextButton(onPressed: onRetry, child: const Text('Retry')),
+        ],
+      ),
+    );
   }
 }
 

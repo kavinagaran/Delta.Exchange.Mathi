@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -110,6 +112,63 @@ void main() {
     expect(find.text('Payoff'), findsNothing);
 
     // Dispose the screen's polling timer before the test ends.
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('Today keeps its last good screen after a transient timeout', (
+    WidgetTester tester,
+  ) async {
+    tester.view.physicalSize = const Size(390, 1000);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final api = _TransientTodayApi();
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: buildAppTheme(blue: true),
+        home: Scaffold(
+          body: TodayScreen(api: api, onUnauthorised: () {}),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('C-BTC-64000-020826'), findsWidgets);
+
+    api.failRefreshes = true;
+    await tester.pump(const Duration(seconds: 10));
+    await tester.pump();
+
+    expect(find.text('Connection delayed'), findsOneWidget);
+    expect(find.textContaining('Showing the last update'), findsOneWidget);
+    expect(find.text('C-BTC-64000-020826'), findsWidgets);
+    expect(find.text('Cannot load today'), findsNothing);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('Today does not overlap slow ten-second refresh batches', (
+    WidgetTester tester,
+  ) async {
+    final api = _SlowTodayApi();
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: buildAppTheme(blue: true),
+        home: Scaffold(
+          body: TodayScreen(api: api, onUnauthorised: () {}),
+        ),
+      ),
+    );
+    await tester.pump();
+    expect(api.statusCalls, 1);
+
+    await tester.pump(const Duration(seconds: 11));
+    expect(api.statusCalls, 1);
+
+    api.statusResponse.complete(
+      const ApiResult.ok(<String, dynamic>{'btc_futures_price': 64763.0}),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('2 trades'), findsOneWidget);
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
@@ -519,6 +578,31 @@ class _TodayApi extends DashboardApi {
       'exit_trigger': 'trailing_stop',
     },
   ]);
+}
+
+class _TransientTodayApi extends _TodayApi {
+  bool failRefreshes = false;
+
+  @override
+  Future<ApiResult<Map<String, dynamic>>> status() async => failRefreshes
+      ? const ApiResult.failed('Timed out — the server did not respond')
+      : super.status();
+
+  @override
+  Future<ApiResult<List<dynamic>>> todayTrades() async => failRefreshes
+      ? const ApiResult.failed('Timed out — the server did not respond')
+      : super.todayTrades();
+}
+
+class _SlowTodayApi extends _TodayApi {
+  int statusCalls = 0;
+  final Completer<ApiResult<Map<String, dynamic>>> statusResponse = Completer();
+
+  @override
+  Future<ApiResult<Map<String, dynamic>>> status() {
+    statusCalls += 1;
+    return statusResponse.future;
+  }
 }
 
 class _CockpitApi extends DashboardApi {
