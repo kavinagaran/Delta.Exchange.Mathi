@@ -816,9 +816,10 @@ class BtcPricePill extends StatelessWidget {
       duration: const Duration(milliseconds: 280),
       curve: Curves.easeOutCubic,
       width: expanded ? double.infinity : null,
+      height: expanded ? 34 : null,
       padding: EdgeInsets.symmetric(
         horizontal: expanded ? 14 : 8,
-        vertical: expanded ? 7 : 2,
+        vertical: expanded ? 3 : 2,
       ),
       decoration: BoxDecoration(
         gradient: LinearGradient(colors: gradient),
@@ -842,20 +843,20 @@ class BtcPricePill extends StatelessWidget {
                     'BTC  ${_formattedPrice()}',
                     style: const TextStyle(
                       color: Colors.white,
-                      fontSize: 24,
+                      fontSize: 16.8,
                       height: 1.1,
                       fontWeight: FontWeight.w800,
                       fontFeatures: [FontFeature.tabularFigures()],
                     ),
                   ),
-                  const SizedBox(height: 3),
+                  const SizedBox(height: 1),
                   Text(
                     changePct == null
                         ? '24h  —'
                         : '24h  ${changePct! >= 0 ? '+' : ''}${changePct!.toStringAsFixed(2)}%',
                     style: const TextStyle(
                       color: Colors.white,
-                      fontSize: 11,
+                      fontSize: 8,
                       fontWeight: FontWeight.w600,
                       height: 1.1,
                     ),
