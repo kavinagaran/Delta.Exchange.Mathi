@@ -24,7 +24,7 @@ class ConfigScreen extends StatefulWidget {
 }
 
 class _ConfigScreenState extends State<ConfigScreen> {
-  static const _appBuild = '6.3.9 (45)';
+  static const _appBuild = '6.3.10 (46)';
   static const _numericSections = <String, List<_FieldSpec>>{
     'Position protection': [
       _FieldSpec('TREND_TP_PREMIUM_PCT', 'Take profit', suffix: '%'),
@@ -91,6 +91,7 @@ class _ConfigScreenState extends State<ConfigScreen> {
   }
 
   Future<void> _load() async {
+    if (_saving) return;
     if (mounted) setState(() => _loading = true);
     final results = await Future.wait([
       widget.api.config(),
@@ -149,7 +150,7 @@ class _ConfigScreenState extends State<ConfigScreen> {
   }
 
   Future<void> _save() async {
-    if (_saving || _config == null) return;
+    if (_saving || _loading || _config == null) return;
     final payload = <String, dynamic>{
       'DRY_RUN': _accountMode,
       'TREND_ENGINE_SCORE_AUTO_MODE': _automation,
@@ -182,6 +183,37 @@ class _ConfigScreenState extends State<ConfigScreen> {
       result.ok,
     );
     if (result.ok) await _load();
+  }
+
+  Future<void> _toggleBot(bool enabled) async {
+    if (_saving || _loading || _config == null) return;
+    // Apply only the automation setting, using the saved account mode.
+    final dryRun = _truth(_config!['DRY_RUN']);
+    final mode = enabled ? (dryRun ? 'dry_run' : 'live') : 'disabled';
+    setState(() => _saving = true);
+    final result = await widget.api.saveConfig({
+      'TREND_ENGINE_SCORE_AUTO_MODE': mode,
+    });
+    if (!mounted) return;
+    setState(() {
+      _saving = false;
+      if (result.ok) {
+        _automation = mode;
+        _config!['TREND_ENGINE_SCORE_AUTO_MODE'] = mode;
+      }
+    });
+    if (result.unauthorised) {
+      widget.onUnauthorised();
+      return;
+    }
+    _toast(
+      result.ok
+          ? enabled
+                ? 'Bot ON · ${dryRun ? 'DRY RUN' : 'LIVE'}'
+                : 'Bot OFF · Automatic entries disabled'
+          : result.error ?? 'Could not update Bot mode',
+      result.ok,
+    );
   }
 
   Future<void> _testTelegram() async {
@@ -256,6 +288,30 @@ class _ConfigScreenState extends State<ConfigScreen> {
         padding: const EdgeInsets.fromLTRB(Gap.lg, Gap.md, Gap.lg, 110),
         children: [
           AppCard(
+            accent: _automation == 'disabled' ? kNeutral : kPositive,
+            child: SwitchListTile.adaptive(
+              key: const ValueKey('config-bot-toggle'),
+              contentPadding: EdgeInsets.zero,
+              title: Text(
+                _automation == 'disabled' ? 'BOT OFF' : 'BOT ON',
+                style: const TextStyle(
+                  fontSize: 20,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+              subtitle: Text(
+                _saving
+                    ? 'Applying…'
+                    : _automation == 'disabled'
+                    ? 'Automatic entries disabled'
+                    : '${_automation == 'live' ? 'LIVE' : 'DRY RUN'} automatic trading',
+              ),
+              value: _automation != 'disabled',
+              onChanged: _saving || _loading ? null : _toggleBot,
+            ),
+          ),
+          const SizedBox(height: Gap.md),
+          AppCard(
             kicker: 'Trend engine',
             title: '${widget.displayName} configuration',
             accent: Theme.of(context).colorScheme.primary,
@@ -294,19 +350,6 @@ class _ConfigScreenState extends State<ConfigScreen> {
                     ),
                   ),
                 ],
-                const SizedBox(height: Gap.sm),
-                DropdownButtonFormField<String>(
-                  initialValue: _automation,
-                  decoration: const InputDecoration(
-                    labelText: 'Automatic trading',
-                  ),
-                  items: const [
-                    DropdownMenuItem(value: 'disabled', child: Text('OFF')),
-                    DropdownMenuItem(value: 'dry_run', child: Text('DRY RUN')),
-                    DropdownMenuItem(value: 'live', child: Text('LIVE')),
-                  ],
-                  onChanged: (value) => setState(() => _automation = value!),
-                ),
                 const SizedBox(height: Gap.sm),
                 _ConfigInput(
                   label: 'Order size',

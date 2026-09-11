@@ -780,11 +780,19 @@ class WebAssetCache {
   }
 }
 
-class _BtcPricePill extends StatelessWidget {
-  const _BtcPricePill({required this.price, required this.direction});
+class BtcPricePill extends StatelessWidget {
+  const BtcPricePill({
+    super.key,
+    required this.price,
+    required this.direction,
+    this.changePct,
+    this.expanded = false,
+  });
 
   final double? price;
   final int direction;
+  final double? changePct;
+  final bool expanded;
 
   String _formattedPrice() {
     if (price == null) return '—';
@@ -807,7 +815,11 @@ class _BtcPricePill extends StatelessWidget {
     return AnimatedContainer(
       duration: const Duration(milliseconds: 280),
       curve: Curves.easeOutCubic,
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+      width: expanded ? double.infinity : null,
+      padding: EdgeInsets.symmetric(
+        horizontal: expanded ? 14 : 8,
+        vertical: expanded ? 7 : 2,
+      ),
       decoration: BoxDecoration(
         gradient: LinearGradient(colors: gradient),
         borderRadius: BorderRadius.circular(99),
@@ -820,17 +832,48 @@ class _BtcPricePill extends StatelessWidget {
           ),
         ],
       ),
-      child: Text(
-        'BTC - ${_formattedPrice()}',
-        style: const TextStyle(
-          color: Colors.white,
-          fontSize: 8.5,
-          height: 1.05,
-          fontWeight: FontWeight.w800,
-          letterSpacing: .15,
-          fontFeatures: [FontFeature.tabularFigures()],
-        ),
-      ),
+      child: expanded
+          ? FittedBox(
+              fit: BoxFit.scaleDown,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    'BTC  ${_formattedPrice()}',
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 24,
+                      height: 1.1,
+                      fontWeight: FontWeight.w800,
+                      fontFeatures: [FontFeature.tabularFigures()],
+                    ),
+                  ),
+                  const SizedBox(height: 3),
+                  Text(
+                    changePct == null
+                        ? '24h  —'
+                        : '24h  ${changePct! >= 0 ? '+' : ''}${changePct!.toStringAsFixed(2)}%',
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                      height: 1.1,
+                    ),
+                  ),
+                ],
+              ),
+            )
+          : Text(
+              'BTC - ${_formattedPrice()}',
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 8.5,
+                height: 1.05,
+                fontWeight: FontWeight.w800,
+                letterSpacing: .15,
+                fontFeatures: [FontFeature.tabularFigures()],
+              ),
+            ),
     );
   }
 }
@@ -846,6 +889,7 @@ class _HomeShellState extends State<HomeShell> {
   final Set<int> _visitedTabs = {0};
   int _tab = 0;
   double? _btcPrice;
+  double? _btcChangePct;
   int _btcDirection = 1;
   bool _ready = false;
   bool _authenticated = false;
@@ -903,6 +947,15 @@ class _HomeShellState extends State<HomeShell> {
         api: api,
         onUnauthorised: _signOut,
         onBtcPrice: _updateBtcPrice,
+        onBtcChange: (change) {
+          if (mounted) {
+            setState(
+              () => _btcChangePct = change != null && change.isFinite
+                  ? change
+                  : null,
+            );
+          }
+        },
       ),
       '/cockpit' => CockpitScreen(api: api, onUnauthorised: _signOut),
       '/positions' => ExposureScreen(api: api, onUnauthorised: _signOut),
@@ -1087,26 +1140,34 @@ class _HomeShellState extends State<HomeShell> {
           padding: EdgeInsets.fromLTRB(14, 10, 7, 10),
           child: Center(child: NeonLogo(size: 34, radius: 10)),
         ),
-        title: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(
-              appPages[_tab].label,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                color: Theme.of(context).colorScheme.onSurface,
-                fontSize: 15,
-                fontWeight: FontWeight.w800,
-                letterSpacing: -.25,
+        title: appPages[_tab].path == '/'
+            ? BtcPricePill(
+                price: _btcPrice,
+                direction: _btcDirection,
+                changePct: _btcChangePct,
+                expanded: true,
+              )
+            : Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    appPages[_tab].label,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: Theme.of(context).colorScheme.onSurface,
+                      fontSize: 15,
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: -.25,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  BtcPricePill(price: _btcPrice, direction: _btcDirection),
+                ],
               ),
-            ),
-            const SizedBox(height: 2),
-            _BtcPricePill(price: _btcPrice, direction: _btcDirection),
-          ],
-        ),
         actions: [
-          const RedBlueThemeToggle(compact: true),
+          if (appPages[_tab].path != '/')
+            const RedBlueThemeToggle(compact: true),
           PopupMenuButton<String>(
             tooltip: 'Account',
             onSelected: (value) {
@@ -1114,6 +1175,11 @@ class _HomeShellState extends State<HomeShell> {
               if (value == 'workspace') unawaited(_showMore());
             },
             itemBuilder: (context) => [
+              if (appPages[_tab].path == '/')
+                const PopupMenuItem<String>(
+                  enabled: false,
+                  child: RedBlueThemeToggle(compact: true),
+                ),
               PopupMenuItem(
                 enabled: false,
                 child: Column(

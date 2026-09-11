@@ -25,11 +25,13 @@ class TodayScreen extends StatefulWidget {
     required this.api,
     required this.onUnauthorised,
     this.onBtcPrice,
+    this.onBtcChange,
   });
 
   final DashboardApi api;
   final VoidCallback onUnauthorised;
   final ValueChanged<double?>? onBtcPrice;
+  final ValueChanged<double?>? onBtcChange;
 
   @override
   State<TodayScreen> createState() => _TodayScreenState();
@@ -207,6 +209,7 @@ class _TodayScreenState extends State<TodayScreen> {
       });
       if (nextStatus != null) {
         widget.onBtcPrice?.call(_number(nextStatus['btc_futures_price']));
+        widget.onBtcChange?.call(_number(nextStatus['btc_futures_change_pct']));
         _voice.configure(
           nextStatus['voice_announcements_enabled'] == true,
           nextStatus['dry_run_mode'],
