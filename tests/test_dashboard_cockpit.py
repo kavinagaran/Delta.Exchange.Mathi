@@ -243,7 +243,9 @@ def test_cockpit_enter_in_dry_run_opens_only_an_isolated_simulation(
     assert body["bot_automation_mode"] == "dry_run"
     execute.assert_not_called()
     market.assert_called_once_with(dry_run=True)
-    prepare.assert_called_once_with("buy_ce", snapshot, dry_run=True)
+    prepare.assert_called_once_with(
+        "buy_ce", snapshot, dry_run=True, setup_id="trend_bullish",
+    )
     state_path = live_account / "dry_run" / "trend_state.json"
     state = json.loads(state_path.read_text(encoding="utf-8"))
     assert state["status"] == "OPEN"
@@ -274,7 +276,7 @@ def test_cockpit_enter_does_not_require_or_change_bot_mode(
     )
     monkeypatch.setattr(
         dashboard, "_cockpit_prepare_manual_entry",
-        lambda action, snapshot: {
+        lambda action, snapshot, **kwargs: {
             "zone": dashboard.TREND_SCORE_CE_ZONE,
             "side": "long",
             "symbol": "C-BTC-1",
@@ -306,7 +308,7 @@ def test_cockpit_preview_does_not_require_bot_off(live_account, monkeypatch):
     )
     monkeypatch.setattr(
         dashboard, "_cockpit_prepare_manual_entry",
-        lambda action, snapshot: {
+        lambda action, snapshot, **kwargs: {
             "zone": dashboard.TREND_SCORE_CE_ZONE,
             "side": "long",
             "option_type": "CE",
@@ -423,7 +425,7 @@ def test_cockpit_enter_tags_manual_ownership_for_every_trade_type(
     )
     monkeypatch.setattr(
         dashboard, "_cockpit_prepare_manual_entry",
-        lambda action_arg, snapshot: copy.deepcopy(prepared),
+        lambda action_arg, snapshot, **kwargs: copy.deepcopy(prepared),
     )
     execute = Mock(return_value=_mock_execution_result())
     monkeypatch.setattr(dashboard, "_trend_score_auto_live_execute", execute)
@@ -457,7 +459,7 @@ def test_cockpit_enter_does_not_record_setup_lock_or_consume_engine_signal(
     )
     monkeypatch.setattr(
         dashboard, "_cockpit_prepare_manual_entry",
-        lambda action, snapshot: {
+        lambda action, snapshot, **kwargs: {
             "zone": dashboard.TREND_SCORE_CE_ZONE, "side": "long",
             "symbol": "C-BTC-1", "product_id": 1, "lots": 1_000,
         },
@@ -470,9 +472,12 @@ def test_cockpit_enter_does_not_record_setup_lock_or_consume_engine_signal(
 
     assert status == 200
     ledger_path = live_account / dashboard.TREND_SCORE_AUTO_LEDGER_FILE
-    ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
-    assert ledger["signals"] == {}
-    assert ledger["setup_lock"] is None
+    if ledger_path.exists():
+        ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+        assert ledger["signals"] == {}
+        assert ledger["setup_lock"] is None
+    else:
+        assert not ledger_path.exists()
 
 
 def test_cockpit_entry_preserves_bot_setting_after_open_and_close(
@@ -487,7 +492,7 @@ def test_cockpit_entry_preserves_bot_setting_after_open_and_close(
     )
     monkeypatch.setattr(
         dashboard, "_cockpit_prepare_manual_entry",
-        lambda action, snapshot: {
+        lambda action, snapshot, **kwargs: {
             "zone": dashboard.TREND_SCORE_PE_ZONE,
             "side": "long",
             "symbol": "P-BTC-1",
@@ -524,7 +529,7 @@ def test_cockpit_sell_move_never_evaluates_the_automated_adx_gate(
     )
     monkeypatch.setattr(
         dashboard, "_cockpit_prepare_manual_entry",
-        lambda action, snapshot: {
+        lambda action, snapshot, **kwargs: {
             "zone": dashboard.TREND_SCORE_MOVE_ZONE, "side": "short",
             "symbol": "MV-BTC-1", "product_id": 1, "lots": 1_000,
         },
@@ -550,7 +555,7 @@ def test_cockpit_enter_surfaces_a_failed_execution_without_a_500(
     )
     monkeypatch.setattr(
         dashboard, "_cockpit_prepare_manual_entry",
-        lambda action, snapshot: {
+        lambda action, snapshot, **kwargs: {
             "zone": dashboard.TREND_SCORE_CE_ZONE, "side": "long",
             "symbol": "C-BTC-1", "product_id": 1, "lots": 1_000,
         },
@@ -629,7 +634,7 @@ def test_cockpit_retries_once_with_delta_affordable_lots_after_margin_rejection(
     )
     monkeypatch.setattr(
         dashboard, "_cockpit_prepare_manual_entry",
-        lambda action, snapshot: {
+        lambda action, snapshot, **kwargs: {
             "zone": dashboard.TREND_SCORE_SHORT_CE_ZONE,
             "side": "short",
             "symbol": "C-BTC-65000-140826",
@@ -700,7 +705,7 @@ def test_cockpit_enter_refuses_when_a_contract_cannot_be_selected(
         dashboard, "_cockpit_market_snapshot", lambda: {"market": {"spot": 65_000}},
     )
 
-    def raise_no_contract(action, snapshot):
+    def raise_no_contract(action, snapshot, **kwargs):
         raise RuntimeError("No exact executable 3-step ITM CALL contract is available")
 
     monkeypatch.setattr(
@@ -795,7 +800,7 @@ def test_cockpit_preview_returns_the_resolved_contract_and_price(
     assert body["entry_price"] == 220.5
     assert body["side"] == "long"
     assert body["instrument_kind"] == "BTC_OPTION"
-    prepare.assert_called_once_with("buy_ce", snapshot_fn.return_value)
+    prepare.assert_called_once_with("buy_ce", snapshot_fn.return_value, setup_id="trend_bullish")
     execute.assert_not_called()
 
 
@@ -806,7 +811,7 @@ def test_cockpit_preview_surfaces_a_contract_resolution_failure_without_a_500(
         dashboard, "_cockpit_market_snapshot", lambda: {"market": {"spot": 65_000}},
     )
 
-    def raise_no_contract(action, snapshot):
+    def raise_no_contract(action, snapshot, **kwargs):
         raise RuntimeError("No exact executable 3-step ITM CALL contract is available")
 
     monkeypatch.setattr(
@@ -832,7 +837,7 @@ def test_cockpit_preview_ignores_an_open_position_and_the_entry_lock(
     )
     monkeypatch.setattr(
         dashboard, "_cockpit_prepare_manual_entry",
-        lambda action, snapshot: {
+        lambda action, snapshot, **kwargs: {
             "zone": dashboard.TREND_SCORE_CE_ZONE, "side": "long",
             "option_type": "CE", "instrument_kind": "BTC_OPTION",
             "symbol": "C-BTC-1", "strike": 65_000.0,
@@ -1293,7 +1298,7 @@ def test_lemme_risk_live_entry_uses_the_standard_protected_seam(
     )
     monkeypatch.setattr(
         dashboard, "_cockpit_prepare_manual_entry",
-        lambda action_arg, snapshot: {
+        lambda action_arg, snapshot, **kwargs: {
             "zone": dashboard.TREND_SCORE_SHORT_PE_ZONE, "side": "short",
             "symbol": "MV-BTC-1", "product_id": 2, "lots": 1_000,
         },

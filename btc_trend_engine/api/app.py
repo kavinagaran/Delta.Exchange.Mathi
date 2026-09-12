@@ -274,12 +274,12 @@ def create_app(config: EngineConfig,
         name = str(body.get("name") or "").strip() if isinstance(body, dict) else ""
         store = _kill_switches(request)
         if name:
-            cleared = store.resume(name)
-            log.warning("kill switch resumed: %s (cleared=%s)", name, cleared)
-            return {"ok": True, "cleared": [name] if cleared else []}
-        cleared = store.resume_all()
-        log.warning("all kill switches resumed: %s", cleared)
-        return {"ok": True, "cleared": cleared}
+            is_cleared = store.resume(name)
+            log.warning("kill switch resumed: %s (cleared=%s)", name, is_cleared)
+            return {"ok": True, "cleared": [name] if is_cleared else []}
+        cleared_all = store.resume_all()
+        log.warning("all kill switches resumed: %s", cleared_all)
+        return {"ok": True, "cleared": cleared_all}
 
     return app
 

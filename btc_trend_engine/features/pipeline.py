@@ -169,6 +169,8 @@ def derivatives_features(ticker: Mapping[str, Any],
 
     def number(key: str) -> float | None:
         value = ticker.get(key)
+        if value is None:
+            return None
         try:
             result = float(value)
         except (TypeError, ValueError):

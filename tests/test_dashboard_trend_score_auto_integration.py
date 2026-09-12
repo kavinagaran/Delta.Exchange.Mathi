@@ -757,7 +757,8 @@ def test_score_open_state_is_ui_ready_protected_and_exactly_1000_lots(
     assert protection["entry_premium_usd"] == 220.0
     assert protection["tp_target_pnl"] == 220.0
     assert protection["sl_target_pnl"] == 110.0
-    assert protection["tsl_arm_pnl"] == protection["tsl_trail_pnl"] == 55.0
+    assert protection["tsl_arm_pnl"] == 0.0
+    assert protection["tsl_trail_pnl"] == 55.0
     assert protection["protection_source"] == "automatic_filled_premium"
     assert protection["manual_override_allowed"] is True
     assert state["risk_at_entry_usd"] == 110.0

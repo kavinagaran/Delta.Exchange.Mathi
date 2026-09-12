@@ -602,8 +602,8 @@ class EngineService:
             "events_written": self.event_store.written,
             "raw_capture_enabled": self.raw_capture_enabled,
             "candles": {
-                resolution: series.last_closed().start.strftime("%Y-%m-%dT%H:%M:%SZ")
-                if series.last_closed() else None
+                resolution: last.start.strftime("%Y-%m-%dT%H:%M:%SZ")
+                if (last := series.last_closed()) else None
                 for resolution, series in self.candles.series.items()
             },
         }

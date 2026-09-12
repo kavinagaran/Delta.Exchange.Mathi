@@ -318,7 +318,6 @@ def build_snapshot(
         entry_allowed = False
 
     trigger_atr = trigger.get("atr")
-    trigger_close = None
     invalidation_price: str | None = None
     suggested_stop_bps: float | None = None
     forecast = forecast or {}
