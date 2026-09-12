@@ -257,17 +257,18 @@ ThemeData buildAppTheme({required bool blue}) {
       ),
     ),
     cardTheme: CardThemeData(
-      color: surface.withValues(alpha: .88),
-      elevation: 0,
+      color: surface.withValues(alpha: .90),
+      elevation: 2,
+      shadowColor: Colors.black.withValues(alpha: .35),
       surfaceTintColor: Colors.transparent,
       shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(12),
-        side: BorderSide(color: border),
+        borderRadius: BorderRadius.circular(14),
+        side: BorderSide(color: border, width: 1.1),
       ),
     ),
     inputDecorationTheme: InputDecorationTheme(
       filled: true,
-      fillColor: subtle.withValues(alpha: .86),
+      fillColor: subtle.withValues(alpha: .88),
       labelStyle: TextStyle(color: muted, fontSize: 13),
       hintStyle: TextStyle(color: muted, fontSize: 13),
       contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
@@ -281,16 +282,18 @@ ThemeData buildAppTheme({required bool blue}) {
       ),
       focusedBorder: OutlineInputBorder(
         borderRadius: BorderRadius.circular(10),
-        borderSide: BorderSide(color: accent, width: 1.5),
+        borderSide: BorderSide(color: accent, width: 1.8),
       ),
     ),
     filledButtonTheme: FilledButtonThemeData(
       style: FilledButton.styleFrom(
         backgroundColor: accent,
         foregroundColor: Colors.white,
+        elevation: 3,
+        shadowColor: accent.withValues(alpha: .45),
         minimumSize: const Size(0, 40),
         textStyle: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(9)),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
       ),
     ),
     navigationBarTheme: NavigationBarThemeData(

@@ -63,25 +63,28 @@ class _AppCardState extends State<AppCard> {
               end: Alignment.bottomRight,
               colors: [
                 Color.alphaBlend(
-                  tone.withValues(alpha: .13),
+                  tone.withValues(alpha: .18),
                   scheme.surface.withValues(alpha: .97),
                 ),
-                scheme.surface.withValues(alpha: .90),
-                Color.alphaBlend(tone.withValues(alpha: .045), scheme.surface),
+                scheme.surface.withValues(alpha: .92),
+                Color.alphaBlend(tone.withValues(alpha: .06), scheme.surface),
               ],
             ),
-            borderRadius: BorderRadius.circular(14),
-            border: Border.all(color: scheme.outline.withValues(alpha: .58)),
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(
+              color: scheme.outline.withValues(alpha: .68),
+              width: 1.2,
+            ),
             boxShadow: [
               BoxShadow(
-                color: Colors.black.withValues(alpha: .28),
-                blurRadius: 16,
-                offset: const Offset(0, 7),
+                color: Colors.black.withValues(alpha: .40),
+                blurRadius: 20,
+                offset: const Offset(0, 8),
               ),
               BoxShadow(
-                color: tone.withValues(alpha: .10),
-                blurRadius: 18,
-                offset: const Offset(0, 4),
+                color: tone.withValues(alpha: .15),
+                blurRadius: 20,
+                offset: const Offset(0, 2),
               ),
             ],
           ),
@@ -89,16 +92,18 @@ class _AppCardState extends State<AppCard> {
           child: Stack(
             children: [
               Positioned(
-                left: 14,
-                right: 14,
+                left: 12,
+                right: 12,
                 top: 0,
-                height: 1,
+                height: 1.5,
                 child: DecoratedBox(
                   decoration: BoxDecoration(
                     gradient: LinearGradient(
                       colors: [
                         Colors.transparent,
-                        tone.withValues(alpha: .72),
+                        Colors.white.withValues(alpha: .30),
+                        tone.withValues(alpha: .85),
+                        Colors.white.withValues(alpha: .30),
                         Colors.transparent,
                       ],
                     ),
@@ -204,30 +209,49 @@ class PageIntro extends StatelessWidget {
       padding: const EdgeInsets.all(Gap.md),
       decoration: BoxDecoration(
         gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
           colors: [
-            scheme.primary.withValues(alpha: .24),
-            scheme.surface.withValues(alpha: .92),
+            scheme.primary.withValues(alpha: .28),
+            scheme.surface.withValues(alpha: .95),
+            Color.alphaBlend(scheme.primary.withValues(alpha: .08), scheme.surface),
           ],
         ),
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: scheme.primary.withValues(alpha: .28)),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+          color: scheme.primary.withValues(alpha: .38),
+          width: 1.2,
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: .38),
+            blurRadius: 18,
+            offset: const Offset(0, 6),
+          ),
+          BoxShadow(
+            color: scheme.primary.withValues(alpha: .15),
+            blurRadius: 16,
+            offset: const Offset(0, 2),
+          ),
+        ],
       ),
       child: Row(
         children: [
           Container(
-            width: 36,
-            height: 36,
+            width: 38,
+            height: 38,
             decoration: BoxDecoration(
               gradient: LinearGradient(
                 begin: Alignment.topLeft,
                 end: Alignment.bottomRight,
-                colors: [scheme.primary, scheme.secondary],
+                colors: [scheme.secondary, scheme.primary],
               ),
               borderRadius: BorderRadius.circular(Radii.md),
               boxShadow: [
                 BoxShadow(
-                  color: scheme.primary.withValues(alpha: .35),
-                  blurRadius: 16,
+                  color: scheme.primary.withValues(alpha: .45),
+                  blurRadius: 14,
+                  offset: const Offset(0, 3),
                 ),
               ],
             ),
@@ -327,13 +351,20 @@ class MetricWrap extends StatelessWidget {
                 child: DecoratedBox(
                   decoration: BoxDecoration(
                     color: Theme.of(context).colorScheme.surfaceContainerHighest
-                        .withValues(alpha: .45),
+                        .withValues(alpha: .50),
                     borderRadius: BorderRadius.circular(Radii.md),
                     border: Border.all(
                       color: Theme.of(
                         context,
-                      ).colorScheme.outline.withValues(alpha: .55),
+                      ).colorScheme.outline.withValues(alpha: .62),
                     ),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withValues(alpha: .22),
+                        blurRadius: 8,
+                        offset: const Offset(0, 2.5),
+                      ),
+                    ],
                   ),
                   child: Padding(
                     padding: const EdgeInsets.all(Gap.sm),
@@ -454,11 +485,25 @@ class StatusPill extends StatelessWidget {
     final scheme = Theme.of(context).colorScheme;
     final tone = colour ?? scheme.onSurfaceVariant;
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 3.5),
       decoration: BoxDecoration(
-        color: tone.withValues(alpha: .13),
+        gradient: LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [
+            tone.withValues(alpha: .22),
+            tone.withValues(alpha: .10),
+          ],
+        ),
         borderRadius: BorderRadius.circular(Radii.pill),
-        border: Border.all(color: tone.withValues(alpha: .38)),
+        border: Border.all(color: tone.withValues(alpha: .48)),
+        boxShadow: [
+          BoxShadow(
+            color: tone.withValues(alpha: .18),
+            blurRadius: 6,
+            offset: const Offset(0, 1.5),
+          ),
+        ],
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
@@ -467,7 +512,16 @@ class StatusPill extends StatelessWidget {
             Container(
               width: 6,
               height: 6,
-              decoration: BoxDecoration(color: tone, shape: BoxShape.circle),
+              decoration: BoxDecoration(
+                color: tone,
+                shape: BoxShape.circle,
+                boxShadow: [
+                  BoxShadow(
+                    color: tone.withValues(alpha: .75),
+                    blurRadius: 4,
+                  ),
+                ],
+              ),
             ),
             const SizedBox(width: 6),
           ],
