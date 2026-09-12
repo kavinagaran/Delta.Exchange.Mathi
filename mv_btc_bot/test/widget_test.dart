@@ -508,12 +508,8 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('TSL ARMED'), findsOneWidget);
-    expect(
-      find.text(
-        'TSL Armed · floor \$360.36 · peak \$412.90 · EXCHANGE PROTECTED',
-      ),
-      findsOneWidget,
-    );
+    expect(find.text('TP / SL / TSL Monitor'), findsOneWidget);
+    expect(find.text('WATCHDOG · 10s'), findsOneWidget);
   });
 }
 
