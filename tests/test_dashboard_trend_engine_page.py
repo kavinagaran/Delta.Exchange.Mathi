@@ -305,8 +305,8 @@ def test_one_committed_trade_decision_is_centered_below_the_circles():
     assert 'class="te-trade-decision-row"' in TEMPLATE
     assert "tradeDecisionMeta(" in TEMPLATE
     assert "renderTradeDecision(" in TEMPLATE
-    assert "BUY 2-STEP ITM CE" in TEMPLATE
-    assert "BUY 2-STEP ITM PE" in TEMPLATE
+    assert "BUY 3-STEP ITM CE" in TEMPLATE
+    assert "BUY 3-STEP ITM PE" in TEMPLATE
     assert "SELL ATM MOVE" in TEMPLATE
     assert "HOLD — NO NEW TRADE" in TEMPLATE
     assert "WAIT — 15M ADX NOT CALM" in TEMPLATE
@@ -377,7 +377,7 @@ vm.runInThisContext(source.slice(start, end) + `
       throw new Error(raw + ' was not mapped to ' + friendly);
     }
   }
-  if (tradeDecisionMeta('CE_2_ITM').label !== 'BUY 2-STEP ITM CE') {
+  if (tradeDecisionMeta('CE_2_ITM').label !== 'BUY 3-STEP ITM CE') {
     throw new Error('CE decision capsule is wrong');
   }
   if (tradeDecisionMeta('PE_2_ITM').tone !== 'is-pe') {

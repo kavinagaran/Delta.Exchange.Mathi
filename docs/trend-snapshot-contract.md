@@ -118,7 +118,7 @@ committed 5-minute ADX. The execution controller uses it to close an open
 | `entry_allowed` | `false` whenever `data_quality != "OK"` — invariant, tested |
 | `zone` | `CE_2_ITM` \| `PE_2_ITM` \| `SHORT_MOVE` \| `HOLD` (v1.1.0) |
 | `zone_action_allowed` | whether the zone's action may be taken now. Directional zones require minimum confidence and score/regime alignment; `SHORT_MOVE` requires neutral confirmation. It can differ from `entry_allowed`: `RANGE` is valid for a MOVE setup but not a legacy directional entry |
-| `zone_itm_steps` | strike-index offset magnitude from ATM; `2` for both CE and PE under the 2026-07-26 spec (legacy used 3 for PE) |
+| `zone_itm_steps` | strike-index offset magnitude from ATM; `3` for both CE and PE under the current policy |
 | `signal_ttl_seconds` | `> 0`. Consumer rejects `timestamp + ttl < now` |
 | `components[].score` | `null` when `available: false`; weights sum to 1.0 |
 | `components[].weight` | v1 weighting per [ADR 0004](adr/0004-order-flow-weight.md) |
@@ -180,11 +180,11 @@ All bind `127.0.0.1:5055` and require `X-Engine-Token` except `/health`.
 
 | Score | Zone | Action |
 |---:|---|---|
-| `+40 … +100` | `CE_2_ITM` | Buy a 2-step ITM call |
+| `+40 … +100` | `CE_2_ITM` | Buy a 3-step ITM call |
 | `+30 < score < +40` | `HOLD` | Keep the existing position |
 | `−30 … +30` with 15m ADX at or below the calm threshold | `SHORT_MOVE` | Sell the ATM MOVE straddle |
 | `−40 < score < −30` | `HOLD` | Keep the existing position |
-| `−100 … −40` | `PE_2_ITM` | Buy a 2-step ITM put |
+| `−100 … −40` | `PE_2_ITM` | Buy a 3-step ITM put |
 
 At exactly ±30 the score is a `SHORT_MOVE` candidate. The current closed
 5m score is actionable when the latest completed 15m ADX is at or below the calm threshold, subject to the remaining

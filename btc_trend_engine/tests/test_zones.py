@@ -22,20 +22,20 @@ def _decide(score, **kw):
 
 # ── the three specified bands, including their exact boundaries ─────────
 @pytest.mark.parametrize("score", [40.1, 65.0, 99.9, 100.0])
-def test_bullish_band_buys_two_step_itm_ce(score):
+def test_bullish_band_buys_three_step_itm_ce(score):
     decision = _decide(score)
     assert decision.zone == zones.CE_2_ITM
-    assert decision.option_type == "CE" and decision.itm_steps == 2
-    assert zones.strike_index_offset(decision.zone) == -2
+    assert decision.option_type == "CE" and decision.itm_steps == 3
+    assert zones.strike_index_offset(decision.zone) == -3
 
 
 @pytest.mark.parametrize("score", [-40.1, -65.0, -100.0])
-def test_bearish_band_buys_two_step_itm_pe(score):
+def test_bearish_band_buys_three_step_itm_pe(score):
     decision = _decide(score)
     assert decision.zone == zones.PE_2_ITM
-    assert decision.option_type == "PE" and decision.itm_steps == 2
+    assert decision.option_type == "PE" and decision.itm_steps == 3
     # ITM for a put is a HIGHER strike -- opposite sign to the call.
-    assert zones.strike_index_offset(decision.zone) == +2
+    assert zones.strike_index_offset(decision.zone) == +3
 
 
 @pytest.mark.parametrize("score", [-30.0, -29.9, 0.0, 12.0, 29.9, 30.0])
@@ -161,13 +161,12 @@ def test_a_custom_policy_moves_both_boundaries():
 
 
 # ── divergence from legacy, stated explicitly ───────────────────────────
-def test_this_model_differs_from_legacy_pe_strike_depth():
-    """Legacy trend_score_auto uses PE_3_ITM (ATM+3); this spec says 2 steps.
-    Pinned so the change is deliberate rather than drifted into."""
+def test_stable_pe_zone_id_uses_three_step_depth():
+    """The stable PE_2_ITM zone id now selects the 3-step policy depth."""
     from trend_score_auto import PE_3_ITM
 
     assert zones.PE_2_ITM != PE_3_ITM
-    assert zones.strike_index_offset(zones.PE_2_ITM) == 2
+    assert zones.strike_index_offset(zones.PE_2_ITM) == 3
 
 
 def test_trend_score_auto_now_delegates_here_so_there_is_one_source_of_truth():
@@ -182,21 +181,20 @@ def test_trend_score_auto_now_delegates_here_so_there_is_one_source_of_truth():
         assert legacy_entry_point(score) == zones.zone_for_score(float(score))
 
     # Specifically: all scores from 30 to 40 are HOLD (the neutral entry
-    # band is +/-30), and puts are 2-step rather than 3-step ITM.
+    # band is +/-30), and puts use the current 3-step ITM policy.
     assert legacy_entry_point(35) == zones.HOLD
     assert legacy_entry_point(-35) == zones.HOLD
     assert legacy_entry_point(-50) == zones.PE_2_ITM
 
 
 # ── zone-level shadow comparison ────────────────────────────────────────
-def test_zone_agreement_flags_the_pe_strike_difference_as_a_disagreement():
-    """Same direction, different instrument. Direction-only comparison would
-    score this as agreement and hide a real execution difference."""
+def test_zone_agreement_treats_the_legacy_pe_name_as_the_same_policy():
+    """PE_3_ITM and PE_2_ITM now both mean a 3-step ITM put."""
     from btc_trend_engine.signals import shadow
 
     agreed, reason = shadow.zone_agreement("PE_3_ITM", "PE_2_ITM")
-    assert agreed is False
-    assert reason == shadow.ZONE_SAME_SIDE_DIFFERENT_STRIKE
+    assert agreed is True
+    assert reason == shadow.AGREE
 
 
 def test_zone_agreement_flags_the_hold_band_divergence():

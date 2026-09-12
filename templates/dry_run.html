@@ -9,7 +9,7 @@
   <div class="dry-run-hero-copy">
     <span class="strategy-kicker">DRY RUN TRADING SIMULATION WORKSPACE</span>
     <h2 id="dry-run-title">Dry Run Trading</h2>
-    <p>The Trend Engine selects one dry-run trade at a time for this user: a 2-step ITM Call, 2-step ITM Put, or ATM MOVE straddle. All dry-run activity remains separate from real positions and P&amp;L.</p>
+    <p>The Trend Engine selects one dry-run trade at a time for this user: a 3-step ITM Call, 3-step ITM Put, or ATM MOVE straddle. All dry-run activity remains separate from real positions and P&amp;L.</p>
   </div>
   <div class="dry-run-hero-actions">
     <span class="pill idle" id="dry-page-mode" role="status" aria-live="polite">
@@ -352,8 +352,8 @@ function dryTrendScoreAutoEnabled() {
 function dryTrendScoreTarget(status) {
   const zone = String(status?.engine_zone || '').trim();
   const labels = {
-    CE_2_ITM: 'Buy 2-step ITM Call',
-    PE_2_ITM: 'Buy 2-step ITM Put',
+    CE_2_ITM: 'Buy 3-step ITM Call',
+    PE_2_ITM: 'Buy 3-step ITM Put',
     SHORT_MOVE: 'Sell ATM MOVE straddle',
     HOLD: 'Hold the open position — no new entry',
   };

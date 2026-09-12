@@ -1510,7 +1510,7 @@ def test_missing_entry_fee_marks_accounting_pending_and_blocks_switch():
 
 # ── zone execution table (2026-07-26 zone spec) ─────────────────────────
 def test_pe_2_itm_is_executable_alongside_the_legacy_pe_3_itm():
-    """The zone spec moved puts from 3-step to 2-step ITM. Before this, the
+    """The stable PE_2_ITM zone id remains executable after strike-policy changes.
     validator rejected PE_2_ITM outright, so the bearish leg could not place
     an order at all."""
     from trend_score_live_execution import ZONE_EXECUTION

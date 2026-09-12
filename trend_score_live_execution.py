@@ -285,8 +285,8 @@ class ZoneExecutionPolicy:
     policy_decision: str
 
 
-# Canonical table of executable zones. PE_2_ITM joined PE_3_ITM on 2026-07-26
-# when the zone spec moved puts from 3-step to 2-step ITM; both are listed
+# Canonical table of executable zones. Stable zone ids are retained across
+# strike-depth policy changes; PE_3_ITM remains listed for legacy positions
 # because a position opened under the old policy must still be closable.
 #
 # Lookups are strict: an unlisted zone raises. This previously fell through an

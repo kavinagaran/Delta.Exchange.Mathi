@@ -166,10 +166,10 @@ def test_completed_candle_signal_key_rejects_conflicting_duplicate_event():
         completed_candle_signal_key(snapshot)
 
 
-def test_ce_counts_two_steps_from_raw_ladder_not_executable_subset():
+def test_ce_counts_three_steps_from_raw_ladder_not_executable_subset():
     expiry = NOW + timedelta(hours=6)
     products = _products(expiry, [64000, 64200, 64400, 64600, 64800, 65000])
-    target = next(row for row in products if row["symbol"].startswith("C-BTC-64400-"))
+    target = next(row for row in products if row["symbol"].startswith("C-BTC-64200-"))
     # The executable universe intentionally omits the intermediate 64600 and
     # 64800 calls. They must still count as raw listed ladder steps.
     selected = select_directional_option(
@@ -181,7 +181,8 @@ def test_ce_counts_two_steps_from_raw_ladder_not_executable_subset():
     )
     assert selected["symbol"] == target["symbol"]
     assert selected["atm_strike"] == 64800
-    assert selected["strike"] == 64400
+    assert selected["strike"] == 64200
+    assert selected["itm_steps"] == 3
     assert selected["lots"] == AUTO_TRADE_LOTS == 1000
 
 
@@ -202,18 +203,18 @@ def test_pe_selects_three_steps_above_atm():
 def test_atm_tie_is_resolved_to_the_lower_listed_strike():
     expiry = NOW + timedelta(hours=6)
     products = _products(expiry, [64200, 64400, 64600, 64800, 65000, 65200])
-    target = next(row for row in products if row["symbol"].startswith("C-BTC-64400-"))
+    target = next(row for row in products if row["symbol"].startswith("C-BTC-64200-"))
     selected = select_directional_option(
         products, [_executable(target)], spot=64900, zone=CE_2_ITM, now=NOW
     )
     assert selected["atm_strike"] == 64800
-    assert selected["strike"] == 64400
+    assert selected["strike"] == 64200
 
 
 def test_exactly_ninety_minutes_is_eligible():
     expiry = NOW + timedelta(minutes=90)
     products = _products(expiry, [64200, 64400, 64600, 64800, 65000, 65200])
-    target = next(row for row in products if row["symbol"].startswith("C-BTC-64400-"))
+    target = next(row for row in products if row["symbol"].startswith("C-BTC-64200-"))
     selected = select_directional_option(
         products, [_executable(target)], spot=64850, zone=CE_2_ITM, now=NOW
     )
@@ -230,7 +231,7 @@ def test_sub_ninety_minute_expiry_is_skipped_without_maximum_dte():
     )
     target = next(
         row for row in products
-        if row["symbol"].startswith("C-BTC-64400-")
+        if row["symbol"].startswith("C-BTC-64200-")
         and row["settlement_time"] == distant.isoformat()
     )
     selected = select_directional_option(
@@ -252,7 +253,7 @@ def test_directional_today_only_never_falls_forward_to_a_distant_expiry():
     )
     distant_target = next(
         row for row in products
-        if row["symbol"].startswith("C-BTC-64400-")
+        if row["symbol"].startswith("C-BTC-64200-")
         and row["settlement_time"] == distant.isoformat()
     )
     assert select_directional_option(
@@ -275,7 +276,7 @@ def test_directional_today_only_accepts_the_sole_listing_even_if_dated_tomorrow(
     products = _products(
         tomorrow, [64200, 64400, 64600, 64800, 65000, 65200, 65400]
     )
-    prefix = "C-BTC-64400-" if zone == CE_2_ITM else "P-BTC-65200-"
+    prefix = "C-BTC-64200-" if zone == CE_2_ITM else "P-BTC-65400-"
     target = next(row for row in products if row["symbol"].startswith(prefix))
     selected = select_directional_option(
         products, [_executable(target)], spot=64850, zone=zone, now=NOW,
@@ -299,7 +300,7 @@ def test_directional_zero_floor_still_selects_todays_near_expiry():
     )
     target = next(
         row for row in products
-        if row["symbol"].startswith("C-BTC-64400-")
+        if row["symbol"].startswith("C-BTC-64200-")
         and row["settlement_time"] == soon.isoformat()
     )
     selected = select_directional_option(
@@ -347,12 +348,12 @@ def test_missing_exact_target_does_not_substitute_a_strike_or_later_expiry():
     )
     wrong_first = next(
         row for row in products
-        if row["symbol"].startswith("C-BTC-64200-")
+        if row["symbol"].startswith("C-BTC-64400-")
         and row["settlement_time"] == first.isoformat()
     )
     valid_later = next(
         row for row in products
-        if row["symbol"].startswith("C-BTC-64400-")
+        if row["symbol"].startswith("C-BTC-64200-")
         and row["settlement_time"] == later.isoformat()
     )
     assert select_directional_option(
@@ -377,7 +378,7 @@ def test_missing_exact_target_does_not_substitute_a_strike_or_later_expiry():
 def test_exact_target_must_be_executable_for_all_1000_lots(change):
     expiry = NOW + timedelta(hours=6)
     products = _products(expiry, [64200, 64400, 64600, 64800, 65000, 65200])
-    target = next(row for row in products if row["symbol"].startswith("C-BTC-64400-"))
+    target = next(row for row in products if row["symbol"].startswith("C-BTC-64200-"))
     assert select_directional_option(
         products,
         [_executable(target, **change)],
@@ -390,7 +391,7 @@ def test_exact_target_must_be_executable_for_all_1000_lots(change):
 def test_selection_is_independent_of_api_row_order():
     expiry = NOW + timedelta(hours=6)
     products = _products(expiry, [64200, 64400, 64600, 64800, 65000, 65200])
-    target = next(row for row in products if row["symbol"].startswith("C-BTC-64400-"))
+    target = next(row for row in products if row["symbol"].startswith("C-BTC-64200-"))
     expected = select_directional_option(
         products, [_executable(target)], spot=64850, zone=CE_2_ITM, now=NOW
     )
@@ -667,33 +668,32 @@ def test_transition_fails_closed_for_multiple_or_unrecognized_positions():
         )
 
 
-def test_pe_2_itm_selects_two_steps_above_atm():
-    """2026-07-26 spec: puts are 2-step ITM, symmetric with calls. The legacy
-    PE_3_ITM path stays alive only so an old position remains closable."""
+def test_pe_stable_zone_id_selects_three_steps_above_atm():
+    """The stable PE_2_ITM id selects the current symmetric 3-step policy."""
     expiry = NOW + timedelta(hours=6)
     products = _products(
         expiry, [64200, 64400, 64600, 64800, 65000, 65200, 65400, 65600]
     )
-    target = next(row for row in products if row["symbol"].startswith("P-BTC-65200-"))
+    target = next(row for row in products if row["symbol"].startswith("P-BTC-65400-"))
     selected = select_directional_option(
         products, [_executable(target)], spot=64850, zone=PE_2_ITM, now=NOW
     )
     assert selected["atm_strike"] == 64800
-    assert selected["strike"] == 65200
-    assert selected["itm_steps"] == 2
+    assert selected["strike"] == 65400
+    assert selected["itm_steps"] == 3
 
 
 def test_call_and_put_step_depth_are_now_symmetric():
     expiry = NOW + timedelta(hours=6)
     strikes = [64200, 64400, 64600, 64800, 65000, 65200, 65400]
     products = _products(expiry, strikes)
-    call = next(r for r in products if r["symbol"].startswith("C-BTC-64400-"))
-    put = next(r for r in products if r["symbol"].startswith("P-BTC-65200-"))
+    call = next(r for r in products if r["symbol"].startswith("C-BTC-64200-"))
+    put = next(r for r in products if r["symbol"].startswith("P-BTC-65400-"))
     ce = select_directional_option(products, [_executable(call)], spot=64850,
                                    zone=CE_2_ITM, now=NOW)
     pe = select_directional_option(products, [_executable(put)], spot=64850,
                                    zone=PE_2_ITM, now=NOW)
-    assert ce["itm_steps"] == pe["itm_steps"] == 2
+    assert ce["itm_steps"] == pe["itm_steps"] == 3
     # Equidistant from ATM, in opposite directions.
     assert ce["atm_strike"] - ce["strike"] == pe["strike"] - pe["atm_strike"]
 

@@ -52,11 +52,11 @@
           <div class="cockpit-option-list">
             <label class="cockpit-option-choice" data-action="buy_ce">
               <input type="radio" name="cockpit-trade" value="buy_ce" disabled>
-              <span><strong>2-Step ITM Call</strong><small>Bullish directional · CE</small></span><i>CE</i>
+              <span><strong>3-Step ITM Call</strong><small>Bullish directional · CE</small></span><i>CE</i>
             </label>
             <label class="cockpit-option-choice" data-action="buy_pe">
               <input type="radio" name="cockpit-trade" value="buy_pe" disabled>
-              <span><strong>2-Step ITM Put</strong><small>Bearish directional · PE</small></span><i>PE</i>
+              <span><strong>3-Step ITM Put</strong><small>Bearish directional · PE</small></span><i>PE</i>
             </label>
             <label class="cockpit-option-choice is-wide" data-action="buy_move">
               <input type="radio" name="cockpit-trade" value="buy_move" disabled>
@@ -120,7 +120,7 @@
 {% block scripts %}
 <script>
 const COCKPIT_TRADE_LABELS = {
-  buy_ce: 'Buy 2-Step ITM Call', buy_pe: 'Buy 2-Step ITM Put',
+  buy_ce: 'Buy 3-Step ITM Call', buy_pe: 'Buy 3-Step ITM Put',
   buy_move: 'Buy ATM MOVE', sell_ce: 'Sell ATM Call',
   sell_pe: 'Sell ATM Put', sell_move: 'Sell ATM MOVE Straddle',
 };

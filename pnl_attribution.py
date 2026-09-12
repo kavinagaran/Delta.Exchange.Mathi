@@ -1,6 +1,6 @@
 """Decompose realised option P&L into delta / gamma / vega / theta / residual.
 
-Why this exists: the strategy trades options (2-step ITM calls and puts, ATM
+Why this exists: the strategy trades options (3-step ITM calls and puts, ATM
 MOVE straddles) but every measurement we have is on the *perpetual*
 (ADR 0005).  When a trade loses money nothing currently distinguishes
 "the direction call was wrong" from "direction was right but IV collapsed"

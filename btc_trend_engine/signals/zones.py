@@ -1,7 +1,7 @@
 """Score -> action zone mapping (operator spec, 2026-07-29).
 
-    > +40         BULLISH    buy 2-step ITM CE (ADX-independent)
-    < -40         BEARISH    buy 2-step ITM PE (ADX-independent)
+    > +40         BULLISH    buy 3-step ITM CE (ADX-independent)
+    < -40         BEARISH    buy 3-step ITM PE (ADX-independent)
     -30 .. +30    SIDEWAYS   sell ATM MOVE when 15m ADX is at or below 25
     all other gaps HOLD      no new action
 
@@ -12,12 +12,11 @@ an open position is kept rather than churned through an inferred intermediate
 trade. This prevents a score oscillating around a boundary from paying both
 spreads on consecutive candles.
 
-Two deliberate differences from the legacy ``trend_score_auto.score_zone``,
-both of which change real behaviour and are called out rather than absorbed
-silently:
+Two deliberate differences from the legacy ``trend_score_auto.score_zone``
+remain explicit:
 
-1. **Legacy PE is 3 steps ITM (`PE_3_ITM`), this is 2** (`PE_2_ITM`), per the
-   spec. Legacy was asymmetric — CE at ATM-2, PE at ATM+3. This is symmetric.
+1. The `CE_2_ITM` and `PE_2_ITM` strings remain stable zone ids for persisted
+   positions and locks. New entries use a symmetric 3-step offset.
 2. **Legacy switches hard at |25|.** It will disagree with this model for
    every non-action gap. This model uses the current closed 5m score plus a
    calm 15m ADX reading for the SHORT_MOVE policy.
@@ -31,9 +30,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-# Zone identifiers. CE_2_ITM and SHORT_MOVE deliberately reuse the legacy
-# spellings so shadow comparison can compare them without a translation
-# table; PE_2_ITM is new precisely because the strike policy differs.
+# Zone identifiers remain stable across strike-depth policy changes so an open
+# position does not appear to cross zones because the strike offset changed.
 CE_2_ITM = "CE_2_ITM"
 PE_2_ITM = "PE_2_ITM"
 SHORT_MOVE = "SHORT_MOVE"
@@ -157,10 +155,10 @@ def decide(
     if not gates_passed:
         return ZoneDecision(zone, False, "one or more execution gates failed")
     if zone == CE_2_ITM:
-        return ZoneDecision(zone, True, "bullish: buy 2-step ITM CE",
-                            option_type="CE", itm_steps=2)
-    return ZoneDecision(zone, True, "bearish: buy 2-step ITM PE",
-                        option_type="PE", itm_steps=2)
+        return ZoneDecision(zone, True, "bullish: buy 3-step ITM CE",
+                            option_type="CE", itm_steps=3)
+    return ZoneDecision(zone, True, "bearish: buy 3-step ITM PE",
+                        option_type="PE", itm_steps=3)
 
 
 def should_exit(
@@ -199,7 +197,7 @@ def strike_index_offset(zone: str) -> int | None:
     None for zones that do not select a vanilla option.
     """
     if zone == CE_2_ITM:
-        return -2
+        return -3
     if zone == PE_2_ITM:
-        return +2
+        return +3
     return None

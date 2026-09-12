@@ -36,8 +36,8 @@ flowchart TD
     N --> O
     O --> M
     M --> P{"target zone"}
-    P -->|CE_2_ITM| Q["select_directional_option<br/>ATM index − 2 → C-BTC-*"]
-    P -->|PE_2_ITM| R["select_directional_option<br/>ATM index + 2 → P-BTC-*"]
+    P -->|CE_2_ITM| Q["select_directional_option<br/>ATM index − 3 → C-BTC-*"]
+    P -->|PE_2_ITM| R["select_directional_option<br/>ATM index + 3 → P-BTC-*"]
     P -->|SHORT_MOVE| S["select_move_contract<br/>ATM → MV-BTC-*, SHORT"]
 
     Q --> T["validate_fixed_entry&#40;&#41;<br/>ZONE_EXECUTION table"]
@@ -87,11 +87,11 @@ raising. Protection is never gated on a candle close or on engine health.
 
 | Score | Zone | Action | Instrument |
 |---|---|---|---|
-| `+40 … +100` | `CE_2_ITM` | buy | 2-step ITM call (ATM − 2) |
+| `+40 … +100` | `CE_2_ITM` | buy | 3-step ITM call (ATM − 3) |
 | `+30 < score < +40` | `HOLD` | none — keep open position | — |
 | `−30 … +30` with 5m ADX ≤ 20 | `SHORT_MOVE` | sell | ATM MOVE straddle |
 | `−40 < score < −30` | `HOLD` | none — keep open position | — |
-| `−100 … −40` | `PE_2_ITM` | buy | 2-step ITM put (ATM + 2) |
+| `−100 … −40` | `PE_2_ITM` | buy | 3-step ITM put (ATM + 3) |
 
 At ±40 the directional zones apply; at ±30 the SHORT_MOVE candidate zone
 applies. Bands live in exactly one place, `btc_trend_engine/signals/zones.py`;

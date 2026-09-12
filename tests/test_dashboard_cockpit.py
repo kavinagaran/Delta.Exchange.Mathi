@@ -701,7 +701,7 @@ def test_cockpit_enter_refuses_when_a_contract_cannot_be_selected(
     )
 
     def raise_no_contract(action, snapshot):
-        raise RuntimeError("No exact executable 2-step ITM CALL contract is available")
+        raise RuntimeError("No exact executable 3-step ITM CALL contract is available")
 
     monkeypatch.setattr(
         dashboard, "_cockpit_prepare_manual_entry", raise_no_contract,
@@ -807,7 +807,7 @@ def test_cockpit_preview_surfaces_a_contract_resolution_failure_without_a_500(
     )
 
     def raise_no_contract(action, snapshot):
-        raise RuntimeError("No exact executable 2-step ITM CALL contract is available")
+        raise RuntimeError("No exact executable 3-step ITM CALL contract is available")
 
     monkeypatch.setattr(
         dashboard, "_cockpit_prepare_manual_entry", raise_no_contract,
@@ -884,7 +884,7 @@ def _snapshot(spot=65_000.0):
     return {"market": {"spot": spot}, "option_contracts": []}
 
 
-def test_prepare_buy_ce_selects_the_2_step_itm_call_zone(live_account, monkeypatch):
+def test_prepare_buy_ce_uses_the_three_step_policy_zone(live_account, monkeypatch):
     selection = {
         "zone": dashboard.TREND_SCORE_CE_ZONE, "symbol": "C-BTC-1",
         "product_id": 1, "strike": 65_000, "expiry": "2026-08-06T12:00:00Z",
@@ -907,6 +907,7 @@ def test_prepare_buy_ce_selects_the_2_step_itm_call_zone(live_account, monkeypat
     assert prepared["side"] == "long"
     assert prepared["instrument_kind"] == "BTC_OPTION"
     assert select.call_args.kwargs["zone"] == dashboard.TREND_SCORE_CE_ZONE
+    assert select.call_args.kwargs["manual_itm_steps"] is None
     # Cockpit always restricts to today's IST expiry (never rolls to
     # tomorrow) but, unlike the automated controller, does not enforce the
     # standard 90-minute floor -- the operator's own judgement substitutes.

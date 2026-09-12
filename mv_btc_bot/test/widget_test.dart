@@ -84,7 +84,7 @@ void main() {
     expect(observedBtcPrice, 64763);
     expect(find.text('+42.4'), findsOneWidget);
     expect(find.text('+46.8'), findsOneWidget);
-    expect(find.text('BUY 2-STEP ITM CE'), findsOneWidget);
+    expect(find.text('BUY 3-STEP ITM CE'), findsOneWidget);
     expect(find.text('ENTRY READY'), findsNothing);
     expect(find.text('SIGNAL CONSUMED'), findsNothing);
     expect(find.text('P-BTC-63000-020826'), findsOneWidget);
@@ -322,13 +322,13 @@ void main() {
     await tester.tap(find.text('Bullish trend score'));
     await tester.pumpAndSettle();
     await tester.scrollUntilVisible(
-      find.text('2-Step ITM Call'),
+      find.text('3-Step ITM Call'),
       300,
       scrollable: find.byType(Scrollable).first,
     );
-    await tester.ensureVisible(find.text('2-Step ITM Call'));
+    await tester.ensureVisible(find.text('3-Step ITM Call'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('2-Step ITM Call'));
+    await tester.tap(find.text('3-Step ITM Call'));
     await tester.pumpAndSettle();
     await tester.ensureVisible(find.text('Preview Order'));
     await tester.tap(find.text('Preview Order'));
@@ -368,7 +368,7 @@ void main() {
 
     expect(find.text('-53.0'), findsOneWidget);
     expect(find.text('-57.6'), findsOneWidget);
-    expect(find.text('BUY 2-STEP ITM PE'), findsOneWidget);
+    expect(find.text('BUY 3-STEP ITM PE'), findsOneWidget);
     expect(find.byKey(const ValueKey('committed-score-chart')), findsOneWidget);
     final chart = tester.widget<InteractiveViewer>(
       find.byKey(const ValueKey('committed-score-chart')),

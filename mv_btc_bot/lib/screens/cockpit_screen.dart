@@ -127,14 +127,14 @@ const _setupGroups = <_SetupGroup>[
 const _strategies = <_StrategySpec>[
   _StrategySpec(
     action: 'buy_ce',
-    title: '2-Step ITM Call',
+    title: '3-Step ITM Call',
     detail: 'Bullish directional · CE',
     badge: 'CE',
     buy: true,
   ),
   _StrategySpec(
     action: 'buy_pe',
-    title: '2-Step ITM Put',
+    title: '3-Step ITM Put',
     detail: 'Bearish directional · PE',
     badge: 'PE',
     buy: true,
@@ -276,8 +276,7 @@ class _CockpitScreenState extends State<CockpitScreen> {
       _controller?['account_live'] == true || _accountTradingMode == 'LIVE';
   bool get _accountDryRun => _accountTradingMode == 'DRY RUN';
   bool get _accountModeReady => _accountLive || _accountDryRun;
-  bool get _canTrade =>
-      _accountModeReady && !_hasOpenPosition && !_busy;
+  bool get _canTrade => _accountModeReady && !_hasOpenPosition && !_busy;
 
   Map<String, dynamic>? get _lock {
     final value = _controller?['setup_lock'];

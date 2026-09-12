@@ -9,7 +9,7 @@ single-position transition.
 Strike *steps* are counted from the raw operational product ladder.  The
 quote-filtered contract universe is consulted only after the exact target has
 been identified.  Consequently, a missing quote cannot silently turn a
-two-step option into a different strike.
+three-step option into a different strike.
 """
 
 from __future__ import annotations
@@ -22,9 +22,9 @@ from btc_trend_engine.signals.regime import CALM_ADX_MAX
 
 
 PE_3_ITM = "PE_3_ITM"   # legacy strike policy; still closable, never opened
-PE_2_ITM = "PE_2_ITM"   # 2026-07-26 spec
+PE_2_ITM = "PE_2_ITM"   # Stable zone id; current entry policy is 3-step ITM.
 SHORT_MOVE = "SHORT_MOVE"
-CE_2_ITM = "CE_2_ITM"
+CE_2_ITM = "CE_2_ITM"   # Stable zone id; current entry policy is 3-step ITM.
 HOLD = "HOLD"
 # Manual-only zone: the Cockpit's Buy MOVE trade.  Never produced by the
 # score-band policy (score_zone() below never returns it) and never entered
@@ -115,7 +115,7 @@ def score_zone(score: Any) -> str:
     source of truth for the 2026-07-29 operator spec — rather than being
     duplicated here, so the two modules cannot drift apart:
 
-        |score| > 40    directional (CE_2_ITM / PE_2_ITM, both 2-step ITM),
+        |score| > 40    directional (CE_2_ITM / PE_2_ITM, both 3-step ITM),
                         independent of ADX
         |score| <= 30   SHORT_MOVE candidate (the engine must also confirm
                         15m ADX is at or below 25)
@@ -335,9 +335,10 @@ def select_directional_option(
     """Select the exact policy strike or return ``None`` without substitution.
 
     The earliest listed operational expiry meeting ``min_time_to_expiry_seconds``
-    is authoritative.  CE selects ``ATM index - 2`` and PE selects
-    ``ATM index + 2`` (2026-07-26 spec; PE was ``+3`` before, making the
-    policy asymmetric).  ``PE_3_ITM`` is still accepted so a position opened
+    is authoritative. CE selects ``ATM index - 3`` and PE selects
+    ``ATM index + 3``. The historical zone identifiers remain stable so
+    persisted positions and locks are not invalidated by this strike policy
+    change. ``PE_3_ITM`` is still accepted so a position opened
     under the old policy can be selected and closed.  If that exact product
     is absent or not executable for the requested lot count, the function returns
     ``None``; it never shifts strike or tries a later expiry.
@@ -345,7 +346,7 @@ def select_directional_option(
     ``manual_itm_steps`` is reserved for an operator-selected Cockpit trade.
     It may choose the same option type at a specific non-negative strike
     offset (including ATM with ``0``) without weakening the automated zone's
-    fixed two-step policy; automated callers leave it as ``None``.
+    fixed three-step policy; automated callers leave it as ``None``.
 
     ``today_only=True`` additionally restricts the ladder to the single
     *nearest* listed expiry -- never a later one -- used by the automated
@@ -367,9 +368,9 @@ def select_directional_option(
         return None
 
     if zone == CE_2_ITM:
-        option_type, steps, direction = "CE", 2, -1
+        option_type, steps, direction = "CE", 3, -1
     elif zone == PE_2_ITM:
-        option_type, steps, direction = "PE", 2, 1
+        option_type, steps, direction = "PE", 3, 1
     elif zone == PE_3_ITM:
         option_type, steps, direction = "PE", 3, 1
     else:

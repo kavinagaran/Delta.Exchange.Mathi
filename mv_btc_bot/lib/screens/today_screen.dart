@@ -729,8 +729,8 @@ class _EngineCard extends StatelessWidget {
   }
 
   static String _zoneLabel(String zone) => switch (zone) {
-    'CE_2_ITM' => 'Bullish · buy 2-step ITM call',
-    'PE_2_ITM' || 'PE_3_ITM' => 'Bearish · buy 2-step ITM put',
+    'CE_2_ITM' => 'Bullish · buy 3-step ITM call',
+    'PE_2_ITM' || 'PE_3_ITM' => 'Bearish · buy 3-step ITM put',
     'SHORT_MOVE' => 'Sideways · sell ATM MOVE',
     'HOLD' => 'Hold · no new action',
     _ => zone,
@@ -769,8 +769,8 @@ class _CockpitCard extends StatefulWidget {
 }
 
 const _kCockpitLabels = {
-  'buy_ce': 'Buy CE (2-step ITM call)',
-  'buy_pe': 'Buy PE (2-step ITM put)',
+  'buy_ce': 'Buy CE (3-step ITM call)',
+  'buy_pe': 'Buy PE (3-step ITM put)',
   'buy_move': 'Buy MOVE (nearest ATM straddle)',
   'sell_move': 'Sell MOVE (nearest ATM straddle)',
 };

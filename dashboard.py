@@ -9632,8 +9632,8 @@ def _prepare_trend_score_auto_entry(signal: dict) -> dict:
             today_only=True,
         )
         if not selection:
-            label = "2-step ITM CALL" if zone == TREND_SCORE_CE_ZONE \
-                else "2-step ITM PUT"
+            label = "3-step ITM CALL" if zone == TREND_SCORE_CE_ZONE \
+                else "3-step ITM PUT"
             raise RuntimeError(
                 f"No exact executable today's-expiry {label} contract "
                 "is available"
@@ -9881,7 +9881,7 @@ def _cockpit_prepare_manual_entry(
     gate to satisfy and no ``plan_score_transition``/ADX calm-market check
     to pass, because a manual trade substitutes the operator's own
     real-time judgement for both. Directional buys select the configured
-    two-step ITM contract; individual directional sells select the current
+    three-step ITM contract; individual directional sells select the current
     ATM CE/PE. Every vanilla option still requires a fresh, non-stale
     executable quote; ``sell_move`` still enforces the
     strategy-wide weekday-blackout guard but skips the automated $300
@@ -9895,7 +9895,7 @@ def _cockpit_prepare_manual_entry(
     that the whole configured size rest at the touch before it would
     simulate, which made the rehearsal stricter than the real-money path it
     rehearses and blocked it against ordinary Delta daily-option books (a
-    2-step ITM strike routinely shows tens-to-hundreds of contracts at the
+    3-step ITM strike routinely shows tens-to-hundreds of contracts at the
     touch against a four-digit configured size). A simulation consumes no
     liquidity at all, so the quantity is recorded -- ``entry_depth`` here and
     ``execution_snapshot.observed_entry_depth`` on the simulated position --
@@ -9934,7 +9934,7 @@ def _cockpit_prepare_manual_entry(
         if not selection:
             option_label = "CALL" if is_call else "PUT"
             label = f"ATM {option_label}" if is_short \
-                else f"2-step ITM {option_label}"
+                else f"3-step ITM {option_label}"
             raise RuntimeError(
                 f"No exact executable today's-expiry {label} contract "
                 "is available"

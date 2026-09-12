@@ -894,8 +894,8 @@ String tradeDecisionLabel(
     return 'WAIT — CHECKS BLOCKED';
   }
   return switch (key) {
-    'CE_2_ITM' => 'BUY 2-STEP ITM CE',
-    'PE_2_ITM' || 'PE_3_ITM' => 'BUY 2-STEP ITM PE',
+    'CE_2_ITM' => 'BUY 3-STEP ITM CE',
+    'PE_2_ITM' || 'PE_3_ITM' => 'BUY 3-STEP ITM PE',
     'SHORT_MOVE' => 'SELL ATM MOVE',
     _ => key.replaceAll('_', ' '),
   };

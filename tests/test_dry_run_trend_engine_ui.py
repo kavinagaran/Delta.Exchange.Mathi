@@ -141,10 +141,10 @@ global.esc = value => String(value ?? '').replace(/&/g, '&amp;')
   .replace(/</g, '&lt;').replace(/>/g, '&gt;');
 vm.runInThisContext(source.slice(start, end));
 
-if (dryTrendScoreTarget({engine_zone: 'CE_2_ITM'}) !== 'Buy 2-step ITM Call') {
+if (dryTrendScoreTarget({engine_zone: 'CE_2_ITM'}) !== 'Buy 3-step ITM Call') {
   throw new Error('CE zone mapping changed');
 }
-if (dryTrendScoreTarget({engine_zone: 'PE_2_ITM'}) !== 'Buy 2-step ITM Put') {
+if (dryTrendScoreTarget({engine_zone: 'PE_2_ITM'}) !== 'Buy 3-step ITM Put') {
   throw new Error('PE zone mapping changed');
 }
 if (dryTrendScoreTarget({engine_zone: 'HOLD'}) !== 'Hold the open position — no new entry') {
