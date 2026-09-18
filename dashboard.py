@@ -15559,11 +15559,27 @@ def api_wallet():
                 usd_balance   = float(w.get("balance") or 0)
                 usd_available = float(w.get("available_balance") or 0)
                 break
+        # Delta's wallet balance is realised cash only.  The venue's
+        # authoritative live account value is WalletPayload.meta.net_equity,
+        # which incorporates the current value of open exposure.  Keep a
+        # defensive balance fallback for older/degraded payloads so existing
+        # accounts never lose their header value entirely.
+        meta = data.get("meta") if isinstance(data.get("meta"), dict) else {}
+        try:
+            account_value_usd = float(meta.get("net_equity"))
+            if not math.isfinite(account_value_usd):
+                raise ValueError("non-finite net equity")
+        except (TypeError, ValueError):
+            account_value_usd = usd_balance
         rate = _usd_inr_rate()
         return jsonify({
             "usd_balance":   round(usd_balance, 2),
             "usd_available": round(usd_available, 2),
             "inr_balance":   round(usd_balance * rate, 2) if rate else None,
+            "account_value_usd": round(account_value_usd, 2),
+            "account_value_inr": (
+                round(account_value_usd * rate, 2) if rate else None
+            ),
             "usd_inr_rate":  round(rate, 2) if rate else None,
         })
     except Exception as e:

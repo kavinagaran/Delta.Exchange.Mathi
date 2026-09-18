@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mv_btc_bot/api/client.dart';
 import 'package:mv_btc_bot/screens/config_screen.dart';
-import 'package:mv_btc_bot/main.dart' show BtcPricePill;
+import 'package:mv_btc_bot/main.dart' show AccountValuePill, BtcPricePill;
 
 class ConfigApi extends DashboardApi {
   ConfigApi({this.mode = 'live', this.dryRun = false})
@@ -46,11 +46,19 @@ void main() {
             toolbarHeight: 60,
             leadingWidth: 57,
             leading: const Icon(Icons.currency_bitcoin),
-            title: const BtcPricePill(
-              price: 78357,
-              direction: -1,
-              changePct: -0.60,
-              expanded: true,
+            title: const Row(
+              children: [
+                Expanded(
+                  child: BtcPricePill(
+                    price: 78357,
+                    direction: -1,
+                    changePct: -0.60,
+                    expanded: true,
+                  ),
+                ),
+                SizedBox(width: 6),
+                AccountValuePill(valueInr: 17125.8),
+              ],
             ),
             actions: [
               IconButton(onPressed: () {}, icon: const Icon(Icons.more_vert)),
@@ -62,7 +70,11 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text(r'BTC  $78,357'), findsOneWidget);
     expect(find.text('24h  -0.60%'), findsOneWidget);
-    expect(tester.getSize(find.byType(BtcPricePill)).width, greaterThan(170));
+    expect(find.text('₹17,126'), findsOneWidget);
+    expect(
+      tester.getSize(find.byType(BtcPricePill)).width,
+      greaterThan(tester.getSize(find.byType(AccountValuePill)).width),
+    );
     expect(tester.takeException(), isNull);
   });
   for (final rejected in [false, true]) {

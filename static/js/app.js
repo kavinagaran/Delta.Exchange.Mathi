@@ -269,6 +269,25 @@ function setBtcMarketPill(el, rawPrice, rawChange) {
   el.innerHTML = `BTC <b>$${fN(validPrice ? price : null)}</b><small>${changeLabel}</small>`;
 }
 
+function setAccountValuePill(el, wallet) {
+  if (!el) return;
+  const usd = Number(wallet?.account_value_usd);
+  const inr = Number(wallet?.account_value_inr);
+  const validUsd = wallet?.account_value_usd !== null &&
+    wallet?.account_value_usd !== undefined && wallet?.account_value_usd !== '' &&
+    Number.isFinite(usd);
+  const validInr = wallet?.account_value_inr !== null &&
+    wallet?.account_value_inr !== undefined && wallet?.account_value_inr !== '' &&
+    Number.isFinite(inr);
+  const usdLabel = validUsd ? `$${fN(usd, 2)}` : '—';
+  const inrLabel = validInr ? ` · ₹${fN(inr)}` : '';
+  el.setAttribute(
+    'aria-label',
+    `Delta account value ${validUsd ? usdLabel : 'unavailable'}${validInr ? `, ₹${fN(inr)}` : ''}`,
+  );
+  el.innerHTML = `Account Value <b>${usdLabel}</b>${inrLabel}`;
+}
+
 function statusFromSlots(st) {
   const slots = [st.morning || {}, { ...st, morning: undefined, trend: undefined }, st.trend || {}];
   const realOpen = slots.filter(s => s && s.status === 'OPEN' && !s.dry_run);
@@ -307,10 +326,7 @@ async function refreshTopbar() {
   if (el) {
     try {
       const w = await jget('/api/wallet');
-      if (w.usd_balance != null) {
-        const inr = w.inr_balance != null ? ` · ₹${fN(w.inr_balance)}` : '';
-        el.innerHTML = `Balance <b>$${fN(w.usd_balance, 2)}</b>${inr}`;
-      }
+      setAccountValuePill(el, w);
     } catch (e) { /* transient */ }
   }
 }

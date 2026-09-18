@@ -72,7 +72,7 @@ const kBlueBackgroundAsset = 'assets/sparkling-blue-dashboard-bg.png';
 
 final appTheme = AppThemeController();
 
-const kWebAssetRevision = '6.3.9+45-concise-pnl-announcement';
+const kWebAssetRevision = '6.3.14+50-account-value-header';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -819,9 +819,9 @@ class BtcPricePill extends StatelessWidget {
       duration: const Duration(milliseconds: 280),
       curve: Curves.easeOutCubic,
       width: expanded ? double.infinity : null,
-      height: expanded ? 34 : null,
+      height: expanded ? 32 : null,
       padding: EdgeInsets.symmetric(
-        horizontal: expanded ? 14 : 8,
+        horizontal: expanded ? 10 : 8,
         vertical: expanded ? 3 : 2,
       ),
       decoration: BoxDecoration(
@@ -846,7 +846,7 @@ class BtcPricePill extends StatelessWidget {
                     'BTC  ${_formattedPrice()}',
                     style: const TextStyle(
                       color: Colors.white,
-                      fontSize: 16.8,
+                      fontSize: 15.2,
                       height: 1.1,
                       fontWeight: FontWeight.w800,
                       fontFeatures: [FontFeature.tabularFigures()],
@@ -882,6 +882,70 @@ class BtcPricePill extends StatelessWidget {
   }
 }
 
+class AccountValuePill extends StatelessWidget {
+  const AccountValuePill({super.key, required this.valueInr});
+
+  final double? valueInr;
+
+  String _formattedValue() {
+    if (valueInr == null || !valueInr!.isFinite) return '₹—';
+    final rounded = valueInr!.round();
+    final sign = rounded < 0 ? '-' : '';
+    final digits = rounded.abs().toString();
+    final grouped = StringBuffer();
+    for (var index = 0; index < digits.length; index++) {
+      if (index > 0 && (digits.length - index) % 3 == 0) grouped.write(',');
+      grouped.write(digits[index]);
+    }
+    return '₹$sign${grouped.toString()}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      key: const ValueKey('header-account-value'),
+      constraints: const BoxConstraints(minWidth: 60, maxWidth: 84),
+      height: 32,
+      padding: const EdgeInsets.symmetric(horizontal: 9),
+      alignment: Alignment.center,
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          colors: [
+            scheme.primary.withValues(alpha: .30),
+            scheme.surfaceContainerHighest.withValues(alpha: .94),
+          ],
+        ),
+        borderRadius: BorderRadius.circular(99),
+        border: Border.all(
+          color: scheme.primary.withValues(alpha: .62),
+          width: .8,
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: scheme.primary.withValues(alpha: .18),
+            blurRadius: 8,
+          ),
+        ],
+      ),
+      child: FittedBox(
+        fit: BoxFit.scaleDown,
+        child: Text(
+          _formattedValue(),
+          maxLines: 1,
+          style: const TextStyle(
+            color: Colors.white,
+            fontSize: 11.5,
+            height: 1,
+            fontWeight: FontWeight.w800,
+            fontFeatures: [FontFeature.tabularFigures()],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class HomeShell extends StatefulWidget {
   const HomeShell({super.key});
 
@@ -894,6 +958,7 @@ class _HomeShellState extends State<HomeShell> {
   int _tab = 0;
   double? _btcPrice;
   double? _btcChangePct;
+  double? _accountValueInr;
   int _btcDirection = 1;
   bool _ready = false;
   bool _authenticated = false;
@@ -958,6 +1023,11 @@ class _HomeShellState extends State<HomeShell> {
                   ? change
                   : null,
             );
+          }
+        },
+        onAccountValueInr: (value) {
+          if (mounted && value != null && value.isFinite) {
+            setState(() => _accountValueInr = value);
           }
         },
       ),
@@ -1145,11 +1215,19 @@ class _HomeShellState extends State<HomeShell> {
           child: Center(child: NeonLogo(size: 34, radius: 10)),
         ),
         title: appPages[_tab].path == '/'
-            ? BtcPricePill(
-                price: _btcPrice,
-                direction: _btcDirection,
-                changePct: _btcChangePct,
-                expanded: true,
+            ? Row(
+                children: [
+                  Expanded(
+                    child: BtcPricePill(
+                      price: _btcPrice,
+                      direction: _btcDirection,
+                      changePct: _btcChangePct,
+                      expanded: true,
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                  AccountValuePill(valueInr: _accountValueInr),
+                ],
               )
             : Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -1166,7 +1244,14 @@ class _HomeShellState extends State<HomeShell> {
                     ),
                   ),
                   const SizedBox(height: 2),
-                  BtcPricePill(price: _btcPrice, direction: _btcDirection),
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      BtcPricePill(price: _btcPrice, direction: _btcDirection),
+                      const SizedBox(width: 5),
+                      AccountValuePill(valueInr: _accountValueInr),
+                    ],
+                  ),
                 ],
               ),
         actions: [

@@ -24,7 +24,7 @@ class ConfigScreen extends StatefulWidget {
 }
 
 class _ConfigScreenState extends State<ConfigScreen> {
-  static const _appBuild = '6.3.13 (49)';
+  static const _appBuild = '6.3.14 (50)';
   static const _numericSections = <String, List<_FieldSpec>>{
     'Position protection': [
       _FieldSpec('TREND_TP_PREMIUM_PCT', 'Take profit', suffix: '%'),

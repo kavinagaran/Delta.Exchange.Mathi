@@ -52,6 +52,7 @@ void main() {
     WidgetTester tester,
   ) async {
     double? observedBtcPrice;
+    double? observedAccountValueInr;
     tester.view.physicalSize = const Size(390, 1000);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
@@ -69,6 +70,7 @@ void main() {
             api: _TodayApi(),
             onUnauthorised: () {},
             onBtcPrice: (price) => observedBtcPrice = price,
+            onAccountValueInr: (value) => observedAccountValueInr = value,
           ),
         ),
       ),
@@ -82,6 +84,7 @@ void main() {
 
     expect(find.text('2 trades'), findsOneWidget);
     expect(observedBtcPrice, 64763);
+    expect(observedAccountValueInr, 17125.8);
     expect(find.text('+42.4'), findsOneWidget);
     expect(find.text('+46.8'), findsOneWidget);
     expect(find.text('BUY 3-STEP ITM CE'), findsOneWidget);
@@ -541,6 +544,13 @@ class _TodayApi extends DashboardApi {
   @override
   Future<ApiResult<Map<String, dynamic>>> protectionStatus() async =>
       const ApiResult.ok(<String, dynamic>{});
+
+  @override
+  Future<ApiResult<Map<String, dynamic>>> wallet() async =>
+      const ApiResult.ok(<String, dynamic>{
+        'account_value_usd': 201.48,
+        'account_value_inr': 17125.8,
+      });
 
   @override
   Stream<ApiResult<Map<String, dynamic>>> protectionStream() =>

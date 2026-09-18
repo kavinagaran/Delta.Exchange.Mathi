@@ -48,6 +48,8 @@ def test_android_native_pages_use_compact_navigation_and_native_theme():
     assert "path: '/trend-engine'" in flutter
     assert "path: '/dry-run'" in flutter
     assert "path: '/logs'" in flutter
+    assert 'id="tb-bal">Account Value' in template
+    assert "class AccountValuePill" in flutter
 
 
 @pytest.mark.skipif(NODE is None, reason="Node.js is required for frontend JavaScript tests")
@@ -191,6 +193,30 @@ setBtcMarketPill(el, 62900, -0.4814);
 if (!el.className.endsWith('down') || !el.innerHTML.includes('-0.48%')) throw new Error('negative movement not rendered');
 setBtcMarketPill(el, 62900, 0);
 if (!el.className.endsWith('flat') || !el.innerHTML.includes('+0.00%')) throw new Error('flat movement not rendered');
+"""
+    result = subprocess.run(
+        [NODE, "-e", script], cwd=ROOT, text=True, capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.skipif(NODE is None, reason="Node.js is required for frontend JavaScript tests")
+def test_account_value_pill_uses_delta_equity_in_usd_and_inr():
+    script = r"""
+const fs = require('fs');
+const vm = require('vm');
+global.document = { addEventListener() {}, getElementById() { return null; }, dispatchEvent() {} };
+global.CustomEvent = function() {};
+vm.runInThisContext(fs.readFileSync('static/js/app.js', 'utf8'));
+global.fN = (value, decimals = 0) => Number(value).toFixed(decimals);
+const el = {innerHTML: '', attrs: {}, setAttribute(k, v) { this.attrs[k] = v; }};
+setAccountValuePill(el, {account_value_usd: 201.48, account_value_inr: 17125.8});
+if (!el.innerHTML.includes('Account Value <b>$201.48</b>')) throw new Error(el.innerHTML);
+if (!el.innerHTML.includes('₹17,126')) throw new Error(el.innerHTML);
+if (!el.attrs['aria-label'].includes('Delta account value')) throw new Error('missing accessible label');
+setAccountValuePill(el, {});
+if (el.innerHTML !== 'Account Value <b>—</b>') throw new Error('missing value did not degrade safely');
 """
     result = subprocess.run(
         [NODE, "-e", script], cwd=ROOT, text=True, capture_output=True,

@@ -3724,6 +3724,16 @@ body:not(.native-app):not(.login-body)::after {
 .theme-picker { min-width: 138px; height: 36px; gap: 7px; }
 .theme-swatch { width: 18px; height: 18px; flex-basis: 18px; }
 .chip, .pill { min-height: 34px; }
+#tb-bal.account-value {
+  border-color: color-mix(in srgb, var(--accent) 38%, var(--border));
+  background:
+    linear-gradient(120deg, color-mix(in srgb, var(--accent) 13%, transparent), transparent 62%),
+    color-mix(in srgb, var(--glass-strong) 92%, transparent);
+}
+#tb-bal.account-value b {
+  color: color-mix(in srgb, var(--accent-dark) 84%, white 16%);
+  font-weight: 800;
+}
 
 /* Page canvas and reusable surfaces */
 .content {

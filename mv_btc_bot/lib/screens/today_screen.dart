@@ -26,12 +26,14 @@ class TodayScreen extends StatefulWidget {
     required this.onUnauthorised,
     this.onBtcPrice,
     this.onBtcChange,
+    this.onAccountValueInr,
   });
 
   final DashboardApi api;
   final VoidCallback onUnauthorised;
   final ValueChanged<double?>? onBtcPrice;
   final ValueChanged<double?>? onBtcChange;
+  final ValueChanged<double?>? onAccountValueInr;
 
   @override
   State<TodayScreen> createState() => _TodayScreenState();
@@ -155,7 +157,7 @@ class _TodayScreenState extends State<TodayScreen> {
 
   Future<void> _refresh({bool quiet = false}) async {
     // A slow mobile request must not be joined by the next 10-second timer.
-    // Without this guard, several complete six-request batches can pile up and
+    // Without this guard, several complete seven-request batches can pile up and
     // make both the phone and a small server progressively less responsive.
     if (_refreshLoading) return;
     _refreshLoading = true;
@@ -168,6 +170,7 @@ class _TodayScreenState extends State<TodayScreen> {
         widget.api.engineLive(),
         widget.api.scoreAutoStatus(),
         widget.api.protectionStatus(),
+        widget.api.wallet(),
       ]);
       if (!mounted) return;
 
@@ -214,6 +217,10 @@ class _TodayScreenState extends State<TodayScreen> {
           nextStatus['voice_announcements_enabled'] == true,
           nextStatus['dry_run_mode'],
         );
+      }
+      if (results[6].ok && results[6].data is Map<String, dynamic>) {
+        final wallet = results[6].data as Map<String, dynamic>;
+        widget.onAccountValueInr?.call(_number(wallet['account_value_inr']));
       }
       if (results[0].ok && nextTrades != null) {
         unawaited(_voice.observe(_todayTrades));
