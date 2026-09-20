@@ -687,7 +687,7 @@ class _CurrentTradeCard extends StatelessWidget {
                         ? 'Reconciling…'
                         : pyramidBusy
                         ? 'Checking…'
-                        : 'Pyramid ×2',
+                        : (averageCount > 0 ? 'Pyramid' : 'Pyramid ×2'),
                     icon: Icons.add_chart_rounded,
                     tone: kPositive,
                     filled: true,

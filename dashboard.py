@@ -4667,7 +4667,7 @@ def download_apk():
     response = send_file(
         str(apk),
         as_attachment=True,
-        download_name="btc-bot-6.3.15-51.apk",
+        download_name="btc-bot-6.3.16-52.apk",
         max_age=0,
     )
     # The download URL is intentionally stable. Prevent browsers and Android
@@ -15181,7 +15181,16 @@ def _composite_rebased_policy(
         or configured.get("tsl_trail_percent_of_entry_premium")
         or 25
     )
-    rebased_tsl_pct = current_tsl_pct * 2.0
+    if (
+        configured.get("protection_source") in (
+            "operator_pyramid_composite", "operator_average_composite"
+        )
+        or int(state.get("average_count") or 0) > 0
+        or int(state.get("pyramid_count") or 0) > 0
+    ):
+        rebased_tsl_pct = current_tsl_pct
+    else:
+        rebased_tsl_pct = current_tsl_pct * 2.0
     policy = build_premium_percent_protection_policy(
         entry_mark,
         state.get("contract_value"),
@@ -15223,8 +15232,6 @@ def _pyramid_base_state(state: dict, *, dry_run: bool) -> dict:
         )
     if int(state.get("pyramid_count") or 0) >= PYRAMID_MAX_PER_CYCLE:
         raise RuntimeError("This position has already used its one pyramid")
-    if int(state.get("average_count") or 0) > 0:
-        raise RuntimeError("This position has already averaged and cannot be pyramided")
     if state.get("pending_pyramid_intent") or state.get("pending_average_intent"):
         raise RuntimeError("A composite add-on order is already being reconciled")
     exchange_protection_active = (
@@ -15409,7 +15416,18 @@ def _pyramid_preview_from_state(
 ) -> dict:
     base = _pyramid_base_state(state, dry_run=dry_run)
     lots = base["lots"]
-    total_lots = lots * 2
+    average_count = int(state.get("average_count") or 0)
+    if average_count > 0:
+        original_lots = int(
+            state.get("original_owned_entry_lots")
+            or (lots - int(state.get("average_added_lots") or 0))
+        )
+        if original_lots <= 0 or original_lots >= lots:
+            original_lots = max(1, lots // 2)
+        add_lots = original_lots
+    else:
+        add_lots = lots
+    total_lots = lots + add_lots
     sign = -1 if base["side"] == "short" else 1
     if base["side"] not in {"long", "short"}:
         raise RuntimeError("Current position direction is invalid")
@@ -15446,7 +15464,7 @@ def _pyramid_preview_from_state(
             raise RuntimeError(
                 "Stored aggregate entry is not synchronized with Delta"
             )
-        prepared = _pyramid_prepared_contract(state, lots)
+        prepared = _pyramid_prepared_contract(state, add_lots)
         quote = _trend_score_auto_live_quote(prepared)
         mark = _trend_score_auto_number(
             quote.get("mark") or quote.get("mid"), "live mark", positive=True,
@@ -15498,9 +15516,9 @@ def _pyramid_preview_from_state(
             prepared,
             quote,
             available_usd=available,
-            configured_lots=lots,
+            configured_lots=add_lots,
         )
-        if int(affordability.get("selected_lots") or 0) != lots:
+        if int(affordability.get("selected_lots") or 0) != add_lots:
             raise RuntimeError(
                 "Available USD balance cannot fund the full matching pyramid quantity"
             )
@@ -15515,6 +15533,10 @@ def _pyramid_preview_from_state(
         )
 
     if not math.isfinite(current_pnl) or current_pnl <= 0:
+        if average_count > 0:
+            raise RuntimeError(
+                "After averaging, pyramiding is allowed only if the position's P&L turns positive"
+            )
         raise RuntimeError(
             "Pyramiding is allowed only while the current P&L is positive"
         )
@@ -15522,7 +15544,7 @@ def _pyramid_preview_from_state(
         raise RuntimeError("Pyramiding is allowed only after TSL is armed")
 
     composite_entry = (
-        base["entry_mark"] * lots + executable * lots
+        base["entry_mark"] * lots + executable * add_lots
     ) / total_lots
     policy = _pyramid_rebased_policy(state, composite_entry, total_lots)
     new_floor = max(
@@ -15537,7 +15559,7 @@ def _pyramid_preview_from_state(
         "product_id": base["product_id"],
         "side": base["side"],
         "current_lots": lots,
-        "add_lots": lots,
+        "add_lots": add_lots,
         "total_lots": total_lots,
         "current_entry": round(base["entry_mark"], 8),
         "estimated_fill": round(executable, 8),

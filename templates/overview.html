@@ -343,7 +343,7 @@ function renderTodayCurrentTrade(trade, index, protection = null) {
     ${slot ? `<div class="today-current-actions">
       ${canOfferPyramid ? `<button class="btn primary sm today-pyramid-btn" type="button"
         onclick="pyramidTodayTrade(${index})" ${pyramidPending ? 'disabled' : ''}>
-        ${pyramidPending ? 'Pyramid reconciling…' : 'Pyramid ×2'}
+        ${pyramidPending ? 'Pyramid reconciling…' : (averageCount > 0 ? 'Pyramid' : 'Pyramid ×2')}
       </button>` : ''}
       ${canOfferAverage ? `<button class="btn warning sm today-avg-btn" type="button"
         onclick="averageTodayTrade(${index})" ${averagePending ? 'disabled' : ''}>

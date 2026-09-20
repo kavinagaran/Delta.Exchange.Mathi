@@ -338,7 +338,7 @@ def test_dry_average_doubles_quantity_rebases_policy_and_requires_negative_pnl(
     assert second_status == 409
     assert "already used" in second.get_json()["error"]
 
-    # Pyramid rejected after average
+    # Pyramid rejected while still in negative P&L after average
     with dashboard.app.test_request_context(
         "/api/pyramid/preview",
         method="POST",
@@ -346,7 +346,52 @@ def test_dry_average_doubles_quantity_rebases_policy_and_requires_negative_pnl(
     ):
         pyr_resp, pyr_status = _response_tuple(dashboard.api_pyramid_preview())
     assert pyr_status == 409
-    assert "already averaged" in pyr_resp.get_json()["error"]
+    assert "positive" in pyr_resp.get_json()["error"]
+
+    # When position P&L turns positive, one-time pyramid is allowed with original lots (100 lots)
+    monkeypatch.setattr(
+        dashboard,
+        "_dry_run_market_mark",
+        lambda _state, *, executable: 120.0,
+    )
+    updated["dry_tsl_armed"] = True
+    _write(dashboard._slot_file("trend", dry_run=True), updated)
+
+    with dashboard.app.test_request_context(
+        "/api/pyramid/preview",
+        method="POST",
+        json={"target_mode": "dry_run"},
+    ):
+        pyr_ok_resp, pyr_ok_status = _response_tuple(dashboard.api_pyramid_preview())
+    assert pyr_ok_status == 200
+    pyr_preview = pyr_ok_resp.get_json()
+    assert pyr_preview["ok"] is True
+    assert pyr_preview["current_lots"] == 200
+    assert pyr_preview["add_lots"] == 100
+    assert pyr_preview["total_lots"] == 300
+
+    # Execute the pyramid
+    with dashboard.app.test_request_context(
+        "/api/pyramid/execute",
+        method="POST",
+        json={"target_mode": "dry_run"},
+    ):
+        exec_resp, exec_status = _response_tuple(dashboard.api_pyramid_execute())
+    assert exec_status == 200
+    exec_state = exec_resp.get_json()["state"]
+    assert exec_state["lots"] == 300
+    assert exec_state["pyramid_count"] == 1
+    assert exec_state["average_count"] == 1
+
+    # Second pyramid rejected (only 1 per cycle)
+    with dashboard.app.test_request_context(
+        "/api/pyramid/preview",
+        method="POST",
+        json={"target_mode": "dry_run"},
+    ):
+        second_pyr, second_pyr_status = _response_tuple(dashboard.api_pyramid_preview())
+    assert second_pyr_status == 409
+    assert "already used its one pyramid" in second_pyr.get_json()["error"]
 
 
 @pytest.mark.parametrize(

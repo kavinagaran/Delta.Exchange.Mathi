@@ -72,7 +72,7 @@ const kBlueBackgroundAsset = 'assets/sparkling-blue-dashboard-bg.png';
 
 final appTheme = AppThemeController();
 
-const kWebAssetRevision = '6.3.15+51-pyramid-tsl2-avgx2';
+const kWebAssetRevision = '6.3.16+52-pyramid-after-average';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
