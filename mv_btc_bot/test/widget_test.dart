@@ -186,6 +186,43 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
+  testWidgets('Today previews and confirms an average in a centered dialog', (
+    WidgetTester tester,
+  ) async {
+    tester.view.physicalSize = const Size(390, 1000);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final api = _TodayApi();
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: buildAppTheme(blue: true),
+        home: Scaffold(
+          body: TodayScreen(api: api, onUnauthorised: () {}),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Avgx2'), findsOneWidget);
+
+    await tester.tap(find.text('Avgx2'));
+    await tester.pumpAndSettle();
+    expect(find.byType(AlertDialog), findsOneWidget);
+    expect(find.text('LIVE average?'), findsOneWidget);
+    expect(
+      find.textContaining('Composite quantity: 2000 lots'),
+      findsOneWidget,
+    );
+    expect(api.averagePreviewCalls, 1);
+
+    await tester.tap(find.text('Confirm average'));
+    await tester.pumpAndSettle();
+    expect(api.averageExecuteCalls, 1);
+    expect(find.text('Average added and protected'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
   testWidgets('Today does not overlap slow ten-second refresh batches', (
     WidgetTester tester,
   ) async {
@@ -558,6 +595,8 @@ class _TodayApi extends DashboardApi {
 
   int pyramidPreviewCalls = 0;
   int pyramidExecuteCalls = 0;
+  int averagePreviewCalls = 0;
+  int averageExecuteCalls = 0;
 
   @override
   Future<ApiResult<Map<String, dynamic>>> status() async =>
@@ -623,6 +662,35 @@ class _TodayApi extends DashboardApi {
     pyramidExecuteCalls += 1;
     return const ApiResult.ok(<String, dynamic>{
       'message': 'Pyramid added and protected',
+    });
+  }
+
+  @override
+  Future<ApiResult<Map<String, dynamic>>> averagePreview(
+    String targetMode,
+  ) async {
+    averagePreviewCalls += 1;
+    return const ApiResult.ok(<String, dynamic>{
+      'symbol': 'C-BTC-64000-020826',
+      'current_lots': 1000,
+      'add_lots': 1000,
+      'total_lots': 2000,
+      'estimated_composite_entry': 448.35,
+      'protection': <String, dynamic>{
+        'tp_target_pnl': 896.7,
+        'sl_target_pnl': 448.35,
+        'tsl_trail_pnl': 269.01,
+      },
+    });
+  }
+
+  @override
+  Future<ApiResult<Map<String, dynamic>>> averageExecute(
+    String targetMode,
+  ) async {
+    averageExecuteCalls += 1;
+    return const ApiResult.ok(<String, dynamic>{
+      'message': 'Average added and protected',
     });
   }
 

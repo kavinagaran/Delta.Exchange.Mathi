@@ -913,4 +913,7 @@ def test_dry_run_has_one_score_zone_position_and_manual_exit():
     assert "pyramidTodayTrade(" in overview
     assert "'/api/pyramid/preview'" in overview
     assert "'/api/pyramid/execute'" in overview
+    assert "averageTodayTrade(" in overview
+    assert "'/api/average/preview'" in overview
+    assert "'/api/average/execute'" in overview
     assert "target_mode: targetMode" in overview

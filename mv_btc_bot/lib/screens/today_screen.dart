@@ -51,6 +51,7 @@ class _TodayScreenState extends State<TodayScreen> {
   bool _refreshLoading = false;
   bool _closing = false;
   bool _pyramiding = false;
+  bool _averaging = false;
   Timer? _poll;
   Timer? _previewPoll;
   bool _previewLoading = false;
@@ -337,8 +338,9 @@ class _TodayScreenState extends State<TodayScreen> {
             Text('TP: ${_money(_number(protection['tp_target_pnl']) ?? 0)}'),
             Text('SL: ${_money(_number(protection['sl_target_pnl']) ?? 0)}'),
             Text(
-              'TSL giveback: '
-              '${_money(_number(protection['tsl_trail_pnl']) ?? 0)}',
+              'TSL giveback (TSL*2): '
+              '${_money(_number(protection['tsl_trail_pnl']) ?? 0)} '
+              '(${protection['tsl_pct'] ?? 0}%)',
             ),
             Text(
               'Preserved floor: '
@@ -368,6 +370,92 @@ class _TodayScreenState extends State<TodayScreen> {
     final message = result.ok
         ? '${result.data?['message'] ?? 'Pyramid added'}'
         : result.error ?? 'Pyramid order failed';
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: result.ok ? kPositive : kNegative,
+      ),
+    );
+    if (result.ok) await _refresh(quiet: true);
+  }
+
+  Future<void> _average(Map<String, dynamic> trade) async {
+    if (_averaging) return;
+    final dryRun =
+        trade['dry_run'] == true ||
+        '${trade['execution_mode'] ?? ''}'.toLowerCase() == 'dry_run';
+    final mode = dryRun ? 'dry_run' : 'live';
+    setState(() => _averaging = true);
+    final previewResult = await widget.api.averagePreview(mode);
+    if (!mounted) return;
+    if (!previewResult.ok || previewResult.data == null) {
+      setState(() => _averaging = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            previewResult.error ?? 'This position is not eligible to average',
+          ),
+          backgroundColor: kNegative,
+        ),
+      );
+      return;
+    }
+    final preview = previewResult.data!;
+    final protection = preview['protection'] is Map<String, dynamic>
+        ? preview['protection'] as Map<String, dynamic>
+        : const <String, dynamic>{};
+    final confirmed = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => AlertDialog(
+        title: Text('${dryRun ? 'DRY RUN' : 'LIVE'} average?'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('${preview['symbol'] ?? trade['symbol'] ?? 'Position'}'),
+            const SizedBox(height: Gap.sm),
+            Text(
+              'Add ${preview['add_lots']} lots to average the current '
+              '${preview['current_lots']} lots.',
+            ),
+            Text('Composite quantity: ${preview['total_lots']} lots'),
+            Text(
+              'Estimated composite entry: '
+              '${_tradePrice(preview['estimated_composite_entry'])}',
+            ),
+            const SizedBox(height: Gap.sm),
+            Text('TP: ${_money(_number(protection['tp_target_pnl']) ?? 0)}'),
+            Text('SL: ${_money(_number(protection['sl_target_pnl']) ?? 0)}'),
+            Text(
+              'TSL giveback (TSL*2): '
+              '${_money(_number(protection['tsl_trail_pnl']) ?? 0)} '
+              '(${protection['tsl_pct'] ?? 0}%)',
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Confirm average'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) {
+      if (mounted) setState(() => _averaging = false);
+      return;
+    }
+    final result = await widget.api.averageExecute(mode);
+    if (!mounted) return;
+    setState(() => _averaging = false);
+    final message = result.ok
+        ? '${result.data?['message'] ?? 'Average added'}'
+        : result.error ?? 'Average order failed';
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(message),
@@ -440,8 +528,10 @@ class _TodayScreenState extends State<TodayScreen> {
                 protection: _protectionFor(current),
                 busy: _closing,
                 pyramidBusy: _pyramiding,
+                averageBusy: _averaging,
                 onClose: () => _close(current),
                 onPyramid: () => _pyramid(current),
+                onAverage: () => _average(current),
               ),
             const SizedBox(height: Gap.md),
             _EngineCard(
@@ -531,16 +621,20 @@ class _CurrentTradeCard extends StatelessWidget {
     required this.protection,
     required this.busy,
     required this.pyramidBusy,
+    required this.averageBusy,
     required this.onClose,
     required this.onPyramid,
+    required this.onAverage,
   });
 
   final Map<String, dynamic> trade;
   final Map<String, dynamic>? protection;
   final bool busy;
   final bool pyramidBusy;
+  final bool averageBusy;
   final VoidCallback onClose;
   final VoidCallback onPyramid;
+  final VoidCallback onAverage;
 
   @override
   Widget build(BuildContext context) {
@@ -550,6 +644,9 @@ class _CurrentTradeCard extends StatelessWidget {
     final pyramidCount = (trade['pyramid_count'] as num?)?.toInt() ?? 0;
     final pyramidPending = trade['pending_pyramid_intent'] != null;
     final canPyramid = slot == 'trend' && pyramidCount < 1;
+    final averageCount = (trade['average_count'] as num?)?.toInt() ?? 0;
+    final averagePending = trade['pending_average_intent'] != null;
+    final canAverage = slot == 'trend' && averageCount < 1;
     return AppCard(
       kicker: 'Current trade',
       title: '${trade['symbol'] ?? '—'}',
@@ -594,16 +691,30 @@ class _CurrentTradeCard extends StatelessWidget {
                     icon: Icons.add_chart_rounded,
                     tone: kPositive,
                     filled: true,
-                    onPressed: pyramidBusy || pyramidPending || busy
+                    onPressed: pyramidBusy || averageBusy || pyramidPending || averagePending || busy
                         ? null
                         : onPyramid,
+                  ),
+                if (canAverage)
+                  CompactAction(
+                    label: averagePending
+                        ? 'Reconciling…'
+                        : averageBusy
+                        ? 'Checking…'
+                        : 'Avgx2',
+                    icon: Icons.trending_down_rounded,
+                    tone: kWarning,
+                    filled: true,
+                    onPressed: averageBusy || pyramidBusy || averagePending || pyramidPending || busy
+                        ? null
+                        : onAverage,
                   ),
                 CompactAction(
                   label: busy ? 'Exiting…' : 'Exit',
                   icon: Icons.exit_to_app_rounded,
                   tone: kNegative,
                   filled: true,
-                  onPressed: busy || pyramidBusy ? null : onClose,
+                  onPressed: busy || pyramidBusy || averageBusy ? null : onClose,
                 ),
               ],
             ),

@@ -1082,9 +1082,8 @@ def _rebased_premium_protection_policy(state, entry_mark, lots, *, source):
     """Rebuild a v2 premium policy for an authoritative aggregate position.
 
     Percentages belong to the original trade generation and remain immutable;
-    only their dollar basis changes when an explicitly pyramided position gets
-    a new aggregate entry/quantity from Delta.  Legacy dollar policies retain
-    their captured values.
+    only their dollar basis changes when an explicitly pyramided or averaged position
+    gets a new aggregate entry/quantity from Delta, with TSL updated as TSL*2.
     """
     configured = state.get("protection_config")
     if not isinstance(configured, dict):
@@ -1093,6 +1092,15 @@ def _rebased_premium_protection_policy(state, entry_mark, lots, *, source):
         "filled_premium_percent_peak_trail_v2"
     ):
         return dict(configured)
+    current_tsl = float(configured.get(
+        "tsl_pct",
+        configured.get("tsl_trail_percent_of_entry_premium", 25),
+    ))
+    if source in ("operator_pyramid_composite", "operator_average_composite"):
+        if configured.get("protection_source") not in (
+            "operator_pyramid_composite", "operator_average_composite"
+        ):
+            current_tsl = current_tsl * 2.0
     rebuilt = premium_percent_protection_policy(
         entry_mark,
         state.get("contract_value"),
@@ -1100,10 +1108,7 @@ def _rebased_premium_protection_policy(state, entry_mark, lots, *, source):
         poll_secs=configured.get("poll_secs", 30),
         tp_percent=configured.get("tp_percent_of_entry_premium", 100),
         sl_percent=configured.get("sl_percent_of_entry_premium", 50),
-        tsl_trail_percent=configured.get(
-            "tsl_pct",
-            configured.get("tsl_trail_percent_of_entry_premium", 25),
-        ),
+        tsl_trail_percent=current_tsl,
     )
     rebuilt["protection_source"] = source
     return rebuilt
@@ -1248,37 +1253,52 @@ def _adopt_matching_external_trend_lots_locked(state, position, previous_lots,
 
     adopted_at = _utc_now()
     pyramid_intent = state.get("pending_pyramid_intent")
+    average_intent = state.get("pending_average_intent")
     explicit_pyramid = isinstance(pyramid_intent, dict)
-    if explicit_pyramid:
+    explicit_average = isinstance(average_intent, dict)
+    explicit_composite = explicit_pyramid or explicit_average
+    composite_intent = pyramid_intent if explicit_pyramid else (
+        average_intent if explicit_average else None
+    )
+    composite_kind = "pyramid" if explicit_pyramid else (
+        "average" if explicit_average else None
+    )
+    if explicit_composite:
         try:
             intended_previous = abs(int(float(
-                pyramid_intent.get("previous_lots")
+                composite_intent.get("previous_lots")
             )))
             intended_added = abs(int(float(
-                pyramid_intent.get("add_lots")
+                composite_intent.get("add_lots")
             )))
-            intended_product = int(pyramid_intent.get("product_id"))
+            intended_product = int(composite_intent.get("product_id"))
         except (TypeError, ValueError, OverflowError) as exc:
-            raise RuntimeError("pyramid intent is malformed") from exc
-        confirmed_fill_raw = pyramid_intent.get("confirmed_filled_lots")
+            raise RuntimeError(f"{composite_kind} intent is malformed") from exc
+        confirmed_fill_raw = composite_intent.get("confirmed_filled_lots")
         if confirmed_fill_raw in (None, ""):
             recovered_order, conclusive = get_order_by_client_id(
-                pyramid_intent.get("client_order_id"), product_id,
+                composite_intent.get("client_order_id"), product_id,
             )
             if not conclusive:
-                raise RuntimeError("pyramid order recovery is inconclusive")
+                raise RuntimeError(f"{composite_kind} order recovery is inconclusive")
             confirmed_fill_raw = _order_filled_size(recovered_order)
-            pyramid_intent = {
-                **pyramid_intent,
+            composite_intent = {
+                **composite_intent,
                 "confirmed_filled_lots": confirmed_fill_raw,
                 "confirmed_order_id": recovered_order.get("id"),
             }
+            if explicit_pyramid:
+                state["pending_pyramid_intent"] = composite_intent
+            else:
+                state["pending_average_intent"] = composite_intent
         try:
             confirmed_fill = abs(int(float(confirmed_fill_raw)))
         except (TypeError, ValueError, OverflowError) as exc:
-            raise RuntimeError("pyramid fill quantity is malformed") from exc
-        if int(state.get("pyramid_count") or 0) >= 1:
+            raise RuntimeError(f"{composite_kind} fill quantity is malformed") from exc
+        if explicit_pyramid and int(state.get("pyramid_count") or 0) >= 1:
             raise RuntimeError("this position cycle was already pyramided")
+        if explicit_average and int(state.get("average_count") or 0) >= 1:
+            raise RuntimeError("this position cycle was already averaged")
         if (
             intended_previous != previous_lots
             or intended_added != added_lots
@@ -1286,7 +1306,7 @@ def _adopt_matching_external_trend_lots_locked(state, position, previous_lots,
             or intended_product != product_id
         ):
             raise RuntimeError(
-                "real-time growth does not match the confirmed pyramid intent"
+                f"real-time growth does not match the confirmed {composite_kind} intent"
             )
     previous_peak = max(_finite_float(state.get("tsl_peak"), 0.0), 0.0)
     previous_floor = state.get("tsl_floor")
@@ -1299,11 +1319,12 @@ def _adopt_matching_external_trend_lots_locked(state, position, previous_lots,
         entry_mark,
         new_lots,
         source=(
-            "operator_pyramid_composite"
-            if explicit_pyramid else
-            str((state.get("protection_config") or {}).get(
-                "protection_source"
-            ) or "automatic_filled_premium")
+            "operator_pyramid_composite" if explicit_pyramid else (
+                "operator_average_composite" if explicit_average else
+                str((state.get("protection_config") or {}).get(
+                    "protection_source"
+                ) or "automatic_filled_premium")
+            )
         ),
     )
     events = [dict(item) for item in (state.get("protection_adoptions") or [])
@@ -1332,31 +1353,36 @@ def _adopt_matching_external_trend_lots_locked(state, position, previous_lots,
         "total_cost_usd": round(entry_mark * cv * new_lots, 2),
         "original_owned_entry_lots": original_owned,
         "owned_entry_lots": (
-            new_lots if explicit_pyramid
+            new_lots if explicit_composite
             else int(state.get("owned_entry_lots") or original_owned)
         ),
         "externally_added_lots_adopted": (
-            adopted_before if explicit_pyramid
+            adopted_before if explicit_composite
             else adopted_before + added_lots
         ),
         "last_external_lots_added": (
             state.get("last_external_lots_added")
-            if explicit_pyramid else added_lots
+            if explicit_composite else added_lots
         ),
         "last_external_adoption_utc": (
             state.get("last_external_adoption_utc")
-            if explicit_pyramid else adopted_at
+            if explicit_composite else adopted_at
         ),
         "external_adoption_notification_pending": (
             bool(state.get("external_adoption_notification_pending"))
-            if explicit_pyramid else True
+            if explicit_composite else True
         ),
         "protection_scope": (
-            "trend_pyramided_composite" if explicit_pyramid
-            else "trend_plus_same_product_external"
+            "trend_pyramided_composite" if explicit_pyramid else (
+                "trend_averaged_composite" if explicit_average else
+                "trend_plus_same_product_external"
+            )
         ),
         "position_composition": (
-            "pyramided" if explicit_pyramid else "mixed_bot_and_external"
+            "pyramided" if explicit_pyramid else (
+                "averaged" if explicit_average else
+                "mixed_bot_and_external"
+            )
         ),
         "protection_revision": protection_revision,
         "protection_adoptions": events,
@@ -1397,8 +1423,10 @@ def _adopt_matching_external_trend_lots_locked(state, position, previous_lots,
         "stop_kind": previous_stop_kind if explicit_pyramid else "sl",
         "tsl_rebased_at_utc": adopted_at,
         "tsl_rebase_reason": (
-            "operator_pyramid_composite" if explicit_pyramid
-            else "external_lot_adoption"
+            "operator_pyramid_composite" if explicit_pyramid else (
+                "operator_average_composite" if explicit_average else
+                "external_lot_adoption"
+            )
         ),
     })
     if explicit_pyramid:
@@ -1414,8 +1442,8 @@ def _adopt_matching_external_trend_lots_locked(state, position, previous_lots,
             "total_lots": new_lots,
             "previous_entry_mark": round(old_entry_mark, 8),
             "aggregate_entry_mark": round(entry_mark, 8),
-            "order_id": pyramid_intent.get("confirmed_order_id"),
-            "client_order_id": pyramid_intent.get("client_order_id"),
+            "order_id": composite_intent.get("confirmed_order_id"),
+            "client_order_id": composite_intent.get("client_order_id"),
         })
         state.update({
             "pyramid_count": int(state.get("pyramid_count") or 0) + 1,
@@ -1423,13 +1451,43 @@ def _adopt_matching_external_trend_lots_locked(state, position, previous_lots,
             + added_lots,
             "last_pyramid_lots": added_lots,
             "last_pyramid_at_utc": adopted_at,
-            "last_pyramid_order_id": pyramid_intent.get("confirmed_order_id"),
-            "last_pyramid_client_order_id": pyramid_intent.get(
+            "last_pyramid_order_id": composite_intent.get("confirmed_order_id"),
+            "last_pyramid_client_order_id": composite_intent.get(
                 "client_order_id"
             ),
             "pyramid_events": pyramid_events,
             "pyramid_notification_pending": True,
             "pending_pyramid_intent": None,
+        })
+    elif explicit_average:
+        average_events = [
+            dict(item) for item in (state.get("average_events") or [])
+            if isinstance(item, dict)
+        ][-19:]
+        average_events.append({
+            "at_utc": adopted_at,
+            "product_id": product_id,
+            "previous_lots": previous_lots,
+            "added_lots": added_lots,
+            "total_lots": new_lots,
+            "previous_entry_mark": round(old_entry_mark, 8),
+            "aggregate_entry_mark": round(entry_mark, 8),
+            "order_id": composite_intent.get("confirmed_order_id"),
+            "client_order_id": composite_intent.get("client_order_id"),
+        })
+        state.update({
+            "average_count": int(state.get("average_count") or 0) + 1,
+            "average_added_lots": int(state.get("average_added_lots") or 0)
+            + added_lots,
+            "last_average_lots": added_lots,
+            "last_average_at_utc": adopted_at,
+            "last_average_order_id": composite_intent.get("confirmed_order_id"),
+            "last_average_client_order_id": composite_intent.get(
+                "client_order_id"
+            ),
+            "average_events": average_events,
+            "average_notification_pending": True,
+            "pending_average_intent": None,
         })
     if continuity.get("fill_fees_complete") and original_fee_authoritative:
         exact_entry_fee = float(original_bot_fee) + float(
@@ -1448,8 +1506,10 @@ def _adopt_matching_external_trend_lots_locked(state, position, previous_lots,
     _atomic_write_json(STATE_FILE, state)
     try:
         audit_event(USER_DIR, (
-            "trend_position_pyramided"
-            if explicit_pyramid else "trend_external_lots_adopted"
+            "trend_position_pyramided" if explicit_pyramid else (
+                "trend_position_averaged" if explicit_average else
+                "trend_external_lots_adopted"
+            )
         ), {
             "slot": SLOT, "symbol": state.get("symbol"),
             "product_id": product_id, "previous_lots": previous_lots,
@@ -1458,6 +1518,7 @@ def _adopt_matching_external_trend_lots_locked(state, position, previous_lots,
             "aggregate_entry_mark": entry_mark,
             "fee_source": fee_source,
             "pyramid_count": state.get("pyramid_count") if explicit_pyramid else None,
+            "average_count": state.get("average_count") if explicit_average else None,
         })
     except Exception as exc:
         log.warning("External-lot adoption audit append failed: %s", exc)
@@ -5127,20 +5188,22 @@ def main():
                     sleep_secs = local_fallback_poll
                     raise _RetryMonitorCycle()
 
-                # A response-lost pyramid POST can leave a durable intent even
-                # when Delta conclusively proves that no order exists (or a
-                # terminal order filled zero). Clear only those exact, flat
+                # A response-lost pyramid or average POST can leave a durable
+                # intent even when Delta conclusively proves that no order exists
+                # (or a terminal order filled zero). Clear only those exact, flat
                 # outcomes. Any active, filled, or inconclusive identity stays
                 # locked so neither the operator nor automation can duplicate
                 # the add-on.
-                pyramid_intent = state.get("pending_pyramid_intent")
+                comp_intent = state.get("pending_pyramid_intent") or state.get("pending_average_intent")
+                comp_key = "pending_pyramid_intent" if state.get("pending_pyramid_intent") else "pending_average_intent"
+                comp_name = "pyramid" if comp_key == "pending_pyramid_intent" else "average"
                 if (
                     SLOT == "trend"
-                    and isinstance(pyramid_intent, dict)
+                    and isinstance(comp_intent, dict)
                     and abs(live) == locked_lots
                 ):
                     recovered, conclusive = get_order_by_client_id(
-                        pyramid_intent.get("client_order_id"), product_id,
+                        comp_intent.get("client_order_id"), product_id,
                     )
                     terminal = bool(
                         recovered
@@ -5152,18 +5215,18 @@ def main():
                     if conclusive and (
                         not recovered or recovered_fill == 0
                     ):
-                        state["pending_pyramid_intent"] = None
-                        state["last_pyramid_reconciliation_note"] = (
-                            "pyramid_exact_order_absent"
-                            if not recovered else "pyramid_terminal_without_fill"
+                        state[comp_key] = None
+                        state[f"last_{comp_name}_reconciliation_note"] = (
+                            f"{comp_name}_exact_order_absent"
+                            if not recovered else f"{comp_name}_terminal_without_fill"
                         )
-                        state["last_pyramid_reconciliation_utc"] = _utc_now()
+                        state[f"last_{comp_name}_reconciliation_utc"] = _utc_now()
                         _atomic_write_json(STATE_FILE, state)
                     elif not conclusive or not terminal:
                         write_monitor_health(
                             "verifying",
                             last_error=(
-                                "pyramid order identity is awaiting exact "
+                                f"{comp_name} order identity is awaiting exact "
                                 "reconciliation"
                             ),
                             identity_state=state,
@@ -5171,7 +5234,7 @@ def main():
                             exchange_position_size=live,
                             protected_lots=lots,
                             protection_established=False,
-                            adoption_status="pyramid_reconciling",
+                            adoption_status=f"{comp_name}_reconciling",
                         )
                         sleep_secs = local_fallback_poll
                         raise _RetryMonitorCycle()
@@ -5179,7 +5242,7 @@ def main():
                         write_monitor_health(
                             "degraded",
                             last_error=(
-                                "pyramid order reports a fill but aggregate "
+                                f"{comp_name} order reports a fill but aggregate "
                                 "position growth is not visible"
                             ),
                             identity_state=state,
@@ -5187,7 +5250,7 @@ def main():
                             exchange_position_size=live,
                             protected_lots=lots,
                             protection_established=False,
-                            adoption_status="pyramid_fill_mismatch",
+                            adoption_status=f"{comp_name}_reconciling",
                         )
                         sleep_secs = local_fallback_poll
                         raise _RetryMonitorCycle()

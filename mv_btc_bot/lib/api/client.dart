@@ -307,6 +307,16 @@ class DashboardApi {
   Future<ApiResult<Map<String, dynamic>>> pyramidExecute(String targetMode) =>
       postMap('/api/pyramid/execute', {'target_mode': targetMode});
 
+  /// Validate an equal-size add-on to average down when current P&L is negative,
+  /// exchange protection is healthy, and one-average-per-cycle limit applies.
+  Future<ApiResult<Map<String, dynamic>>> averagePreview(String targetMode) =>
+      postMap('/api/average/preview', {'target_mode': targetMode});
+
+  /// Submit the confirmed equal-size average add-on and rebase composite protection.
+  /// Partial add-on fills are rolled back.
+  Future<ApiResult<Map<String, dynamic>>> averageExecute(String targetMode) =>
+      postMap('/api/average/execute', {'target_mode': targetMode});
+
   Future<ApiResult<dynamic>> squareOff({
     required String slot,
     required String targetMode,

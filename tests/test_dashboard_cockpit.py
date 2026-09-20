@@ -253,6 +253,8 @@ def test_dry_pyramid_doubles_quantity_rebases_policy_and_preserves_floor(
     assert updated["protection_config"]["entry_premium_usd"] == pytest.approx(25.0)
     assert updated["protection_config"]["tp_target_pnl"] == pytest.approx(25.0)
     assert updated["protection_config"]["sl_target_pnl"] == pytest.approx(7.5)
+    assert updated["protection_config"]["tsl_pct"] == pytest.approx(60.0)
+    assert updated["protection_config"]["tsl_trail_pnl"] == pytest.approx(15.0)
     assert updated["dry_tsl_floor_usd"] >= 4.0
 
     with dashboard.app.test_request_context(
@@ -263,6 +265,88 @@ def test_dry_pyramid_doubles_quantity_rebases_policy_and_preserves_floor(
         second, second_status = _response_tuple(dashboard.api_pyramid_preview())
     assert second_status == 409
     assert "already used" in second.get_json()["error"]
+
+
+def test_dry_average_doubles_quantity_rebases_policy_and_requires_negative_pnl(
+    live_account, monkeypatch,
+):
+    state = _dry_pyramid_state()
+    state["dry_tsl_armed"] = False
+    state["dry_peak_pnl_usd"] = 0.0
+    state["dry_tsl_floor_usd"] = None
+    _write(dashboard._slot_file("trend", dry_run=True), state)
+
+    # Positive PnL -> preview should be rejected
+    monkeypatch.setattr(
+        dashboard,
+        "_dry_run_market_mark",
+        lambda _state, *, executable: 150.0,
+    )
+    with dashboard.app.test_request_context(
+        "/api/average/preview",
+        method="POST",
+        json={"target_mode": "dry_run"},
+    ):
+        pos_resp, pos_status = _response_tuple(dashboard.api_average_preview())
+    assert pos_status == 409
+    assert "negative" in pos_resp.get_json()["error"].lower()
+
+    # Negative PnL (mark = 80.0 < entry 100.0) -> preview and execute should succeed
+    monkeypatch.setattr(
+        dashboard,
+        "_dry_run_market_mark",
+        lambda _state, *, executable: 80.0,
+    )
+    with dashboard.app.test_request_context(
+        "/api/average/preview",
+        method="POST",
+        json={"target_mode": "dry_run"},
+    ):
+        prev_resp, prev_status = _response_tuple(dashboard.api_average_preview())
+    assert prev_status == 200
+    assert prev_resp.get_json()["ok"] is True
+    assert prev_resp.get_json()["estimated_composite_entry"] == pytest.approx(90.0)
+
+    with dashboard.app.test_request_context(
+        "/api/average/execute",
+        method="POST",
+        json={"target_mode": "dry_run"},
+    ):
+        response, status = _response_tuple(dashboard.api_average_execute())
+
+    payload = response.get_json()
+    assert status == 200
+    assert payload["ok"] is True
+    updated = payload["state"]
+    assert updated["lots"] == 200
+    assert updated["average_count"] == 1
+    assert updated["entry_mark"] == pytest.approx(90.0)
+    # composite premium = 200 * 0.001 * 90.0 = 18.0
+    assert updated["protection_config"]["entry_premium_usd"] == pytest.approx(18.0)
+    assert updated["protection_config"]["tp_target_pnl"] == pytest.approx(18.0)
+    assert updated["protection_config"]["sl_target_pnl"] == pytest.approx(5.4)
+    assert updated["protection_config"]["tsl_pct"] == pytest.approx(60.0)
+    assert updated["protection_config"]["tsl_trail_pnl"] == pytest.approx(10.8)
+
+    # Second average rejected (only 1 per cycle)
+    with dashboard.app.test_request_context(
+        "/api/average/preview",
+        method="POST",
+        json={"target_mode": "dry_run"},
+    ):
+        second, second_status = _response_tuple(dashboard.api_average_preview())
+    assert second_status == 409
+    assert "already used" in second.get_json()["error"]
+
+    # Pyramid rejected after average
+    with dashboard.app.test_request_context(
+        "/api/pyramid/preview",
+        method="POST",
+        json={"target_mode": "dry_run"},
+    ):
+        pyr_resp, pyr_status = _response_tuple(dashboard.api_pyramid_preview())
+    assert pyr_status == 409
+    assert "already averaged" in pyr_resp.get_json()["error"]
 
 
 @pytest.mark.parametrize(
