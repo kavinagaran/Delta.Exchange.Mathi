@@ -2813,6 +2813,111 @@ class TpMonitorSafetyTests(unittest.TestCase):
         )
         self.assertTrue(ledger["fill_fees_complete"])
 
+    def test_fresh_position_tsl_arming_does_not_clamp_floor_to_zero(self):
+        # Entry: 789.0 * 0.001 * 25 lots = $19.725 entry premium
+        policy = tp_monitor.premium_percent_protection_policy(
+            789.0, 0.001, 25,
+            poll_secs=10,
+            tp_percent=100,
+            sl_percent=50,
+            tsl_trail_percent=25,
+        )
+        self.write_state(
+            lots=25, owned_entry_lots=25, original_owned_entry_lots=25,
+            entry_mark=789.0, original_bot_entry_mark=789.0,
+            contract_value=0.001, symbol="P-BTC-81200-200926",
+            product_id=101, side="long",
+            tsl_floor=None, tsl_peak=0.0, tsl_armed=False,
+            stop_kind="sl",
+            protection_config=policy,
+        )
+        orders_by_id = {}
+        placed_stops = []
+        def fake_place_stop(pid, side, sz, pr, kind, client_order_id=None):
+            placed_stops.append((sz, pr, kind))
+            oid = f"tsl-{len(placed_stops)}"
+            ord_dict = {
+                "id": oid, "product_id": pid, "state": "open",
+                "size": sz, "unfilled_size": sz, "filled_size": 0, "side": side,
+                "reduce_only": True, "order_type": "market_order",
+                "stop_order_type": kind, "stop_trigger_method": "mark_price",
+                "stop_price": str(pr), "client_order_id": client_order_id,
+            }
+            orders_by_id[oid] = ord_dict
+            return {"result": ord_dict}
+
+        # Mark price ticks up slightly to 789.04 (+0.001 USD PnL) -> arms TSL
+        with patch.object(tp_monitor, "SLOT", "trend"), \
+             patch.object(tp_monitor, "REMOVE_PROTECTION", False), \
+             patch.object(tp_monitor, "install_signal_handlers"), \
+             patch.object(tp_monitor, "get_exchange_size", return_value=25), \
+             patch.object(tp_monitor, "get_exchange_position", return_value={
+                 "product_id": 101, "size": 25, "entry_price": "789.0",
+             }), \
+             patch.object(tp_monitor, "_trend_cycle_continuity",
+                          return_value=self.continuity(size=25, entry=789.0)), \
+             patch.object(tp_monitor, "get_mark", return_value=789.04), \
+             patch.object(tp_monitor, "place_stop_order", side_effect=fake_place_stop), \
+             patch.object(tp_monitor, "get_order", side_effect=lambda oid: orders_by_id.get(oid, {})), \
+             patch.object(tp_monitor, "send_telegram"), \
+             patch.object(tp_monitor.time, "sleep", side_effect=_StopLoop):
+            with self.assertRaises(_StopLoop):
+                tp_monitor.main()
+
+        state = self.read_state()
+        self.assertTrue(state["tsl_armed"])
+        # The trail floor must be negative (~ -4.93 USD), NOT clamped to 0.0 (breakeven)!
+        self.assertIsNotNone(state["tsl_floor"])
+        self.assertLess(state["tsl_floor"], 0.0)
+        expected_floor = round(0.001 - 19.725 * 0.25, 2)
+        self.assertEqual(round(state["tsl_floor"], 2), expected_floor)
+        # Verify the placed trailing stop price is well below entry price (789.0), not clamped at 789.0
+        tsl_orders = [item for item in placed_stops if item[2] == "stop_loss_order"]
+        self.assertTrue(len(tsl_orders) >= 1)
+        placed_price = tsl_orders[-1][1]
+        self.assertLess(placed_price, 789.0)
+        self.assertAlmostEqual(placed_price, 591.8, delta=0.5)
+
+    def test_pyramided_position_preserves_locked_tsl_floor_in_loop(self):
+        # A position that already locked in +4.0 USD before pyramiding
+        policy = tp_monitor.premium_percent_protection_policy(
+            789.0, 0.001, 50,
+            poll_secs=10,
+            tp_percent=100,
+            sl_percent=50,
+            tsl_trail_percent=25,
+        )
+        self.write_state(
+            lots=50, owned_entry_lots=50, original_owned_entry_lots=25,
+            entry_mark=789.0, original_bot_entry_mark=789.0,
+            contract_value=0.001, symbol="P-BTC-81200-200926",
+            product_id=101, side="long",
+            position_composition="pyramided",
+            tsl_floor=4.0, tsl_peak=8.0, tsl_armed=True,
+            stop_kind="tsl",
+            tsl_stop_order_id="old-tsl", stop_lots=50,
+            protection_config=policy,
+        )
+        with patch.object(tp_monitor, "SLOT", "trend"), \
+             patch.object(tp_monitor, "REMOVE_PROTECTION", False), \
+             patch.object(tp_monitor, "install_signal_handlers"), \
+             patch.object(tp_monitor, "get_exchange_size", return_value=50), \
+             patch.object(tp_monitor, "get_exchange_position", return_value={
+                 "product_id": 101, "size": 50, "entry_price": "789.0",
+             }), \
+             patch.object(tp_monitor, "_trend_cycle_continuity",
+                          return_value=self.continuity(size=50, entry=789.0)), \
+             patch.object(tp_monitor, "get_mark", return_value=789.0), \
+             patch.object(tp_monitor, "send_telegram"), \
+             patch.object(tp_monitor.time, "sleep", side_effect=_StopLoop):
+            with self.assertRaises(_StopLoop):
+                tp_monitor.main()
+
+        state = self.read_state()
+        self.assertTrue(state["tsl_armed"])
+        # Even though fresh trail from mark 789.0 would be negative, the locked +4.0 floor is preserved!
+        self.assertGreaterEqual(state["tsl_floor"], 4.0)
+
 
 class MarkPriceStreamTests(unittest.TestCase):
     def test_compact_mark_price_frame_is_validated_and_monotonic(self):
@@ -2846,3 +2951,5 @@ class MarkPriceStreamTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+

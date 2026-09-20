@@ -3887,7 +3887,7 @@ def main():
     peak_pnl = float(state.get("tsl_peak") or 0.0)
     tsl_armed = bool(state.get("tsl_armed"))
     stop_id = state.get("tsl_stop_order_id")
-    stop_floor = float(state.get("tsl_floor") or 0.0)
+    stop_floor = _finite_float(state.get("tsl_floor"), None)
     stop_kind = state.get("stop_kind") or ("tsl" if tsl_armed else "sl")
     stop_lots = int(state.get("stop_lots") or lots)
     tp_id = state.get("tp_stop_order_id")
@@ -4288,7 +4288,7 @@ def main():
                         trigger_key="stop_trigger_method",
                         last_key="last_tsl_stop_order_id",
                         status_key="stop_order_state"):
-                    stop_id, stop_lots, stop_floor, stop_kind = None, 0, 0.0, "sl"
+                    stop_id, stop_lots, stop_floor, stop_kind = None, 0, None, "sl"
                     return True
                 save_state_fields(exchange_protection_error=(
                     f"disabled stop cleanup blocked: {identity_error}"
@@ -4312,7 +4312,7 @@ def main():
                 tsl_floor=None, stop_kind="sl", exchange_protection_error=""):
             local_fallback_active = True
             return False
-        stop_id, stop_lots, stop_floor, stop_kind = None, 0, 0.0, "sl"
+        stop_id, stop_lots, stop_floor, stop_kind = None, 0, None, "sl"
         log.info("Retired stop order %s because both SL and TSL are disabled.", retired_id)
         return True
 
@@ -4528,8 +4528,9 @@ def main():
         )
 
     if stop_id or tp_id:
-        log.info("Resuming persisted orders: %s=%s (floor $%.2f), TP=%s, peak=$%.2f.",
-                 stop_kind.upper(), stop_id, stop_floor, tp_id, peak_pnl)
+        floor_label = f"${stop_floor:.2f}" if stop_floor is not None else "none"
+        log.info("Resuming persisted orders: %s=%s (floor %s), TP=%s, peak=$%.2f.",
+                 stop_kind.upper(), stop_id, floor_label, tp_id, peak_pnl)
 
     def _stream_status(status, error):
         current_state = load_state()
@@ -4849,7 +4850,7 @@ def main():
                     peak_pnl = float(state.get("tsl_peak") or 0.0)
                     persist_pk = peak_pnl
                     tsl_armed = bool(state.get("tsl_armed"))
-                    stop_floor = float(state.get("tsl_floor") or 0.0)
+                    stop_floor = _finite_float(state.get("tsl_floor"), None)
                     stop_kind = state.get("stop_kind") or (
                         "tsl" if tsl_armed else "sl"
                     )
@@ -5086,7 +5087,7 @@ def main():
                     peak_pnl = float(state.get("tsl_peak") or 0.0)
                     persist_pk = peak_pnl
                     tsl_armed = bool(state.get("tsl_armed"))
-                    stop_floor = float(state.get("tsl_floor") or 0.0)
+                    stop_floor = _finite_float(state.get("tsl_floor"), None)
                     stop_kind = state.get("stop_kind") or (
                         "tsl" if tsl_armed else "sl"
                     )
@@ -5301,8 +5302,8 @@ def main():
                             if explicit_pyramid else False
                         )
                         stop_floor = (
-                            _finite_float(state.get("tsl_floor"), 0.0)
-                            if explicit_pyramid else 0.0
+                            _finite_float(state.get("tsl_floor"), None)
+                            if explicit_pyramid else None
                         )
                         stop_kind = (
                             (state.get("stop_kind") or "tsl")
@@ -5388,7 +5389,7 @@ def main():
                         peak_pnl = 0.0
                         persist_pk = 0.0
                         tsl_armed = False
-                        stop_floor = 0.0
+                        stop_floor = None
                         stop_kind = "sl"
                     except Exception as exc:
                         message = f"partial Trend reduction could not be reconciled: {exc}"
@@ -5553,10 +5554,12 @@ def main():
                     pnl,
                 )
                 tsl_armed = tsl_armed or bool(streamed_state.get("tsl_armed"))
-                stop_floor = max(
-                    stop_floor,
-                    _finite_float(streamed_state.get("tsl_floor"), 0.0),
-                )
+                streamed_floor = _finite_float(streamed_state.get("tsl_floor"), None)
+                if streamed_floor is not None:
+                    stop_floor = (
+                        streamed_floor if stop_floor is None
+                        else max(stop_floor, streamed_floor)
+                    )
                 if peak_pnl - persist_pk >= 1.0:
                     persist_pk = peak_pnl
                     save_state_fields(tsl_peak=round(peak_pnl, 2), tsl_armed=tsl_armed)
@@ -5580,15 +5583,19 @@ def main():
                                  peak_pnl, tsl_arm_pnl, tsl_trail_pnl)
 
                 active_tsl = tsl_enabled and tsl_armed
+                prior_tsl_floor = (
+                    stop_floor if (stop_floor is not None and stop_kind == "tsl")
+                    else None
+                )
                 tsl_floor = (
                     max(
-                        stop_floor,
+                        *([prior_tsl_floor] if prior_tsl_floor is not None else []),
                         -sl_pnl,
                         peak_pnl - entry_premium_usd * tsl_pct / 100.0,
                     )
                     if active_tsl and nimmathi_tsl else
                     max(
-                        stop_floor,
+                        *([prior_tsl_floor] if prior_tsl_floor is not None else []),
                         tsl_lock_min_pnl,
                         peak_pnl - tsl_trail_pnl,
                     )
@@ -5597,6 +5604,7 @@ def main():
                 if active_tsl:
                     if (stop_id is None or stop_lots != lots
                             or not stop_complete
+                            or stop_floor is None
                             or tsl_floor - stop_floor >= ratchet_min or pos_changed):
                         ensure_stop(tsl_floor, "tsl")
                 elif sl_pnl > 0 and (stop_id is None or stop_lots != lots
@@ -5774,7 +5782,8 @@ def main():
                         "externally_added_lots_adopted", 0),
                     adoption_status="adopted" if state.get(
                         "externally_added_lots_adopted") else "not_needed",
-                    stop_kind=stop_kind, stop_floor=round(stop_floor, 2),
+                    stop_kind=stop_kind,
+                    stop_floor=round(stop_floor, 2) if stop_floor is not None else None,
                     tsl_armed=tsl_armed,
                     exchange_protection_supported=not exch_unsupported,
                     exchange_protection_complete=exchange_complete,
