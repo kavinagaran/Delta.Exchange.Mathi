@@ -180,6 +180,112 @@ def _post_cockpit_enter(action: str, setup: str | None = None):
         return _response_tuple(dashboard.api_cockpit_enter())
 
 
+def _dry_pyramid_state() -> dict:
+    policy = dashboard.build_premium_percent_protection_policy(
+        100.0,
+        0.001,
+        100,
+        poll_secs=30,
+        tp_percent=100,
+        sl_percent=30,
+        tsl_trail_percent=30,
+    )
+    return {
+        "slot": "trend",
+        "status": "OPEN",
+        "dry_run": True,
+        "execution_mode": "dry_run",
+        "ownership": dashboard.TREND_SCORE_MANUAL_DRY_OWNERSHIP,
+        "position_cycle_id": "dry-pyramid-cycle",
+        "product_id": 901,
+        "symbol": "C-BTC-80000-200926",
+        "side": "long",
+        "instrument_kind": "option",
+        "option_type": "call",
+        "trend_score_zone": dashboard.TREND_SCORE_CE_ZONE,
+        "lots": 100,
+        "owned_entry_lots": 100,
+        "protection_lots": 100,
+        "max_protected_lots": 100,
+        "entry_mark": 100.0,
+        "contract_value": 0.001,
+        "strike": 80000,
+        "entry_fee_usd": 0.0,
+        "protection_config": policy,
+        "protection_revision": 0,
+        "dry_tsl_armed": True,
+        "dry_peak_pnl_usd": 8.0,
+        "dry_tsl_floor_usd": 4.0,
+        "selected_contract_snapshot": {
+            "raw_product": {},
+            # Delta publishes a per-order ceiling. The add-on equals 100 and
+            # is valid even though the resulting composite position is 200.
+            "max_order_lots": 100,
+        },
+    }
+
+
+def test_dry_pyramid_doubles_quantity_rebases_policy_and_preserves_floor(
+    live_account, monkeypatch,
+):
+    state = _dry_pyramid_state()
+    _write(dashboard._slot_file("trend", dry_run=True), state)
+    monkeypatch.setattr(
+        dashboard,
+        "_dry_run_market_mark",
+        lambda _state, *, executable: 150.0,
+    )
+
+    with dashboard.app.test_request_context(
+        "/api/pyramid/execute",
+        method="POST",
+        json={"target_mode": "dry_run"},
+    ):
+        response, status = _response_tuple(dashboard.api_pyramid_execute())
+
+    payload = response.get_json()
+    assert status == 200
+    assert payload["ok"] is True
+    updated = payload["state"]
+    assert updated["lots"] == 200
+    assert updated["pyramid_count"] == 1
+    assert updated["entry_mark"] == pytest.approx(125.0)
+    assert updated["protection_config"]["entry_premium_usd"] == pytest.approx(25.0)
+    assert updated["protection_config"]["tp_target_pnl"] == pytest.approx(25.0)
+    assert updated["protection_config"]["sl_target_pnl"] == pytest.approx(7.5)
+    assert updated["dry_tsl_floor_usd"] >= 4.0
+
+    with dashboard.app.test_request_context(
+        "/api/pyramid/preview",
+        method="POST",
+        json={"target_mode": "dry_run"},
+    ):
+        second, second_status = _response_tuple(dashboard.api_pyramid_preview())
+    assert second_status == 409
+    assert "already used" in second.get_json()["error"]
+
+
+@pytest.mark.parametrize(
+    ("mark", "armed", "message"),
+    [
+        (90.0, True, "positive"),
+        (150.0, False, "TSL is armed"),
+    ],
+)
+def test_dry_pyramid_requires_profit_and_armed_tsl(
+    live_account, monkeypatch, mark, armed, message,
+):
+    state = _dry_pyramid_state()
+    state["dry_tsl_armed"] = armed
+    monkeypatch.setattr(
+        dashboard,
+        "_dry_run_market_mark",
+        lambda _state, *, executable: mark,
+    )
+    with pytest.raises(RuntimeError, match=message):
+        dashboard._pyramid_preview_from_state(state, dry_run=True)
+
+
 def _post_cockpit_preview(action: str, setup: str | None = None):
     with dashboard.app.test_request_context(
         "/api/cockpit/preview", method="POST",

@@ -234,6 +234,70 @@ class TpMonitorSafetyTests(unittest.TestCase):
         self.assertEqual(health["protection_revision"], 1)
         self.assertTrue(health["continuity_verified"])
 
+    def test_explicit_pyramid_rebases_composite_policy_and_preserves_tsl(self):
+        policy = tp_monitor.premium_percent_protection_policy(
+            100.0, 0.001, 100,
+            poll_secs=10,
+            tp_percent=100,
+            sl_percent=30,
+            tsl_trail_percent=30,
+        )
+        state = self.write_state(
+            lots=100,
+            protection_lots=100,
+            max_protected_lots=100,
+            owned_entry_lots=100,
+            original_owned_entry_lots=100,
+            entry_mark=100.0,
+            original_bot_entry_mark=100.0,
+            contract_value=0.001,
+            position_cycle_id="trend-cycle-test",
+            protection_config=policy,
+            protection_revision=2,
+            tsl_peak=8.0,
+            tsl_armed=True,
+            tsl_floor=4.0,
+            stop_kind="tsl",
+            pending_pyramid_intent={
+                "client_order_id": "pyramid-1",
+                "confirmed_order_id": "order-pyramid-1",
+                "confirmed_filled_lots": 100,
+                "previous_lots": 100,
+                "add_lots": 100,
+                "product_id": 101,
+            },
+        )
+        continuity = self.continuity(
+            size=200, entry=125.0, entries=200,
+            fill_ids=["pyramid-fill"],
+        )
+        with patch.object(tp_monitor, "SLOT", "trend"), \
+             patch.object(tp_monitor, "audit_event") as audit:
+            updated = tp_monitor._adopt_matching_external_trend_lots(
+                state,
+                {"product_id": 101, "size": 200, "entry_price": "125.0"},
+                100,
+                continuity,
+            )
+
+        self.assertEqual(updated["lots"], 200)
+        self.assertEqual(updated["owned_entry_lots"], 200)
+        self.assertEqual(updated["externally_added_lots_adopted"], 0)
+        self.assertEqual(updated["pyramid_count"], 1)
+        self.assertEqual(updated["pyramid_added_lots"], 100)
+        self.assertIsNone(updated["pending_pyramid_intent"])
+        self.assertEqual(updated["position_composition"], "pyramided")
+        self.assertEqual(updated["protection_scope"], "trend_pyramided_composite")
+        self.assertEqual(updated["protection_config"]["entry_premium_usd"], 25.0)
+        self.assertEqual(updated["protection_config"]["tp_target_pnl"], 25.0)
+        self.assertEqual(updated["protection_config"]["sl_target_pnl"], 7.5)
+        self.assertTrue(updated["tsl_armed"])
+        self.assertEqual(updated["tsl_peak"], 8.0)
+        self.assertEqual(updated["tsl_floor"], 4.0)
+        self.assertEqual(updated["stop_kind"], "tsl")
+        self.assertEqual(updated["tsl_rebase_reason"], "operator_pyramid_composite")
+        self.assertEqual(audit.call_args.args[1], "trend_position_pyramided")
+
     def test_live_score_position_adopts_verified_same_product_growth(self):
         self.write_state(
             lots=3,

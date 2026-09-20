@@ -109,6 +109,7 @@
 <script>
 const TODAY_CONTROL_SLOTS = new Set(['morning', 'evening', 'trend']);
 const todayClosing = new Set();
+const todayPyramiding = new Set();
 let todayProtectionEvents = null;
 let todayRows = [];
 let todayCurrentIndex = -1;
@@ -317,9 +318,12 @@ function renderTodayCurrentTrade(trade, index, protection = null) {
   const slot = todayControlSlot(trade);
   const simulated = trade.dry_run === true ||
     String(trade.execution_mode || '').toLowerCase() === 'dry_run';
+  const pyramidCount = Number(trade.pyramid_count || 0);
+  const pyramidPending = !!trade.pending_pyramid_intent;
+  const canOfferPyramid = slot === 'trend' && pyramidCount < 1;
   root.innerHTML = `<div class="dry-state-line">
       <span class="badge ${simulated ? 'sim' : 'live'}">${simulated ? 'SIMULATED OPEN' : 'LIVE OPEN'}</span>
-      <span>${simulated ? 'Dry Run position · no exchange exposure' : 'Exchange position'}</span>
+      <span>${simulated ? 'Dry Run position · no exchange exposure' : 'Exchange position'}${pyramidCount > 0 ? ' · Pyramid ×1' : ''}</span>
     </div>
     <div class="big-pnl ${pnlCls(pnl)}">${f$(pnl)}${pnlPercent == null ? '' :
       `<span class="pnl-percent">(${todaySignedPercent(pnlPercent)})</span>`}<small>Live P&amp;L</small></div>
@@ -333,6 +337,10 @@ function renderTodayCurrentTrade(trade, index, protection = null) {
       <dt>Current mark</dt><dd>$${fN(trade.current_mark, 4)}</dd>
     </dl>
     ${slot ? `<div class="today-current-actions">
+      ${canOfferPyramid ? `<button class="btn primary sm today-pyramid-btn" type="button"
+        onclick="pyramidTodayTrade(${index})" ${pyramidPending ? 'disabled' : ''}>
+        ${pyramidPending ? 'Pyramid reconciling…' : 'Pyramid ×2'}
+      </button>` : ''}
       <button class="btn danger sm today-exit-btn" type="button" onclick="closeTodayLiveTrade(${index})">Exit</button>
     </div>` : ''}
     ${slot ? todayInlineProtectionHtml(protection) : ''}`;
@@ -444,6 +452,56 @@ function todayAdxPill(snapshot) {
   const value = available ? Number(raw).toFixed(1) : '—';
   return `<div class="dial-adx-row"><div class="dial-adx-pill" title="Latest completed 15-minute ADX" aria-label="15-minute ADX ${value}">
     <span>ADX <small>15M</small></span><strong>${value}</strong></div></div>`;
+}
+
+async function pyramidTodayTrade(index) {
+  const trade = todayLiveTrade(index);
+  if (!trade || trade.controlSlot !== 'trend' || todayPyramiding.has(index)) {
+    if (!trade) toast('This trade is no longer available', 'err');
+    return;
+  }
+  const simulated = trade.dry_run === true ||
+    String(trade.execution_mode || '').toLowerCase() === 'dry_run';
+  const targetMode = simulated ? 'dry_run' : 'live';
+  todayPyramiding.add(index);
+  try {
+    const preview = await jpost('/api/pyramid/preview', {
+      target_mode: targetMode,
+    });
+    if (!preview.ok) {
+      toast(preview.error || 'This position is not eligible to pyramid', 'err');
+      return;
+    }
+    const message = [
+      `${simulated ? 'DRY RUN' : 'LIVE'} PYRAMID — ${preview.symbol}`,
+      '',
+      `Add ${fN(preview.add_lots)} lots to the current ${fN(preview.current_lots)} lots`,
+      `Composite quantity: ${fN(preview.total_lots)} lots`,
+      `Estimated composite entry: $${fN(preview.estimated_composite_entry, 4)}`,
+      `Composite TP: ${f$(preview.protection?.tp_target_pnl)}`,
+      `Composite SL: ${f$(preview.protection?.sl_target_pnl)}`,
+      `Composite TSL giveback: ${f$(preview.protection?.tsl_trail_pnl)}`,
+      `Preserved TSL floor: ${f$(preview.composite_tsl_floor)}`,
+      '',
+      simulated
+        ? 'Confirm the simulated add-on?'
+        : 'Confirm this LIVE market add-on order?',
+    ].join('\n');
+    if (!confirm(message)) return;
+    const result = await jpost('/api/pyramid/execute', {
+      target_mode: targetMode,
+    });
+    if (!result.ok) {
+      toast(result.error || 'Pyramid order failed', 'err');
+      return;
+    }
+    toast(result.message || `Pyramid added — ${fN(preview.total_lots)} lots`, 'ok');
+    await loadAll();
+  } catch (error) {
+    toast(error?.message || 'Pyramid request failed', 'err');
+  } finally {
+    todayPyramiding.delete(index);
+  }
 }
 
 function todayTradeDecisionPill(status, snapshot) {

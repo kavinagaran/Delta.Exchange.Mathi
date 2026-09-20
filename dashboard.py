@@ -4447,7 +4447,9 @@ def _tp_monitor_payload():
             st.get("protection_lots") or st.get("lots")
         )
         bot_entry_lots = lot_count(
-            st.get("original_owned_entry_lots")
+            st.get("owned_entry_lots")
+            if st.get("position_composition") == "pyramided"
+            else st.get("original_owned_entry_lots")
             or st.get("owned_entry_lots") or st.get("lots")
         )
         exchange_lots = lot_count(health.get("exchange_position_size")) \
@@ -15140,6 +15142,782 @@ def api_trend_engine_score_auto_setup_lock_reset():
         return jsonify({"ok": False, "error": str(exc)[:300]}), 400
 
 
+PYRAMID_MAX_PER_CYCLE = 1
+
+
+def _pyramid_target_mode(body: dict) -> tuple[bool, str]:
+    requested = str(
+        body.get("target_mode") or body.get("expected_mode") or ""
+    ).strip().lower().replace(" ", "_")
+    if requested in {"dry", "simulation", "simulated"}:
+        requested = "dry_run"
+    if not requested:
+        requested = (
+            "dry_run" if _trading_mode_payload().get("dry_run_mode")
+            else "live"
+        )
+    if requested not in {"live", "dry_run"}:
+        raise ValueError("target_mode must be live or dry_run")
+    return requested == "dry_run", requested
+
+
+def _pyramid_rebased_policy(state: dict, entry_mark: float, lots: int) -> dict:
+    configured = state.get("protection_config")
+    if not isinstance(configured, dict) or str(
+        configured.get("protection_mode") or ""
+    ) != "filled_premium_percent_peak_trail_v2":
+        raise RuntimeError(
+            "This position predates percentage-based composite protection"
+        )
+    policy = build_premium_percent_protection_policy(
+        entry_mark,
+        state.get("contract_value"),
+        lots,
+        poll_secs=configured.get("poll_secs", 30),
+        tp_percent=configured.get("tp_percent_of_entry_premium", 100),
+        sl_percent=configured.get("sl_percent_of_entry_premium", 50),
+        tsl_trail_percent=configured.get(
+            "tsl_pct",
+            configured.get("tsl_trail_percent_of_entry_premium", 25),
+        ),
+    )
+    policy["protection_source"] = "operator_pyramid_composite"
+    return policy
+
+
+def _pyramid_base_state(state: dict, *, dry_run: bool) -> dict:
+    if str(state.get("status") or "").upper() != "OPEN":
+        raise RuntimeError("There is no open Trend position to pyramid")
+    if bool(state.get("dry_run")) != bool(dry_run):
+        raise RuntimeError("The open position belongs to a different trading mode")
+    if str(state.get("ownership") or "") not in {
+        TREND_SCORE_AUTO_OWNERSHIP,
+        TREND_SCORE_AUTO_LIVE_OWNERSHIP,
+        TREND_SCORE_MANUAL_LIVE_OWNERSHIP,
+        TREND_SCORE_MANUAL_DRY_OWNERSHIP,
+    }:
+        raise RuntimeError(
+            "External or ownership-ambiguous positions cannot be pyramided"
+        )
+    if int(state.get("pyramid_count") or 0) >= PYRAMID_MAX_PER_CYCLE:
+        raise RuntimeError("This position has already used its one pyramid")
+    if state.get("pending_pyramid_intent"):
+        raise RuntimeError("A pyramid order is already being reconciled")
+    if (
+        state.get("pending_entry_client_order_id")
+        or state.get("pending_entry_order_id")
+        or state.get("pending_close_client_order_id")
+        or state.get("pending_close_order_id")
+        or state.get("pending_stop_protection")
+        or state.get("pending_tp_protection")
+        or _state_has_pending_protection_cleanup(state)
+        or _state_has_pending_accounting(state)
+    ):
+        raise RuntimeError(
+            "The position has an unresolved order, protection, or accounting action"
+        )
+    lots = _trend_score_auto_exact_int(
+        state.get("lots"), "current position lots", positive=True,
+    )
+    product_id = _trend_score_auto_exact_int(
+        state.get("product_id"), "current product identity", positive=True,
+    )
+    entry_mark = _trend_score_auto_number(
+        state.get("entry_mark"), "current aggregate entry", positive=True,
+    )
+    contract_value = _trend_score_auto_number(
+        state.get("contract_value"), "contract value", positive=True,
+    )
+    symbol = str(state.get("symbol") or "").strip()
+    if not symbol:
+        raise RuntimeError("Current position symbol is unavailable")
+    _pyramid_rebased_policy(state, entry_mark, lots)
+    return {
+        "lots": lots,
+        "product_id": product_id,
+        "entry_mark": entry_mark,
+        "contract_value": contract_value,
+        "symbol": symbol,
+        "side": str(state.get("side") or "").strip().lower(),
+    }
+
+
+def _pyramid_prepared_contract(state: dict, lots: int) -> dict:
+    selected = state.get("selected_contract_snapshot")
+    selected = copy.deepcopy(selected) if isinstance(selected, dict) else {}
+    prepared = {
+        **selected,
+        "lots": lots,
+        "product_id": state.get("product_id"),
+        "symbol": state.get("symbol"),
+        "zone": (
+            state.get("trend_score_zone") or state.get("zone")
+            or selected.get("zone")
+        ),
+        "side": state.get("side"),
+        "exchange_side": (
+            "sell" if str(state.get("side") or "").lower() == "short"
+            else "buy"
+        ),
+        "instrument_kind": (
+            state.get("instrument_kind") or selected.get("instrument_kind")
+        ),
+        "option_type": state.get("option_type") or selected.get("option_type"),
+        "contract_value": state.get("contract_value"),
+        "entry_price": state.get("entry_mark"),
+        "strike": state.get("strike") or selected.get("strike"),
+        "max_order_lots": (
+            state.get("max_order_lots") or selected.get("max_order_lots")
+        ),
+    }
+    if not isinstance(prepared.get("raw_product"), dict):
+        raise RuntimeError(
+            "The open position has no authoritative product snapshot"
+        )
+    product_limit = _trend_score_auto_exact_int(
+        prepared.get("max_order_lots"), "contract order-size limit",
+        positive=True,
+    )
+    if lots > product_limit:
+        raise RuntimeError(
+            f"The matching add-on exceeds the contract order limit of "
+            f"{product_limit:,} lots"
+        )
+    return prepared
+
+
+def _pyramid_preview_from_state(
+    state: dict,
+    *,
+    dry_run: bool,
+    credentials: tuple[str, str] | None = None,
+) -> dict:
+    base = _pyramid_base_state(state, dry_run=dry_run)
+    lots = base["lots"]
+    total_lots = lots * 2
+    sign = -1 if base["side"] == "short" else 1
+    if base["side"] not in {"long", "short"}:
+        raise RuntimeError("Current position direction is invalid")
+
+    if dry_run:
+        mark = _dry_run_market_mark(state, executable=False)
+        executable = _dry_run_market_mark(state, executable=True)
+        _, current_pnl, current_gross, _ = _dry_run_pnl_at_mark(state, mark)
+        tsl_armed = bool(state.get("dry_tsl_armed"))
+        old_floor = _as_float(state.get("dry_tsl_floor_usd"), 0.0)
+        affordability = None
+        quote = None
+    else:
+        if not credentials or not all(credentials):
+            raise RuntimeError("API credentials are not configured")
+        position = _strict_realtime_position(
+            base["product_id"], credentials=credentials,
+        )
+        live_size_value = float(position.get("size") or 0)
+        live_size = _trend_score_auto_exact_int(
+            abs(live_size_value), "real-time position lots", positive=True,
+        )
+        live_sign = -1 if live_size_value < 0 else 1
+        if live_size != lots or live_sign != sign:
+            raise RuntimeError(
+                "Stored position does not match Delta in real time"
+            )
+        live_entry = _trend_score_auto_number(
+            position.get("entry_price"), "Delta aggregate entry", positive=True,
+        )
+        if abs(live_entry - base["entry_mark"]) > max(
+            0.02, abs(live_entry) * 0.0001,
+        ):
+            raise RuntimeError(
+                "Stored aggregate entry is not synchronized with Delta"
+            )
+        prepared = _pyramid_prepared_contract(state, lots)
+        quote = _trend_score_auto_live_quote(prepared)
+        mark = _trend_score_auto_number(
+            quote.get("mark") or quote.get("mid"), "live mark", positive=True,
+        )
+        executable = _trend_score_auto_number(
+            quote.get("bid") if sign < 0 else quote.get("ask"),
+            "pyramid executable price", positive=True,
+        )
+        current_gross = (
+            (mark - live_entry) * base["contract_value"] * lots * sign
+        )
+        protection = _tp_monitor_payload().get("trend") or {}
+        stream_pnl = protection.get("live_pnl")
+        try:
+            stream_pnl = float(stream_pnl)
+        except (TypeError, ValueError, OverflowError):
+            stream_pnl = None
+        current_pnl = (
+            stream_pnl
+            if stream_pnl is not None and math.isfinite(stream_pnl)
+            else current_gross
+        )
+        tsl_armed = bool(
+            protection.get("stream_tsl_armed") or protection.get("tsl_armed")
+        )
+        old_floor = _as_float(
+            protection.get("stream_tsl_floor")
+            if protection.get("stream_tsl_floor") is not None
+            else protection.get("tsl_floor"),
+            0.0,
+        )
+        protected_lots = int(protection.get("protected_lots") or 0)
+        if (
+            not protection.get("running")
+            or not protection.get("protection_established")
+            or protection.get("coverage_status") not in {
+                "exchange_protected", "local_fallback",
+            }
+            or protected_lots != lots
+            or not protection.get("continuity_verified")
+        ):
+            raise RuntimeError(
+                "Current TP/SL/TSL protection is not fully healthy"
+            )
+        available = _trend_score_auto_live_available_usd(
+            credentials=credentials,
+        )
+        affordability = _trend_score_auto_live_affordability(
+            prepared,
+            quote,
+            available_usd=available,
+            configured_lots=lots,
+        )
+        if int(affordability.get("selected_lots") or 0) != lots:
+            raise RuntimeError(
+                "Available USD balance cannot fund the full matching pyramid quantity"
+            )
+        limits = _trend_score_auto_live_execution_limits(prepared)
+        build_trend_score_live_market_payload(
+            prepared,
+            quote,
+            client_order_id="nithi-pyr-preview",
+            max_slippage_pct=limits[0],
+            max_spread_pct=limits[1],
+            max_quote_age_sec=limits[2],
+        )
+
+    if not math.isfinite(current_pnl) or current_pnl <= 0:
+        raise RuntimeError(
+            "Pyramiding is allowed only while the current P&L is positive"
+        )
+    if not tsl_armed:
+        raise RuntimeError("Pyramiding is allowed only after TSL is armed")
+
+    composite_entry = (
+        base["entry_mark"] * lots + executable * lots
+    ) / total_lots
+    policy = _pyramid_rebased_policy(state, composite_entry, total_lots)
+    new_floor = max(
+        old_floor,
+        -float(policy["sl_target_pnl"]),
+        current_gross - float(policy["tsl_trail_pnl"]),
+    )
+    return {
+        "eligible": True,
+        "dry_run": dry_run,
+        "symbol": base["symbol"],
+        "product_id": base["product_id"],
+        "side": base["side"],
+        "current_lots": lots,
+        "add_lots": lots,
+        "total_lots": total_lots,
+        "current_entry": round(base["entry_mark"], 8),
+        "estimated_fill": round(executable, 8),
+        "estimated_composite_entry": round(composite_entry, 8),
+        "current_pnl": round(current_pnl, 8),
+        "current_gross_pnl": round(current_gross, 8),
+        "previous_tsl_floor": round(old_floor, 8),
+        "composite_tsl_floor": round(new_floor, 8),
+        "protection": policy,
+        "quote": quote,
+        "affordability": affordability,
+    }
+
+
+def _wait_for_pyramid_order(
+    acknowledgement: dict | None,
+    *,
+    requested: int,
+    product_id: int,
+    client_order_id: str,
+    side: str,
+    reduce_only: bool,
+    credentials: tuple[str, str],
+    timeout_sec: float = 10.0,
+) -> tuple[dict | None, int | None, bool]:
+    """Reconcile only the exact pyramid order identity to a terminal fill."""
+    latest = dict(acknowledgement or {})
+    deadline = time.monotonic() + max(timeout_sec, 0.0)
+    while True:
+        if latest:
+            _validate_dashboard_order(
+                latest,
+                product_id=product_id,
+                client_order_id=client_order_id,
+                side=side,
+                reduce_only=reduce_only,
+            )
+            filled = _terminal_fill(latest, requested)
+            if filled is not None:
+                return latest, filled, True
+        if time.monotonic() >= deadline:
+            return (latest or None), None, False
+        lookup = _trend_score_auto_live_exact_order_lookup(
+            latest.get("id") if latest else None,
+            client_order_id,
+            product_id,
+            credentials=credentials,
+        )
+        if not lookup.conclusive:
+            time.sleep(0.25)
+            continue
+        if lookup.order is not None:
+            latest = dict(lookup.order)
+        time.sleep(0.25)
+
+
+def _pyramid_clear_intent(state: dict, *, note: str) -> dict:
+    latest = _trend_score_auto_strict_json(_slot_file("trend"), {})
+    if (
+        str(latest.get("position_cycle_id") or "")
+        != str(state.get("position_cycle_id") or "")
+    ):
+        raise RuntimeError("Trend position changed during pyramid reconciliation")
+    latest.update({
+        "pending_pyramid_intent": None,
+        "last_pyramid_reconciliation_note": note,
+        "last_pyramid_reconciliation_utc": datetime.now(
+            timezone.utc
+        ).isoformat(),
+    })
+    _atomic_write_json(_slot_file("trend"), latest)
+    return latest
+
+
+def _pyramid_rollback_partial(
+    state: dict,
+    *,
+    filled_lots: int,
+    credentials: tuple[str, str],
+) -> dict:
+    """Remove only a partially filled add-on and prove the base is restored."""
+    if filled_lots <= 0:
+        return _pyramid_clear_intent(state, note="pyramid_not_filled")
+    product_id = int(state["product_id"])
+    client_id = (
+        f"nithi-pyr-rb-{int(time.time())}-{secrets.token_hex(4)}"
+    )[:32]
+    close_side = "buy" if state.get("side") == "short" else "sell"
+    payload = {
+        "product_id": product_id,
+        "size": int(filled_lots),
+        "side": close_side,
+        "order_type": "market_order",
+        "reduce_only": True,
+        "client_order_id": client_id,
+    }
+    order, response = _post_dashboard_order(
+        payload, credentials=credentials,
+    )
+    if not order:
+        raise RuntimeError(
+            "Partial pyramid rollback was rejected: "
+            + str(response.get("error") or response)[:300]
+        )
+    order = _validate_dashboard_order(
+        order,
+        product_id=product_id,
+        client_order_id=client_id,
+        side=close_side,
+        reduce_only=True,
+    )
+    order, rolled_back, conclusive = _wait_for_pyramid_order(
+        order,
+        requested=filled_lots,
+        product_id=product_id,
+        client_order_id=client_id,
+        side=close_side,
+        reduce_only=True,
+        credentials=credentials,
+    )
+    if not conclusive or rolled_back != filled_lots:
+        raise RuntimeError(
+            "Partial pyramid rollback could not be fully verified; "
+            "the position remains locked for reconciliation"
+        )
+    restored = _strict_realtime_position(
+        product_id, credentials=credentials,
+    )
+    expected = (
+        -int(state["lots"])
+        if state.get("side") == "short" else int(state["lots"])
+    )
+    if int(float(restored.get("size") or 0)) != expected:
+        raise RuntimeError(
+            "Partial pyramid rollback did not restore the original quantity"
+        )
+    latest = _pyramid_clear_intent(
+        state, note="partial_pyramid_fully_rolled_back",
+    )
+    _trend_audit("trend_pyramid_partial_reversed", {
+        "product_id": product_id,
+        "filled_lots": filled_lots,
+        "rollback_order_id": (order or {}).get("id"),
+        "restored_lots": abs(expected),
+    })
+    return latest
+
+
+def _pyramid_apply_dry_run(state: dict, preview: dict) -> dict:
+    """Atomically turn one simulated position into its composite pyramid."""
+    latest = _trend_score_auto_strict_json(
+        _slot_file("trend", dry_run=True), {},
+    )
+    if (
+        str(latest.get("position_cycle_id") or "")
+        != str(state.get("position_cycle_id") or "")
+        or int(latest.get("lots") or 0) != int(preview["current_lots"])
+    ):
+        raise RuntimeError("DRY RUN position changed before pyramiding")
+    added_lots = int(preview["add_lots"])
+    total_lots = int(preview["total_lots"])
+    fill = float(preview["estimated_fill"])
+    entry_fee = float(
+        latest.get("entry_fee_usd")
+        or latest.get("entry_fees_usd") or 0.0
+    )
+    added_fee = _option_fee_per_lot(
+        fill,
+        float(latest.get("contract_value") or 0.001),
+        float(latest.get("strike") or 0),
+    ) * added_lots
+    now = datetime.now(timezone.utc).isoformat()
+    events = [
+        dict(item) for item in (latest.get("pyramid_events") or [])
+        if isinstance(item, dict)
+    ][-19:]
+    events.append({
+        "at_utc": now,
+        "mode": "dry_run",
+        "previous_lots": int(preview["current_lots"]),
+        "added_lots": added_lots,
+        "total_lots": total_lots,
+        "fill": fill,
+        "aggregate_entry_mark": preview["estimated_composite_entry"],
+    })
+    latest.update({
+        "lots": total_lots,
+        "protection_lots": total_lots,
+        "max_protected_lots": max(
+            int(latest.get("max_protected_lots") or 0), total_lots,
+        ),
+        "owned_entry_lots": total_lots,
+        "entry_mark": float(preview["estimated_composite_entry"]),
+        "entry_mark_source": "dry_run_pyramid_composite",
+        "total_cost_usd": round(
+            float(preview["estimated_composite_entry"])
+            * float(latest.get("contract_value") or 0.001)
+            * total_lots,
+            8,
+        ),
+        "entry_fee_usd": round(entry_fee + added_fee, 8),
+        "entry_fees_usd": round(entry_fee + added_fee, 8),
+        "fees_usd": round(entry_fee + added_fee, 8),
+        "protection_config": preview["protection"],
+        "protection_revision": int(
+            latest.get("protection_revision") or 0
+        ) + 1,
+        "pyramid_count": int(latest.get("pyramid_count") or 0) + 1,
+        "pyramid_added_lots": int(
+            latest.get("pyramid_added_lots") or 0
+        ) + added_lots,
+        "last_pyramid_lots": added_lots,
+        "last_pyramid_at_utc": now,
+        "pyramid_events": events,
+        "position_composition": "pyramided",
+        "protection_scope": "trend_pyramided_composite",
+        "dry_tsl_armed": True,
+        "dry_tsl_floor_usd": max(
+            _as_float(latest.get("dry_tsl_floor_usd"), 0.0),
+            float(preview["composite_tsl_floor"]),
+        ),
+        "pending_pyramid_intent": None,
+    })
+    _atomic_write_json(_slot_file("trend", dry_run=True), latest)
+    _trend_audit("trend_position_pyramided", {
+        "mode": "dry_run",
+        "product_id": latest.get("product_id"),
+        "previous_lots": preview["current_lots"],
+        "added_lots": added_lots,
+        "protected_lots": total_lots,
+        "aggregate_entry_mark": latest["entry_mark"],
+    })
+    return latest
+
+
+@app.route("/api/pyramid/preview", methods=["POST"])
+def api_pyramid_preview():
+    body = request.get_json(silent=True) or {}
+    try:
+        dry_run, mode = _pyramid_target_mode(body)
+        state = _trend_score_auto_strict_json(
+            _slot_file("trend", dry_run=dry_run), {},
+        )
+        credentials = None if dry_run else _active_creds()
+        preview = _pyramid_preview_from_state(
+            state, dry_run=dry_run, credentials=credentials,
+        )
+        return jsonify({"ok": True, "target_mode": mode, **preview})
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)[:500]}), 409
+
+
+@app.route("/api/pyramid/execute", methods=["POST"])
+def api_pyramid_execute():
+    """Add one equal-size lot to the active Trend position, once per cycle."""
+    body = request.get_json(silent=True) or {}
+    try:
+        dry_run, mode = _pyramid_target_mode(body)
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    user = _active_user()
+    root_dir = _user_dir()
+    owner = f"pyramid:{user}:{os.getpid()}:{time.time_ns()}"
+    try:
+        with account_entry_lock(root_dir, owner) as exposure_lock:
+            if not exposure_lock:
+                raise RuntimeError(
+                    "Another account exposure change is in progress"
+                )
+            lock_dir = _mode_data_dir(dry_run)
+            with account_file_lock(
+                lock_dir, "close-trend", owner,
+                stale_after_sec=120, wait_sec=2,
+            ) as close_lock:
+                if not close_lock:
+                    raise RuntimeError("The Trend slot is busy")
+                state_path = _slot_file("trend", dry_run=dry_run)
+                state = _trend_score_auto_strict_json(state_path, {})
+                credentials = None if dry_run else _active_creds()
+                preview = _pyramid_preview_from_state(
+                    state,
+                    dry_run=dry_run,
+                    credentials=credentials,
+                )
+                if dry_run:
+                    updated = _pyramid_apply_dry_run(state, preview)
+                    return jsonify({
+                        "ok": True,
+                        "status": "OPEN",
+                        "target_mode": mode,
+                        "state": updated,
+                        "preview": preview,
+                    })
+
+                if not credentials or not all(credentials):
+                    raise RuntimeError("API credentials are not configured")
+                prepared = _pyramid_prepared_contract(
+                    state, int(preview["add_lots"]),
+                )
+                quote = _trend_score_auto_live_quote(prepared)
+                available = _trend_score_auto_live_available_usd(
+                    credentials=credentials,
+                )
+                refreshed_affordability = _trend_score_auto_live_affordability(
+                    prepared,
+                    quote,
+                    available_usd=available,
+                    configured_lots=int(preview["add_lots"]),
+                )
+                if int(refreshed_affordability.get("selected_lots") or 0) != int(
+                    preview["add_lots"]
+                ):
+                    raise RuntimeError(
+                        "Available USD balance or executable depth changed; "
+                        "the full matching pyramid quantity is no longer safe"
+                    )
+                client_id = (
+                    f"nithi-pyr-{int(time.time())}-{secrets.token_hex(4)}"
+                )[:32]
+                limits = _trend_score_auto_live_execution_limits(prepared)
+                payload, _ = build_trend_score_live_market_payload(
+                    prepared,
+                    quote,
+                    client_order_id=client_id,
+                    max_slippage_pct=limits[0],
+                    max_spread_pct=limits[1],
+                    max_quote_age_sec=limits[2],
+                )
+                intended_at = datetime.now(timezone.utc).isoformat()
+                state["pending_pyramid_intent"] = {
+                    "client_order_id": client_id,
+                    "product_id": int(preview["product_id"]),
+                    "previous_lots": int(preview["current_lots"]),
+                    "add_lots": int(preview["add_lots"]),
+                    "expected_total_lots": int(preview["total_lots"]),
+                    "side": preview["side"],
+                    "payload": payload,
+                    "created_at_utc": intended_at,
+                    "status": "POST_PENDING",
+                }
+                _atomic_write_json(state_path, state)
+                try:
+                    order, response = _post_dashboard_order(
+                        payload, credentials=credentials,
+                    )
+                except Exception as post_exc:
+                    lookup = _trend_score_auto_live_exact_order_lookup(
+                        None, client_id, int(preview["product_id"]),
+                        credentials=credentials,
+                    )
+                    if lookup.conclusive and lookup.order is None:
+                        _pyramid_clear_intent(
+                            state, note="pyramid_post_failed_without_order",
+                        )
+                        raise RuntimeError(
+                            f"Pyramid order was not created: {post_exc}"
+                        ) from post_exc
+                    if not lookup.conclusive:
+                        raise RuntimeError(
+                            "Pyramid POST outcome is inconclusive; the durable "
+                            "intent is locked for automatic reconciliation"
+                        ) from post_exc
+                    order, response = lookup.order, {
+                        "success": True, "recovered": True,
+                    }
+                if not order:
+                    lookup = _trend_score_auto_live_exact_order_lookup(
+                        None, client_id, int(preview["product_id"]),
+                        credentials=credentials,
+                    )
+                    if lookup.conclusive and lookup.order is None:
+                        _pyramid_clear_intent(
+                            state, note="pyramid_post_rejected_without_fill",
+                        )
+                        raise RuntimeError(
+                            "Pyramid order was rejected: "
+                            + str(response.get("error") or response)[:300]
+                        )
+                    order = lookup.order
+                if order:
+                    order = _validate_dashboard_order(
+                        order,
+                        product_id=int(preview["product_id"]),
+                        client_order_id=client_id,
+                        side=str(payload.get("side") or "").lower(),
+                        reduce_only=False,
+                    )
+                order, filled, conclusive = _wait_for_pyramid_order(
+                    order,
+                    requested=int(preview["add_lots"]),
+                    product_id=int(preview["product_id"]),
+                    client_order_id=client_id,
+                    side=str(payload.get("side") or "").lower(),
+                    reduce_only=False,
+                    credentials=credentials,
+                )
+                if not conclusive or filled is None:
+                    raise RuntimeError(
+                        "Pyramid order status is inconclusive; the durable "
+                        "intent is locked for automatic reconciliation"
+                    )
+                if filled == 0:
+                    _pyramid_clear_intent(
+                        state, note="pyramid_terminal_without_fill",
+                    )
+                    raise RuntimeError("Pyramid order completed without a fill")
+                if filled != int(preview["add_lots"]):
+                    _pyramid_rollback_partial(
+                        state,
+                        filled_lots=filled,
+                        credentials=credentials,
+                    )
+                    raise RuntimeError(
+                        f"Pyramid filled only {filled}/{preview['add_lots']} "
+                        "lots; the add-on was fully rolled back"
+                    )
+                live = _strict_realtime_position(
+                    int(preview["product_id"]), credentials=credentials,
+                )
+                expected_signed = (
+                    -int(preview["total_lots"])
+                    if preview["side"] == "short"
+                    else int(preview["total_lots"])
+                )
+                if int(float(live.get("size") or 0)) != expected_signed:
+                    raise RuntimeError(
+                        "Delta aggregate quantity does not match the completed pyramid"
+                    )
+                latest = _trend_score_auto_strict_json(state_path, {})
+                intent = dict(latest.get("pending_pyramid_intent") or {})
+                if intent.get("client_order_id") != client_id:
+                    raise RuntimeError("Pyramid intent changed during reconciliation")
+                intent.update({
+                    "status": "FILLED_PENDING_PROTECTION",
+                    "confirmed_filled_lots": filled,
+                    "confirmed_order_id": (order or {}).get("id"),
+                    "average_fill_price": (order or {}).get(
+                        "average_fill_price"
+                    ),
+                    "confirmed_at_utc": datetime.now(
+                        timezone.utc
+                    ).isoformat(),
+                })
+                latest["pending_pyramid_intent"] = intent
+                _atomic_write_json(state_path, latest)
+
+            _restart_tp_monitor(user, "trend")
+            deadline = time.monotonic() + 12.0
+            protected = False
+            final_state = latest
+            while time.monotonic() < deadline:
+                final_state = _trend_score_auto_strict_json(state_path, {})
+                if (
+                    int(final_state.get("pyramid_count") or 0) >= 1
+                    and not final_state.get("pending_pyramid_intent")
+                ):
+                    health = _tp_monitor_payload().get("trend") or {}
+                    protected = bool(
+                        health.get("protection_established")
+                        and int(health.get("protected_lots") or 0)
+                        == int(preview["total_lots"])
+                    )
+                    if protected:
+                        break
+                time.sleep(0.25)
+            if int(final_state.get("pyramid_count") or 0) < 1:
+                raise RuntimeError(
+                    "Pyramid fill is confirmed and protection reconciliation "
+                    "is still in progress"
+                )
+            _trend_audit("trend_pyramid_execute", {
+                "mode": "live",
+                "product_id": preview["product_id"],
+                "previous_lots": preview["current_lots"],
+                "added_lots": preview["add_lots"],
+                "total_lots": preview["total_lots"],
+                "order_id": (order or {}).get("id"),
+                "protected": protected,
+            })
+            return jsonify({
+                "ok": True,
+                "status": "OPEN",
+                "target_mode": mode,
+                "state": final_state,
+                "protection_established": protected,
+                "message": (
+                    "Pyramid added and composite protection verified"
+                    if protected else
+                    "Pyramid added; composite protection is updating"
+                ),
+            }), (200 if protected else 202)
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)[:500]}), 409
+
+
 @app.route("/api/cockpit/setups")
 def api_cockpit_setups():
     snapshot = trend_engine_client.get_snapshot("BTCUSD")
@@ -16321,10 +17099,29 @@ def _dry_run_protection_cycle(
             peak_pct > 0 and tsl_pct > 0
             if nimmathi_tsl else arm and trail and peak >= arm
         )
+        previous_floor = state.get("dry_tsl_floor_usd")
+        try:
+            previous_floor = float(previous_floor)
+            if not math.isfinite(previous_floor):
+                previous_floor = None
+        except (TypeError, ValueError, OverflowError):
+            previous_floor = None
         tsl_floor = (
-            max(-sl, peak - entry_basis * tsl_pct / 100.0)
+            max(
+                *(
+                    [previous_floor] if previous_floor is not None else []
+                ),
+                -sl,
+                peak - entry_basis * tsl_pct / 100.0,
+            )
             if tsl_armed and nimmathi_tsl else
-            max(peak - trail, locked) if tsl_armed else None
+            max(
+                *(
+                    [previous_floor] if previous_floor is not None else []
+                ),
+                peak - trail,
+                locked,
+            ) if tsl_armed else None
         )
         trigger = None
         if tp and pnl >= tp:

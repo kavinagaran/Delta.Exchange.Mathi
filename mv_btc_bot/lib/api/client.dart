@@ -297,6 +297,16 @@ class DashboardApi {
     String setup,
   ) => postMap('/api/cockpit/enter', {'action': action, 'setup': setup});
 
+  /// Validate an equal-size add-on against the current position, live P&L,
+  /// armed TSL, exchange protection and one-pyramid-per-cycle limit.
+  Future<ApiResult<Map<String, dynamic>>> pyramidPreview(String targetMode) =>
+      postMap('/api/pyramid/preview', {'target_mode': targetMode});
+
+  /// Submit the confirmed equal-size add-on and rebase protection to the
+  /// exchange's composite position. Partial add-on fills are rolled back.
+  Future<ApiResult<Map<String, dynamic>>> pyramidExecute(String targetMode) =>
+      postMap('/api/pyramid/execute', {'target_mode': targetMode});
+
   Future<ApiResult<dynamic>> squareOff({
     required String slot,
     required String targetMode,

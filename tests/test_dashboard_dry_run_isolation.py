@@ -905,9 +905,12 @@ def test_dry_run_has_one_score_zone_position_and_manual_exit():
     for legacy_slot in ("dry-slot-morning", "dry-slot-evening", "dry-slot-trend"):
         assert legacy_slot not in template
 
-    # Today is a daily ledger for the active account mode. Its only mutation is
-    # an explicitly mode-bound exit through the guarded square-off endpoint.
+    # Today exposes only explicitly mode-bound mutations: guarded square-off
+    # and the operator-confirmed, server-gated one-time pyramid.
     assert "squareOff(" not in overview
-    assert "target_mode: targetMode" not in overview
     assert "closeTodayLiveTrade(" in overview
     assert "target_mode: simulated ? 'dry_run' : 'live'" in overview
+    assert "pyramidTodayTrade(" in overview
+    assert "'/api/pyramid/preview'" in overview
+    assert "'/api/pyramid/execute'" in overview
+    assert "target_mode: targetMode" in overview

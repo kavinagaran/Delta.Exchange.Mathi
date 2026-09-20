@@ -50,6 +50,7 @@ class _TodayScreenState extends State<TodayScreen> {
   bool _loading = true;
   bool _refreshLoading = false;
   bool _closing = false;
+  bool _pyramiding = false;
   Timer? _poll;
   Timer? _previewPoll;
   bool _previewLoading = false;
@@ -267,7 +268,13 @@ class _TodayScreenState extends State<TodayScreen> {
     if (confirmed != true || !mounted) return;
     setState(() => _closing = true);
     final slot = '${trade['control_slot'] ?? trade['slot'] ?? 'trend'}';
-    final result = await widget.api.squareOff(slot: slot, targetMode: 'live');
+    final dryRun =
+        trade['dry_run'] == true ||
+        '${trade['execution_mode'] ?? ''}'.toLowerCase() == 'dry_run';
+    final result = await widget.api.squareOff(
+      slot: slot,
+      targetMode: dryRun ? 'dry_run' : 'live',
+    );
     if (!mounted) return;
     setState(() => _closing = false);
     ScaffoldMessenger.of(context).showSnackBar(
@@ -275,6 +282,95 @@ class _TodayScreenState extends State<TodayScreen> {
         content: Text(
           result.ok ? 'Close submitted' : result.error ?? 'Close failed',
         ),
+        backgroundColor: result.ok ? kPositive : kNegative,
+      ),
+    );
+    if (result.ok) await _refresh(quiet: true);
+  }
+
+  Future<void> _pyramid(Map<String, dynamic> trade) async {
+    if (_pyramiding) return;
+    final dryRun =
+        trade['dry_run'] == true ||
+        '${trade['execution_mode'] ?? ''}'.toLowerCase() == 'dry_run';
+    final mode = dryRun ? 'dry_run' : 'live';
+    setState(() => _pyramiding = true);
+    final previewResult = await widget.api.pyramidPreview(mode);
+    if (!mounted) return;
+    if (!previewResult.ok || previewResult.data == null) {
+      setState(() => _pyramiding = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            previewResult.error ?? 'This position is not eligible to pyramid',
+          ),
+          backgroundColor: kNegative,
+        ),
+      );
+      return;
+    }
+    final preview = previewResult.data!;
+    final protection = preview['protection'] is Map<String, dynamic>
+        ? preview['protection'] as Map<String, dynamic>
+        : const <String, dynamic>{};
+    final confirmed = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => AlertDialog(
+        title: Text('${dryRun ? 'DRY RUN' : 'LIVE'} pyramid?'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('${preview['symbol'] ?? trade['symbol'] ?? 'Position'}'),
+            const SizedBox(height: Gap.sm),
+            Text(
+              'Add ${preview['add_lots']} lots to the current '
+              '${preview['current_lots']} lots.',
+            ),
+            Text('Composite quantity: ${preview['total_lots']} lots'),
+            Text(
+              'Estimated composite entry: '
+              '${_tradePrice(preview['estimated_composite_entry'])}',
+            ),
+            const SizedBox(height: Gap.sm),
+            Text('TP: ${_money(_number(protection['tp_target_pnl']) ?? 0)}'),
+            Text('SL: ${_money(_number(protection['sl_target_pnl']) ?? 0)}'),
+            Text(
+              'TSL giveback: '
+              '${_money(_number(protection['tsl_trail_pnl']) ?? 0)}',
+            ),
+            Text(
+              'Preserved floor: '
+              '${_money(_number(preview['composite_tsl_floor']) ?? 0)}',
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Confirm pyramid'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) {
+      if (mounted) setState(() => _pyramiding = false);
+      return;
+    }
+    final result = await widget.api.pyramidExecute(mode);
+    if (!mounted) return;
+    setState(() => _pyramiding = false);
+    final message = result.ok
+        ? '${result.data?['message'] ?? 'Pyramid added'}'
+        : result.error ?? 'Pyramid order failed';
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
         backgroundColor: result.ok ? kPositive : kNegative,
       ),
     );
@@ -343,7 +439,9 @@ class _TodayScreenState extends State<TodayScreen> {
                 trade: current,
                 protection: _protectionFor(current),
                 busy: _closing,
+                pyramidBusy: _pyramiding,
                 onClose: () => _close(current),
+                onPyramid: () => _pyramid(current),
               ),
             const SizedBox(height: Gap.md),
             _EngineCard(
@@ -432,18 +530,26 @@ class _CurrentTradeCard extends StatelessWidget {
     required this.trade,
     required this.protection,
     required this.busy,
+    required this.pyramidBusy,
     required this.onClose,
+    required this.onPyramid,
   });
 
   final Map<String, dynamic> trade;
   final Map<String, dynamic>? protection;
   final bool busy;
+  final bool pyramidBusy;
   final VoidCallback onClose;
+  final VoidCallback onPyramid;
 
   @override
   Widget build(BuildContext context) {
     final pnl = (trade['live_pnl'] as num?)?.toDouble();
     final pnlPercent = _positionPnlPercent(trade, protection, pnl);
+    final slot = '${trade['control_slot'] ?? trade['slot'] ?? 'trend'}';
+    final pyramidCount = (trade['pyramid_count'] as num?)?.toInt() ?? 0;
+    final pyramidPending = trade['pending_pyramid_intent'] != null;
+    final canPyramid = slot == 'trend' && pyramidCount < 1;
     return AppCard(
       kicker: 'Current trade',
       title: '${trade['symbol'] ?? '—'}',
@@ -473,12 +579,33 @@ class _CurrentTradeCard extends StatelessWidget {
           ),
           const SizedBox(height: Gap.lg),
           Center(
-            child: CompactAction(
-              label: busy ? 'Exiting…' : 'Exit',
-              icon: Icons.exit_to_app_rounded,
-              tone: kNegative,
-              filled: true,
-              onPressed: busy ? null : onClose,
+            child: Wrap(
+              alignment: WrapAlignment.center,
+              spacing: Gap.sm,
+              runSpacing: Gap.sm,
+              children: [
+                if (canPyramid)
+                  CompactAction(
+                    label: pyramidPending
+                        ? 'Reconciling…'
+                        : pyramidBusy
+                        ? 'Checking…'
+                        : 'Pyramid ×2',
+                    icon: Icons.add_chart_rounded,
+                    tone: kPositive,
+                    filled: true,
+                    onPressed: pyramidBusy || pyramidPending || busy
+                        ? null
+                        : onPyramid,
+                  ),
+                CompactAction(
+                  label: busy ? 'Exiting…' : 'Exit',
+                  icon: Icons.exit_to_app_rounded,
+                  tone: kNegative,
+                  filled: true,
+                  onPressed: busy || pyramidBusy ? null : onClose,
+                ),
+              ],
             ),
           ),
           if (protection != null) ...[

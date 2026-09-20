@@ -149,6 +149,43 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
+  testWidgets('Today previews and confirms a pyramid in a centered dialog', (
+    WidgetTester tester,
+  ) async {
+    tester.view.physicalSize = const Size(390, 1000);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final api = _TodayApi();
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: buildAppTheme(blue: true),
+        home: Scaffold(
+          body: TodayScreen(api: api, onUnauthorised: () {}),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Pyramid ×2'), findsOneWidget);
+
+    await tester.tap(find.text('Pyramid ×2'));
+    await tester.pumpAndSettle();
+    expect(find.byType(AlertDialog), findsOneWidget);
+    expect(find.text('LIVE pyramid?'), findsOneWidget);
+    expect(
+      find.textContaining('Composite quantity: 2000 lots'),
+      findsOneWidget,
+    );
+    expect(api.pyramidPreviewCalls, 1);
+
+    await tester.tap(find.text('Confirm pyramid'));
+    await tester.pumpAndSettle();
+    expect(api.pyramidExecuteCalls, 1);
+    expect(find.text('Pyramid added and protected'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
   testWidgets('Today does not overlap slow ten-second refresh batches', (
     WidgetTester tester,
   ) async {
@@ -519,6 +556,9 @@ void main() {
 class _TodayApi extends DashboardApi {
   _TodayApi() : super(baseUrl: 'https://example.invalid', sessionCookie: null);
 
+  int pyramidPreviewCalls = 0;
+  int pyramidExecuteCalls = 0;
+
   @override
   Future<ApiResult<Map<String, dynamic>>> status() async =>
       const ApiResult.ok(<String, dynamic>{'btc_futures_price': 64763.0});
@@ -555,6 +595,36 @@ class _TodayApi extends DashboardApi {
   @override
   Stream<ApiResult<Map<String, dynamic>>> protectionStream() =>
       const Stream.empty();
+
+  @override
+  Future<ApiResult<Map<String, dynamic>>> pyramidPreview(
+    String targetMode,
+  ) async {
+    pyramidPreviewCalls += 1;
+    return const ApiResult.ok(<String, dynamic>{
+      'symbol': 'C-BTC-64000-020826',
+      'current_lots': 1000,
+      'add_lots': 1000,
+      'total_lots': 2000,
+      'estimated_composite_entry': 448.35,
+      'composite_tsl_floor': 12.0,
+      'protection': <String, dynamic>{
+        'tp_target_pnl': 896.7,
+        'sl_target_pnl': 269.01,
+        'tsl_trail_pnl': 269.01,
+      },
+    });
+  }
+
+  @override
+  Future<ApiResult<Map<String, dynamic>>> pyramidExecute(
+    String targetMode,
+  ) async {
+    pyramidExecuteCalls += 1;
+    return const ApiResult.ok(<String, dynamic>{
+      'message': 'Pyramid added and protected',
+    });
+  }
 
   @override
   Future<ApiResult<List<dynamic>>> todayTrades() async => ApiResult.ok([
