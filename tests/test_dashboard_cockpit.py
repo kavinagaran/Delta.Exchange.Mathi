@@ -286,6 +286,64 @@ def test_dry_pyramid_requires_profit_and_armed_tsl(
         dashboard._pyramid_preview_from_state(state, dry_run=True)
 
 
+def test_live_pyramid_base_allows_active_exchange_protection(live_account):
+    state = _dry_pyramid_state()
+    state.update({
+        "dry_run": False,
+        "execution_mode": "live",
+        "ownership": dashboard.TREND_SCORE_MANUAL_LIVE_OWNERSHIP,
+        "tsl_stop_order_id": "exchange-stop-101",
+        "tp_stop_order_id": "exchange-tp-101",
+        "stop_lots": 100,
+        "tp_lots": 100,
+        "exchange_protection_supported": True,
+        "protection_runtime_mode": "exchange",
+    })
+    base = dashboard._pyramid_base_state(state, dry_run=False)
+    assert base["lots"] == 100
+    assert base["symbol"] == "C-BTC-80000-200926"
+
+
+def test_live_pyramid_base_allows_unsupported_exchange_protection_with_stale_intent(
+    live_account,
+):
+    state = _dry_pyramid_state()
+    state.update({
+        "dry_run": False,
+        "execution_mode": "live",
+        "ownership": dashboard.TREND_SCORE_MANUAL_LIVE_OWNERSHIP,
+        "tsl_stop_order_id": None,
+        "tp_stop_order_id": None,
+        "exchange_protection_supported": False,
+        "protection_runtime_mode": "local_monitor",
+        "pending_stop_protection": {
+            "client_order_id": "nithi-tp-nith-t-st-78425105-01",
+            "lots": 100,
+        },
+    })
+    base = dashboard._pyramid_base_state(state, dry_run=False)
+    assert base["lots"] == 100
+
+
+def test_live_pyramid_base_blocks_when_exchange_protection_intent_is_in_flight(
+    live_account,
+):
+    state = _dry_pyramid_state()
+    state.update({
+        "dry_run": False,
+        "execution_mode": "live",
+        "ownership": dashboard.TREND_SCORE_MANUAL_LIVE_OWNERSHIP,
+        "exchange_protection_supported": True,
+        "protection_runtime_mode": "exchange",
+        "pending_stop_protection": {
+            "client_order_id": "nithi-tp-nith-t-st-78425105-01",
+            "lots": 100,
+        },
+    })
+    with pytest.raises(RuntimeError, match="unresolved order"):
+        dashboard._pyramid_base_state(state, dry_run=False)
+
+
 def _post_cockpit_preview(action: str, setup: str | None = None):
     with dashboard.app.test_request_context(
         "/api/cockpit/preview", method="POST",

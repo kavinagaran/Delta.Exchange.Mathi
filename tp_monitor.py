@@ -3895,6 +3895,8 @@ def main():
     persist_pk = peak_pnl
     ratchet_min = max(_f("TSL_RATCHET_MIN_PNL", 1.0), tsl_trail_pnl * 0.05)
     exch_unsupported = state.get("exchange_protection_supported") is False
+    if exch_unsupported and (state.get("pending_stop_protection") or state.get("pending_tp_protection")):
+        save_state_fields(pending_stop_protection=None, pending_tp_protection=None)
     alert_codes = set(state.get("protection_alert_codes") or [])
     last_reconcile = 0.0
     consecutive_errors = 0
@@ -3930,7 +3932,9 @@ def main():
             local_fallback_active = True
             save_state_fields(exchange_protection_supported=False,
                               exchange_protection_error=f"{what} unsupported",
-                              protection_runtime_mode="local_monitor")
+                              protection_runtime_mode="local_monitor",
+                              pending_stop_protection=None,
+                              pending_tp_protection=None)
             # This is an exchange capability result, not a protection outage.
             # The monitor immediately switches to the faster local loop and
             # retains the same reduce-only close path.  Telegram is reserved

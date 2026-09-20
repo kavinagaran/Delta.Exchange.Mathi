@@ -1111,6 +1111,9 @@ class TpMonitorSafetyTests(unittest.TestCase):
         self.assertTrue(health["protection_established"])
         self.assertTrue(health["local_fallback_active"])
         self.assertFalse(health["exchange_protection_complete"])
+        state = self.read_state()
+        self.assertIsNone(state.get("pending_stop_protection"))
+        self.assertIsNone(state.get("pending_tp_protection"))
 
     def test_opt_in_exchange_only_protection_triggers_safety_close(self):
         self.write_state(protection_config={

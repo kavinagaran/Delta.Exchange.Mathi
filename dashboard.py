@@ -15203,14 +15203,31 @@ def _pyramid_base_state(state: dict, *, dry_run: bool) -> dict:
         raise RuntimeError("This position has already used its one pyramid")
     if state.get("pending_pyramid_intent"):
         raise RuntimeError("A pyramid order is already being reconciled")
+    exchange_protection_active = (
+        state.get("exchange_protection_supported") is not False
+        and str(state.get("protection_runtime_mode") or "").lower() != "local_monitor"
+    )
+    unresolved_protection = bool(
+        state.get("orphan_protection_order_ids")
+        or state.get("protection_cleanup_pending")
+        or state.get("protection_cleanup_errors")
+        or state.get("remove_protection_requested")
+        or (
+            exchange_protection_active
+            and (
+                state.get("pending_stop_protection")
+                or state.get("pending_tp_protection")
+            )
+        )
+    )
     if (
         state.get("pending_entry_client_order_id")
         or state.get("pending_entry_order_id")
+        or state.get("pending_entry_submission_state")
         or state.get("pending_close_client_order_id")
         or state.get("pending_close_order_id")
-        or state.get("pending_stop_protection")
-        or state.get("pending_tp_protection")
-        or _state_has_pending_protection_cleanup(state)
+        or state.get("pending_close_submission_state")
+        or unresolved_protection
         or _state_has_pending_accounting(state)
     ):
         raise RuntimeError(
