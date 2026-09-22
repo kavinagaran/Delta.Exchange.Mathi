@@ -223,6 +223,38 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
+  testWidgets('Take profit box has UP and DOWN stepper arrows that adjust TP by 10%', (
+    WidgetTester tester,
+  ) async {
+    final api = _WatchdogProtectionApi();
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: buildAppTheme(blue: false),
+        home: Scaffold(
+          body: TodayScreen(api: api, onUnauthorised: () {}),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('TAKE PROFIT'), findsOneWidget);
+    final upBtn = find.byKey(const Key('tp_step_up'));
+    final downBtn = find.byKey(const Key('tp_step_down'));
+    expect(upBtn, findsOneWidget);
+    expect(downBtn, findsOneWidget);
+
+    await tester.tap(upBtn);
+    await tester.pump();
+    expect(api.adjustTpCalls, 1);
+    expect(api.lastDeltaPercent, 10.0);
+
+    await tester.tap(downBtn);
+    await tester.pump();
+    expect(api.adjustTpCalls, 2);
+    expect(api.lastDeltaPercent, -10.0);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
   testWidgets('Today does not overlap slow ten-second refresh batches', (
     WidgetTester tester,
   ) async {
@@ -597,6 +629,24 @@ class _TodayApi extends DashboardApi {
   int pyramidExecuteCalls = 0;
   int averagePreviewCalls = 0;
   int averageExecuteCalls = 0;
+  int adjustTpCalls = 0;
+  double? lastDeltaPercent;
+
+  @override
+  Future<ApiResult<Map<String, dynamic>>> adjustTp({
+    String slot = 'trend',
+    required double deltaPercent,
+    String mode = 'live',
+  }) async {
+    adjustTpCalls += 1;
+    lastDeltaPercent = deltaPercent;
+    return ApiResult.ok(<String, dynamic>{
+      'ok': true,
+      'slot': slot,
+      'new_tp': 22.0,
+      'previous_tp': 20.0,
+    });
+  }
 
   @override
   Future<ApiResult<Map<String, dynamic>>> status() async =>

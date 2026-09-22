@@ -289,7 +289,14 @@ function todayInlineProtectionHtml(protection) {
     </div>
     <div class="today-protection-grid">
       <div class="today-protection-metric tone-tp"><span>Take profit $</span>
-        <strong>${value(protection.target_pnl ?? protection.tp_target_pnl)}</strong></div>
+        <div class="tp-metric-val-row">
+          <strong>${value(protection?.target_pnl ?? protection?.tp_target_pnl)}</strong>
+          <span class="tp-stepper-btns">
+            <button type="button" class="tp-step-btn tp-step-up" onclick="adjustTodayTp(10)" title="Increase Take Profit by 10%" aria-label="Increase Take Profit by 10%">▲</button>
+            <button type="button" class="tp-step-btn tp-step-down" onclick="adjustTodayTp(-10)" title="Decrease Take Profit by 10%" aria-label="Decrease Take Profit by 10%">▼</button>
+          </span>
+        </div>
+      </div>
       <div class="today-protection-metric tone-sl"><span>Stop loss $</span>
         <strong>${value(protection.sl_pnl ?? protection.sl_target_pnl)}</strong></div>
       <div class="today-protection-metric tone-tsl-arm ${nimmathiTsl ? 'is-trail-value' : ''}"><span>${nimmathiTsl ? 'Peak P&amp;L $' : 'TSL arm P&amp;L $'}</span>
@@ -351,7 +358,7 @@ function renderTodayCurrentTrade(trade, index, protection = null) {
       </button>` : ''}
       ${canOfferAverage ? `<button class="btn warning sm today-avg-btn" type="button"
         onclick="averageTodayTrade(${index})" ${averagePending ? 'disabled' : ''}>
-        ${averagePending ? 'Average reconciling…' : 'Avgx2'}
+        ${averagePending ? 'Average reconciling…' : (pyramidCount > 0 ? 'Average' : 'Avgx2')}
       </button>` : ''}
       <button class="btn danger sm today-exit-btn" type="button" onclick="closeTodayLiveTrade(${index})">Exit</button>
     </div>` : ''}
@@ -562,6 +569,35 @@ async function averageTodayTrade(index) {
     toast(error?.message || 'Average request failed', 'err');
   } finally {
     todayAveraging.delete(index);
+  }
+}
+
+let todayAdjustingTp = false;
+
+async function adjustTodayTp(deltaPercent) {
+  if (todayAdjustingTp) return;
+  todayAdjustingTp = true;
+  const btns = document.querySelectorAll('.tp-step-btn');
+  btns.forEach(b => b.disabled = true);
+  try {
+    const res = await jpost('/api/protection/adjust-tp', {
+      delta_percent: deltaPercent,
+      slot: 'trend',
+    });
+    if (!res.ok) {
+      toast(res.error || 'Failed to adjust take profit', 'err');
+      return;
+    }
+    const sign = deltaPercent > 0 ? '+' : '';
+    const newTpStr = res.new_tp_target_pnl != null ? `$${fN(res.new_tp_target_pnl, 2)}` : '';
+    toast(`Take profit adjusted (${sign}${deltaPercent}%) → ${newTpStr}`, 'ok');
+    await loadAll();
+  } catch (error) {
+    toast(error?.message || 'Failed to adjust take profit', 'err');
+  } finally {
+    todayAdjustingTp = false;
+    const btnsAfter = document.querySelectorAll('.tp-step-btn');
+    btnsAfter.forEach(b => b.disabled = false);
   }
 }
 

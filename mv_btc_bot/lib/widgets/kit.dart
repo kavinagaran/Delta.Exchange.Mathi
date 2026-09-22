@@ -434,6 +434,7 @@ class MetricTile extends StatelessWidget {
     this.sub,
     this.colour,
     this.big = false,
+    this.trailing,
   });
 
   final String label;
@@ -441,6 +442,7 @@ class MetricTile extends StatelessWidget {
   final String? sub;
   final Color? colour;
   final bool big;
+  final Widget? trailing;
 
   @override
   Widget build(BuildContext context) {
@@ -454,12 +456,32 @@ class MetricTile extends StatelessWidget {
           style: AppText.kicker.copyWith(color: scheme.onSurfaceVariant),
         ),
         const SizedBox(height: Gap.xs),
-        Text(
-          value,
-          style: (big ? AppText.display : AppText.metric).copyWith(
-            color: colour ?? scheme.onSurface,
+        if (trailing == null)
+          Text(
+            value,
+            style: (big ? AppText.display : AppText.metric).copyWith(
+              color: colour ?? scheme.onSurface,
+            ),
+          )
+        else
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              Flexible(
+                child: Text(
+                  value,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: (big ? AppText.display : AppText.metric).copyWith(
+                    color: colour ?? scheme.onSurface,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 4),
+              trailing!,
+            ],
           ),
-        ),
         if (sub != null) ...[
           const SizedBox(height: 2),
           Text(

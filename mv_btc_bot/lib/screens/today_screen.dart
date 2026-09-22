@@ -52,6 +52,7 @@ class _TodayScreenState extends State<TodayScreen> {
   bool _closing = false;
   bool _pyramiding = false;
   bool _averaging = false;
+  bool _adjustingTp = false;
   Timer? _poll;
   Timer? _previewPoll;
   bool _previewLoading = false;
@@ -465,6 +466,43 @@ class _TodayScreenState extends State<TodayScreen> {
     if (result.ok) await _refresh(quiet: true);
   }
 
+  Future<void> _adjustTp(double deltaPercent) async {
+    final trade = _currentTrade;
+    if (trade == null || _adjustingTp) return;
+    final slot = '${trade['control_slot'] ?? trade['slot'] ?? 'trend'}';
+    final dryRun =
+        trade['dry_run'] == true ||
+        '${trade['execution_mode'] ?? ''}'.toLowerCase() == 'dry_run';
+    final mode = dryRun ? 'dry_run' : 'live';
+    setState(() => _adjustingTp = true);
+    final result = await widget.api.adjustTp(
+      slot: slot,
+      deltaPercent: deltaPercent,
+      mode: mode,
+    );
+    if (!mounted) return;
+    setState(() => _adjustingTp = false);
+    if (result.ok && result.data != null) {
+      final newTp = result.data!['new_tp'];
+      final sign = deltaPercent > 0 ? '+' : '';
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Take profit updated to \$$newTp ($sign${deltaPercent.toInt()}%)'),
+          backgroundColor: kPositive,
+          duration: const Duration(seconds: 2),
+        ),
+      );
+      await _refresh(quiet: true);
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(result.error ?? 'Failed to adjust take profit'),
+          backgroundColor: kNegative,
+        ),
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     if (_loading && _status == null) {
@@ -529,9 +567,11 @@ class _TodayScreenState extends State<TodayScreen> {
                 busy: _closing,
                 pyramidBusy: _pyramiding,
                 averageBusy: _averaging,
+                adjustingTp: _adjustingTp,
                 onClose: () => _close(current),
                 onPyramid: () => _pyramid(current),
                 onAverage: () => _average(current),
+                onAdjustTp: _adjustTp,
               ),
             const SizedBox(height: Gap.md),
             _EngineCard(
@@ -622,9 +662,11 @@ class _CurrentTradeCard extends StatelessWidget {
     required this.busy,
     required this.pyramidBusy,
     required this.averageBusy,
+    this.adjustingTp = false,
     required this.onClose,
     required this.onPyramid,
     required this.onAverage,
+    this.onAdjustTp,
   });
 
   final Map<String, dynamic> trade;
@@ -632,9 +674,11 @@ class _CurrentTradeCard extends StatelessWidget {
   final bool busy;
   final bool pyramidBusy;
   final bool averageBusy;
+  final bool adjustingTp;
   final VoidCallback onClose;
   final VoidCallback onPyramid;
   final VoidCallback onAverage;
+  final ValueChanged<double>? onAdjustTp;
 
   @override
   Widget build(BuildContext context) {
@@ -701,7 +745,7 @@ class _CurrentTradeCard extends StatelessWidget {
                         ? 'Reconciling…'
                         : averageBusy
                         ? 'Checking…'
-                        : 'Avgx2',
+                        : (pyramidCount > 0 ? 'Average' : 'Avgx2'),
                     icon: Icons.trending_down_rounded,
                     tone: kWarning,
                     filled: true,
@@ -721,7 +765,11 @@ class _CurrentTradeCard extends StatelessWidget {
           ),
           if (protection != null) ...[
             const SizedBox(height: Gap.lg),
-            _ProtectionPanel(protection: protection!),
+            _ProtectionPanel(
+              protection: protection!,
+              onAdjustTp: onAdjustTp,
+              adjustingTp: adjustingTp,
+            ),
           ],
         ],
       ),
@@ -772,9 +820,15 @@ class _LivePnlMetric extends StatelessWidget {
 }
 
 class _ProtectionPanel extends StatelessWidget {
-  const _ProtectionPanel({required this.protection});
+  const _ProtectionPanel({
+    required this.protection,
+    this.onAdjustTp,
+    this.adjustingTp = false,
+  });
 
   final Map<String, dynamic> protection;
+  final ValueChanged<double>? onAdjustTp;
+  final bool adjustingTp;
 
   @override
   Widget build(BuildContext context) {
@@ -840,6 +894,13 @@ class _ProtectionPanel extends StatelessWidget {
                 label: 'Take profit',
                 value: value('target_pnl', 'tp_target_pnl'),
                 colour: kPositive,
+                trailing: onAdjustTp == null
+                    ? null
+                    : _TpStepper(
+                        onUp: () => onAdjustTp!(10.0),
+                        onDown: () => onAdjustTp!(-10.0),
+                        busy: adjustingTp,
+                      ),
               ),
               MetricTile(
                 label: 'Stop loss',
@@ -885,6 +946,88 @@ class _ProtectionPanel extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+class _TpStepper extends StatelessWidget {
+  const _TpStepper({
+    required this.onUp,
+    required this.onDown,
+    this.busy = false,
+  });
+
+  final VoidCallback onUp;
+  final VoidCallback onDown;
+  final bool busy;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      margin: const EdgeInsets.only(left: 4),
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainerHighest.withValues(alpha: .85),
+        borderRadius: BorderRadius.circular(4),
+        border: Border.all(
+          color: kPositive.withValues(alpha: .40),
+          width: 0.9,
+        ),
+      ),
+      child: busy
+          ? const Padding(
+              padding: EdgeInsets.all(4),
+              child: SizedBox(
+                width: 12,
+                height: 12,
+                child: CircularProgressIndicator(
+                  strokeWidth: 1.5,
+                  color: kPositive,
+                ),
+              ),
+            )
+          : Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                InkWell(
+                  key: const Key('tp_step_up'),
+                  borderRadius: const BorderRadius.only(
+                    topLeft: Radius.circular(3),
+                    topRight: Radius.circular(3),
+                  ),
+                  onTap: onUp,
+                  child: const Padding(
+                    padding: EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                    child: Icon(
+                      Icons.keyboard_arrow_up_rounded,
+                      size: 15,
+                      color: kPositive,
+                    ),
+                  ),
+                ),
+                Container(
+                  height: 1,
+                  width: 16,
+                  color: scheme.outline.withValues(alpha: .3),
+                ),
+                InkWell(
+                  key: const Key('tp_step_down'),
+                  borderRadius: const BorderRadius.only(
+                    bottomLeft: Radius.circular(3),
+                    bottomRight: Radius.circular(3),
+                  ),
+                  onTap: onDown,
+                  child: const Padding(
+                    padding: EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                    child: Icon(
+                      Icons.keyboard_arrow_down_rounded,
+                      size: 15,
+                      color: kPositive,
+                    ),
+                  ),
+                ),
+              ],
+            ),
     );
   }
 }

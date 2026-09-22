@@ -15342,8 +15342,6 @@ def _average_base_state(state: dict, *, dry_run: bool) -> dict:
         )
     if int(state.get("average_count") or 0) >= AVERAGE_MAX_PER_CYCLE:
         raise RuntimeError("This position has already used its one average order")
-    if int(state.get("pyramid_count") or 0) > 0:
-        raise RuntimeError("This position has already pyramided and cannot be averaged")
     if state.get("pending_average_intent") or state.get("pending_pyramid_intent"):
         raise RuntimeError("A composite add-on order is already being reconciled")
     exchange_protection_active = (
@@ -15622,7 +15620,18 @@ def _average_preview_from_state(
 ) -> dict:
     base = _average_base_state(state, dry_run=dry_run)
     lots = base["lots"]
-    total_lots = lots * 2
+    pyramid_count = int(state.get("pyramid_count") or 0)
+    if pyramid_count > 0:
+        original_lots = int(
+            state.get("original_owned_entry_lots")
+            or (lots - int(state.get("pyramid_added_lots") or 0))
+        )
+        if original_lots <= 0 or original_lots >= lots:
+            original_lots = max(1, lots // 2)
+        add_lots = original_lots
+    else:
+        add_lots = lots
+    total_lots = lots + add_lots
     sign = -1 if base["side"] == "short" else 1
     if base["side"] not in {"long", "short"}:
         raise RuntimeError("Current position direction is invalid")
@@ -15657,7 +15666,7 @@ def _average_preview_from_state(
             raise RuntimeError(
                 "Stored aggregate entry is not synchronized with Delta"
             )
-        prepared = _pyramid_prepared_contract(state, lots)
+        prepared = _pyramid_prepared_contract(state, add_lots)
         quote = _trend_score_auto_live_quote(prepared)
         mark = _trend_score_auto_number(
             quote.get("mark") or quote.get("mid"), "live mark", positive=True,
@@ -15700,9 +15709,9 @@ def _average_preview_from_state(
             prepared,
             quote,
             available_usd=available,
-            configured_lots=lots,
+            configured_lots=add_lots,
         )
-        if int(affordability.get("selected_lots") or 0) != lots:
+        if int(affordability.get("selected_lots") or 0) != add_lots:
             raise RuntimeError(
                 "Available USD balance cannot fund the full matching average quantity"
             )
@@ -15722,7 +15731,7 @@ def _average_preview_from_state(
         )
 
     composite_entry = (
-        base["entry_mark"] * lots + executable * lots
+        base["entry_mark"] * lots + executable * add_lots
     ) / total_lots
     policy = _average_rebased_policy(state, composite_entry, total_lots)
     new_floor = -float(policy["sl_target_pnl"])
@@ -15734,7 +15743,7 @@ def _average_preview_from_state(
         "product_id": base["product_id"],
         "side": base["side"],
         "current_lots": lots,
-        "add_lots": lots,
+        "add_lots": add_lots,
         "total_lots": total_lots,
         "current_entry": round(base["entry_mark"], 8),
         "estimated_fill": round(executable, 8),
@@ -15927,6 +15936,10 @@ def _pyramid_apply_dry_run(state: dict, preview: dict) -> dict:
             int(latest.get("max_protected_lots") or 0), total_lots,
         ),
         "owned_entry_lots": total_lots,
+        "original_owned_entry_lots": int(
+            latest.get("original_owned_entry_lots")
+            or preview["current_lots"]
+        ),
         "entry_mark": float(preview["estimated_composite_entry"]),
         "entry_mark_source": "dry_run_pyramid_composite",
         "total_cost_usd": round(
@@ -15949,8 +15962,16 @@ def _pyramid_apply_dry_run(state: dict, preview: dict) -> dict:
         "last_pyramid_lots": added_lots,
         "last_pyramid_at_utc": now,
         "pyramid_events": events,
-        "position_composition": "pyramided",
-        "protection_scope": "trend_pyramided_composite",
+        "position_composition": (
+            "composite_averaged_and_pyramided"
+            if int(latest.get("average_count") or 0) > 0
+            else "pyramided"
+        ),
+        "protection_scope": (
+            "trend_composite"
+            if int(latest.get("average_count") or 0) > 0
+            else "trend_pyramided_composite"
+        ),
         "dry_tsl_armed": False,
         "dry_tsl_floor_usd": None,
         "dry_peak_pnl_usd": 0.0,
@@ -16104,6 +16125,10 @@ def _average_apply_dry_run(state: dict, preview: dict) -> dict:
             int(latest.get("max_protected_lots") or 0), total_lots,
         ),
         "owned_entry_lots": total_lots,
+        "original_owned_entry_lots": int(
+            latest.get("original_owned_entry_lots")
+            or preview["current_lots"]
+        ),
         "entry_mark": float(preview["estimated_composite_entry"]),
         "entry_mark_source": "dry_run_average_composite",
         "total_cost_usd": round(
@@ -16126,8 +16151,16 @@ def _average_apply_dry_run(state: dict, preview: dict) -> dict:
         "last_average_lots": added_lots,
         "last_average_at_utc": now,
         "average_events": events,
-        "position_composition": "averaged",
-        "protection_scope": "trend_averaged_composite",
+        "position_composition": (
+            "composite_pyramided_and_averaged"
+            if int(latest.get("pyramid_count") or 0) > 0
+            else "averaged"
+        ),
+        "protection_scope": (
+            "trend_composite"
+            if int(latest.get("pyramid_count") or 0) > 0
+            else "trend_averaged_composite"
+        ),
         "dry_tsl_armed": False,
         "dry_tsl_floor_usd": None,
         "pending_average_intent": None,
@@ -16660,6 +16693,123 @@ def api_average_execute():
                     "Average added; composite protection is updating"
                 ),
             }), (200 if protected else 202)
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)[:500]}), 409
+
+
+@app.route("/api/protection/adjust-tp", methods=["POST"])
+def api_protection_adjust_tp():
+    """Adjust Take Profit P&L target in-place (default 10% per click)."""
+    body = request.get_json(silent=True) or {}
+    slot = str(body.get("slot") or "trend").strip().lower()
+    if slot not in {"trend", "morning", "evening"}:
+        return jsonify({"ok": False, "error": f"Invalid slot: {slot}"}), 400
+    try:
+        dry_run, mode = _pyramid_target_mode(body)
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+
+    user = _active_user()
+    owner = f"adjust_tp:{user}:{os.getpid()}:{time.time_ns()}"
+    lock_dir = _mode_data_dir(dry_run)
+    try:
+        with account_file_lock(
+            lock_dir, f"close-{slot}", owner,
+            stale_after_sec=30, wait_sec=5,
+        ) as lock:
+            if not lock:
+                raise RuntimeError(f"The {slot} slot is busy")
+            state_path = _slot_file(slot, dry_run=dry_run)
+            state = _trend_score_auto_strict_json(state_path, {})
+            if str(state.get("status") or "").upper() != "OPEN":
+                raise RuntimeError(f"There is no open {slot} position to adjust TP")
+
+            protection_cfg = dict(state.get("protection_config") or {})
+            cfg = _user_cfg()
+            tp_cfg_key = (
+                "TP_TARGET_PNL" if slot == "evening"
+                else f"TP_TARGET_PNL_{slot.upper()}"
+            )
+            current_tp = (
+                _as_float(protection_cfg.get("tp_target_pnl"), 0.0)
+                or _as_float(state.get("tp_target_pnl"), 0.0)
+                or _as_float(cfg.get(tp_cfg_key), 20.0)
+            )
+            if current_tp <= 0:
+                current_tp = 20.0
+
+            delta_percent = body.get("delta_percent")
+            if delta_percent is not None:
+                try:
+                    delta_pct = float(delta_percent)
+                except (TypeError, ValueError):
+                    return jsonify({"ok": False, "error": "delta_percent must be a number"}), 400
+                multiplier = 1.0 + (delta_pct / 100.0)
+                new_tp = round(current_tp * multiplier, 2)
+            elif "new_tp" in body:
+                try:
+                    new_tp = round(float(body["new_tp"]), 2)
+                except (TypeError, ValueError):
+                    return jsonify({"ok": False, "error": "new_tp must be a number"}), 400
+            else:
+                return jsonify({"ok": False, "error": "Either delta_percent or new_tp is required"}), 400
+
+            new_tp = max(1.0, new_tp)
+
+            # Recalculate percentage if basis is available
+            lots = abs(int(float(state.get("lots") or 0)))
+            cv = _as_float(state.get("contract_value"), 0.001)
+            entry_mark = _as_float(state.get("entry_mark"), 0.0)
+            entry_premium_usd = entry_mark * cv * lots
+            new_pct = None
+            if entry_premium_usd > 0:
+                new_pct = round((new_tp / entry_premium_usd) * 100.0, 2)
+
+            protection_cfg["tp_target_pnl"] = new_tp
+            if new_pct is not None:
+                protection_cfg["tp_percent_of_entry_premium"] = new_pct
+                protection_cfg["tp_target_pct"] = new_pct
+
+            now_utc = datetime.now(timezone.utc).isoformat()
+            state["protection_config"] = protection_cfg
+            state["tp_target_pnl"] = new_tp
+            state["protection_revision"] = int(state.get("protection_revision") or 0) + 1
+            state["last_protection_edit_utc"] = now_utc
+            _atomic_write_json(state_path, state)
+
+            # Update user config.json for persistence
+            try:
+                saved_cfg, _ = _saved_user_cfg()
+                saved_cfg[tp_cfg_key] = str(new_tp)
+                if new_pct is not None and slot == "trend":
+                    saved_cfg["TREND_TP_PREMIUM_PCT"] = str(new_pct)
+                _atomic_write_json(_cfg_file(), saved_cfg)
+            except Exception as cfg_err:
+                log.warning("Could not update config.json after TP adjustment: %s", cfg_err)
+
+            # If live, restart monitor to immediately replace resting orders
+            monitor_restarted = False
+            if not dry_run:
+                monitor_restarted = _restart_tp_monitor(user, slot)
+
+            _trend_audit("protection_tp_adjusted", {
+                "slot": slot,
+                "target_mode": mode,
+                "previous_tp": current_tp,
+                "new_tp": new_tp,
+                "new_pct": new_pct,
+                "monitor_restarted": monitor_restarted,
+            })
+
+            return jsonify({
+                "ok": True,
+                "slot": slot,
+                "target_mode": mode,
+                "previous_tp": current_tp,
+                "new_tp": new_tp,
+                "new_pct": new_pct,
+                "monitor_restarted": monitor_restarted,
+            })
     except Exception as exc:
         return jsonify({"ok": False, "error": str(exc)[:500]}), 409
 

@@ -323,4 +323,16 @@ class DashboardApi {
   }) => post('/api/square-off?slot=${Uri.encodeQueryComponent(slot)}', {
     'target_mode': targetMode,
   });
+
+  /// Adjust Take Profit P&L target in-place by a percentage delta (e.g. +10% or -10%).
+  Future<ApiResult<Map<String, dynamic>>> adjustTp({
+    String slot = 'trend',
+    required double deltaPercent,
+    String mode = 'live',
+  }) =>
+      postMap('/api/protection/adjust-tp', {
+        'slot': slot,
+        'delta_percent': deltaPercent,
+        'target_mode': mode,
+      });
 }

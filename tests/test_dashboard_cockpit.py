@@ -396,6 +396,129 @@ def test_dry_average_doubles_quantity_rebases_policy_and_requires_negative_pnl(
     assert "already used its one pyramid" in second_pyr.get_json()["error"]
 
 
+def test_dry_pyramid_then_average_cycle(live_account, monkeypatch):
+    state = _dry_pyramid_state()
+    state["dry_tsl_armed"] = True
+    _write(dashboard._slot_file("trend", dry_run=True), state)
+    monkeypatch.setattr(
+        dashboard,
+        "_dry_run_market_mark",
+        lambda _state, *, executable: 120.0,
+    )
+
+    # 1. First pyramid: adds 100 lots -> total 200 lots
+    with dashboard.app.test_request_context(
+        "/api/pyramid/execute",
+        method="POST",
+        json={"target_mode": "dry_run"},
+    ):
+        pyr_resp, pyr_status = _response_tuple(dashboard.api_pyramid_execute())
+    assert pyr_status == 200
+    pyr_state = pyr_resp.get_json()["state"]
+    assert pyr_state["lots"] == 200
+    assert pyr_state["pyramid_count"] == 1
+    assert pyr_state.get("average_count") in (None, 0)
+
+    # Second pyramid rejected
+    with dashboard.app.test_request_context(
+        "/api/pyramid/preview",
+        method="POST",
+        json={"target_mode": "dry_run"},
+    ):
+        sec_pyr, sec_pyr_status = _response_tuple(dashboard.api_pyramid_preview())
+    assert sec_pyr_status == 409
+    assert "already used its one pyramid" in sec_pyr.get_json()["error"]
+
+    # 2. Market price drops, P&L becomes negative
+    monkeypatch.setattr(
+        dashboard,
+        "_dry_run_market_mark",
+        lambda _state, *, executable: 80.0,
+    )
+
+    # Average preview after pyramid: adds original 100 lots -> total 300 lots
+    with dashboard.app.test_request_context(
+        "/api/average/preview",
+        method="POST",
+        json={"target_mode": "dry_run"},
+    ):
+        avg_resp, avg_status = _response_tuple(dashboard.api_average_preview())
+    assert avg_status == 200
+    avg_prev = avg_resp.get_json()
+    assert avg_prev["ok"] is True
+    assert avg_prev["current_lots"] == 200
+    assert avg_prev["add_lots"] == 100
+    assert avg_prev["total_lots"] == 300
+
+    # Execute average
+    with dashboard.app.test_request_context(
+        "/api/average/execute",
+        method="POST",
+        json={"target_mode": "dry_run"},
+    ):
+        avg_exec_resp, avg_exec_status = _response_tuple(dashboard.api_average_execute())
+    assert avg_exec_status == 200
+    final_state = avg_exec_resp.get_json()["state"]
+    assert final_state["lots"] == 300
+    assert final_state["pyramid_count"] == 1
+    assert final_state["average_count"] == 1
+    assert final_state["position_composition"] == "composite_pyramided_and_averaged"
+
+    # Second average rejected
+    with dashboard.app.test_request_context(
+        "/api/average/preview",
+        method="POST",
+        json={"target_mode": "dry_run"},
+    ):
+        sec_avg, sec_avg_status = _response_tuple(dashboard.api_average_preview())
+    assert sec_avg_status == 409
+    assert "already used its one average" in sec_avg.get_json()["error"]
+
+
+def test_adjust_tp_endpoint_percent_stepping(live_account):
+    state = _dry_pyramid_state()
+    state["protection_config"] = {"tp_target_pnl": 20.0, "sl_target_pnl": 10.0}
+    _write(dashboard._slot_file("trend", dry_run=True), state)
+
+    # Step up by +10%
+    with dashboard.app.test_request_context(
+        "/api/protection/adjust-tp",
+        method="POST",
+        json={"slot": "trend", "delta_percent": 10.0, "target_mode": "dry_run"},
+    ):
+        resp, status = _response_tuple(dashboard.api_protection_adjust_tp())
+    assert status == 200
+    data = resp.get_json()
+    assert data["ok"] is True
+    assert data["previous_tp"] == 20.0
+    assert data["new_tp"] == 22.0
+
+    # Step down by -10% from 22.0 -> 19.8
+    with dashboard.app.test_request_context(
+        "/api/protection/adjust-tp",
+        method="POST",
+        json={"slot": "trend", "delta_percent": -10.0, "target_mode": "dry_run"},
+    ):
+        resp2, status2 = _response_tuple(dashboard.api_protection_adjust_tp())
+    assert status2 == 200
+    data2 = resp2.get_json()
+    assert data2["ok"] is True
+    assert data2["previous_tp"] == 22.0
+    assert data2["new_tp"] == 19.8
+
+    # Ensure minimum floor of $1.00
+    with dashboard.app.test_request_context(
+        "/api/protection/adjust-tp",
+        method="POST",
+        json={"slot": "trend", "delta_percent": -99.0, "target_mode": "dry_run"},
+    ):
+        resp3, status3 = _response_tuple(dashboard.api_protection_adjust_tp())
+    assert status3 == 200
+    data3 = resp3.get_json()
+    assert data3["ok"] is True
+    assert data3["new_tp"] == 1.0
+
+
 @pytest.mark.parametrize(
     ("mark", "armed", "message"),
     [

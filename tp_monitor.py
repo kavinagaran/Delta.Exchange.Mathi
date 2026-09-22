@@ -1389,15 +1389,23 @@ def _adopt_matching_external_trend_lots_locked(state, position, previous_lots,
             if explicit_composite else True
         ),
         "protection_scope": (
-            "trend_pyramided_composite" if explicit_pyramid else (
+            "trend_composite"
+            if (int(state.get("pyramid_count") or 0) > 0 and int(state.get("average_count") or 0) > 0)
+            else ("trend_pyramided_composite" if explicit_pyramid else (
                 "trend_averaged_composite" if explicit_average else
                 "trend_plus_same_product_external"
-            )
+            ))
         ),
         "position_composition": (
-            "pyramided" if explicit_pyramid else (
-                "averaged" if explicit_average else
-                "mixed_bot_and_external"
+            "composite_averaged_and_pyramided"
+            if (explicit_pyramid and int(state.get("average_count") or 0) > 0)
+            else (
+                "composite_pyramided_and_averaged"
+                if (explicit_average and int(state.get("pyramid_count") or 0) > 0)
+                else ("pyramided" if explicit_pyramid else (
+                    "averaged" if explicit_average else
+                    "mixed_bot_and_external"
+                ))
             )
         ),
         "protection_revision": protection_revision,
@@ -5209,6 +5217,12 @@ def main():
                 else:
                     entry_mark = locked_entry
                     cv = locked_cv
+                configured = state.get("protection_config") or {}
+                new_target_pnl = _configured_number("tp_target_pnl", target_pnl, minimum=1.0)
+                tp_changed = abs(new_target_pnl - target_pnl) > 0.001
+                if tp_changed:
+                    log.info("Target TP P&L changed: $%.2f -> $%.2f", target_pnl, new_target_pnl)
+                    target_pnl = new_target_pnl
                 position = get_exchange_position(product_id)
                 if position is None:
                     write_monitor_health(
@@ -5409,12 +5423,17 @@ def main():
                             state.get("last_pyramid_at_utc")
                             and state.get("pyramid_count")
                         )
+                        explicit_average = bool(
+                            state.get("last_average_at_utc")
+                            and state.get("average_count")
+                        )
+                        explicit_composite = explicit_pyramid or explicit_average
                         peak_pnl = 0.0
                         persist_pk = 0.0
                         tsl_armed = False
                         stop_floor = None
                         stop_kind = "sl"
-                        # A pyramid changes both quantity and aggregate entry.
+                        # A composite add-on changes both quantity and aggregate entry.
                         # Reload the policy captured in the newly persisted
                         # composite state before editing any TP/SL/TSL order;
                         # keeping the process-start values would protect the
@@ -5458,11 +5477,16 @@ def main():
                             _f("TSL_RATCHET_MIN_PNL", 1.0),
                             tsl_trail_pnl * 0.05,
                         )
+                        action_label = (
+                            "composite" if (explicit_pyramid and explicit_average)
+                            else ("pyramid" if explicit_pyramid else (
+                                "average" if explicit_average else "external"
+                            ))
+                        )
                         log.warning(
                             "Adopted %d same-product %s lots; aggregate protection "
                             "is resizing %d -> %d at exchange entry %.4f.",
-                            adopted_lots,
-                            "pyramid" if explicit_pyramid else "external",
+                            adopted_lots, action_label,
                             previous_lots, new_lots, new_entry,
                         )
                     except Exception as exc:
@@ -5728,7 +5752,7 @@ def main():
                 elif sl_pnl > 0 and (stop_id is None or stop_lots != lots
                                      or not stop_complete or pos_changed):
                     ensure_stop(-sl_pnl, "sl")
-                ensure_tp(force=pos_changed or tp_lots != lots or tp_id is None)
+                ensure_tp(force=pos_changed or tp_lots != lots or tp_id is None or tp_changed)
 
                 stop_required = sl_pnl > 0 or active_tsl
                 desired_tp_price = max(
