@@ -568,7 +568,23 @@ def _risk_history(data_dir: Path, now: datetime, offset_minutes: int) -> tuple[f
             )
         pnl = _finite(row.get("pnl_usd"))
         stamp = _row_timestamp(row)
-        if pnl is None or stamp is None or stamp > now:
+        if pnl is None:
+            # An operator-authorized external-protection-only position that
+            # closed without the bot observing the closing fill has no
+            # reconstructable exit price -- its realized P&L is genuinely
+            # unknown, not corrupt data. Excluding it here is the only way
+            # such a row does not block every subsequent risk evaluation
+            # (and every score cycle with it) indefinitely.
+            if (
+                row.get("operator_authorized_protection_only") is True
+                and str(row.get("ownership") or "").lower()
+                == "external_protection_only"
+            ):
+                continue
+            raise SnapshotCollectionError(
+                f"trade_history.json row {index} has unknown P&L or time"
+            )
+        if stamp is None or stamp > now:
             raise SnapshotCollectionError(
                 f"trade_history.json row {index} has unknown P&L or time"
             )
@@ -705,7 +721,15 @@ def collect_delta_trend_snapshot(
     positions = list(local_positions)
     position_state_consistent = not bool(local_pending)
     if dry_run:
-        equity = _finite(strategy_config.get("TREND_ENGINE_DRY_RUN_EQUITY_USD"))
+        # Trend Score DRY RUN owns this capital setting.  The older two names
+        # are accepted only to keep already-saved accounts runnable; using the
+        # MOVE value first would make a correctly configured new account fail
+        # closed before it could simulate a trade.
+        equity = _finite(strategy_config.get("TREND_DRY_RUN_CAPITAL_USD"))
+        if equity is None:
+            equity = _finite(
+                strategy_config.get("TREND_ENGINE_DRY_RUN_EQUITY_USD")
+            )
         if equity is None:
             equity = _finite(strategy_config.get("MOVE_DRY_RUN_CAPITAL_USD"))
         available = equity

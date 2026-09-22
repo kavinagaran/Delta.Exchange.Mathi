@@ -96,6 +96,80 @@ def test_score_status_reads_live_namespace_and_live_ownership(
     assert "last_error" not in payload
 
 
+def test_score_status_exposes_current_contract_blocker_from_live_ledger(
+        tmp_path, monkeypatch):
+    users = tmp_path / "users"
+    account = users / "alice"
+    account.mkdir(parents=True)
+    _write(account / "config.json", _score_config("live"))
+    _write(account / dashboard.TREND_SCORE_AUTO_LEDGER_FILE, {
+        "schema_version": 1,
+        "signals": {},
+        "notifications": {},
+        "current_transition": {
+            "signal_key": "short-move-signal",
+            "target_zone": dashboard.TREND_SCORE_MOVE_ZONE,
+            "phase": "FLAT_WAITING_CONTRACT",
+            "entry_blocked_reason": (
+                "SHORT MOVE premium must be above $300 "
+                "(currently $272.00)"
+            ),
+        },
+        "no_fill_setup": None,
+        "setup_lock": None,
+    })
+    monkeypatch.setattr(dashboard, "USERS_DIR", users)
+    monkeypatch.setattr(dashboard, "_active_user", lambda: "alice")
+    dashboard._trend_score_auto_health.clear()
+    dashboard._trend_score_auto_health["alice"] = {
+        "mode": "live",
+        "engine_zone": dashboard.TREND_SCORE_MOVE_ZONE,
+    }
+
+    with dashboard.app.test_request_context(
+            "/api/trend-engine/score-auto/status"):
+        payload = dashboard.api_trend_engine_score_auto_status().get_json()
+
+    assert payload["controller_phase"] == "FLAT_WAITING_CONTRACT"
+    assert payload["transition_target_zone"] == dashboard.TREND_SCORE_MOVE_ZONE
+    assert payload["entry_blocked_reason"] == (
+        "SHORT MOVE premium must be above $300 (currently $272.00)"
+    )
+
+
+def test_score_status_does_not_expose_stale_completed_transition_blocker(
+        tmp_path, monkeypatch):
+    users = tmp_path / "users"
+    account = users / "alice"
+    account.mkdir(parents=True)
+    _write(account / "config.json", _score_config("live"))
+    _write(account / dashboard.TREND_SCORE_AUTO_LEDGER_FILE, {
+        "schema_version": 1,
+        "signals": {},
+        "notifications": {},
+        "current_transition": {
+            "target_zone": dashboard.TREND_SCORE_MOVE_ZONE,
+            "phase": "COMPLETE",
+            "entry_blocked_reason": "old premium failure",
+        },
+        "no_fill_setup": None,
+        "setup_lock": None,
+    })
+    monkeypatch.setattr(dashboard, "USERS_DIR", users)
+    monkeypatch.setattr(dashboard, "_active_user", lambda: "alice")
+    dashboard._trend_score_auto_health.clear()
+    dashboard._trend_score_auto_health["alice"] = {
+        "mode": "live",
+        "engine_zone": dashboard.TREND_SCORE_MOVE_ZONE,
+    }
+
+    with dashboard.app.test_request_context(
+            "/api/trend-engine/score-auto/status"):
+        payload = dashboard.api_trend_engine_score_auto_status().get_json()
+
+    assert "entry_blocked_reason" not in payload
+
+
 def _run_one_supervisor_iteration(
         monkeypatch, *, mode, score_effect=None, snapshot_effect=None,
         recovery_claimed=False):

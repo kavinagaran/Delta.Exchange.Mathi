@@ -1,0 +1,84 @@
+# Continuous integration.
+#
+# Why this exists: a credential-safety test sat broken across two commits
+# because nothing was watching. It failed on fixture setup rather than on its
+# assertion, so the suite was red and the property it guards ("the LIVE order
+# is signed with the identity verified at preflight") was silently unverified
+# in production. Nothing about that is visible unless someone runs pytest by
+# hand and reads the tail.
+#
+# The suite is the gate. Lint and types are reported but do not block: they
+# were configured in pyproject.toml and never actually run, so they have a
+# standing backlog (ruff 152, mypy 45 at the time of writing). Making them
+# blocking today would mean a permanently red pipeline, which trains people
+# to ignore it -- exactly the failure this workflow is meant to fix. Ratchet
+# them down, then flip continue-on-error off, one tool at a time.
+
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  # A newer push supersedes an in-flight run on the same branch.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+
+      - name: Install dependencies
+        # All three sets go into one interpreter here on purpose. The split
+        # into .venv / .venv-engine exists so the engine's numpy/pandas pins
+        # cannot be moved under the legacy trading stack on a live host; CI is
+        # disposable and runs the whole suite in one process.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-engine.txt
+          pip install -r requirements-dev.txt
+
+      - name: Run tests
+        # No credentials and no network: the suite must pass offline, which is
+        # also what keeps it honest about not calling the exchange.
+        run: python -m pytest tests/ btc_trend_engine/tests/ -q
+
+  quality:
+    name: lint and types (advisory)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+
+      - name: Install tooling and typed dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-engine.txt
+          pip install -r requirements-dev.txt
+
+      - name: Ruff
+        continue-on-error: true
+        run: python -m ruff check . --output-format=github
+
+      - name: Mypy
+        continue-on-error: true
+        run: python -m mypy

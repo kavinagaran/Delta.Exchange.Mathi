@@ -2,6 +2,7 @@ import json
 import shutil
 import subprocess
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -181,15 +182,29 @@ def test_live_display_projection_reports_a_same_frame_conflict_without_mutation(
     assert trend == original_trend
 
 
-def test_real_overview_has_only_current_trend_engine_position_copy():
+def test_real_overview_is_a_same_day_trade_ledger_only():
     source = (ROOT / "templates" / "overview.html").read_text(encoding="utf-8")
 
-    assert "Trend Engine positions" in source
-    assert "Morning MOVE" in source
-    assert "Evening MOVE" in source
-    assert "Trend-based position (CE / PE)" in source
-    assert "st.display_slots ||" in source
-    for obsolete in (
+    for required in (
+        'id="today-summary"',
+        'id="today-trades-body"',
+        "jget('/api/today-trades')",
+        "Today's Trades",
+        '>Exit</button>',
+        "renderTodayTrades(",
+        "todayInlineProtectionHtml(",
+        "jget('/api/tp-monitor')",
+    ):
+        assert required in source
+    for non_daily in (
+        'id="positions-body"',
+        "No open positions",
+        "st.display_slots ||",
+        "openProtectionDrawer",
+        "showPayoff(",
+        "squareOff(",
+        "Trading mode",
+        "Engine health",
         "Scheduled forecast-driven entries only",
         "Automatic MOVE Forecast",
         "Waiting for the next scheduled decision cycle",
@@ -201,118 +216,207 @@ def test_real_overview_has_only_current_trend_engine_position_copy():
         "function trendEntry",
         "/api/trend-entry/preview",
         "jpost('/api/trend-entry'",
+        'id="today-body"',
+        ">Close Position</button>",
+        ">Protection</button>",
+        ">Payoff</button>",
     ):
-        assert obsolete not in source
+        assert non_daily not in source
+
+
+def test_today_trades_uses_the_active_accounts_dry_run_history(
+        isolated_live_dashboard, monkeypatch):
+    now = datetime.now(timezone.utc)
+    dry_history = isolated_live_dashboard / "dry_run" / "trade_history.json"
+    _write(dry_history, [{
+        "slot": "trend", "status": "CLOSED", "dry_run": True,
+        "symbol": "MV-BTC-62600-020826", "side": "short", "lots": 1000,
+        "entry_date": now.strftime("%Y-%m-%d"),
+        "entry_time_utc": now.strftime("%H:%M:%S"),
+        "exit_date": now.strftime("%Y-%m-%d"),
+        "exit_time_utc": now.strftime("%H:%M:%S"),
+        "entry_mark": 358, "exit_mark": 500, "pnl_usd": -142,
+    }])
+    monkeypatch.setattr(dashboard, "_user_cfg", lambda: {
+        "DRY_RUN": "true", "TREND_ENGINE_SCORE_AUTO_MODE": "dry_run",
+    })
+
+    with dashboard.app.test_request_context("/api/today-trades"):
+        rows = dashboard.api_today_trades().get_json()
+
+    assert len(rows) == 1
+    assert rows[0]["symbol"] == "MV-BTC-62600-020826"
+    assert rows[0]["dry_run"] is True
 
 
 @pytest.mark.skipif(NODE is None, reason="Node.js is required for frontend JavaScript tests")
-def test_real_cards_route_actions_to_source_slot_and_show_trade_time_first():
+def test_real_overview_summarises_and_renders_only_today_rows():
     script = r"""
 const fs = require('fs');
 const vm = require('vm');
 const source = fs.readFileSync('templates/overview.html', 'utf8');
-const start = source.indexOf('function liveMoveDisplaySlotFromUtc');
-const end = source.indexOf('function renderExternalOptions');
-if (start < 0 || end <= start) throw new Error('REAL card functions not found');
+const start = source.indexOf('const TODAY_CONTROL_SLOTS');
+const end = source.indexOf('async function loadAll');
+if (start < 0 || end <= start) throw new Error('Today ledger functions not found');
 
+const elements = {};
+function element(id) {
+  if (!elements[id]) {
+    const card = { className: '' };
+    const classes = new Set();
+    elements[id] = {
+      innerHTML: '', textContent: '', className: '',
+      addEventListener() {},
+      closest(selector) { return selector === '.stat' ? card : null; },
+      classList: {
+        add(value) { classes.add(value); },
+        remove(value) { classes.delete(value); },
+        contains(value) { return classes.has(value); },
+      },
+      card,
+    };
+  }
+  return elements[id];
+}
+global.document = { getElementById: element, addEventListener() {} };
+global.window = {};
 global.fN = value => String(value ?? '—');
-global.f$ = value => String(value ?? '—');
-global.pnlCls = () => 'c-pos';
+global.f$ = value => {
+  const number = Number(value);
+  return `${number < 0 ? '-$' : '+$'}${Math.abs(number).toFixed(2)}`;
+};
+global.pnlCls = value => Number(value) < 0 ? 'c-neg' : 'c-pos';
 global.esc = value => String(value ?? '').replace(/&/g, '&amp;')
   .replace(/</g, '&lt;').replace(/>/g, '&gt;');
-global.utcToIst = value => {
-  const [h, m] = String(value || '').split(':').map(Number);
-  if (!Number.isFinite(h) || !Number.isFinite(m)) return '';
-  const total = (h * 60 + m + 330) % 1440;
-  const hh = Math.floor(total / 60);
-  const mm = total % 60;
-  const ap = hh >= 12 ? 'PM' : 'AM';
-  return `${((hh + 11) % 12) + 1}:${String(mm).padStart(2, '0')} ${ap} IST`;
+global.originBadge = trade => {
+  const label = String(trade?.origin_label || '').trim();
+  const cls = label === 'M' ? 'manual'
+    : label === 'A' ? 'auto' : label === 'E' ? 'external' : '';
+  return cls ? `<span class="badge origin ${cls}">${label}</span> ` : '';
+};
+global.mountOriginFilter = () => () => '';
+global.filterByOrigin = (trades, origin) => {
+  const key = String(origin || '').trim();
+  if (!key) return trades;
+  return trades.filter(trade => String(trade?.origin_label || '').trim() === key);
+};
+global.confirm = () => true;
+global.toast = () => {};
+global.protectionDrawerFieldsHtml = record =>
+  `<input id="pdw-target" value="${record.target_pnl}">`;
+global.protectionDrawerIdFor = () => ({});
+global.saveProtectionConfig = async () => ({ok: true});
+let posted = null;
+global.jpost = async (url, body) => {
+  posted = {url, body};
+  return {ok: false, error: 'intentional test stop'};
+};
+global.jget = async url => {
+  if (url === '/api/today-trades') {
+    return [
+      {symbol: 'C-BTC-65000', side: 'long', strike: 65000, lots: 1000,
+       entry_mark: 500, _live: true, current_mark: 525, live_pnl: 25,
+       slot: 'trend', origin_label: 'M'},
+      {symbol: 'P-BTC-64000', side: 'long', strike: 64000, lots: 1000,
+       entry_mark: 450, exit_mark: 400, pnl_usd: -50, slot: 'trend',
+       entry_date: '2026-08-02', entry_time_utc: '02:11:00',
+       exit_date: '2026-08-02', exit_time_utc: '02:31:00',
+       exit_trigger: 'trailing_stop', origin_label: 'A'},
+    ];
+  }
+  if (url === '/api/tp-monitor') {
+    return {trend: {
+      running: true, target_pnl: 500, sl_pnl: 250, tsl_arm_pnl: 125,
+      tsl_trail_pnl: 100, tsl_lock_min_pnl: 25, poll_secs: 10,
+      protection_source: 'automatic_filled_premium',
+      coverage_status: 'exchange_protected',
+      health: {peak_pnl: 180, heartbeat_utc: new Date().toISOString()},
+    }};
+  }
+  if (url === '/api/trend-engine/score-auto/status') {
+    return {status: 'signal_consumed', engine_zone: 'CE_2_ITM',
+      direction_score: 43.2, market_regime: 'trend_up', lots: 1000,
+      symbol: 'C-BTC-65000',
+      last_action: 'this completed LIVE signal was already handled; waiting for the next one'};
+  }
+  if (url === '/api/engine/snapshot') {
+    return {trend_score: 43.2, trigger_adx: 19.7, data_quality: 'OK'};
+  }
+  if (url === '/api/engine/live') {
+    return {available: true, live_score: 47.8, data_quality: 'OK'};
+  }
+  throw new Error(`unexpected endpoint: ${url}`);
 };
 vm.runInThisContext(source.slice(start, end));
 
-if (liveMoveDisplaySlotFromUtc('05:29:59') !== 'morning') {
-  throw new Error('10:59:59 AM IST did not route to Morning');
-}
-if (liveMoveDisplaySlotFromUtc('05:30:00') !== 'evening') {
-  throw new Error('11:00 AM IST did not route to Evening');
-}
-
-const state = {
-  status: 'OPEN',
-  source_slot: 'trend',
-  control_slot: 'trend',
-  display_slot: 'morning',
-  entry_time_utc: '12:00:00',
-  entry_at_utc: '2026-07-23T01:50:00Z',
-  symbol: 'MV-BTC-65800-230726',
-  side: 'short',
-  lots: 1000,
-  entry_mark: 445,
-  current_mark: 414,
-  live_pnl: 17.45,
-  total_cost_usd: 445,
-};
-const protection = {
-  trend: {
-    running: true,
-    protection_established: true,
-    target_pnl: 500,
-    sl_pnl: 300,
-    tsl_arm_pnl: 125,
-    tsl_trail_pnl: 125,
-    tsl_lock_min_pnl: 0,
-    poll_secs: 30,
-  },
-};
-const html = slotHtml(state, 'morning', protection);
-const tradeTime = html.indexOf('<dt>Time of trade</dt>');
-const contract = html.indexOf('<dt>Contract</dt>');
-if (tradeTime < 0 || contract < 0 || tradeTime > contract) {
-  throw new Error(`trade time is not the first detail row: ${html}`);
-}
-if (!html.includes('7:20 AM IST')) {
-  throw new Error(`actual IST trade time is missing: ${html}`);
-}
-if (html.includes('<dt>Entered</dt>')) {
-  throw new Error('obsolete Entered row remains');
-}
-for (const required of [
-  "squareOff('trend', 'morning', 'live')",
-  "saveTp('morning', 'trend')",
-  "toggleTp('trend', true)",
-  "showPayoff('morning')",
-]) {
-  if (!html.includes(required)) {
-    throw new Error(`source-aware action is missing (${required}): ${html}`);
+(async () => {
+  await loadToday();
+  if (elements['today-trade-total'].textContent !== '2') throw new Error('trade total is wrong');
+  if (elements['today-open-total'].textContent !== '1') throw new Error('open total is wrong');
+  if (elements['today-closed-total'].textContent !== '1') throw new Error('closed total is wrong');
+  if (elements['today-pnl'].textContent !== '-$25.00') throw new Error('day P&L is wrong');
+  const currentCard = elements['today-current-position'].innerHTML;
+  if (!currentCard.includes('C-BTC-65000') || !currentCard.includes('>Exit</button>')) {
+    throw new Error(`current trade card is incomplete: ${currentCard}`);
   }
-}
-if (html.includes('Automatic MOVE Forecast')) {
-  throw new Error(`routed score position inherited scheduled copy: ${html}`);
-}
-
-const closed = slotHtml({
-  ...state,
-  status: 'CLOSED',
-  pnl_usd: 10,
-  exit_mark: 400,
-  exit_time_utc: '02:50:00',
-}, 'morning', protection);
-if (closed.indexOf('<dt>Time of trade</dt>') > closed.indexOf('<dt>Contract</dt>')) {
-  throw new Error(`closed trade time is not first: ${closed}`);
-}
-if (closed.includes('TP / SL / TSL Monitor')) {
-  throw new Error(`closed trade retained inactive protection controls: ${closed}`);
-}
-
-const pending = slotHtml({
-  ...state,
-  status: 'ENTRY_PENDING',
-}, 'morning', protection);
-if (!pending.includes('ENTRY PENDING') || pending.includes('Closed') ||
-    pending.includes('NaN')) {
-  throw new Error(`pending entry was rendered as a closed trade: ${pending}`);
-}
+  for (const detail of [
+    'Live protection', 'TP / SL / TSL Monitor', 'RUNNING',
+    'Take profit $', '500', 'Stop loss $', '250',
+    'TSL arm P&amp;L $', '125', 'TSL trail $', '100',
+    'Minimum locked $', '25', 'EXCHANGE PROTECTED',
+  ]) {
+    if (!currentCard.includes(detail)) throw new Error(`missing protection detail: ${detail}`);
+  }
+  for (const removed of ['Close Position', '>Protection</button>', '>Payoff</button>']) {
+    if (currentCard.includes(removed)) {
+      throw new Error(`current trade card exposed removed control: ${removed}`);
+    }
+  }
+  const todayTable = elements['today-trades-body'].innerHTML;
+  for (const detail of [
+    'C-BTC-65000', 'P-BTC-64000', 'OPEN', 'CLOSED', '-$50.00',
+  ]) {
+    if (!todayTable.includes(detail)) throw new Error(`missing Today table detail: ${detail}`);
+  }
+  if (!todayTable.includes('badge origin manual') ||
+      !todayTable.includes('badge origin auto')) {
+    throw new Error(`Today table is missing M/A origin badges: ${todayTable}`);
+  }
+  if (todayTable.includes(' IST')) throw new Error('Today table still prints IST');
+  const decisionCard = elements['today-engine-decision'].innerHTML;
+  for (const detail of ['Live preview', 'Committed decision', 'today-score-dial',
+                        'today-trade-decision-pill', 'dial-adx-pill', '19.7', '15M']) {
+    if (!decisionCard.includes(detail)) throw new Error(`missing engine dial detail: ${detail}`);
+  }
+  if (decisionCard.includes('View Trend Engine')) {
+    throw new Error('obsolete Trend Engine link is still present');
+  }
+  if (decisionCard.includes('Latest controller error')) {
+    throw new Error('retired information text is still shown below the dials');
+  }
+  if (!todayAdxPill({trigger_adx: 0}).includes('<strong>0.0</strong>') ||
+      !todayAdxPill({trigger_adx: null}).includes('<strong>—</strong>')) {
+    throw new Error('ADX pill confuses missing ADX with zero');
+  }
+  // The automation text block (current action / regime / trade type /
+  // contract / last action / signal bar closed / last cycle) was retired
+  // with the Cockpit redesign -- the dials, decision and ADX pills remain, the
+  // per-field automation prose does not.
+  if (decisionCard.includes('Current automatic action')) {
+    throw new Error('retired automation detail block is still present');
+  }
+  await closeTodayLiveTrade(0);
+  if (!posted || posted.url !== '/api/square-off?slot=trend' ||
+      posted.body?.target_mode !== 'live') {
+    throw new Error(`LIVE close was not explicitly routed: ${JSON.stringify(posted)}`);
+  }
+  for (const removed of ['Open Positions', 'Engine health']) {
+    if (todayTable.includes(removed)) throw new Error(`non-daily section leaked: ${removed}`);
+  }
+})().catch(error => {
+  console.error(error);
+  process.exitCode = 1;
+});
 """
     result = subprocess.run(
         [NODE, "-e", script],

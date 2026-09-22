@@ -2,7 +2,14 @@
   "permissions": {
     "allow": [
       "PowerShell(Select-String -Path \"D:\\\\LocalGIT\\\\Delta.Exchange\\\\logs\\\\delta_bot.log\" -Pattern \"Signal: BULLISH|Signal: BEARISH|Placing order|BUY|SELL|bullish|bearish\" -CaseSensitive | Select-Object -Last 20 | ForEach-Object { $_.Line })",
-      "PowerShell(Start-Process python -ArgumentList '\"D:\\\\LocalGIT\\\\Delta 4PM Strangle\\\\strangle_4pm_bot.py\"' -WorkingDirectory \"D:\\\\LocalGIT\\\\Delta 4PM Strangle\" -WindowStyle Normal)"
+      "PowerShell(Start-Process python -ArgumentList '\"D:\\\\LocalGIT\\\\Delta 4PM Strangle\\\\strangle_4pm_bot.py\"' -WorkingDirectory \"D:\\\\LocalGIT\\\\Delta 4PM Strangle\" -WindowStyle Normal)",
+      "PowerShell($env:PATH = \"C:\\\\flutter\\\\bin;$env:PATH\"; Set-Location \"D:\\\\AI\\\\Delta.Exchange.Mathi\\\\mv_btc_bot\"; flutter build apk --release)",
+      "Bash(ssh -i DeltaBot.pem -o StrictHostKeyChecking=accept-new -o ConnectTimeout=20 ubuntu@13.207.78.56 \"ls -l /home/ubuntu/mathi/mv_btc_bot/build/app/outputs/flutter-apk/ 2>&1; echo '---'; hostname\")",
+      "Bash(scp -i DeltaBot.pem -o StrictHostKeyChecking=accept-new mv_btc_bot/build/app/outputs/flutter-apk/app-release.apk ubuntu@13.207.78.56:/home/ubuntu/mathi/mv_btc_bot/build/app/outputs/flutter-apk/app-release.apk.new)",
+      "Bash(ssh -i DeltaBot.pem ubuntu@13.207.78.56 \"cd /home/ubuntu/mathi/mv_btc_bot/build/app/outputs/flutter-apk && cp -f app-release.apk app-release.apk.prev && mv -f app-release.apk.new app-release.apk && ls -l\")",
+      "Bash(python -m pytest tests/test_trend_score_auto.py -q)",
+      "Bash(python -m pytest tests/test_trend_score_live_execution.py -q)",
+      "Bash(python -m pytest tests/test_dashboard_trend_score_auto_live_controller.py -q -k \"affordab or required_funds or risk_uses\")"
     ]
   }
 }

@@ -1,6 +1,7 @@
 # start_bots.ps1 — idempotent starter for Mathi's trading stack.
-# Starts Delta_Straddle_Live.py and dashboard.py only if not already running.
-# Used by Task Scheduler at logon and as a 10-minute watchdog.
+# Starts Delta_Straddle_Live.py, dashboard.py and the btc_trend_engine only if
+# not already running. Used by Task Scheduler at logon and as a 10-minute
+# watchdog.
 #
 # IMPORTANT — two Windows gotchas this script works around:
 # 1. When this script runs as a Scheduled Task (SYSTEM), Windows puts the
@@ -55,4 +56,31 @@ if (-not $botRunning) {
 if (-not $dashRunning) {
   $ok = Start-Detached $py "dashboard.py" $dir (Join-Path $dir "logs\dashboard_wmi_stdout.log")
   Add-Content $log "$ts  started dashboard.py (ok=$ok)"
+}
+
+# ── btc_trend_engine (ADR 0001) ─────────────────────────────────────────
+# Same duplicate-owner cleanup as port 5001: exactly one process may own 5055.
+$enginePortOwners = Get-NetTCPConnection -LocalPort 5055 -ErrorAction SilentlyContinue |
+                    Select-Object -ExpandProperty OwningProcess -Unique
+if ($enginePortOwners.Count -gt 1) {
+  foreach ($enginePid in $enginePortOwners) {
+    Stop-Process -Id $enginePid -Force -ErrorAction SilentlyContinue
+  }
+  Add-Content $log "$ts  cleared $($enginePortOwners.Count) conflicting processes on port 5055"
+  Start-Sleep -Seconds 1
+  $enginePortOwners = @()
+}
+
+# Prefer the dedicated venv; fall back to the global interpreter if absent.
+$enginePy = Join-Path $dir ".venv-engine\Scripts\python.exe"
+if (-not (Test-Path $enginePy)) { $enginePy = $py }
+
+$engineRunning = (Get-WmiObject Win32_Process -Filter "name='python.exe'" |
+                  Select-Object -ExpandProperty CommandLine) |
+                 Where-Object { $_ -like "*btc_trend_engine.api.app*" }
+if (-not $engineRunning) {
+  # A stale stop sentinel must not kill the engine we are about to start.
+  Remove-Item (Join-Path $dir "data\engine.stop") -Force -ErrorAction SilentlyContinue
+  $ok = Start-Detached $enginePy "-m btc_trend_engine.api.app" $dir (Join-Path $dir "logs\engine_wmi_stdout.log")
+  Add-Content $log "$ts  started btc_trend_engine (ok=$ok, py=$enginePy)"
 }

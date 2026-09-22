@@ -21,11 +21,18 @@ class TpMonitorSafetyTests(unittest.TestCase):
         self.state_file = root / "state.json"
         self.history_file = root / "history.json"
         self.health_file = root / "health.json"
+        self.stream_file = root / "stream.json"
         self.path_patches = [
             patch.object(tp_monitor, "STATE_FILE", self.state_file),
             patch.object(tp_monitor, "HISTORY_FILE", self.history_file),
             patch.object(tp_monitor, "HEALTH_FILE", self.health_file),
+            patch.object(tp_monitor, "STREAM_FILE", self.stream_file),
             patch.object(tp_monitor, "USER_DIR", root),
+            patch.object(tp_monitor.DeltaMarkPriceStream, "start"),
+            # Most tests exercise the legacy reconciliation branches in
+            # isolation. Exchange-only behavior has a dedicated contract
+            # test below.
+            patch.object(tp_monitor, "EXCHANGE_ONLY_PROTECTION", False),
         ]
         for item in self.path_patches:
             item.start()
@@ -101,6 +108,37 @@ class TpMonitorSafetyTests(unittest.TestCase):
             settings = tp_monitor._slot_settings("trend")
         self.assertEqual(settings["tsl_arm_pnl"], 125)
         self.assertEqual(settings["tsl_trail_pnl"], 40)
+
+    def test_stream_snapshot_replaces_previous_positions_tsl_telemetry(self):
+        self.stream_file.write_text(json.dumps({
+            "product_id": 101,
+            "position_cycle_id": "old-cycle",
+            "protection_revision": 0,
+            "tsl_peak": 238.62,
+            "tsl_armed": True,
+            "tsl_floor": 132.87,
+        }), encoding="utf-8")
+        current = {
+            "product_id": 101,
+            "position_cycle_id": "new-cycle",
+            "protection_revision": 0,
+            "tsl_peak": 7.83,
+            "tsl_armed": False,
+            "tsl_floor": None,
+        }
+
+        tp_monitor.write_stream_snapshot(
+            product_id=current["product_id"],
+            position_cycle_id=current["position_cycle_id"],
+            protection_revision=current["protection_revision"],
+            **tp_monitor._stream_tsl_snapshot(current),
+        )
+
+        stream = json.loads(self.stream_file.read_text(encoding="utf-8"))
+        self.assertEqual(stream["position_cycle_id"], "new-cycle")
+        self.assertEqual(stream["tsl_peak"], 7.83)
+        self.assertFalse(stream["tsl_armed"])
+        self.assertIsNone(stream["tsl_floor"])
 
     def test_realtime_position_endpoint_signs_query_and_distinguishes_failure(self):
         response = Mock()
@@ -196,7 +234,137 @@ class TpMonitorSafetyTests(unittest.TestCase):
         self.assertEqual(health["protection_revision"], 1)
         self.assertTrue(health["continuity_verified"])
 
-    def test_live_score_position_never_adopts_same_product_growth(self):
+    def test_explicit_pyramid_rebases_composite_policy_and_preserves_tsl(self):
+        policy = tp_monitor.premium_percent_protection_policy(
+            100.0, 0.001, 100,
+            poll_secs=10,
+            tp_percent=100,
+            sl_percent=30,
+            tsl_trail_percent=30,
+        )
+        state = self.write_state(
+            lots=100,
+            protection_lots=100,
+            max_protected_lots=100,
+            owned_entry_lots=100,
+            original_owned_entry_lots=100,
+            entry_mark=100.0,
+            original_bot_entry_mark=100.0,
+            contract_value=0.001,
+            position_cycle_id="trend-cycle-test",
+            protection_config=policy,
+            protection_revision=2,
+            tsl_peak=8.0,
+            tsl_armed=True,
+            tsl_floor=4.0,
+            stop_kind="tsl",
+            pending_pyramid_intent={
+                "client_order_id": "pyramid-1",
+                "confirmed_order_id": "order-pyramid-1",
+                "confirmed_filled_lots": 100,
+                "previous_lots": 100,
+                "add_lots": 100,
+                "product_id": 101,
+            },
+        )
+        continuity = self.continuity(
+            size=200, entry=125.0, entries=200,
+            fill_ids=["pyramid-fill"],
+        )
+        with patch.object(tp_monitor, "SLOT", "trend"), \
+             patch.object(tp_monitor, "audit_event") as audit:
+            updated = tp_monitor._adopt_matching_external_trend_lots(
+                state,
+                {"product_id": 101, "size": 200, "entry_price": "125.0"},
+                100,
+                continuity,
+            )
+
+        self.assertEqual(updated["lots"], 200)
+        self.assertEqual(updated["owned_entry_lots"], 200)
+        self.assertEqual(updated["externally_added_lots_adopted"], 0)
+        self.assertEqual(updated["pyramid_count"], 1)
+        self.assertEqual(updated["pyramid_added_lots"], 100)
+        self.assertIsNone(updated["pending_pyramid_intent"])
+        self.assertEqual(updated["position_composition"], "pyramided")
+        self.assertEqual(updated["protection_scope"], "trend_pyramided_composite")
+        self.assertEqual(updated["protection_config"]["entry_premium_usd"], 25.0)
+        self.assertEqual(updated["protection_config"]["tp_target_pnl"], 25.0)
+        self.assertEqual(updated["protection_config"]["sl_target_pnl"], 7.5)
+        self.assertEqual(updated["protection_config"]["tsl_pct"], 30.0)
+        self.assertEqual(updated["protection_config"]["tsl_trail_pnl"], 7.5)
+        self.assertFalse(updated["tsl_armed"])
+        self.assertEqual(updated["tsl_peak"], 0.0)
+        self.assertIsNone(updated["tsl_floor"])
+        self.assertEqual(updated["stop_kind"], "sl")
+        self.assertEqual(updated["tsl_rebase_reason"], "operator_pyramid_composite")
+        self.assertEqual(audit.call_args.args[1], "trend_position_pyramided")
+
+    def test_explicit_average_rebases_composite_policy_and_preserves_tsl(self):
+        policy = tp_monitor.premium_percent_protection_policy(
+            100.0, 0.001, 100,
+            poll_secs=10,
+            tp_percent=100,
+            sl_percent=50,
+            tsl_trail_percent=30,
+        )
+        state = self.write_state(
+            lots=100,
+            protection_lots=100,
+            max_protected_lots=100,
+            owned_entry_lots=100,
+            original_owned_entry_lots=100,
+            entry_mark=100.0,
+            original_bot_entry_mark=100.0,
+            contract_value=0.001,
+            position_cycle_id="trend-cycle-test-avg",
+            protection_config=policy,
+            protection_revision=2,
+            tsl_peak=0.0,
+            tsl_armed=False,
+            tsl_floor=None,
+            stop_kind="sl",
+            pending_average_intent={
+                "client_order_id": "average-1",
+                "confirmed_order_id": "order-average-1",
+                "confirmed_filled_lots": 100,
+                "previous_lots": 100,
+                "add_lots": 100,
+                "product_id": 101,
+            },
+        )
+        continuity = self.continuity(
+            size=200, entry=80.0, entries=200,
+            fill_ids=["average-fill"],
+        )
+        with patch.object(tp_monitor, "SLOT", "trend"), \
+             patch.object(tp_monitor, "audit_event") as audit:
+            updated = tp_monitor._adopt_matching_external_trend_lots(
+                state,
+                {"product_id": 101, "size": 200, "entry_price": "80.0"},
+                100,
+                continuity,
+            )
+
+        self.assertEqual(updated["lots"], 200)
+        self.assertEqual(updated["owned_entry_lots"], 200)
+        self.assertEqual(updated["externally_added_lots_adopted"], 0)
+        self.assertEqual(updated["average_count"], 1)
+        self.assertEqual(updated["average_added_lots"], 100)
+        self.assertIsNone(updated["pending_average_intent"])
+        self.assertEqual(updated["position_composition"], "averaged")
+        self.assertEqual(updated["protection_scope"], "trend_averaged_composite")
+        self.assertEqual(updated["protection_config"]["entry_premium_usd"], 16.0)
+        self.assertEqual(updated["protection_config"]["tp_target_pnl"], 16.0)
+        self.assertEqual(updated["protection_config"]["sl_target_pnl"], 8.0)
+        self.assertEqual(updated["protection_config"]["tsl_pct"], 30.0)
+        self.assertEqual(updated["protection_config"]["tsl_trail_pnl"], 4.8)
+        self.assertFalse(updated["tsl_armed"])
+        self.assertEqual(updated["stop_kind"], "sl")
+        self.assertEqual(updated["tsl_rebase_reason"], "operator_average_composite")
+        self.assertEqual(audit.call_args.args[1], "trend_position_averaged")
+
+    def test_live_score_position_adopts_verified_same_product_growth(self):
         self.write_state(
             lots=3,
             owned_entry_lots=3,
@@ -206,6 +374,7 @@ class TpMonitorSafetyTests(unittest.TestCase):
             position_cycle_id="trend-cycle-test",
             entry_mark=1.0,
             entry_fees_usd=0.10,
+            exchange_protection_supported=False,
             protection_config={
                 "tp_target_pnl": 100,
                 "sl_target_pnl": 50,
@@ -227,6 +396,7 @@ class TpMonitorSafetyTests(unittest.TestCase):
                  return_value=self.continuity(),
              ), \
              patch.object(tp_monitor, "get_order") as get_order, \
+             patch.object(tp_monitor, "get_mark", return_value=1.4), \
              patch.object(tp_monitor, "place_stop_order") as place, \
              patch.object(tp_monitor, "edit_stop_price") as edit, \
              patch.object(tp_monitor, "send_telegram") as telegram, \
@@ -235,23 +405,28 @@ class TpMonitorSafetyTests(unittest.TestCase):
                 tp_monitor.main()
 
         state = self.read_state()
-        self.assertEqual(state["lots"], 3)
+        self.assertEqual(state["lots"], 6)
+        self.assertEqual(state["protection_lots"], 6)
         self.assertEqual(state["owned_entry_lots"], 3)
-        self.assertNotIn("externally_added_lots_adopted", state)
+        self.assertEqual(state["original_owned_entry_lots"], 3)
+        self.assertEqual(state["externally_added_lots_adopted"], 3)
+        self.assertEqual(state["entry_mark"], 1.5)
+        self.assertEqual(state["position_composition"], "mixed_bot_and_external")
+        self.assertEqual(state["protection_scope"], "trend_plus_same_product_external")
         get_order.assert_not_called()
         place.assert_not_called()
         edit.assert_not_called()
         self.assertTrue(any(
-            "fixed-size LIVE score ownership" in call.args[0]
+            "EXTERNAL LOTS PROTECTED" in call.args[0]
             for call in telegram.call_args_list
         ))
         health = json.loads(self.health_file.read_text(encoding="utf-8"))
-        self.assertEqual(health["status"], "degraded")
-        self.assertEqual(health["adoption_status"], "blocked_score_fixed_size")
+        self.assertEqual(health["status"], "healthy")
+        self.assertEqual(health["adoption_status"], "adopted")
         self.assertEqual(health["exchange_position_size"], 6)
-        self.assertEqual(health["protected_lots"], 3)
-        self.assertEqual(health["unprotected_same_product_lots"], 3)
-        self.assertFalse(health["protection_established"])
+        self.assertEqual(health["protected_lots"], 6)
+        self.assertTrue(health["local_fallback_active"])
+        self.assertTrue(health["protection_established"])
 
     def test_failed_resize_keeps_old_orders_and_reports_partial_coverage(self):
         self.write_state(
@@ -682,6 +857,28 @@ class TpMonitorSafetyTests(unittest.TestCase):
         self.assertEqual(row["externally_added_lots_adopted"], 3)
         self.assertEqual(tp_monitor._owned_close_lots(self.read_state()), 6)
 
+    def test_closed_history_preserves_manual_cockpit_origin(self):
+        self.write_state(
+            status="CLOSED", exit_mark=2.0, gross_pnl_usd=3.0,
+            pnl_usd=2.8, exit_time_utc="01:10:00", closed_lots=10,
+            ownership="manual_cockpit_live",
+            entry_trigger="manual_cockpit_sell_move",
+            entry_classification="manual_cockpit",
+            strategy="manual_cockpit",
+            manual_cockpit_action="sell_move",
+            score_auto_signal_key="manual-cockpit|sell_move|abc123",
+        )
+
+        self.assertTrue(tp_monitor.append_history(self.read_state()))
+        row = json.loads(self.history_file.read_text(encoding="utf-8"))[0]
+        self.assertEqual(row["ownership"], "manual_cockpit_live")
+        self.assertEqual(row["entry_trigger"], "manual_cockpit_sell_move")
+        self.assertEqual(row["entry_classification"], "manual_cockpit")
+        self.assertEqual(row["manual_cockpit_action"], "sell_move")
+        self.assertEqual(
+            row["signal_key"], "manual-cockpit|sell_move|abc123",
+        )
+
     def test_sigterm_handler_keeps_open_exchange_orders(self):
         self.write_state(tsl_stop_order_id="sl-1", tp_stop_order_id="tp-1")
         with patch.object(tp_monitor.signal, "signal") as register:
@@ -775,6 +972,126 @@ class TpMonitorSafetyTests(unittest.TestCase):
             "pending-tp-order",
         )
 
+    def test_cleanup_clears_conclusively_absent_protection_journal(self):
+        """A POST intent that never became an order must not block tomorrow."""
+        intent = {
+            "client_order_id": "pending-stop-never-created",
+            "product_id": 101,
+            "side": "sell",
+            "lots": 3,
+            "stop_price": 0.1,
+            "stop_order_type": "stop_loss_order",
+        }
+        self.write_state(pending_stop_protection=intent)
+        with patch.object(
+                tp_monitor, "get_order_by_client_id",
+                return_value=({}, True)), \
+             patch.object(tp_monitor, "cancel_order") as cancel:
+            ok = tp_monitor.remove_exchange_protection(
+                self.read_state(), confirmed_closed=True,
+                reason="unit-test settled flat cleanup",
+            )
+
+        self.assertTrue(ok)
+        cancel.assert_not_called()
+        state = self.read_state()
+        self.assertIsNone(state["pending_stop_protection"])
+        self.assertEqual(
+            state["last_pending_stop_protection_client_order_id"],
+            "pending-stop-never-created",
+        )
+
+    def test_settled_trend_flat_fallback_requires_aggregate_and_fill_proof(self):
+        state = self.write_state(
+            settlement="2026-07-15T12:00:00Z",
+            original_owned_entry_lots=10,
+        )
+        response = Mock()
+        response.json.return_value = {
+            "success": True,
+            "result": [{"product_id": 202, "size": "4"}],
+        }
+        continuity = {
+            "verified": True,
+            "status": "closed",
+            "signed_size": 0,
+        }
+        with patch.object(tp_monitor, "SLOT", "trend"), \
+             patch.object(tp_monitor.requests, "get", return_value=response) as get, \
+             patch.object(tp_monitor, "_sign", return_value={"x": "signed"}), \
+             patch.object(
+                 tp_monitor, "_trend_cycle_continuity",
+                 return_value=continuity,
+             ) as cycle:
+            accepted, reason, proof = tp_monitor._settled_trend_flat_evidence(
+                state, datetime(2026, 7, 15, 12, 1, tzinfo=timezone.utc),
+            )
+
+        self.assertTrue(accepted, reason)
+        self.assertIs(proof, continuity)
+        get.assert_called_once_with(
+            f"{tp_monitor.BASE_URL}/v2/positions/margined",
+            headers={"x": "signed"}, timeout=8,
+        )
+        cycle.assert_called_once_with(
+            state, {"product_id": 101, "size": 0},
+        )
+
+    def test_settled_trend_flat_fallback_rejects_live_aggregate_position(self):
+        state = self.write_state(settlement="2026-07-15T12:00:00Z")
+        response = Mock()
+        response.json.return_value = {
+            "success": True,
+            "result": [{"product_id": 101, "size": "10"}],
+        }
+        with patch.object(tp_monitor, "SLOT", "trend"), \
+             patch.object(tp_monitor.requests, "get", return_value=response), \
+             patch.object(tp_monitor, "_sign", return_value={}), \
+             patch.object(tp_monitor, "_trend_cycle_continuity") as cycle:
+            accepted, reason, proof = tp_monitor._settled_trend_flat_evidence(
+                state, datetime(2026, 7, 15, 12, 1, tzinfo=timezone.utc),
+            )
+
+        self.assertFalse(accepted)
+        self.assertIsNone(proof)
+        self.assertIn("still report", reason)
+        cycle.assert_not_called()
+
+    def test_settled_trend_flat_fallback_rejects_incomplete_fill_ledger(self):
+        state = self.write_state(settlement="2026-07-15T12:00:00Z")
+        response = Mock()
+        response.json.return_value = {"success": True, "result": []}
+        with patch.object(tp_monitor, "SLOT", "trend"), \
+             patch.object(tp_monitor.requests, "get", return_value=response), \
+             patch.object(tp_monitor, "_sign", return_value={}), \
+             patch.object(tp_monitor, "_trend_cycle_continuity", return_value={
+                 "verified": False,
+                 "status": "history_unavailable",
+                 "reason": "fill history timed out",
+             }):
+            accepted, reason, proof = tp_monitor._settled_trend_flat_evidence(
+                state, datetime(2026, 7, 15, 12, 1, tzinfo=timezone.utc),
+            )
+
+        self.assertFalse(accepted)
+        self.assertIsNone(proof)
+        self.assertIn("fill history timed out", reason)
+
+    def test_settled_trend_flat_fallback_never_runs_before_settlement(self):
+        state = self.write_state(settlement="2026-07-15T12:00:00Z")
+        with patch.object(tp_monitor, "SLOT", "trend"), \
+             patch.object(tp_monitor.requests, "get") as get, \
+             patch.object(tp_monitor, "_trend_cycle_continuity") as cycle:
+            accepted, reason, proof = tp_monitor._settled_trend_flat_evidence(
+                state, datetime(2026, 7, 15, 11, 59, tzinfo=timezone.utc),
+            )
+
+        self.assertFalse(accepted)
+        self.assertIsNone(proof)
+        self.assertIn("not settled", reason)
+        get.assert_not_called()
+        cycle.assert_not_called()
+
     def test_cleanup_retains_inconclusive_protection_journal(self):
         intent = {
             "client_order_id": "pending-stop-client",
@@ -830,7 +1147,7 @@ class TpMonitorSafetyTests(unittest.TestCase):
         health = json.loads(self.health_file.read_text(encoding="utf-8"))
         self.assertEqual(health["status"], "healthy")
 
-    def test_unsupported_exchange_protection_alerts_and_uses_local_fallback(self):
+    def test_unsupported_exchange_protection_uses_quiet_healthy_local_fallback(self):
         self.write_state(protection_config={
             "tp_target_pnl": 100, "sl_target_pnl": 50,
             "tsl_arm_pnl": 0, "tsl_trail_pnl": 0, "poll_secs": 30,
@@ -846,16 +1163,85 @@ class TpMonitorSafetyTests(unittest.TestCase):
              patch.object(tp_monitor, "place_stop_order", return_value=unsupported), \
              patch.object(tp_monitor, "get_order_by_client_id",
                           return_value=({}, True)), \
+             patch.object(tp_monitor, "close_position") as close, \
              patch.object(tp_monitor, "send_telegram") as telegram, \
              patch.object(tp_monitor.time, "sleep", side_effect=_StopLoop):
             with self.assertRaises(_StopLoop):
                 tp_monitor.main()
-        telegram.assert_called_once()
-        self.assertIn("local monitor fallback", telegram.call_args.args[0])
+        close.assert_not_called()
+        telegram.assert_not_called()
         health = json.loads(self.health_file.read_text(encoding="utf-8"))
-        self.assertEqual(health["status"], "degraded")
+        self.assertEqual(health["status"], "healthy")
+        self.assertEqual(health["last_error"], "")
+        self.assertEqual(health["protection_runtime_mode"], "local_monitor")
+        self.assertTrue(health["protection_established"])
         self.assertTrue(health["local_fallback_active"])
         self.assertFalse(health["exchange_protection_complete"])
+        state = self.read_state()
+        self.assertIsNone(state.get("pending_stop_protection"))
+        self.assertIsNone(state.get("pending_tp_protection"))
+
+    def test_opt_in_exchange_only_protection_triggers_safety_close(self):
+        self.write_state(protection_config={
+            "tp_target_pnl": 100, "sl_target_pnl": 50,
+            "tsl_arm_pnl": 0, "tsl_trail_pnl": 0, "poll_secs": 30,
+        })
+        unsupported = {"success": False, "error": {"code": "unsupported"}}
+        with patch.object(tp_monitor, "EXCHANGE_ONLY_PROTECTION", True), \
+             patch.object(tp_monitor, "REMOVE_PROTECTION", False), \
+             patch.object(tp_monitor, "install_signal_handlers"), \
+             patch.object(tp_monitor, "get_exchange_size", return_value=10), \
+             patch.object(tp_monitor, "get_exchange_position", return_value={
+                 "product_id": 101, "size": 10, "entry_price": "1.0",
+             }), \
+             patch.object(tp_monitor, "get_mark", return_value=1.0), \
+             patch.object(tp_monitor, "place_stop_order", return_value=unsupported), \
+             patch.object(tp_monitor, "get_order_by_client_id",
+                          return_value=({}, True)), \
+             patch.object(tp_monitor, "close_position", return_value=True) as close, \
+             patch.object(tp_monitor, "remove_exchange_protection",
+                          return_value=True), \
+             patch.object(tp_monitor, "send_telegram") as telegram, \
+             patch.object(tp_monitor.time, "sleep", side_effect=_StopLoop):
+            self.assertEqual(tp_monitor.main(), 0)
+        close.assert_called_once()
+        self.assertEqual(
+            close.call_args.args[3], "exchange_protection_unavailable",
+        )
+        telegram.assert_called_once()
+        health = json.loads(self.health_file.read_text(encoding="utf-8"))
+        self.assertEqual(health["status"], "closed")
+        self.assertEqual(health["protection_runtime_mode"], "exchange_required")
+        self.assertFalse(health["protection_established"])
+
+    def test_local_fallback_alerts_only_after_three_consecutive_poll_failures(self):
+        self.write_state(
+            exchange_protection_supported=False,
+            protection_config={
+                "tp_target_pnl": 100, "sl_target_pnl": 50,
+                "tsl_arm_pnl": 0, "tsl_trail_pnl": 0, "poll_secs": 30,
+            },
+        )
+        with patch.object(tp_monitor, "REMOVE_PROTECTION", False), \
+             patch.object(tp_monitor, "install_signal_handlers"), \
+             patch.object(tp_monitor, "get_exchange_size", return_value=10), \
+             patch.object(tp_monitor, "get_exchange_position", return_value={
+                 "product_id": 101, "size": 10, "entry_price": "1.0",
+             }), \
+             patch.object(tp_monitor, "get_mark",
+                          side_effect=RuntimeError("ticker unavailable")), \
+             patch.object(tp_monitor, "send_telegram") as telegram, \
+             patch.object(tp_monitor.time, "sleep",
+                          side_effect=[None, None, _StopLoop()]):
+            with self.assertRaises(_StopLoop):
+                tp_monitor.main()
+
+        telegram.assert_called_once()
+        message = telegram.call_args.args[0]
+        self.assertIn("local protection failed 3 consecutive checks", message)
+        health = json.loads(self.health_file.read_text(encoding="utf-8"))
+        self.assertEqual(health["status"], "degraded")
+        self.assertEqual(health["consecutive_errors"], 3)
 
     def test_close_does_not_remove_protection_until_zero_position_is_confirmed(self):
         self.write_state(tp_stop_order_id="tp-1")
@@ -1120,6 +1506,87 @@ class TpMonitorSafetyTests(unittest.TestCase):
         )
         telegram.assert_not_called()
 
+    def test_protection_only_external_terminal_protection_skips_fill_ledger_redirect(
+        self,
+    ):
+        """A protection-only hand-off's own confirmed stop fill is authoritative.
+
+        Companion to the anchored-Trend test above, which proves an ordinary
+        controller-owned position *does* redirect through fill-ledger
+        reconstruction here. A protection-only hand-off has no bot fill
+        ledger at any stage of its life, and this terminal order is already
+        proof of its one and only fill -- it must finalize directly rather
+        than being routed into a fresh, page-size-limited order-history
+        search for an order this call already holds proof of.
+        """
+        self.write_state(
+            lots=3, owned_entry_lots=3, original_owned_entry_lots=3,
+            original_bot_entry_mark=1.0,
+            continuity_anchor_utc="2026-07-15T01:02:03+00:00",
+            tp_stop_order_id="tp-terminal",
+            ownership="external_protection_only",
+            operator_authorized_protection_only=True,
+            entry_trigger="operator_authorized_external_protection",
+        )
+        terminal = {
+            **self.protection_order("tp-terminal", 3, "tp"),
+            "state": "closed", "unfilled_size": 0,
+            "filled_size": 3, "average_fill_price": "2.0",
+            "commission": "0.02",
+        }
+        with patch.object(tp_monitor, "SLOT", "trend"), \
+             patch.object(tp_monitor, "REMOVE_PROTECTION", False), \
+             patch.object(tp_monitor, "install_signal_handlers"), \
+             patch.object(tp_monitor, "get_exchange_size", return_value=0), \
+             patch.object(tp_monitor, "get_order", return_value=terminal), \
+             patch.object(
+                 tp_monitor, "_finalize_external_flat_close_locked",
+             ) as ledger, \
+             patch.object(
+                 tp_monitor, "remove_exchange_protection", return_value=True,
+             ), \
+             patch.object(tp_monitor, "send_telegram"):
+            self.assertEqual(tp_monitor.main(), 0)
+
+        ledger.assert_not_called()
+        persisted = self.read_state()
+        self.assertEqual(persisted["status"], "CLOSED")
+        self.assertEqual(persisted["exit_mark"], 2.0)
+        self.assertAlmostEqual(persisted["gross_pnl_usd"], 3.0)
+
+    def test_protection_only_external_confirmed_close_skips_fill_ledger_redirect(
+        self,
+    ):
+        """Same principle as above, for the confirmed-market-close entry point."""
+        state = self.write_state(
+            ownership="external_protection_only",
+            operator_authorized_protection_only=True,
+            entry_trigger="operator_authorized_external_protection",
+            continuity_anchor_utc="2026-07-15T01:02:03+00:00",
+            entry_mark=1.0, contract_value=1.0, lots=10, side="long",
+            pending_close_order_id="close-1",
+            pending_close_client_order_id="close-1-client",
+        )
+        order = {
+            "id": "close-1", "client_order_id": "close-1-client",
+            "average_fill_price": "2.0", "size": 10,
+            "filled_size": 10, "unfilled_size": 0, "commission": "0.12",
+        }
+        with patch.object(tp_monitor, "SLOT", "trend"), \
+             patch.object(
+                 tp_monitor, "_finalize_external_flat_close_locked",
+             ) as redirect:
+            closed = tp_monitor._finalize_confirmed_market_close_locked(
+                state, order, mark=2.0, lots=10, reason="take_profit",
+            )
+
+        redirect.assert_not_called()
+        self.assertTrue(closed)
+        persisted = self.read_state()
+        self.assertEqual(persisted["status"], "CLOSED")
+        self.assertEqual(persisted["exit_mark"], 2.0)
+        self.assertAlmostEqual(persisted["gross_pnl_usd"], 10.0)
+
     def test_complete_trend_fill_ledger_clears_consumed_close_journal(self):
         state = self.write_state(
             original_bot_entry_fee_usd=0.10,
@@ -1168,6 +1635,51 @@ class TpMonitorSafetyTests(unittest.TestCase):
         self.assertIsNone(closed["pending_close_client_order_id"])
         self.assertIsNone(closed["pending_close_order_id"])
         self.assertFalse(closed["pending_close_post_boundary"])
+
+    def test_protection_only_external_close_skips_fill_ledger_and_uses_order_history(
+        self,
+    ):
+        """A hand-off position has no bot fill ledger at any point in its life.
+
+        Regression test: ``_finalize_trend_flat_fill_ledger`` was attempted
+        for every SLOT=="trend" state with a resolvable entry timestamp,
+        including an operator-authorized protection-only hand-off -- and its
+        failure then suppressed the fallback to the real Delta order-history
+        lookup entirely, leaving such a position's accounting permanently
+        "pending". The authenticated close order must be used instead.
+        """
+        state = self.write_state(
+            ownership="external_protection_only",
+            operator_authorized_protection_only=True,
+            entry_trigger="operator_authorized_external_protection",
+            continuity_anchor_utc="2026-07-15T01:02:03+00:00",
+            entry_mark=1.0, contract_value=1.0, lots=10, side="long",
+        )
+        order = {
+            "id": "close-1", "average_fill_price": "1.5",
+            "size": 10, "filled_size": 10, "unfilled_size": 0,
+            "updated_at": "2026-07-15T02:00:00Z",
+        }
+        with patch.object(tp_monitor, "SLOT", "trend"), \
+             patch.object(
+                 tp_monitor, "_finalize_trend_flat_fill_ledger",
+             ) as ledger, \
+             patch.object(
+                 tp_monitor, "_resolve_external_close_order",
+                 return_value=(order, True, ""),
+             ):
+            closed = tp_monitor._finalize_external_flat_close_locked(state)
+
+        ledger.assert_not_called()
+        self.assertTrue(closed)
+        persisted = self.read_state()
+        self.assertEqual(persisted["status"], "CLOSED")
+        self.assertEqual(persisted["exit_mark"], 1.5)
+        self.assertAlmostEqual(persisted["gross_pnl_usd"], 5.0)
+        self.assertEqual(
+            persisted["exit_reconciliation_status"], "resolved_order_history",
+        )
+        self.assertIsNotNone(persisted["pnl_usd"])
 
     def test_closed_pending_worker_retries_once_then_repairs_on_later_run(self):
         self.write_state(
@@ -2370,6 +2882,323 @@ class TpMonitorSafetyTests(unittest.TestCase):
         )
         self.assertTrue(ledger["fill_fees_complete"])
 
+    def test_fresh_position_tsl_arming_does_not_clamp_floor_to_zero(self):
+        # Entry: 789.0 * 0.001 * 25 lots = $19.725 entry premium
+        policy = tp_monitor.premium_percent_protection_policy(
+            789.0, 0.001, 25,
+            poll_secs=10,
+            tp_percent=100,
+            sl_percent=50,
+            tsl_trail_percent=25,
+        )
+        self.write_state(
+            lots=25, owned_entry_lots=25, original_owned_entry_lots=25,
+            entry_mark=789.0, original_bot_entry_mark=789.0,
+            contract_value=0.001, symbol="P-BTC-81200-200926",
+            product_id=101, side="long",
+            tsl_floor=None, tsl_peak=0.0, tsl_armed=False,
+            stop_kind="sl",
+            protection_config=policy,
+        )
+        orders_by_id = {}
+        placed_stops = []
+        def fake_place_stop(pid, side, sz, pr, kind, client_order_id=None):
+            placed_stops.append((sz, pr, kind))
+            oid = f"tsl-{len(placed_stops)}"
+            ord_dict = {
+                "id": oid, "product_id": pid, "state": "open",
+                "size": sz, "unfilled_size": sz, "filled_size": 0, "side": side,
+                "reduce_only": True, "order_type": "market_order",
+                "stop_order_type": kind, "stop_trigger_method": "mark_price",
+                "stop_price": str(pr), "client_order_id": client_order_id,
+            }
+            orders_by_id[oid] = ord_dict
+            return {"result": ord_dict}
+
+        # Mark price ticks up slightly to 789.04 (+0.001 USD PnL) -> arms TSL
+        with patch.object(tp_monitor, "SLOT", "trend"), \
+             patch.object(tp_monitor, "REMOVE_PROTECTION", False), \
+             patch.object(tp_monitor, "install_signal_handlers"), \
+             patch.object(tp_monitor, "get_exchange_size", return_value=25), \
+             patch.object(tp_monitor, "get_exchange_position", return_value={
+                 "product_id": 101, "size": 25, "entry_price": "789.0",
+             }), \
+             patch.object(tp_monitor, "_trend_cycle_continuity",
+                          return_value=self.continuity(size=25, entry=789.0)), \
+             patch.object(tp_monitor, "get_mark", return_value=789.04), \
+             patch.object(tp_monitor, "place_stop_order", side_effect=fake_place_stop), \
+             patch.object(tp_monitor, "get_order", side_effect=lambda oid: orders_by_id.get(oid, {})), \
+             patch.object(tp_monitor, "send_telegram"), \
+             patch.object(tp_monitor.time, "sleep", side_effect=_StopLoop):
+            with self.assertRaises(_StopLoop):
+                tp_monitor.main()
+
+        state = self.read_state()
+        self.assertTrue(state["tsl_armed"])
+        # The trail floor must be negative (~ -4.93 USD), NOT clamped to 0.0 (breakeven)!
+        self.assertIsNotNone(state["tsl_floor"])
+        self.assertLess(state["tsl_floor"], 0.0)
+        expected_floor = round(0.001 - 19.725 * 0.25, 2)
+        self.assertEqual(round(state["tsl_floor"], 2), expected_floor)
+        # Verify the placed trailing stop price is well below entry price (789.0), not clamped at 789.0
+        tsl_orders = [item for item in placed_stops if item[2] == "stop_loss_order"]
+        self.assertTrue(len(tsl_orders) >= 1)
+        placed_price = tsl_orders[-1][1]
+        self.assertLess(placed_price, 789.0)
+        self.assertAlmostEqual(placed_price, 591.8, delta=0.5)
+
+    def test_pyramided_position_preserves_locked_tsl_floor_in_loop(self):
+        # A position that already locked in +4.0 USD before pyramiding
+        policy = tp_monitor.premium_percent_protection_policy(
+            789.0, 0.001, 50,
+            poll_secs=10,
+            tp_percent=100,
+            sl_percent=50,
+            tsl_trail_percent=25,
+        )
+        self.write_state(
+            lots=50, owned_entry_lots=50, original_owned_entry_lots=25,
+            entry_mark=789.0, original_bot_entry_mark=789.0,
+            contract_value=0.001, symbol="P-BTC-81200-200926",
+            product_id=101, side="long",
+            position_composition="pyramided",
+            tsl_floor=4.0, tsl_peak=8.0, tsl_armed=True,
+            stop_kind="tsl",
+            tsl_stop_order_id="old-tsl", stop_lots=50,
+            protection_config=policy,
+        )
+        with patch.object(tp_monitor, "SLOT", "trend"), \
+             patch.object(tp_monitor, "REMOVE_PROTECTION", False), \
+             patch.object(tp_monitor, "install_signal_handlers"), \
+             patch.object(tp_monitor, "get_exchange_size", return_value=50), \
+             patch.object(tp_monitor, "get_exchange_position", return_value={
+                 "product_id": 101, "size": 50, "entry_price": "789.0",
+             }), \
+             patch.object(tp_monitor, "_trend_cycle_continuity",
+                          return_value=self.continuity(size=50, entry=789.0)), \
+             patch.object(tp_monitor, "get_mark", return_value=789.0), \
+             patch.object(tp_monitor, "send_telegram"), \
+             patch.object(tp_monitor.time, "sleep", side_effect=_StopLoop):
+            with self.assertRaises(_StopLoop):
+                tp_monitor.main()
+
+        state = self.read_state()
+        self.assertTrue(state["tsl_armed"])
+        # Even though fresh trail from mark 789.0 would be negative, the locked +4.0 floor is preserved!
+        self.assertGreaterEqual(state["tsl_floor"], 4.0)
+
+    def _capture_on_realtime_mark(self, state, *, initial_mark=875.0):
+        callback_box = []
+        def capture_stream_init(_self, symbol, on_mark, on_status=None):
+            callback_box.append(on_mark)
+
+        active = lambda order_id: self.protection_order(
+            order_id, state["lots"], "tp" if str(order_id).startswith("tp") else "stop",
+        )
+        fake_place = lambda _p, _side, lots, _price, kind, **_kw: {
+            "success": True, "result": self.protection_order(f"{kind}-order", lots, kind),
+        }
+        self.health_file.write_text(json.dumps({
+            "status": "healthy",
+            "product_id": state["product_id"],
+            "protection_revision": int(state.get("protection_revision") or 0),
+            "position_cycle_id": str(state.get("position_cycle_id") or ""),
+            "heartbeat_utc": datetime.now(timezone.utc).isoformat(),
+            "continuity_verified": True,
+            "protection_established": True,
+            "local_fallback_active": True,
+            "local_stop_fallback_active": True,
+        }), encoding="utf-8")
+        with patch.object(tp_monitor.DeltaMarkPriceStream, "__init__", capture_stream_init), \
+             patch.object(tp_monitor, "SLOT", "trend"), \
+             patch.object(tp_monitor, "REMOVE_PROTECTION", False), \
+             patch.object(tp_monitor, "install_signal_handlers"), \
+             patch.object(tp_monitor, "place_stop_order", side_effect=fake_place), \
+             patch.object(tp_monitor, "edit_stop_price", return_value={"success": True}), \
+             patch.object(tp_monitor, "get_exchange_size", return_value=state["lots"]), \
+             patch.object(tp_monitor, "get_exchange_position", return_value={
+                 "product_id": state["product_id"], "size": state["lots"], "entry_price": str(state["entry_mark"]),
+             }), \
+             patch.object(tp_monitor, "_trend_cycle_continuity",
+                          return_value=self.continuity(size=state["lots"], entry=state["entry_mark"])), \
+             patch.object(tp_monitor, "get_order", side_effect=lambda oid: active(oid)), \
+             patch.object(tp_monitor, "get_mark", return_value=initial_mark), \
+             patch.object(tp_monitor, "send_telegram"), \
+             patch.object(tp_monitor.time, "sleep", side_effect=_StopLoop):
+            with self.assertRaises(_StopLoop):
+                tp_monitor.main()
+        self.assertTrue(len(callback_box) > 0, "Failed to capture _on_realtime_mark")
+        return callback_box[0]
+
+    def test_dollar_tsl_not_armed_when_peak_below_arm_threshold(self):
+        # Scenario from user screenshot:
+        # Contract P-BTC-87200-220926, entry 875.0, lots 200, cv 0.001
+        # Config: arm = 150.0, trail = 150.0, TP = 1034.0, SL = 517.0
+        # Peak mark 999.75 -> Peak PnL = (999.75 - 875) * 0.001 * 200 = 24.95
+        state = self.write_state(
+            lots=200, owned_entry_lots=200, original_owned_entry_lots=200,
+            entry_mark=875.0, original_bot_entry_mark=875.0,
+            contract_value=0.001, symbol="P-BTC-87200-220926",
+            product_id=101, side="long",
+            tsl_peak=24.95, tsl_armed=False, tsl_floor=None,
+            stop_kind="sl",
+            protection_config={
+                "tp_target_pnl": 1034.0,
+                "sl_target_pnl": 517.0,
+                "tsl_arm_pnl": 150.0,
+                "tsl_trail_pnl": 150.0,
+                "poll_secs": 10,
+            },
+        )
+        # 1. Telemetry snapshot check
+        snap = tp_monitor._stream_tsl_snapshot(state)
+        self.assertFalse(snap["tsl_armed"])
+        self.assertIsNone(snap["tsl_floor"])
+        self.assertEqual(snap["tsl_peak"], 24.95)
+
+        on_mark = self._capture_on_realtime_mark(state, initial_mark=875.0)
+
+        # 2. Realtime mark callback check at mark 999.75 (PnL = +24.95)
+        # Should not arm because 24.95 < 150.0
+        with patch.object(tp_monitor, "close_position", return_value=False) as close_pos:
+            on_mark(999.75, 1_000_000, "ws")
+            close_pos.assert_not_called()
+
+        updated = self.read_state()
+        self.assertFalse(updated.get("tsl_armed", False))
+        self.assertIsNone(updated.get("tsl_floor"))
+        self.assertEqual(updated.get("tsl_peak"), 24.95)
+
+        # 3. Realtime mark callback at mark 869.0 (PnL = -1.20)
+        # Price dips into slight negative; should NOT trigger trailing stop!
+        with patch.object(tp_monitor, "close_position", return_value=False) as close_pos:
+            on_mark(869.0, 2_000_000, "ws")
+            close_pos.assert_not_called()
+
+    def test_dollar_tsl_arms_and_trails_when_peak_reaches_arm_threshold(self):
+        state = self.write_state(
+            lots=200, owned_entry_lots=200, original_owned_entry_lots=200,
+            entry_mark=875.0, original_bot_entry_mark=875.0,
+            contract_value=0.001, symbol="P-BTC-87200-220926",
+            product_id=101, side="long",
+            exchange_protection_supported=False,
+            tsl_peak=0.0, tsl_armed=False, tsl_floor=None,
+            stop_kind="sl",
+            protection_config={
+                "tp_target_pnl": 1034.0,
+                "sl_target_pnl": 517.0,
+                "tsl_arm_pnl": 150.0,
+                "tsl_trail_pnl": 150.0,
+                "tsl_lock_min_pnl": 0.0,
+                "poll_secs": 10,
+            },
+        )
+        on_mark = self._capture_on_realtime_mark(state, initial_mark=875.0)
+
+        # Mark reaches 1625.0 -> PnL = (1625 - 875) * 0.001 * 200 = 150.0
+        with patch.object(tp_monitor, "close_position", return_value=False) as close_pos:
+            on_mark(1625.0, 1_000_000, "ws")
+            close_pos.assert_not_called()
+
+        armed_state = self.read_state()
+        self.assertTrue(armed_state["tsl_armed"])
+        self.assertEqual(armed_state["tsl_peak"], 150.0)
+        # Floor = max(0.0, 150.0 - 150.0) = 0.0
+        self.assertEqual(armed_state["tsl_floor"], 0.0)
+
+        # Mark rises further to 1725.0 -> PnL = 170.0
+        with patch.object(tp_monitor, "close_position", return_value=False) as close_pos:
+            on_mark(1725.0, 2_000_000, "ws")
+            close_pos.assert_not_called()
+
+        higher_state = self.read_state()
+        self.assertTrue(higher_state["tsl_armed"])
+        self.assertEqual(higher_state["tsl_peak"], 170.0)
+        # Floor = max(0.0, 170.0 - 150.0) = 20.0
+        self.assertEqual(higher_state["tsl_floor"], 20.0)
+
+        # Mark pulls back to 950.0 -> PnL = (950 - 875) * 0.001 * 200 = 15.0 <= floor (20.0)
+        # Now trailing stop SHOULD trigger
+        with patch.object(tp_monitor, "_close_position_locked", return_value=True) as close_pos:
+            on_mark(950.0, 3_000_000, "ws")
+            close_pos.assert_called_once()
+            self.assertEqual(close_pos.call_args[0][3], "trailing_stop")
+
+    def test_dollar_tsl_stale_armed_flag_purged_on_startup_if_peak_insufficient(self):
+        # Corrupted state with tsl_armed=True and floor=0.0 despite peak=24.95 < arm=150.0
+        self.write_state(
+            lots=200, owned_entry_lots=200, original_owned_entry_lots=200,
+            entry_mark=875.0, original_bot_entry_mark=875.0,
+            contract_value=0.001, symbol="P-BTC-87200-220926",
+            product_id=101, side="long",
+            tsl_peak=24.95, tsl_armed=True, tsl_floor=0.0,
+            stop_kind="tsl",
+            protection_config={
+                "tp_target_pnl": 1034.0,
+                "sl_target_pnl": 517.0,
+                "tsl_arm_pnl": 150.0,
+                "tsl_trail_pnl": 150.0,
+                "poll_secs": 10,
+            },
+        )
+        active = lambda order_id: self.protection_order(
+            order_id, 200, "tp" if str(order_id).startswith("tp") else "stop",
+        )
+        with patch.object(tp_monitor, "SLOT", "trend"), \
+             patch.object(tp_monitor, "REMOVE_PROTECTION", False), \
+             patch.object(tp_monitor, "install_signal_handlers"), \
+             patch.object(tp_monitor, "get_exchange_size", return_value=200), \
+             patch.object(tp_monitor, "get_exchange_position", return_value={
+                 "product_id": 101, "size": 200, "entry_price": "875.0",
+             }), \
+             patch.object(tp_monitor, "_trend_cycle_continuity",
+                          return_value=self.continuity(size=200, entry=875.0)), \
+             patch.object(tp_monitor, "get_order", side_effect=lambda oid: active(oid)), \
+             patch.object(tp_monitor, "get_mark", return_value=869.0), \
+             patch.object(tp_monitor, "close_position") as close_pos, \
+             patch.object(tp_monitor, "send_telegram"), \
+             patch.object(tp_monitor.time, "sleep", side_effect=_StopLoop):
+            with self.assertRaises(_StopLoop):
+                tp_monitor.main()
+            close_pos.assert_not_called()
+
+        # Telemetry snapshot must report disarmed
+        snap = tp_monitor._stream_tsl_snapshot(self.read_state())
+        self.assertFalse(snap["tsl_armed"])
+        self.assertIsNone(snap["tsl_floor"])
+
+
+class MarkPriceStreamTests(unittest.TestCase):
+    def test_compact_mark_price_frame_is_validated_and_monotonic(self):
+        frame = json.dumps({
+            "type": "mark_price", "sy": "MARK:C-BTC-64000-030826",
+            "p": "423.125", "ts": 1_754_202_000_000_000,
+        })
+        self.assertEqual(
+            tp_monitor.parse_mark_price_frame(
+                frame, "C-BTC-64000-030826", last_timestamp=0,
+            ),
+            (423.125, 1_754_202_000_000_000),
+        )
+        self.assertIsNone(tp_monitor.parse_mark_price_frame(
+            frame, "P-BTC-64000-030826", last_timestamp=0,
+        ))
+        self.assertIsNone(tp_monitor.parse_mark_price_frame(
+            frame, "C-BTC-64000-030826",
+            last_timestamp=1_754_202_000_000_000,
+        ))
+
+    def test_heartbeat_and_invalid_prices_never_reach_protection(self):
+        self.assertIsNone(tp_monitor.parse_mark_price_frame(
+            {"type": "heartbeat", "sy": "MARK:C-BTC", "ts": 1}, "C-BTC",
+        ))
+        self.assertIsNone(tp_monitor.parse_mark_price_frame(
+            {"type": "mark_price", "sy": "MARK:C-BTC", "p": "nan", "ts": 2},
+            "C-BTC",
+        ))
+
 
 if __name__ == "__main__":
     unittest.main()
+
+

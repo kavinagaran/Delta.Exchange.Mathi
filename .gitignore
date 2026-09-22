@@ -27,7 +27,13 @@ mv_btc_bot/linux/flutter/ephemeral/
 mv_btc_bot/macos/Flutter/ephemeral/
 mv_btc_bot/windows/flutter/ephemeral/
 mv_btc_bot/.flutter-plugins*
+mv_btc_bot/test/failures/
 
 # SSH keys — never commit
 *.pem
 *.ppk
+
+# Trend Engine data store
+data/
+ws_probe_samples.json
+test_output.txt

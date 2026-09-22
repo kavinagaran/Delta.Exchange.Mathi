@@ -1,0 +1,21 @@
+[Unit]
+Description=BTC BOT MOVE bot for account %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/mathi
+Environment=BOT_USER=%i
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/ubuntu/mathi/venv/bin/python Delta_Straddle_Live.py
+Restart=always
+RestartSec=10
+KillSignal=SIGTERM
+TimeoutStopSec=45
+StandardOutput=append:/home/ubuntu/mathi/logs/bot-%i.log
+StandardError=append:/home/ubuntu/mathi/logs/bot-%i.log
+
+[Install]
+WantedBy=multi-user.target
