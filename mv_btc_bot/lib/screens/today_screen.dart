@@ -338,12 +338,12 @@ class _TodayScreenState extends State<TodayScreen> {
             Text('TP: ${_money(_number(protection['tp_target_pnl']) ?? 0)}'),
             Text('SL: ${_money(_number(protection['sl_target_pnl']) ?? 0)}'),
             Text(
-              'TSL giveback (TSL*2): '
+              'TSL giveback: '
               '${_money(_number(protection['tsl_trail_pnl']) ?? 0)} '
               '(${protection['tsl_pct'] ?? 0}%)',
             ),
             Text(
-              'Preserved floor: '
+              'Composite floor: '
               '${_money(_number(preview['composite_tsl_floor']) ?? 0)}',
             ),
           ],
@@ -428,7 +428,7 @@ class _TodayScreenState extends State<TodayScreen> {
             Text('TP: ${_money(_number(protection['tp_target_pnl']) ?? 0)}'),
             Text('SL: ${_money(_number(protection['sl_target_pnl']) ?? 0)}'),
             Text(
-              'TSL giveback (TSL*2): '
+              'TSL giveback: '
               '${_money(_number(protection['tsl_trail_pnl']) ?? 0)} '
               '(${protection['tsl_pct'] ?? 0}%)',
             ),
@@ -780,21 +780,25 @@ class _ProtectionPanel extends StatelessWidget {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final running = protection['running'] == true;
-    final armed =
-        protection['stream_tsl_armed'] == true ||
-        protection['tsl_armed'] == true;
     final health = protection['health'] is Map
         ? Map<String, dynamic>.from(protection['health'] as Map)
         : <String, dynamic>{'peak_pnl': protection['peak_pnl_usd']};
     final peak =
         _number(protection['stream_tsl_peak']) ?? _number(health['peak_pnl']);
+    final nimmathiTsl = protection['nimmathi_tsl'] == true;
+    final rawArmed =
+        protection['stream_tsl_armed'] == true ||
+        protection['tsl_armed'] == true;
+    final tslArm = _number(protection['tsl_arm_pnl']) ?? 0.0;
+    final armed = nimmathiTsl
+        ? rawArmed
+        : (rawArmed && tslArm > 0 && (peak ?? 0.0) >= tslArm);
     final floor = _number(
       protection['stream_tsl_floor'] ??
           protection['tsl_floor'] ??
           protection['tsl_floor_usd'] ??
           health['stop_floor'],
     );
-    final nimmathiTsl = protection['nimmathi_tsl'] == true;
     final rawGiveback = armed && peak != null && floor != null
         ? peak - floor
         : null;

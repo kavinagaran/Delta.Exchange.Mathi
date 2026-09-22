@@ -239,14 +239,18 @@ function todayInlineProtectionHtml(protection) {
     peak_pnl: protection.peak_pnl_usd,
   };
   const running = protection.running === true;
-  const armed = protection.stream_tsl_armed === true || protection.tsl_armed === true;
+  const rawArmed = protection.stream_tsl_armed === true || protection.tsl_armed === true;
+  const peakValue = todayKnownNumber(protection.stream_tsl_peak)
+    ? Number(protection.stream_tsl_peak)
+    : todayKnownNumber(health.peak_pnl) ? Number(health.peak_pnl) : null;
+  const tslArm = Number(protection.tsl_arm_pnl || 0);
+  const armed = protection.nimmathi_tsl === true
+    ? rawArmed
+    : (rawArmed && tslArm > 0 && (peakValue ?? 0) >= tslArm);
   const status = armed ? 'TSL ARMED' : running ? 'RUNNING' : 'NOT RUNNING';
   const statusClass = armed || running ? 'live' : 'closed-loss';
   const value = (raw, fallback = 0) =>
     todayKnownNumber(raw) ? fN(Number(raw), 4) : fN(fallback, 4);
-  const peakValue = todayKnownNumber(protection.stream_tsl_peak)
-    ? Number(protection.stream_tsl_peak)
-    : todayKnownNumber(health.peak_pnl) ? Number(health.peak_pnl) : null;
   const peak = peakValue !== null
     ? `Peak <strong class="${peakValue >= 0 ? 'today-telemetry-positive' : 'today-telemetry-negative'}">${esc(f$(peakValue))}</strong>`
     : '<span class="today-telemetry-warn">Peak pending</span>';

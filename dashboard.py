@@ -4457,6 +4457,11 @@ def _tp_monitor_payload():
         exchange_protected_lots = lot_count(
             health.get("exchange_protected_lots")
         ) if verified_health else 0
+        exchange_lots = lot_count(health.get("exchange_position_size")) \
+            if verified_health else 0
+        exchange_protected_lots = lot_count(
+            health.get("exchange_protected_lots")
+        ) if verified_health else 0
         external_protected_lots = max(protected_lots - bot_entry_lots, 0)
         continuity_required = slot == "trend" and st.get("status") == "OPEN"
         continuity_ok = bool(
@@ -4502,13 +4507,24 @@ def _tp_monitor_payload():
             "stop_order_proof", "tsl_stop_order_id",
         )
         tp_proven = strict_order_flag("tp_order_proof", "tp_stop_order_id")
+        is_nimmathi = (
+            policy["protection_mode"]
+            == "filled_premium_percent_peak_trail_v2"
+        )
+        stream_peak_val = stream.get("tsl_peak") if stream_matches else None
+        stream_raw_armed = bool(stream.get("tsl_armed")) if stream_matches else False
+        if is_nimmathi:
+            stream_armed_val = stream_raw_armed
+        else:
+            arm_val = _as_float(policy.get("tsl_arm_pnl"), 0.0)
+            pk_val = _as_float(stream_peak_val, 0.0)
+            stream_armed_val = bool(stream_raw_armed and arm_val > 0 and pk_val >= arm_val)
         out[slot] = {"running": running, "target_pnl": target,
                      "poll_secs": poll, "sl_pnl": sl, "tsl_pnl": tsl,
                      "tsl_arm_pnl": policy["tsl_arm_pnl"],
                      "tsl_trail_pnl": policy["tsl_trail_pnl"],
                      "tsl_pct": policy["tsl_pct"],
-                     "nimmathi_tsl": policy["protection_mode"]
-                                      == "filled_premium_percent_peak_trail_v2",
+                     "nimmathi_tsl": is_nimmathi,
                      "tsl_lock_min_pnl": policy["tsl_lock_min_pnl"],
                      "protection_source": policy["protection_source"],
                      "entry_premium_usd": policy["entry_premium_usd"],
@@ -4524,12 +4540,10 @@ def _tp_monitor_payload():
                          "expected_interval_secs", 2),
                      "live_mark": stream.get("mark") if streaming else None,
                      "live_pnl": stream.get("pnl") if streaming else None,
-                     "stream_tsl_peak": stream.get("tsl_peak")
-                                        if stream_matches else None,
+                     "stream_tsl_peak": stream_peak_val,
                      "stream_tsl_floor": stream.get("tsl_floor")
-                                         if stream_matches else None,
-                     "stream_tsl_armed": bool(stream.get("tsl_armed"))
-                                         if stream_matches else False,
+                                         if (stream_matches and stream_armed_val) else None,
+                     "stream_tsl_armed": stream_armed_val,
                      "health_matches": health_matches, "health": health,
                      "protection_established": bool(
                          verified_health and health.get("protection_established")),
@@ -5741,7 +5755,29 @@ def _dry_protection_policy(state: dict) -> dict:
     policy = state.get("protection_config") if isinstance(state, dict) else None
     if not isinstance(policy, dict):
         slot = str(state.get("slot") or "") if isinstance(state, dict) else ""
-        policy = _tp_policy(slot) if slot in SLOTS else {}
+        if slot == "trend" and str((state or {}).get("status") or "").upper() == "OPEN":
+            entry_mark = _as_float((state or {}).get("entry_mark"), 0.0)
+            cv = _as_float((state or {}).get("contract_value"), 0.001)
+            lots = int(_as_float((state or {}).get("lots"), 0))
+            if entry_mark > 0 and lots > 0:
+                try:
+                    cfg = _user_cfg()
+                    poll_secs = _tp_policy("trend").get("poll_secs", 30)
+                    policy = build_premium_percent_protection_policy(
+                        entry_mark,
+                        cv,
+                        lots,
+                        poll_secs=poll_secs,
+                        tp_percent=cfg.get("TREND_TP_PREMIUM_PCT") or 100,
+                        sl_percent=cfg.get("TREND_SL_PREMIUM_PCT") or 50,
+                        tsl_trail_percent=cfg.get("TREND_TSL_PCT") or 25,
+                    )
+                except Exception:
+                    policy = _tp_policy(slot)
+            else:
+                policy = _tp_policy(slot)
+        else:
+            policy = _tp_policy(slot) if slot in SLOTS else {}
 
     def nonnegative(key: str, default: float = 0.0) -> float:
         value = _as_float(policy.get(key), default)
@@ -15173,24 +15209,25 @@ def _composite_rebased_policy(
     if not isinstance(configured, dict) or str(
         configured.get("protection_mode") or ""
     ) != "filled_premium_percent_peak_trail_v2":
-        raise RuntimeError(
-            "This position predates percentage-based composite protection"
+        cv = _as_float(state.get("contract_value"), 0.001)
+        cfg = _user_cfg()
+        poll_secs = _tp_policy("trend").get("poll_secs", 30)
+        policy = build_premium_percent_protection_policy(
+            entry_mark,
+            cv,
+            lots,
+            poll_secs=poll_secs,
+            tp_percent=cfg.get("TREND_TP_PREMIUM_PCT") or 100,
+            sl_percent=cfg.get("TREND_SL_PREMIUM_PCT") or 50,
+            tsl_trail_percent=cfg.get("TREND_TSL_PCT") or 25,
         )
+        policy["protection_source"] = source
+        return policy
     current_tsl_pct = float(
         configured.get("tsl_pct")
         or configured.get("tsl_trail_percent_of_entry_premium")
         or 25
     )
-    if (
-        configured.get("protection_source") in (
-            "operator_pyramid_composite", "operator_average_composite"
-        )
-        or int(state.get("average_count") or 0) > 0
-        or int(state.get("pyramid_count") or 0) > 0
-    ):
-        rebased_tsl_pct = current_tsl_pct
-    else:
-        rebased_tsl_pct = current_tsl_pct * 2.0
     policy = build_premium_percent_protection_policy(
         entry_mark,
         state.get("contract_value"),
@@ -15198,7 +15235,7 @@ def _composite_rebased_policy(
         poll_secs=configured.get("poll_secs", 30),
         tp_percent=configured.get("tp_percent_of_entry_premium", 100),
         sl_percent=configured.get("sl_percent_of_entry_premium", 50),
-        tsl_trail_percent=rebased_tsl_pct,
+        tsl_trail_percent=current_tsl_pct,
     )
     policy["protection_source"] = source
     return policy
@@ -15547,10 +15584,13 @@ def _pyramid_preview_from_state(
         base["entry_mark"] * lots + executable * add_lots
     ) / total_lots
     policy = _pyramid_rebased_policy(state, composite_entry, total_lots)
-    new_floor = max(
-        old_floor,
-        -float(policy["sl_target_pnl"]),
-        current_gross - float(policy["tsl_trail_pnl"]),
+    composite_pnl = (
+        (mark - composite_entry) * base["contract_value"] * total_lots * sign
+    )
+    new_floor = (
+        composite_pnl - float(policy["tsl_trail_pnl"])
+        if composite_pnl > 0
+        else -float(policy["sl_target_pnl"])
     )
     return {
         "eligible": True,
@@ -15911,11 +15951,9 @@ def _pyramid_apply_dry_run(state: dict, preview: dict) -> dict:
         "pyramid_events": events,
         "position_composition": "pyramided",
         "protection_scope": "trend_pyramided_composite",
-        "dry_tsl_armed": True,
-        "dry_tsl_floor_usd": max(
-            _as_float(latest.get("dry_tsl_floor_usd"), 0.0),
-            float(preview["composite_tsl_floor"]),
-        ),
+        "dry_tsl_armed": False,
+        "dry_tsl_floor_usd": None,
+        "dry_peak_pnl_usd": 0.0,
         "pending_pyramid_intent": None,
     })
     _atomic_write_json(_slot_file("trend", dry_run=True), latest)
@@ -17518,6 +17556,19 @@ def _save_config_data(data: dict):
                                 "automatic_entry_protection_replaced": automatic_policy,
                                 "manual_override_allowed": True,
                             })
+                            new_arm = _as_float(policy.get("tsl_arm_pnl"), 0.0)
+                            current_peak = _as_float(
+                                state.get("dry_peak_pnl_usd" if dry_run else "tsl_peak"),
+                                0.0,
+                            )
+                            if new_arm > 0 and current_peak < new_arm:
+                                if dry_run:
+                                    state["dry_tsl_armed"] = False
+                                    state["dry_tsl_floor_usd"] = None
+                                else:
+                                    state["tsl_armed"] = False
+                                    state["tsl_floor"] = None
+                                    state["stop_kind"] = "sl"
                     state["protection_config"] = policy
                     if dry_run:
                         # A saved paper policy must become effective on the

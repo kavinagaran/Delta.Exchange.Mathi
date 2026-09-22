@@ -1002,7 +1002,18 @@ def _stream_tsl_snapshot(state):
     """
     state = state if isinstance(state, dict) else {}
     peak = max(_finite_float(state.get("tsl_peak"), 0.0), 0.0)
-    armed = bool(state.get("tsl_armed"))
+    configured = state.get("protection_config")
+    configured = configured if isinstance(configured, dict) else {}
+    is_nimmathi = (
+        str(configured.get("protection_mode") or "")
+        == "filled_premium_percent_peak_trail_v2"
+    )
+    raw_armed = bool(state.get("tsl_armed"))
+    if is_nimmathi:
+        armed = raw_armed and peak > 0
+    else:
+        arm = _finite_float(configured.get("tsl_arm_pnl"), 0.0)
+        armed = raw_armed and arm > 0 and peak >= arm
     floor = _finite_float(state.get("tsl_floor"), None) if armed else None
     return {
         "tsl_peak": round(peak, 8),
@@ -1083,24 +1094,26 @@ def _rebased_premium_protection_policy(state, entry_mark, lots, *, source):
 
     Percentages belong to the original trade generation and remain immutable;
     only their dollar basis changes when an explicitly pyramided or averaged position
-    gets a new aggregate entry/quantity from Delta, with TSL updated as TSL*2.
+    gets a new aggregate entry/quantity from Delta.
     """
     configured = state.get("protection_config")
     if not isinstance(configured, dict):
-        return configured
+        cv = _finite_float(state.get("contract_value"), 0.001)
+        rebuilt = premium_percent_protection_policy(
+            entry_mark,
+            cv,
+            lots,
+            poll_secs=POLL_SECS,
+            tp_percent=_f("TREND_TP_PREMIUM_PCT", 100),
+            sl_percent=_f("TREND_SL_PREMIUM_PCT", 50),
+            tsl_trail_percent=_f("TREND_TSL_PCT", 25),
+        )
+        rebuilt["protection_source"] = source
+        return rebuilt
     if str(configured.get("protection_mode") or "") != (
         "filled_premium_percent_peak_trail_v2"
     ):
         return dict(configured)
-    current_tsl = float(configured.get(
-        "tsl_pct",
-        configured.get("tsl_trail_percent_of_entry_premium", 25),
-    ))
-    if source in ("operator_pyramid_composite", "operator_average_composite"):
-        if configured.get("protection_source") not in (
-            "operator_pyramid_composite", "operator_average_composite"
-        ):
-            current_tsl = current_tsl * 2.0
     rebuilt = premium_percent_protection_policy(
         entry_mark,
         state.get("contract_value"),
@@ -1108,7 +1121,10 @@ def _rebased_premium_protection_policy(state, entry_mark, lots, *, source):
         poll_secs=configured.get("poll_secs", 30),
         tp_percent=configured.get("tp_percent_of_entry_premium", 100),
         sl_percent=configured.get("sl_percent_of_entry_premium", 50),
-        tsl_trail_percent=current_tsl,
+        tsl_trail_percent=configured.get(
+            "tsl_pct",
+            configured.get("tsl_trail_percent_of_entry_premium", 25),
+        ),
     )
     rebuilt["protection_source"] = source
     return rebuilt
@@ -1417,10 +1433,10 @@ def _adopt_matching_external_trend_lots_locked(state, position, previous_lots,
         # Dollar TSL state belongs to the old, smaller exposure.  The newly
         # composed aggregate starts a fresh protection segment so an inherited
         # peak/floor cannot immediately liquidate the external top-up.
-        "tsl_peak": previous_peak if explicit_pyramid else 0.0,
-        "tsl_armed": previous_armed if explicit_pyramid else False,
-        "tsl_floor": previous_floor if explicit_pyramid else None,
-        "stop_kind": previous_stop_kind if explicit_pyramid else "sl",
+        "tsl_peak": 0.0,
+        "tsl_armed": False,
+        "tsl_floor": None,
+        "stop_kind": "sl",
         "tsl_rebased_at_utc": adopted_at,
         "tsl_rebase_reason": (
             "operator_pyramid_composite" if explicit_pyramid else (
@@ -3946,9 +3962,13 @@ def main():
     )
     monitor_entry_client_id = str(state.get("client_order_id") or "")
     peak_pnl = float(state.get("tsl_peak") or 0.0)
-    tsl_armed = bool(state.get("tsl_armed"))
+    raw_armed = bool(state.get("tsl_armed"))
+    if nimmathi_tsl:
+        tsl_armed = raw_armed and peak_pnl > 0
+    else:
+        tsl_armed = raw_armed and (tsl_arm_pnl > 0 and peak_pnl >= tsl_arm_pnl)
     stop_id = state.get("tsl_stop_order_id")
-    stop_floor = _finite_float(state.get("tsl_floor"), None)
+    stop_floor = _finite_float(state.get("tsl_floor"), None) if tsl_armed else None
     stop_kind = state.get("stop_kind") or ("tsl" if tsl_armed else "sl")
     stop_lots = int(state.get("stop_lots") or lots)
     tp_id = state.get("tp_stop_order_id")
@@ -4729,19 +4749,26 @@ def main():
         has_stored_floor = stored_floor_raw not in (None, "")
         was_armed = bool(preview.get("tsl_armed"))
         next_peak = max(stored_peak, preview_pnl)
-        next_armed = (
-            was_armed or (next_peak > 0 and trail_pct > 0 and basis > 0)
-            if policy_is_nimmathi_tsl
-            else was_armed or (arm > 0 and trail > 0 and next_peak >= arm)
-        )
-        next_floor = stored_floor
+        if policy_is_nimmathi_tsl:
+            next_armed = was_armed or (next_peak > 0 and trail_pct > 0 and basis > 0)
+        else:
+            next_armed = (
+                arm > 0
+                and trail > 0
+                and (next_peak >= arm or (was_armed and stored_peak >= arm))
+            )
+        next_floor = stored_floor if next_armed else None
         if next_armed:
             nimmathi_floor = max(
                 -stop_loss, next_peak - basis * trail_pct / 100.0,
             )
             next_floor = (
                 nimmathi_floor if policy_is_nimmathi_tsl else
-                max(stored_floor, lock_min, next_peak - trail)
+                max(
+                    *([stored_floor] if has_stored_floor and was_armed else []),
+                    lock_min,
+                    next_peak - trail,
+                )
             )
         ratchet = max(1.0, trail * 0.05)
         state_change = (
@@ -4758,7 +4785,7 @@ def main():
         trigger = None
         if tp_trigger:
             trigger = "take_profit"
-        elif stop_fallback and next_armed and preview_pnl <= next_floor:
+        elif stop_fallback and next_armed and next_floor is not None and preview_pnl <= next_floor:
             trigger = "trailing_stop"
         elif stop_fallback and stop_loss > 0 and preview_pnl <= -stop_loss:
             trigger = "stop_loss"
@@ -4784,7 +4811,21 @@ def main():
             has_current_floor = current_floor_raw not in (None, "")
             current_armed = bool(current.get("tsl_armed"))
             resolved_peak = max(current_peak, next_peak)
-            resolved_armed = current_armed or next_armed
+            if policy_is_nimmathi_tsl:
+                resolved_armed = (
+                    (current_armed or next_armed)
+                    and (resolved_peak > 0 and trail_pct > 0 and basis > 0)
+                )
+            else:
+                resolved_armed = (
+                    arm > 0
+                    and trail > 0
+                    and (
+                        resolved_peak >= arm
+                        or (current_armed and current_peak >= arm)
+                        or (next_armed and next_peak >= arm)
+                    )
+                )
             if resolved_armed:
                 proposed_floor = (
                     max(
@@ -4792,14 +4833,15 @@ def main():
                         resolved_peak - basis * trail_pct / 100.0,
                     )
                     if policy_is_nimmathi_tsl else
-                    max(lock_min, resolved_peak - trail)
+                    max(
+                        *([current_floor] if has_current_floor and current_armed else []),
+                        lock_min,
+                        resolved_peak - trail,
+                    )
                 )
-                resolved_floor = (
-                    max(current_floor, proposed_floor)
-                    if has_current_floor else proposed_floor
-                )
+                resolved_floor = proposed_floor
             else:
-                resolved_floor = current_floor
+                resolved_floor = None
             current.update({
                 "tsl_peak": round(resolved_peak, 8),
                 "tsl_armed": resolved_armed,
@@ -4914,8 +4956,12 @@ def main():
                     cv = persisted_cv
                     peak_pnl = float(state.get("tsl_peak") or 0.0)
                     persist_pk = peak_pnl
-                    tsl_armed = bool(state.get("tsl_armed"))
-                    stop_floor = _finite_float(state.get("tsl_floor"), None)
+                    raw_armed = bool(state.get("tsl_armed"))
+                    if nimmathi_tsl:
+                        tsl_armed = raw_armed and peak_pnl > 0
+                    else:
+                        tsl_armed = raw_armed and (tsl_arm_pnl > 0 and peak_pnl >= tsl_arm_pnl)
+                    stop_floor = _finite_float(state.get("tsl_floor"), None) if tsl_armed else None
                     stop_kind = state.get("stop_kind") or (
                         "tsl" if tsl_armed else "sl"
                     )
@@ -5151,8 +5197,12 @@ def main():
                     cv = locked_cv
                     peak_pnl = float(state.get("tsl_peak") or 0.0)
                     persist_pk = peak_pnl
-                    tsl_armed = bool(state.get("tsl_armed"))
-                    stop_floor = _finite_float(state.get("tsl_floor"), None)
+                    raw_armed = bool(state.get("tsl_armed"))
+                    if nimmathi_tsl:
+                        tsl_armed = raw_armed and peak_pnl > 0
+                    else:
+                        tsl_armed = raw_armed and (tsl_arm_pnl > 0 and peak_pnl >= tsl_arm_pnl)
+                    stop_floor = _finite_float(state.get("tsl_floor"), None) if tsl_armed else None
                     stop_kind = state.get("stop_kind") or (
                         "tsl" if tsl_armed else "sl"
                     )
@@ -5359,23 +5409,11 @@ def main():
                             state.get("last_pyramid_at_utc")
                             and state.get("pyramid_count")
                         )
-                        peak_pnl = (
-                            _finite_float(state.get("tsl_peak"), 0.0)
-                            if explicit_pyramid else 0.0
-                        )
-                        persist_pk = peak_pnl
-                        tsl_armed = (
-                            bool(state.get("tsl_armed"))
-                            if explicit_pyramid else False
-                        )
-                        stop_floor = (
-                            _finite_float(state.get("tsl_floor"), None)
-                            if explicit_pyramid else None
-                        )
-                        stop_kind = (
-                            (state.get("stop_kind") or "tsl")
-                            if explicit_pyramid else "sl"
-                        )
+                        peak_pnl = 0.0
+                        persist_pk = 0.0
+                        tsl_armed = False
+                        stop_floor = None
+                        stop_kind = "sl"
                         # A pyramid changes both quantity and aggregate entry.
                         # Reload the policy captured in the newly persisted
                         # composite state before editing any TP/SL/TSL order;
@@ -5620,13 +5658,25 @@ def main():
                     _finite_float(streamed_state.get("tsl_peak"), 0.0),
                     pnl,
                 )
-                tsl_armed = tsl_armed or bool(streamed_state.get("tsl_armed"))
+                if nimmathi_tsl:
+                    tsl_armed = tsl_armed or bool(streamed_state.get("tsl_armed"))
+                else:
+                    stream_armed = bool(streamed_state.get("tsl_armed"))
+                    tsl_armed = (
+                        tsl_enabled and (
+                            peak_pnl >= tsl_arm_pnl
+                            or (tsl_armed and persist_pk >= tsl_arm_pnl)
+                            or (stream_armed and _finite_float(streamed_state.get("tsl_peak"), 0.0) >= tsl_arm_pnl)
+                        )
+                    )
                 streamed_floor = _finite_float(streamed_state.get("tsl_floor"), None)
-                if streamed_floor is not None:
+                if streamed_floor is not None and tsl_armed:
                     stop_floor = (
                         streamed_floor if stop_floor is None
                         else max(stop_floor, streamed_floor)
                     )
+                elif not tsl_armed:
+                    stop_floor = None
                 if peak_pnl - persist_pk >= 1.0:
                     persist_pk = peak_pnl
                     save_state_fields(tsl_peak=round(peak_pnl, 2), tsl_armed=tsl_armed)
@@ -5636,7 +5686,8 @@ def main():
                     if entry_premium_usd > 0 else 0.0
                 )
                 should_arm_tsl = (
-                    peak_pct > 0 if nimmathi_tsl else peak_pnl >= tsl_arm_pnl
+                    peak_pct > 0 if nimmathi_tsl
+                    else (tsl_arm_pnl > 0 and tsl_trail_pnl > 0 and peak_pnl >= tsl_arm_pnl)
                 )
                 if tsl_enabled and not tsl_armed and should_arm_tsl:
                     tsl_armed = True

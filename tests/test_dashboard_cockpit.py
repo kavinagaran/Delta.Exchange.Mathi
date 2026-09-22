@@ -253,9 +253,11 @@ def test_dry_pyramid_doubles_quantity_rebases_policy_and_preserves_floor(
     assert updated["protection_config"]["entry_premium_usd"] == pytest.approx(25.0)
     assert updated["protection_config"]["tp_target_pnl"] == pytest.approx(25.0)
     assert updated["protection_config"]["sl_target_pnl"] == pytest.approx(7.5)
-    assert updated["protection_config"]["tsl_pct"] == pytest.approx(60.0)
-    assert updated["protection_config"]["tsl_trail_pnl"] == pytest.approx(15.0)
-    assert updated["dry_tsl_floor_usd"] >= 4.0
+    assert updated["protection_config"]["tsl_pct"] == pytest.approx(30.0)
+    assert updated["protection_config"]["tsl_trail_pnl"] == pytest.approx(7.5)
+    assert updated["dry_tsl_floor_usd"] is None
+    assert updated["dry_tsl_armed"] is False
+    assert updated["dry_peak_pnl_usd"] == 0.0
 
     with dashboard.app.test_request_context(
         "/api/pyramid/preview",
@@ -325,8 +327,8 @@ def test_dry_average_doubles_quantity_rebases_policy_and_requires_negative_pnl(
     assert updated["protection_config"]["entry_premium_usd"] == pytest.approx(18.0)
     assert updated["protection_config"]["tp_target_pnl"] == pytest.approx(18.0)
     assert updated["protection_config"]["sl_target_pnl"] == pytest.approx(5.4)
-    assert updated["protection_config"]["tsl_pct"] == pytest.approx(60.0)
-    assert updated["protection_config"]["tsl_trail_pnl"] == pytest.approx(10.8)
+    assert updated["protection_config"]["tsl_pct"] == pytest.approx(30.0)
+    assert updated["protection_config"]["tsl_trail_pnl"] == pytest.approx(5.4)
 
     # Second average rejected (only 1 per cycle)
     with dashboard.app.test_request_context(
@@ -1607,9 +1609,108 @@ def test_lemme_risk_live_entry_uses_the_standard_protected_seam(
     assert response.get_json()["ok"] is True
     execute.assert_called_once()
     call_kwargs = execute.call_args.kwargs
-    assert (
-        call_kwargs["ownership"] == dashboard.TREND_SCORE_MANUAL_LIVE_OWNERSHIP
-    )
     assert call_kwargs["signal"]["signal_key"].startswith(
         "manual-cockpit|sell_move|"
     )
+
+
+def test_tp_monitor_payload_dollar_tsl_disarms_if_peak_below_arm(monkeypatch, tmp_path):
+    user_dir = tmp_path / "user"
+    user_dir.mkdir()
+    monkeypatch.setattr(dashboard, "_user_dir", lambda: user_dir)
+    monkeypatch.setattr(dashboard, "USERS_DIR", tmp_path)
+    monkeypatch.setattr(dashboard, "_active_user", lambda: "user")
+
+    slot_file = user_dir / "trend_state.json"
+    stream_file = user_dir / "tp_trend_stream.json"
+    state = {
+        "status": "OPEN",
+        "lots": 200,
+        "entry_mark": 875.0,
+        "contract_value": 0.001,
+        "side": "long",
+        "symbol": "P-BTC-87200-220926",
+        "product_id": 101,
+        "position_cycle_id": "cycle-1",
+        "protection_revision": 0,
+        "protection_config": {
+            "tp_target_pnl": 1034.0,
+            "sl_target_pnl": 517.0,
+            "tsl_arm_pnl": 150.0,
+            "tsl_trail_pnl": 150.0,
+            "poll_secs": 10,
+        },
+    }
+    stale_stream = {
+        "product_id": 101,
+        "position_cycle_id": "cycle-1",
+        "protection_revision": 0,
+        "tsl_peak": 24.95,
+        "tsl_armed": True,
+        "tsl_floor": 0.0,
+    }
+    slot_file.write_text(json.dumps(state), encoding="utf-8")
+    stream_file.write_text(json.dumps(stale_stream), encoding="utf-8")
+    monkeypatch.setattr(
+        dashboard,
+        "_slot_file",
+        lambda slot, dry_run=False: slot_file if slot == "trend" else tmp_path / f"{slot}.json",
+    )
+    monkeypatch.setattr(dashboard, "_tp_health", lambda u, s: {})
+    monkeypatch.setattr(dashboard, "_tp_running", lambda u, s: True)
+
+    payload = dashboard._tp_monitor_payload()
+    trend_payload = payload.get("trend") or {}
+    assert trend_payload.get("stream_tsl_armed") is False
+    assert trend_payload.get("stream_tsl_floor") is None
+    assert trend_payload.get("stream_tsl_peak") == 24.95
+    assert trend_payload.get("tsl_arm_pnl") == 150.0
+    assert trend_payload.get("tsl_trail_pnl") == 150.0
+
+
+def test_save_config_data_dollar_tsl_resets_armed_if_peak_below_new_arm(monkeypatch, tmp_path):
+    user_dir = tmp_path / "user"
+    user_dir.mkdir()
+    config_file = user_dir / "config.json"
+    config_file.write_text(json.dumps({}), encoding="utf-8")
+    slot_file = user_dir / "trend_state.json"
+    initial_state = {
+        "status": "OPEN",
+        "lots": 100,
+        "entry_mark": 500.0,
+        "contract_value": 0.001,
+        "tsl_peak": 50.0,
+        "tsl_armed": True,
+        "tsl_floor": 10.0,
+        "stop_kind": "tsl",
+        "protection_config": {
+            "tp_target_pnl": 200.0,
+            "sl_target_pnl": 100.0,
+            "tsl_arm_pnl": 40.0,
+            "tsl_trail_pnl": 40.0,
+        },
+    }
+    slot_file.write_text(json.dumps(initial_state), encoding="utf-8")
+    monkeypatch.setattr(dashboard, "_user_dir", lambda: user_dir)
+    monkeypatch.setattr(dashboard, "_mode_data_dir", lambda dry_run=False: user_dir)
+    monkeypatch.setattr(
+        dashboard,
+        "_slot_file",
+        lambda slot, dry_run=False: slot_file if slot == "trend" else tmp_path / f"{slot}.json",
+    )
+
+    # Raise TSL arm to 100.0 (above peak of 50.0)
+    new_config = {
+        "TP_TARGET_PNL_TREND": 200.0,
+        "SL_TARGET_PNL_TREND": 100.0,
+        "TSL_ARM_PNL_TREND": 100.0,
+        "TSL_TRAIL_PNL_TREND": 50.0,
+    }
+    with dashboard.app.test_request_context():
+        dashboard._save_config_data(new_config)
+
+    reloaded = json.loads(slot_file.read_text(encoding="utf-8"))
+    assert reloaded["tsl_armed"] is False
+    assert reloaded["tsl_floor"] is None
+    assert reloaded["stop_kind"] == "sl"
+

@@ -291,16 +291,16 @@ class TpMonitorSafetyTests(unittest.TestCase):
         self.assertEqual(updated["protection_config"]["entry_premium_usd"], 25.0)
         self.assertEqual(updated["protection_config"]["tp_target_pnl"], 25.0)
         self.assertEqual(updated["protection_config"]["sl_target_pnl"], 7.5)
-        self.assertEqual(updated["protection_config"]["tsl_pct"], 60.0)
-        self.assertEqual(updated["protection_config"]["tsl_trail_pnl"], 15.0)
-        self.assertTrue(updated["tsl_armed"])
-        self.assertEqual(updated["tsl_peak"], 8.0)
-        self.assertEqual(updated["tsl_floor"], 4.0)
-        self.assertEqual(updated["stop_kind"], "tsl")
+        self.assertEqual(updated["protection_config"]["tsl_pct"], 30.0)
+        self.assertEqual(updated["protection_config"]["tsl_trail_pnl"], 7.5)
+        self.assertFalse(updated["tsl_armed"])
+        self.assertEqual(updated["tsl_peak"], 0.0)
+        self.assertIsNone(updated["tsl_floor"])
+        self.assertEqual(updated["stop_kind"], "sl")
         self.assertEqual(updated["tsl_rebase_reason"], "operator_pyramid_composite")
         self.assertEqual(audit.call_args.args[1], "trend_position_pyramided")
 
-    def test_explicit_average_rebases_composite_policy_and_doubles_tsl(self):
+    def test_explicit_average_rebases_composite_policy_and_preserves_tsl(self):
         policy = tp_monitor.premium_percent_protection_policy(
             100.0, 0.001, 100,
             poll_secs=10,
@@ -357,8 +357,8 @@ class TpMonitorSafetyTests(unittest.TestCase):
         self.assertEqual(updated["protection_config"]["entry_premium_usd"], 16.0)
         self.assertEqual(updated["protection_config"]["tp_target_pnl"], 16.0)
         self.assertEqual(updated["protection_config"]["sl_target_pnl"], 8.0)
-        self.assertEqual(updated["protection_config"]["tsl_pct"], 60.0)
-        self.assertEqual(updated["protection_config"]["tsl_trail_pnl"], 9.6)
+        self.assertEqual(updated["protection_config"]["tsl_pct"], 30.0)
+        self.assertEqual(updated["protection_config"]["tsl_trail_pnl"], 4.8)
         self.assertFalse(updated["tsl_armed"])
         self.assertEqual(updated["stop_kind"], "sl")
         self.assertEqual(updated["tsl_rebase_reason"], "operator_average_composite")
@@ -2986,6 +2986,185 @@ class TpMonitorSafetyTests(unittest.TestCase):
         self.assertTrue(state["tsl_armed"])
         # Even though fresh trail from mark 789.0 would be negative, the locked +4.0 floor is preserved!
         self.assertGreaterEqual(state["tsl_floor"], 4.0)
+
+    def _capture_on_realtime_mark(self, state, *, initial_mark=875.0):
+        callback_box = []
+        def capture_stream_init(_self, symbol, on_mark, on_status=None):
+            callback_box.append(on_mark)
+
+        active = lambda order_id: self.protection_order(
+            order_id, state["lots"], "tp" if str(order_id).startswith("tp") else "stop",
+        )
+        fake_place = lambda _p, _side, lots, _price, kind, **_kw: {
+            "success": True, "result": self.protection_order(f"{kind}-order", lots, kind),
+        }
+        self.health_file.write_text(json.dumps({
+            "status": "healthy",
+            "product_id": state["product_id"],
+            "protection_revision": int(state.get("protection_revision") or 0),
+            "position_cycle_id": str(state.get("position_cycle_id") or ""),
+            "heartbeat_utc": datetime.now(timezone.utc).isoformat(),
+            "continuity_verified": True,
+            "protection_established": True,
+            "local_fallback_active": True,
+            "local_stop_fallback_active": True,
+        }), encoding="utf-8")
+        with patch.object(tp_monitor.DeltaMarkPriceStream, "__init__", capture_stream_init), \
+             patch.object(tp_monitor, "SLOT", "trend"), \
+             patch.object(tp_monitor, "REMOVE_PROTECTION", False), \
+             patch.object(tp_monitor, "install_signal_handlers"), \
+             patch.object(tp_monitor, "place_stop_order", side_effect=fake_place), \
+             patch.object(tp_monitor, "edit_stop_price", return_value={"success": True}), \
+             patch.object(tp_monitor, "get_exchange_size", return_value=state["lots"]), \
+             patch.object(tp_monitor, "get_exchange_position", return_value={
+                 "product_id": state["product_id"], "size": state["lots"], "entry_price": str(state["entry_mark"]),
+             }), \
+             patch.object(tp_monitor, "_trend_cycle_continuity",
+                          return_value=self.continuity(size=state["lots"], entry=state["entry_mark"])), \
+             patch.object(tp_monitor, "get_order", side_effect=lambda oid: active(oid)), \
+             patch.object(tp_monitor, "get_mark", return_value=initial_mark), \
+             patch.object(tp_monitor, "send_telegram"), \
+             patch.object(tp_monitor.time, "sleep", side_effect=_StopLoop):
+            with self.assertRaises(_StopLoop):
+                tp_monitor.main()
+        self.assertTrue(len(callback_box) > 0, "Failed to capture _on_realtime_mark")
+        return callback_box[0]
+
+    def test_dollar_tsl_not_armed_when_peak_below_arm_threshold(self):
+        # Scenario from user screenshot:
+        # Contract P-BTC-87200-220926, entry 875.0, lots 200, cv 0.001
+        # Config: arm = 150.0, trail = 150.0, TP = 1034.0, SL = 517.0
+        # Peak mark 999.75 -> Peak PnL = (999.75 - 875) * 0.001 * 200 = 24.95
+        state = self.write_state(
+            lots=200, owned_entry_lots=200, original_owned_entry_lots=200,
+            entry_mark=875.0, original_bot_entry_mark=875.0,
+            contract_value=0.001, symbol="P-BTC-87200-220926",
+            product_id=101, side="long",
+            tsl_peak=24.95, tsl_armed=False, tsl_floor=None,
+            stop_kind="sl",
+            protection_config={
+                "tp_target_pnl": 1034.0,
+                "sl_target_pnl": 517.0,
+                "tsl_arm_pnl": 150.0,
+                "tsl_trail_pnl": 150.0,
+                "poll_secs": 10,
+            },
+        )
+        # 1. Telemetry snapshot check
+        snap = tp_monitor._stream_tsl_snapshot(state)
+        self.assertFalse(snap["tsl_armed"])
+        self.assertIsNone(snap["tsl_floor"])
+        self.assertEqual(snap["tsl_peak"], 24.95)
+
+        on_mark = self._capture_on_realtime_mark(state, initial_mark=875.0)
+
+        # 2. Realtime mark callback check at mark 999.75 (PnL = +24.95)
+        # Should not arm because 24.95 < 150.0
+        with patch.object(tp_monitor, "close_position", return_value=False) as close_pos:
+            on_mark(999.75, 1_000_000, "ws")
+            close_pos.assert_not_called()
+
+        updated = self.read_state()
+        self.assertFalse(updated.get("tsl_armed", False))
+        self.assertIsNone(updated.get("tsl_floor"))
+        self.assertEqual(updated.get("tsl_peak"), 24.95)
+
+        # 3. Realtime mark callback at mark 869.0 (PnL = -1.20)
+        # Price dips into slight negative; should NOT trigger trailing stop!
+        with patch.object(tp_monitor, "close_position", return_value=False) as close_pos:
+            on_mark(869.0, 2_000_000, "ws")
+            close_pos.assert_not_called()
+
+    def test_dollar_tsl_arms_and_trails_when_peak_reaches_arm_threshold(self):
+        state = self.write_state(
+            lots=200, owned_entry_lots=200, original_owned_entry_lots=200,
+            entry_mark=875.0, original_bot_entry_mark=875.0,
+            contract_value=0.001, symbol="P-BTC-87200-220926",
+            product_id=101, side="long",
+            exchange_protection_supported=False,
+            tsl_peak=0.0, tsl_armed=False, tsl_floor=None,
+            stop_kind="sl",
+            protection_config={
+                "tp_target_pnl": 1034.0,
+                "sl_target_pnl": 517.0,
+                "tsl_arm_pnl": 150.0,
+                "tsl_trail_pnl": 150.0,
+                "poll_secs": 10,
+            },
+        )
+        on_mark = self._capture_on_realtime_mark(state, initial_mark=875.0)
+
+        # Mark reaches 1625.0 -> PnL = (1625 - 875) * 0.001 * 200 = 150.0
+        with patch.object(tp_monitor, "close_position", return_value=False) as close_pos:
+            on_mark(1625.0, 1_000_000, "ws")
+            close_pos.assert_not_called()
+
+        armed_state = self.read_state()
+        self.assertTrue(armed_state["tsl_armed"])
+        self.assertEqual(armed_state["tsl_peak"], 150.0)
+        # Floor = max(0.0, 150.0 - 150.0) = 0.0
+        self.assertEqual(armed_state["tsl_floor"], 0.0)
+
+        # Mark rises further to 1725.0 -> PnL = 170.0
+        with patch.object(tp_monitor, "close_position", return_value=False) as close_pos:
+            on_mark(1725.0, 2_000_000, "ws")
+            close_pos.assert_not_called()
+
+        higher_state = self.read_state()
+        self.assertTrue(higher_state["tsl_armed"])
+        self.assertEqual(higher_state["tsl_peak"], 170.0)
+        # Floor = max(0.0, 170.0 - 150.0) = 20.0
+        self.assertEqual(higher_state["tsl_floor"], 20.0)
+
+        # Mark pulls back to 950.0 -> PnL = (950 - 875) * 0.001 * 200 = 15.0 <= floor (20.0)
+        # Now trailing stop SHOULD trigger
+        with patch.object(tp_monitor, "_close_position_locked", return_value=True) as close_pos:
+            on_mark(950.0, 3_000_000, "ws")
+            close_pos.assert_called_once()
+            self.assertEqual(close_pos.call_args[0][3], "trailing_stop")
+
+    def test_dollar_tsl_stale_armed_flag_purged_on_startup_if_peak_insufficient(self):
+        # Corrupted state with tsl_armed=True and floor=0.0 despite peak=24.95 < arm=150.0
+        self.write_state(
+            lots=200, owned_entry_lots=200, original_owned_entry_lots=200,
+            entry_mark=875.0, original_bot_entry_mark=875.0,
+            contract_value=0.001, symbol="P-BTC-87200-220926",
+            product_id=101, side="long",
+            tsl_peak=24.95, tsl_armed=True, tsl_floor=0.0,
+            stop_kind="tsl",
+            protection_config={
+                "tp_target_pnl": 1034.0,
+                "sl_target_pnl": 517.0,
+                "tsl_arm_pnl": 150.0,
+                "tsl_trail_pnl": 150.0,
+                "poll_secs": 10,
+            },
+        )
+        active = lambda order_id: self.protection_order(
+            order_id, 200, "tp" if str(order_id).startswith("tp") else "stop",
+        )
+        with patch.object(tp_monitor, "SLOT", "trend"), \
+             patch.object(tp_monitor, "REMOVE_PROTECTION", False), \
+             patch.object(tp_monitor, "install_signal_handlers"), \
+             patch.object(tp_monitor, "get_exchange_size", return_value=200), \
+             patch.object(tp_monitor, "get_exchange_position", return_value={
+                 "product_id": 101, "size": 200, "entry_price": "875.0",
+             }), \
+             patch.object(tp_monitor, "_trend_cycle_continuity",
+                          return_value=self.continuity(size=200, entry=875.0)), \
+             patch.object(tp_monitor, "get_order", side_effect=lambda oid: active(oid)), \
+             patch.object(tp_monitor, "get_mark", return_value=869.0), \
+             patch.object(tp_monitor, "close_position") as close_pos, \
+             patch.object(tp_monitor, "send_telegram"), \
+             patch.object(tp_monitor.time, "sleep", side_effect=_StopLoop):
+            with self.assertRaises(_StopLoop):
+                tp_monitor.main()
+            close_pos.assert_not_called()
+
+        # Telemetry snapshot must report disarmed
+        snap = tp_monitor._stream_tsl_snapshot(self.read_state())
+        self.assertFalse(snap["tsl_armed"])
+        self.assertIsNone(snap["tsl_floor"])
 
 
 class MarkPriceStreamTests(unittest.TestCase):
