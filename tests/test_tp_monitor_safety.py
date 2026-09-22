@@ -3089,6 +3089,7 @@ class TpMonitorSafetyTests(unittest.TestCase):
                 "sl_target_pnl": 517.0,
                 "tsl_arm_pnl": 150.0,
                 "tsl_trail_pnl": 150.0,
+                "tsl_lock_min_pnl": 0.0,
                 "poll_secs": 10,
             },
         )
