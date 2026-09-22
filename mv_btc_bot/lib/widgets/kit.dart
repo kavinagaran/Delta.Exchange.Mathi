@@ -447,7 +447,7 @@ class MetricTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    return Column(
+    final content = Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -456,32 +456,14 @@ class MetricTile extends StatelessWidget {
           style: AppText.kicker.copyWith(color: scheme.onSurfaceVariant),
         ),
         const SizedBox(height: Gap.xs),
-        if (trailing == null)
-          Text(
-            value,
-            style: (big ? AppText.display : AppText.metric).copyWith(
-              color: colour ?? scheme.onSurface,
-            ),
-          )
-        else
-          Row(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.center,
-            children: [
-              Flexible(
-                child: Text(
-                  value,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: (big ? AppText.display : AppText.metric).copyWith(
-                    color: colour ?? scheme.onSurface,
-                  ),
-                ),
-              ),
-              const SizedBox(width: 4),
-              trailing!,
-            ],
+        Text(
+          value,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: (big ? AppText.display : AppText.metric).copyWith(
+            color: colour ?? scheme.onSurface,
           ),
+        ),
         if (sub != null) ...[
           const SizedBox(height: 2),
           Text(
@@ -489,6 +471,19 @@ class MetricTile extends StatelessWidget {
             style: AppText.caption.copyWith(color: scheme.onSurfaceVariant),
           ),
         ],
+      ],
+    );
+
+    if (trailing == null) {
+      return content;
+    }
+
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.center,
+      children: [
+        Expanded(child: content),
+        const SizedBox(width: Gap.xs),
+        trailing!,
       ],
     );
   }

@@ -965,64 +965,64 @@ class _TpStepper extends StatelessWidget {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     return Container(
-      margin: const EdgeInsets.only(left: 4),
+      width: 36,
+      height: 46,
       decoration: BoxDecoration(
         color: scheme.surfaceContainerHighest.withValues(alpha: .85),
-        borderRadius: BorderRadius.circular(4),
+        borderRadius: BorderRadius.circular(6),
         border: Border.all(
-          color: kPositive.withValues(alpha: .40),
-          width: 0.9,
+          color: kPositive.withValues(alpha: .55),
+          width: 1.0,
         ),
       ),
       child: busy
-          ? const Padding(
-              padding: EdgeInsets.all(4),
+          ? const Center(
               child: SizedBox(
-                width: 12,
-                height: 12,
+                width: 16,
+                height: 16,
                 child: CircularProgressIndicator(
-                  strokeWidth: 1.5,
+                  strokeWidth: 2,
                   color: kPositive,
                 ),
               ),
             )
           : Column(
-              mainAxisSize: MainAxisSize.min,
               children: [
-                InkWell(
-                  key: const Key('tp_step_up'),
-                  borderRadius: const BorderRadius.only(
-                    topLeft: Radius.circular(3),
-                    topRight: Radius.circular(3),
-                  ),
-                  onTap: onUp,
-                  child: const Padding(
-                    padding: EdgeInsets.symmetric(horizontal: 4, vertical: 1),
-                    child: Icon(
-                      Icons.keyboard_arrow_up_rounded,
-                      size: 15,
-                      color: kPositive,
+                Expanded(
+                  child: InkWell(
+                    key: const Key('tp_step_up'),
+                    borderRadius: const BorderRadius.only(
+                      topLeft: Radius.circular(5),
+                      topRight: Radius.circular(5),
+                    ),
+                    onTap: onUp,
+                    child: const Center(
+                      child: Icon(
+                        Icons.keyboard_arrow_up_rounded,
+                        size: 22,
+                        color: kPositive,
+                      ),
                     ),
                   ),
                 ),
                 Container(
                   height: 1,
-                  width: 16,
-                  color: scheme.outline.withValues(alpha: .3),
+                  color: scheme.outline.withValues(alpha: .35),
                 ),
-                InkWell(
-                  key: const Key('tp_step_down'),
-                  borderRadius: const BorderRadius.only(
-                    bottomLeft: Radius.circular(3),
-                    bottomRight: Radius.circular(3),
-                  ),
-                  onTap: onDown,
-                  child: const Padding(
-                    padding: EdgeInsets.symmetric(horizontal: 4, vertical: 1),
-                    child: Icon(
-                      Icons.keyboard_arrow_down_rounded,
-                      size: 15,
-                      color: kPositive,
+                Expanded(
+                  child: InkWell(
+                    key: const Key('tp_step_down'),
+                    borderRadius: const BorderRadius.only(
+                      bottomLeft: Radius.circular(5),
+                      bottomRight: Radius.circular(5),
+                    ),
+                    onTap: onDown,
+                    child: const Center(
+                      child: Icon(
+                        Icons.keyboard_arrow_down_rounded,
+                        size: 22,
+                        color: kPositive,
+                      ),
                     ),
                   ),
                 ),
