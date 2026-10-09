@@ -350,7 +350,17 @@ def test_score_live_submit_keeps_credentials_verified_before_post(monkeypatch):
     dashboard._trend_score_auto_live_execute(
         user="alice",
         signal={"signal_key": "signal-1"},
-        prepared={"product_id": 101},
+        # A realistic contract, not a bare product_id: the premium-protection
+        # policy derives TP/SL/TSL from entry_price and contract_value and
+        # raises without them. This test is about credential binding, but it
+        # has to get past that policy to reach the assertions below -- when it
+        # did not, the test failed on setup and silently stopped checking that
+        # the POST is signed with the identity verified at preflight.
+        prepared={
+            "product_id": 101,
+            "entry_price": 500.0,
+            "contract_value": 0.001,
+        },
         transition_id="transition-1",
         initial_revision="revision-1",
         existing_state={"status": "CLOSED"},

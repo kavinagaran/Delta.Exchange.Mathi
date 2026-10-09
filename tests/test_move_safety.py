@@ -209,8 +209,19 @@ def test_move_value_gate_uses_only_completed_candles():
     assert "forecast_abs_move" in result
 
 
-def test_short_move_requires_explicit_enable():
-    with patch.object(bot, "ALLOW_SHORT_MOVE", False):
+def test_short_move_requires_explicit_enable(tmp_path):
+    """The SHORT-MOVE guard must be reached on its own merits.
+
+    ``build_move_entry_plan`` runs four earlier preconditions -- entry
+    configuration, the protection snapshot, the pending-entry journal, and
+    the concurrent-MOVE cap -- before it looks at ALLOW_SHORT_MOVE. Leaving
+    them unpatched made this test pass only where ambient config happened to
+    satisfy them: on a machine with a populated .env. Without credentials it
+    raised "new entries disabled: account API credentials are unavailable"
+    instead, so the assertion never exercised the guard it names.
+    """
+    with patch.object(bot, "ALLOW_SHORT_MOVE", False),          patch.object(bot, "DATA_DIR", tmp_path),          patch.object(bot, "_assert_entry_configuration"),          patch.object(bot, "_protection_snapshot",
+                      return_value={"tp_target_pnl": 200, "sl_target_pnl": 0}),          patch.object(bot, "load_states", return_value={}):
         with pytest.raises(RuntimeError, match="short MOVE entries are disabled"):
             bot.build_move_entry_plan({"symbol": "MV-X"}, 10, "sell", "evening")
 
@@ -601,3 +612,73 @@ def test_recovered_partial_close_accounting_is_carried_to_final_exit(tmp_path):
     assert final["exit_commission_usd"] == pytest.approx(.03)
     assert final["fees_usd"] == pytest.approx(.05)
     assert final["pnl_usd"] == pytest.approx(.10)
+
+
+# ── Entry protection fail-safe ────────────────────────────────────────────
+# These properties were previously proven only against the dashboard's copy of
+# the MOVE entry path, which had no caller and has been removed. They are
+# re-asserted here against `_protect_or_flatten_entry`, the path that actually
+# runs after a scheduled fill.
+
+def test_protection_start_failure_flattens_the_filled_position(tmp_path):
+    with patch.object(bot, "start_tp_monitor", return_value=False), \
+         patch.object(bot, "_emergency_flatten_unprotected",
+                      return_value=True) as flatten, \
+         patch.object(bot, "_write_entry_journal") as journal, \
+         patch.object(bot, "send_telegram") as telegram:
+        protected = bot._protect_or_flatten_entry("evening")
+
+    assert protected is False
+    flatten.assert_called_once_with("evening")
+    telegram.assert_called_once()
+    # The journal is cleared only after the risk-reducing close is ordered.
+    assert journal.call_args_list[-1].args == ("evening", None)
+
+
+def test_unverifiable_protection_leaves_the_journal_for_recovery(tmp_path):
+    """Neither outcome proven: the entry journal must survive so periodic
+    recovery can resolve the position instead of it being silently dropped."""
+    with patch.object(bot, "start_tp_monitor",
+                      side_effect=OSError("spawn failed")), \
+         patch.object(bot, "_emergency_flatten_unprotected") as flatten, \
+         patch.object(bot, "_write_entry_journal") as journal, \
+         patch.object(bot, "send_telegram"):
+        with pytest.raises(OSError, match="spawn failed"):
+            bot._protect_or_flatten_entry("evening")
+
+    flatten.assert_not_called()
+    journal.assert_not_called()
+
+
+def test_verified_protection_keeps_the_position_and_clears_the_journal(tmp_path):
+    with patch.object(bot, "start_tp_monitor", return_value=True), \
+         patch.object(bot, "_emergency_flatten_unprotected") as flatten, \
+         patch.object(bot, "_write_entry_journal") as journal, \
+         patch.object(bot, "send_telegram") as telegram:
+        assert bot._protect_or_flatten_entry("morning") is True
+
+    flatten.assert_not_called()
+    telegram.assert_not_called()
+    journal.assert_called_once_with("morning", None)
+
+
+def test_emergency_flatten_closes_with_the_protection_failure_trigger(tmp_path):
+    state = {"status": "OPEN", "symbol": "MV-BTC-64000-180726", "lots": 5}
+    with patch.object(bot, "DATA_DIR", tmp_path), \
+         patch.object(bot, "load_state", return_value=state), \
+         patch.object(bot, "_close_position_job") as close, \
+         patch.object(bot, "audit_event"):
+        assert bot._emergency_flatten_unprotected("evening") is True
+
+    close.assert_called_once()
+    assert close.call_args.kwargs["exit_trigger_override"] == \
+        "protection_start_failure"
+
+
+def test_emergency_flatten_never_orders_a_close_without_an_open_position(tmp_path):
+    with patch.object(bot, "DATA_DIR", tmp_path), \
+         patch.object(bot, "load_state", return_value={"status": "CLOSED"}), \
+         patch.object(bot, "_close_position_job") as close, \
+         patch.object(bot, "audit_event"):
+        assert bot._emergency_flatten_unprotected("evening") is True
+    close.assert_not_called()

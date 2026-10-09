@@ -1,5 +1,6 @@
 import json
 import inspect
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -32,15 +33,45 @@ def _response_tuple(result):
     return result, result.status_code
 
 
-def test_exposure_routes_reject_invalid_slot_before_exchange_call():
-    with dashboard.app.test_request_context(
-            "/api/manual-entry?slot=typo", method="POST", json={"side": "buy"}), \
-            patch.object(dashboard.req, "post") as post:
-        response, status = _response_tuple(dashboard.api_manual_entry())
-        assert status == 410
-        assert response.get_json()["code"] == "MANUAL_MOVE_DISABLED"
-        post.assert_not_called()
+MANUAL_MOVE_ROUTES = ("/api/manual-entry", "/api/manual-entry/preview")
 
+
+@contextmanager
+def _authenticated_client(tmp_path):
+    """A client past `_auth_gate`, so a 404 proves the route is gone rather
+    than merely proving the request was unauthenticated."""
+    with patch.object(dashboard, "DASH_PASS", ""), \
+            patch.object(dashboard, "USERS_DIR", tmp_path / "no-accounts"):
+        yield dashboard.app.test_client()
+
+
+def test_manual_move_routes_are_unroutable():
+    """Discretionary MOVE entry was retired: the routes must not exist at all.
+
+    A 410 stub still accepts a request and depends on an early return staying
+    first in the body.  An unregistered rule cannot be re-enabled by an edit
+    that moves code above the guard.
+    """
+    registered = {str(rule) for rule in dashboard.app.url_map.iter_rules()}
+    for path in MANUAL_MOVE_ROUTES:
+        assert path not in registered
+    assert not hasattr(dashboard, "api_manual_entry")
+    assert not hasattr(dashboard, "api_manual_entry_preview")
+
+
+@pytest.mark.parametrize("path", MANUAL_MOVE_ROUTES)
+def test_manual_move_routes_cannot_reach_an_order_post(path, tmp_path):
+    with patch.object(dashboard.req, "post") as post, \
+            patch.object(dashboard, "_post_dashboard_order") as submit, \
+            _authenticated_client(tmp_path) as client:
+        for call in (client.get(f"{path}?slot=evening&side=buy"),
+                     client.post(f"{path}?slot=evening", json={"side": "buy"})):
+            assert call.status_code == 404
+    post.assert_not_called()
+    submit.assert_not_called()
+
+
+def test_exposure_routes_reject_invalid_slot_before_exchange_call():
     with dashboard.app.test_request_context(
             "/api/square-off?slot=typo", method="POST"), \
             patch.object(dashboard.req, "post") as post:
@@ -48,84 +79,6 @@ def test_exposure_routes_reject_invalid_slot_before_exchange_call():
         assert status == 400
         assert "slot" in response.get_json()["error"]
         post.assert_not_called()
-
-
-def test_legacy_manual_sizing_fails_closed_on_unknown_or_zero_affordability():
-    def cfg(key, default=""):
-        return {"STRADDLE_LOTS": "800", "MAX_ORDER_LOTS": "1000"}.get(key, default)
-
-    with patch.object(dashboard, "_cfg", side_effect=cfg), \
-            patch.object(dashboard, "_affordable_option_lots", return_value=None):
-        assert dashboard._manual_entry_lots("evening", 10, .001, 64000) == 0
-    with patch.object(dashboard, "_cfg", side_effect=cfg), \
-            patch.object(dashboard, "_affordable_option_lots", return_value=0):
-        assert dashboard._manual_entry_lots("evening", 10, .001, 64000) == 0
-
-
-def test_manual_move_selector_uses_nearest_live_cycle_for_both_state_slots():
-    now = datetime(2026, 7, 17, 4, 0, tzinfo=timezone.utc)
-    products = [
-        {"id": 1, "symbol": "MV-BTC-64000-100726", "state": "live",
-         "trading_status": "operational", "settlement_time": "2026-07-10T12:00:00Z",
-         "strike_price": "64000", "underlying_asset": {"symbol": "BTC"}},
-        {"id": 2, "symbol": "MV-BTC-64000-170726", "state": "live",
-         "trading_status": "settled", "settlement_time": "2026-07-17T12:00:00Z",
-         "strike_price": "64000", "underlying_asset": {"symbol": "BTC"}},
-        {"id": 3, "symbol": "MV-BTC-64500-170726", "state": "live",
-         "trading_status": "operational", "settlement_time": "2026-07-17T12:00:00Z",
-         "strike_price": "64500", "underlying_asset": {"symbol": "BTC"}},
-        {"id": 4, "symbol": "MV-BTC-64600-180726", "state": "live",
-         "trading_status": "operational", "settlement_time": "2026-07-18T12:00:00Z",
-         "strike_price": "64600", "underlying_asset": {"symbol": "BTC"}},
-        {"id": 5, "symbol": "MV-BTC-64200-170726", "state": "live",
-         "trading_status": "operational", "settlement_time": "2026-07-17T12:00:00Z",
-         "strike_price": "64200", "underlying_asset": {"symbol": "BTC"}},
-    ]
-
-    def cfg(key, default=""):
-        return {"MOVE_MIN_TTE_MINUTES": "90", "MOVE_MAX_TTE_HOURS": "40"}.get(
-            key, default)
-
-    with patch.object(dashboard, "_cfg", side_effect=cfg):
-        morning = dashboard._select_atm_mv(products, 64600, "morning", now)
-        evening = dashboard._select_atm_mv(products, 64600, "evening", now)
-
-    assert morning["id"] == 3
-    assert evening["id"] == 3
-
-
-def test_manual_move_selector_rolls_to_next_cycle_when_nearest_is_below_min_tte():
-    now = datetime(2026, 7, 17, 11, 0, tzinfo=timezone.utc)
-    products = [
-        {"id": 1, "symbol": "MV-BTC-64000-170726", "state": "live",
-         "trading_status": "operational", "settlement_time": "2026-07-17T12:00:00Z",
-         "strike_price": "64000"},
-        {"id": 2, "symbol": "MV-BTC-64500-180726", "state": "live",
-         "trading_status": "operational", "settlement_time": "2026-07-18T12:00:00Z",
-         "strike_price": "64500"},
-    ]
-    with patch.object(dashboard, "_cfg", side_effect=lambda key, default="": default):
-        assert dashboard._select_atm_mv(products, 64400, "evening", now)["id"] == 2
-
-
-def test_manual_move_selector_fails_closed_when_no_product_passes_tte_and_status():
-    now = datetime(2026, 7, 17, 11, 0, tzinfo=timezone.utc)
-    products = [
-        {"id": 1, "symbol": "MV-BTC-64000-170726", "state": "live",
-         "trading_status": "operational", "settlement_time": "2026-07-17T12:00:00Z",
-         "strike_price": "64000"},
-        {"id": 2, "symbol": "MV-BTC-64500-170726", "state": "closed",
-         "trading_status": "operational", "settlement_time": "2026-07-17T12:00:00Z",
-         "strike_price": "64500"},
-        {"id": 3, "symbol": "MV-BTC-64500-180726", "state": "live",
-         "trading_status": "operational", "settlement_time": "2026-07-18T12:00:00Z",
-         "strike_price": "nan"},
-        {"id": 4, "symbol": "MV-BTCX-64500-180726", "state": "live",
-         "trading_status": "operational", "settlement_time": "2026-07-18T12:00:00Z",
-         "strike_price": "64500"},
-    ]
-    with patch.object(dashboard, "_cfg", side_effect=lambda key, default="": default):
-        assert dashboard._select_atm_mv(products, 64000, "morning", now) is None
 
 
 def test_live_move_products_paginates_without_requiring_future_expiry():
@@ -158,78 +111,37 @@ def test_live_move_products_rejects_repeated_pagination_cursor():
         dashboard._fetch_live_mv_products()
 
 
-def test_manual_move_selector_uses_safe_defaults_for_nonfinite_tte_config():
-    now = datetime(2026, 7, 17, 11, 0, tzinfo=timezone.utc)
-    product = {
-        "id": 1, "symbol": "MV-BTC-64000-170726", "state": "live",
-        "trading_status": "operational",
-        "settlement_time": "2026-07-17T12:00:00Z",
-        "strike_price": "64000",
-    }
-    with patch.object(dashboard, "_cfg", return_value="nan"):
-        assert dashboard._select_atm_mv(
-            [product], 64000, "evening", now) is None
-
-
-def test_manual_preview_is_disabled_before_strategy_or_exchange_work():
-    contract = {
-        "id": 9, "symbol": "MV-BTC-65000-180726", "contract_value": ".001",
-        "strike_price": "65000", "settlement_time": "2026-07-18T12:00:00Z",
-    }
-    quote = {"entry_price": 10, "entry_depth": 100}
-    with dashboard.app.test_request_context(
-            "/api/manual-entry/preview?slot=evening&side=sell"), \
-            patch.object(dashboard, "_current_atm_mv", return_value=contract) as select, \
-            patch.object(dashboard, "_move_execution_quote", return_value=quote) as pricing, \
-            patch.object(dashboard, "_move_lot_plan",
-                         return_value={"lots": 0, "reason": "No affordable lots"}):
-        response, status = _response_tuple(dashboard.api_manual_entry_preview())
-
-    assert status == 410
-    assert response.get_json()["code"] == "MANUAL_MOVE_DISABLED"
-    select.assert_not_called()
-    pricing.assert_not_called()
-
-
-def test_manual_entry_is_disabled_before_contract_or_exchange_work(isolated_user):
-    selected = {"id": 10, "symbol": "MV-BTC-65500-180726"}
-    with dashboard.app.test_request_context(
-            "/api/manual-entry?slot=evening", method="POST",
-            json={"side": "buy", "product_id": 9,
-                  "symbol": "MV-BTC-65000-180726", "lots": 2, "mark": 10}), \
-            patch.object(dashboard, "_active_creds", return_value=("key", "secret")), \
-            patch.object(dashboard, "_current_atm_mv", return_value=selected), \
+def test_manual_move_routes_never_touch_strategy_or_exchange_helpers(tmp_path):
+    """The retired routes are gone, so no request can reach contract discovery,
+    exchange position reads, or order submission."""
+    with patch.object(dashboard, "_active_creds", return_value=("key", "secret")), \
+            patch.object(dashboard, "_fetch_live_mv_products") as products, \
             patch.object(dashboard, "_strict_exchange_positions") as positions, \
-            patch.object(dashboard, "_post_dashboard_order") as submit:
-        response, status = _response_tuple(dashboard.api_manual_entry())
-
-    assert status == 410
-    assert response.get_json()["code"] == "MANUAL_MOVE_DISABLED"
-    positions.assert_not_called()
-    submit.assert_not_called()
-
-
-def test_manual_entry_never_revalidates_or_submits_old_preview(isolated_user):
-    selected = {"id": 9, "symbol": "MV-BTC-65000-180726"}
-    with dashboard.app.test_request_context(
-            "/api/manual-entry?slot=evening", method="POST",
+            patch.object(dashboard, "_post_dashboard_order") as submit, \
+            patch.object(dashboard.req, "post") as raw_post, \
+            _authenticated_client(tmp_path) as client:
+        preview = client.get("/api/manual-entry/preview?slot=evening&side=sell")
+        entry = client.post(
+            "/api/manual-entry?slot=evening",
             json={"side": "buy", "product_id": 9,
-                  "symbol": selected["symbol"], "lots": 2, "mark": 10}), \
-            patch.object(dashboard, "_active_creds", return_value=("key", "secret")), \
-            patch.object(dashboard, "_current_atm_mv", return_value=selected), \
-            patch.object(dashboard, "_strict_exchange_positions", return_value=[]), \
-            patch.object(dashboard, "_validate_move_entry_account", return_value=0), \
-            patch.object(dashboard, "_move_execution_quote",
-                         return_value={"entry_price": 10, "entry_depth": 100}) as pricing, \
-            patch.object(dashboard, "_move_lot_plan",
-                         return_value={"lots": 3, "reason": "sizing checks passed"}), \
-            patch.object(dashboard, "_post_dashboard_order") as submit:
-        response, status = _response_tuple(dashboard.api_manual_entry())
+                  "symbol": "MV-BTC-65000-180726", "lots": 2, "mark": 10})
 
-    assert status == 410
-    assert response.get_json()["code"] == "MANUAL_MOVE_DISABLED"
-    pricing.assert_not_called()
-    submit.assert_not_called()
+    assert preview.status_code == 404
+    assert entry.status_code == 404
+    for helper in (products, positions, submit, raw_post):
+        helper.assert_not_called()
+
+
+def test_discretionary_move_entry_helpers_are_gone():
+    """The retired routes were the only callers of these helpers.  Keeping the
+    code alive behind a dead route is how a disabled path comes back."""
+    for name in ("_select_atm_mv", "_current_atm_mv", "_move_execution_quote",
+                 "_move_lot_plan", "_validate_move_entry_account",
+                 "_manual_entry_lots", "_submit_manual_move_entry",
+                 "_protect_or_flatten_move", "_force_flatten_move",
+                 "_recover_pending_move_entry", "_persist_proven_move_open",
+                 "_flatten_unpersisted_move_fill", "_post_entry_exchange_size"):
+        assert not hasattr(dashboard, name), name
 
 
 def test_overview_has_no_manual_or_scheduled_move_controls():
@@ -245,264 +157,19 @@ def test_overview_has_no_manual_or_scheduled_move_controls():
     assert "function moveDecisionHtml(view)" not in source
     assert "Automatic MOVE Forecast" not in source
     assert "SIDEWAYS SELL immediate" not in source
-    assert "Trend-based position (CE / PE)" in source
-    assert "st.display_slots ||" in source
+    # Today contains only same-day trade data. The one mutating action is an
+    # explicit, mode-bound close routed through the guarded square-off API.
+    assert "jget('/api/today-trades')" in source
+    assert "squareOff(" not in source
+    assert "openProtectionDrawer" not in source
+    assert "'/api/square-off?slot='" in source
+    assert "target_mode: simulated ? 'dry_run' : 'live'" in source
     assert "/api/manual-entry" not in mobile
     assert "MORNING_SIDE" not in mobile
     assert "EVENING_SIDE" not in mobile
-    assert (
-        "AUTO forecast" in mobile
-        or (
-            "class DashboardWebPage" in mobile
-            and "label: 'Nithi Bot'" in mobile
-            and "path: '/'" in mobile
-        )
-    )
-
-
-def test_short_plan_requires_opt_in_positive_sl_and_short_cap():
-    cfg = {
-        "STRADDLE_LOTS": "100", "MAX_ORDER_LOTS": "100",
-        "ORDER_CHUNK_LOTS": "100", "MIN_BOOK_DEPTH_MULTIPLE": "1",
-        "RISK_PER_TRADE_USD_EVENING": "200", "SHORT_MAX_RISK_USD": "0",
-    }
-    contract = {"contract_value": ".001", "strike_price": "64000"}
-    quote = {"entry_price": 10, "entry_depth": 100}
-    with patch.object(dashboard, "_user_cfg", return_value=cfg), \
-            patch.object(dashboard, "_cfg_bool", return_value=False), \
-            patch.object(dashboard, "_affordable_option_lots", return_value=100), \
-            patch.object(dashboard, "_tp_env", return_value=(100, 30, 50, 0)):
-        plan = dashboard._move_lot_plan("evening", "sell", contract, quote)
-    assert plan["lots"] == 0
-    assert "disabled" in plan["reason"]
-
-
-def test_dry_move_sizing_uses_virtual_cap_without_book_depth_limit():
-    cfg = {
-        "STRADDLE_LOTS": "1000", "MAX_ORDER_LOTS": "1000",
-        "ORDER_CHUNK_LOTS": "1000", "MIN_BOOK_DEPTH_MULTIPLE": "1",
-        "RISK_PER_TRADE_USD_EVENING": "500",
-        "MAX_ACCOUNT_PREMIUM_AT_RISK_USD": "500",
-    }
-    contract = {"contract_value": ".001", "strike_price": "64000"}
-    quote = {"entry_price": 149, "entry_depth": 569}
-    with patch.object(dashboard, "_user_cfg", return_value=cfg), \
-            patch.object(dashboard, "_affordable_option_lots") as wallet, \
-            patch.object(dashboard, "_tp_env", return_value=(100, 30, 0, 0)), \
-            patch.object(dashboard, "_open_long_premium_usd", return_value=0), \
-            patch.object(dashboard, "_option_fee_per_lot", return_value=.005):
-        plan = dashboard._move_lot_plan(
-            "evening", "buy", contract, quote, dry_run=True)
-
-    wallet.assert_not_called()
-    assert plan["lots"] == 1000
-    assert plan["affordable"] == 1000
-    assert plan["affordability_source"] == "paper_configured_cap"
-    assert plan["observed_entry_depth_lots"] == 569
-    assert plan["book_depth_applied_to_sizing"] is False
-
-
-def test_live_move_sizing_does_not_use_book_depth_as_lot_cap():
-    cfg = {
-        "STRADDLE_LOTS": "1000", "MAX_ORDER_LOTS": "1000",
-        "ORDER_CHUNK_LOTS": "1000",
-        "RISK_PER_TRADE_USD_EVENING": "500",
-        "MAX_ACCOUNT_PREMIUM_AT_RISK_USD": "500",
-    }
-    contract = {"contract_value": ".001", "strike_price": "64000"}
-    quote = {"entry_price": 149, "entry_depth": 12}
-    with patch.object(dashboard, "_user_cfg", return_value=cfg), \
-            patch.object(dashboard, "_affordable_option_lots", return_value=1000), \
-            patch.object(dashboard, "_tp_env", return_value=(100, 30, 0, 0)), \
-            patch.object(dashboard, "_open_long_premium_usd", return_value=0), \
-            patch.object(dashboard, "_option_fee_per_lot", return_value=.005):
-        plan = dashboard._move_lot_plan(
-            "evening", "buy", contract, quote, dry_run=False)
-
-    assert plan["lots"] == 1000
-    assert plan["observed_entry_depth_lots"] == 12
-    assert plan["book_depth_applied_to_sizing"] is False
-
-
-def test_live_move_sizing_still_fails_closed_on_empty_wallet():
-    cfg = {
-        "STRADDLE_LOTS": "1000", "MAX_ORDER_LOTS": "1000",
-        "ORDER_CHUNK_LOTS": "1000", "MIN_BOOK_DEPTH_MULTIPLE": "1",
-        "RISK_PER_TRADE_USD_EVENING": "500",
-        "MAX_ACCOUNT_PREMIUM_AT_RISK_USD": "500",
-    }
-    contract = {"contract_value": ".001", "strike_price": "64000"}
-    quote = {"entry_price": 149, "entry_depth": 569}
-    with patch.object(dashboard, "_user_cfg", return_value=cfg), \
-            patch.object(dashboard, "_affordable_option_lots", return_value=0), \
-            patch.object(dashboard, "_tp_env", return_value=(100, 30, 0, 0)), \
-            patch.object(dashboard, "_open_long_premium_usd", return_value=0):
-        plan = dashboard._move_lot_plan(
-            "evening", "buy", contract, quote, dry_run=False)
-
-    assert plan["lots"] == 0
-    assert plan["affordability_source"] == "exchange_wallet"
-
-
-def test_dry_short_uses_short_cap_when_configured_sl_is_disabled():
-    cfg = {
-        "STRADDLE_LOTS": "1000", "MAX_ORDER_LOTS": "1000",
-        "ORDER_CHUNK_LOTS": "1000", "MIN_BOOK_DEPTH_MULTIPLE": "1",
-        "RISK_PER_TRADE_USD_EVENING": "500",
-        "SHORT_MAX_RISK_USD": "250",
-    }
-    contract = {"contract_value": ".001", "strike_price": "64000"}
-    quote = {"entry_price": 144, "entry_depth": 1098}
-    with patch.object(dashboard, "_user_cfg", return_value=cfg), \
-            patch.object(dashboard, "_cfg_bool", return_value=True), \
-            patch.object(dashboard, "_affordable_option_lots") as wallet, \
-            patch.object(dashboard, "_tp_env", return_value=(200, 20, 0, 0)):
-        plan = dashboard._move_lot_plan(
-            "evening", "sell", contract, quote, dry_run=True)
-
-    wallet.assert_not_called()
-    assert plan["lots"] == 1000
-    assert plan["risk_budget_usd"] == 250
-    assert plan["sl_target_pnl"] == 0
-    assert plan["risk_stop_loss_usd"] == 250
-    assert plan["paper_short_risk_assumption_usd"] == 250
-    assert plan["proposed_risk_usd"] == 250
-
-
-def test_live_short_still_requires_configured_positive_sl():
-    cfg = {
-        "STRADDLE_LOTS": "100", "MAX_ORDER_LOTS": "100",
-        "ORDER_CHUNK_LOTS": "100", "MIN_BOOK_DEPTH_MULTIPLE": "1",
-        "RISK_PER_TRADE_USD_EVENING": "500",
-        "SHORT_MAX_RISK_USD": "250",
-    }
-    contract = {"contract_value": ".001", "strike_price": "64000"}
-    quote = {"entry_price": 144, "entry_depth": 100}
-    with patch.object(dashboard, "_user_cfg", return_value=cfg), \
-            patch.object(dashboard, "_cfg_bool", return_value=True), \
-            patch.object(dashboard, "_affordable_option_lots", return_value=100), \
-            patch.object(dashboard, "_tp_env", return_value=(200, 20, 0, 0)):
-        plan = dashboard._move_lot_plan(
-            "evening", "sell", contract, quote, dry_run=False)
-
-    assert plan["lots"] == 0
-    assert plan["reason"] == "Short MOVE requires a positive SL and short-risk cap"
-
-
-def test_manual_entry_honors_concurrent_move_cap(isolated_user):
-    _write(isolated_user / "morning_state.json", _open_state(
-        slot="morning", product_id=7, symbol="MV-BTC-OLD", lots=4,
-        owned_entry_lots=4))
-    with patch.object(dashboard, "_cfg",
-                      side_effect=lambda key, default="": "1" if key == "MAX_CONCURRENT_MOVE_POSITIONS" else default):
-        with pytest.raises(RuntimeError, match="concurrent MOVE position cap"):
-            dashboard._validate_move_entry_account(
-                [{"product_id": 7, "size": "4", "unrealized_pnl": "0"}], 9)
-
-
-def test_manual_plan_is_explicitly_discretionary_not_value_eligible():
-    cfg = {
-        "STRADDLE_LOTS": "100", "MAX_ORDER_LOTS": "100",
-        "ORDER_CHUNK_LOTS": "100", "MIN_BOOK_DEPTH_MULTIPLE": "1",
-        "RISK_PER_TRADE_USD_EVENING": "200", "MOVE_VALUE_FILTER_ENABLED": "true",
-        "MAX_ACCOUNT_PREMIUM_AT_RISK_USD": "500",
-    }
-    contract = {"contract_value": ".001", "strike_price": "64000"}
-    quote = {"entry_price": 10, "entry_depth": 100}
-    with patch.object(dashboard, "_user_cfg", return_value=cfg), \
-            patch.object(dashboard, "_affordable_option_lots", return_value=100), \
-            patch.object(dashboard, "_tp_env", return_value=(100, 30, 50, 0)), \
-            patch.object(dashboard, "_open_long_premium_usd", return_value=0):
-        plan = dashboard._move_lot_plan("evening", "buy", contract, quote)
-    assert plan["move_value_filter_enabled"] is True
-    assert plan["move_value_gate_evaluated"] is False
-    assert plan["entry_classification"] == "discretionary_manual"
-
-
-def test_entry_identity_is_durable_before_bounded_ioc_post(isolated_user):
-    contract = {"id": 9, "symbol": "MV-BTC-X", "contract_value": ".001",
-                "strike_price": "64000", "settlement_time": "2026-07-16T00:00:00Z"}
-    quote = {"entry_price": 10, "limit_price": 10.1}
-    plan = {"lots": 5, "proposed_risk_usd": 10}
-    captured = {}
-
-    def submit(payload):
-        pending = json.loads((isolated_user / "straddle_state.json").read_text())
-        assert pending["status"] == "ENTRY_PENDING"
-        assert pending["pending_entry_client_order_id"] == payload["client_order_id"]
-        captured.update(payload)
-        order = {"id": 77, "client_order_id": payload["client_order_id"],
-                 "product_id": 9, "side": "buy", "reduce_only": False,
-                 "state": "closed", "filled_size": 5, "unfilled_size": 0,
-                 "average_fill_price": "10"}
-        return order, {"success": True, "result": order}
-
-    with patch.object(dashboard, "_tp_policy", return_value={"sl_target_pnl": 50}), \
-            patch.object(dashboard, "_post_dashboard_order", side_effect=submit):
-        state, order = dashboard._submit_manual_move_entry(
-            "evening", "buy", contract, quote, plan, False)
-
-    assert captured["order_type"] == "limit_order"
-    assert captured["time_in_force"] == "ioc"
-    assert captured["client_order_id"]
-    assert state["status"] == "OPEN"
-    assert state["lots"] == 5
-    assert state["order_id"] == order["id"]
-
-
-def test_lost_entry_response_leaves_exact_pending_identity(isolated_user):
-    contract = {"id": 9, "symbol": "MV-BTC-X", "contract_value": ".001",
-                "strike_price": "64000"}
-    quote = {"entry_price": 10, "limit_price": 10.1}
-    plan = {"lots": 5, "proposed_risk_usd": 10}
-    with patch.object(dashboard, "_tp_policy", return_value={"sl_target_pnl": 50}), \
-            patch.object(dashboard, "_post_dashboard_order", side_effect=TimeoutError("lost")), \
-            patch.object(dashboard, "_lookup_dashboard_order", return_value=None):
-        with pytest.raises(RuntimeError, match="recovery pending"):
-            dashboard._submit_manual_move_entry(
-                "evening", "buy", contract, quote, plan, False)
-    pending = json.loads((isolated_user / "straddle_state.json").read_text())
-    assert pending["status"] == "ENTRY_PENDING"
-    assert pending["pending_entry_client_order_id"]
-    assert pending["pending_entry_submission_state"] == "submission_unknown"
-
-
-def test_proven_fill_open_write_failure_recovers_exact_order(isolated_user):
-    contract = {"id": 9, "symbol": "MV-BTC-X", "contract_value": ".001",
-                "strike_price": "64000"}
-    quote = {"entry_price": 10, "limit_price": 10.1}
-    plan = {"lots": 5, "proposed_risk_usd": 10}
-    order_box = {}
-    real_write = dashboard._atomic_write_json
-    failed_open_once = False
-
-    def submit(payload):
-        order = {"id": 78, "client_order_id": payload["client_order_id"],
-                 "product_id": 9, "side": "buy", "reduce_only": False,
-                 "state": "closed", "filled_size": 5, "unfilled_size": 0,
-                 "average_fill_price": "10"}
-        order_box["order"] = order
-        return order, {"success": True, "result": order}
-
-    def flaky_write(path, value):
-        nonlocal failed_open_once
-        if value.get("status") == "OPEN" and not failed_open_once:
-            failed_open_once = True
-            raise OSError("one-off fsync failure")
-        return real_write(path, value)
-
-    with patch.object(dashboard, "_tp_policy", return_value={"sl_target_pnl": 50}), \
-            patch.object(dashboard, "_post_dashboard_order", side_effect=submit), \
-            patch.object(dashboard, "_lookup_dashboard_order",
-                         side_effect=lambda *args, **kwargs: order_box.get("order")), \
-            patch.object(dashboard, "_atomic_write_json", side_effect=flaky_write):
-        state, _ = dashboard._submit_manual_move_entry(
-            "evening", "buy", contract, quote, plan, False)
-
-    assert failed_open_once
-    assert state["status"] == "OPEN"
-    assert state["entry_state_write_recovered"] is True
-    assert json.loads((isolated_user / "straddle_state.json").read_text())["status"] == "OPEN"
+    assert "'/' => TodayScreen" in mobile
+    assert "label: 'Today'" in mobile
+    assert "path: '/'" in mobile
 
 
 def _open_state(**updates):
@@ -649,56 +316,29 @@ def test_squareoff_blocks_aggregate_size_mismatch_before_post(isolated_user):
     submit.assert_not_called()
 
 
-def test_manual_entry_honors_shared_account_exposure_lock(isolated_user):
+def test_square_off_honors_shared_account_exposure_lock(isolated_user):
+    """The retired manual-entry route used to prove this; the surviving
+    exposure-changing route must honour the same cross-process lock."""
+    _write(isolated_user / "straddle_state.json", _open_state())
     with account_entry_lock(isolated_user, "holder") as held:
         assert held
         with dashboard.app.test_request_context(
-                "/api/manual-entry?slot=evening", method="POST", json={"side": "buy"}), \
+                "/api/square-off?slot=evening", method="POST"), \
                 patch.object(dashboard, "_active_creds", return_value=("key", "secret")), \
                 patch.object(dashboard.req, "post") as post:
-            response, status = _response_tuple(dashboard.api_manual_entry())
-    assert status == 410
-    assert response.get_json()["code"] == "MANUAL_MOVE_DISABLED"
+            response, status = _response_tuple(dashboard.api_square_off())
+    assert status == 409
+    assert "in progress" in response.get_json()["error"]
     post.assert_not_called()
 
 
-def test_protection_failure_forces_verified_flatten(isolated_user):
-    state = _open_state()
-    _write(isolated_user / "straddle_state.json", state)
-    with patch.object(dashboard, "_tp_health", return_value={}), \
-            patch.object(dashboard, "_tp_running", return_value=False), \
-            patch.object(dashboard, "_spawn_tp", return_value=object()), \
-            patch.object(dashboard, "_wait_for_protection", return_value=(False, {})), \
-            patch.object(dashboard, "_send_telegram"), \
-            patch.object(dashboard, "_force_flatten_move",
-                         return_value={"pnl": 1, "order_id": 90}) as flatten:
-        protected, detail = dashboard._protect_or_flatten_move(
-            "evening", state, datetime.now(timezone.utc))
-    assert not protected
-    assert detail["flattened"] is True
-    flatten.assert_called_once()
-
-
-def test_monitor_start_exception_also_forces_flatten(isolated_user):
-    state = _open_state()
-    _write(isolated_user / "straddle_state.json", state)
-    with patch.object(dashboard, "_tp_health", return_value={}), \
-            patch.object(dashboard, "_tp_running", return_value=False), \
-            patch.object(dashboard, "_spawn_tp", side_effect=OSError("spawn failed")), \
-            patch.object(dashboard, "_send_telegram"), \
-            patch.object(dashboard, "_force_flatten_move",
-                         return_value={"pnl": 1, "order_id": 91}) as flatten:
-        protected, detail = dashboard._protect_or_flatten_move(
-            "evening", state, datetime.now(timezone.utc))
-    assert not protected
-    assert detail["flattened"] is True
-    assert detail["protection_health"]["last_error"] == "spawn failed"
-    flatten.assert_called_once()
-
-
-def test_success_response_does_not_use_an_always_true_expression():
-    source = inspect.getsource(dashboard.api_manual_entry)
-    assert "dry_run or True" not in source
+def test_no_order_path_gates_on_an_always_true_expression():
+    """The original guard covered the retired manual-entry route.  Apply it to
+    every surviving dashboard order path instead of dropping the check."""
+    for func in (dashboard.api_square_off, dashboard.api_trend_entry,
+                 dashboard._execute_trend_entry,
+                 dashboard._close_move_state_locked):
+        assert "dry_run or True" not in inspect.getsource(func)
 
 
 @pytest.mark.parametrize(
@@ -1450,3 +1090,73 @@ def test_tp_sl_tsl_exchange_flags_require_fresh_matching_strict_proofs(
     legacy_payload = payload_for(legacy_claim_only)
     assert legacy_payload["tp_on_exchange"] is False
     assert legacy_payload["sl_on_exchange"] is False
+
+
+def test_tp_status_reports_adopted_local_aggregate_as_protected(
+        isolated_user):
+    state = _trend_squareoff_state(
+        lots=500,
+        protection_lots=500,
+        owned_entry_lots=100,
+        original_owned_entry_lots=100,
+        externally_added_lots_adopted=400,
+        protection_revision=8,
+        continuity_revision=6,
+        tsl_stop_order_id=None,
+        tp_stop_order_id=None,
+    )
+    _write(isolated_user / "trend_state.json", state)
+    health = _trend_continuity_health(
+        state,
+        status="healthy",
+        protected_lots=500,
+        exchange_position_size=500,
+        exchange_protected_lots=0,
+        local_fallback_active=True,
+        protection_established=True,
+    )
+
+    with patch.object(
+            dashboard, "_tp_health",
+            side_effect=lambda _user, slot: health if slot == "trend" else {}), \
+            patch.object(
+                dashboard, "_tp_running",
+                side_effect=lambda _user, slot: slot == "trend"), \
+            dashboard.app.test_request_context("/api/tp-monitor"):
+        payload = dashboard.tp_monitor_status().get_json()["trend"]
+
+    assert payload["coverage_status"] == "local_fallback"
+    assert payload["protection_established"] is True
+    assert payload["protected_lots"] == 500
+    assert payload["exchange_position_lots"] == 500
+    assert payload["bot_entry_lots"] == 100
+    assert payload["external_protected_lots"] == 400
+
+
+def test_wait_for_protection_accepts_fresh_matching_local_fallback(
+        isolated_user):
+    state = _trend_squareoff_state(
+        status="OPEN",
+        tsl_stop_order_id=None,
+        tp_stop_order_id=None,
+    )
+    _write(isolated_user / "trend_state.json", state)
+    health = _trend_continuity_health(
+        state,
+        status="healthy",
+        protected_lots=6,
+        exchange_position_size=6,
+        exchange_protected_lots=0,
+        exchange_protection_complete=False,
+        local_fallback_active=True,
+        protection_established=True,
+    )
+
+    started_at = datetime.now(timezone.utc)
+    with patch.object(dashboard, "_tp_health", return_value=health):
+        verified, returned = dashboard._wait_for_protection(
+            "alice", "trend", started_at, timeout_secs=0.2,
+        )
+
+    assert verified is True
+    assert returned is health

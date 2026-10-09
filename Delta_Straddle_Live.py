@@ -360,9 +360,21 @@ log.addHandler(_ch)
 if DRY_RUN:
     log.info("*** DRY-RUN MODE — no real orders will be placed ***")
 
-if not API_KEY or not API_SECRET:
-    log.critical("API_KEY / API_SECRET missing in .env — aborting.")
-    sys.exit(1)
+def _require_credentials() -> None:
+    """Refuse to run the bot without a signing identity.
+
+    Deliberately called from ``main()`` rather than executed at import time.
+    The test suite imports this module to exercise pure decision logic that
+    never signs a request, and CI runs deliberately without credentials --
+    so a module-level ``sys.exit`` raised ``SystemExit`` during pytest
+    *collection* and aborted the entire run before a single test executed.
+    The suite is CI's blocking gate, which meant the gate itself was down
+    while looking merely red. Deferring the check keeps the import pure and
+    still stops a real bot process before it can reach the exchange.
+    """
+    if not API_KEY or not API_SECRET:
+        log.critical("API_KEY / API_SECRET missing in .env — aborting.")
+        sys.exit(1)
 
 # ─────────────────────────────────────────────────────────────
 # AUTHENTICATION
@@ -3024,8 +3036,7 @@ def start_tp_monitor(slot: str):
             if age < -30 or age > heartbeat_max_age:
                 return False
             proven_mode = bool(
-                health.get("exchange_protection_complete")
-                or health.get("local_fallback_active")
+                health.get("exchange_protection_complete") is True
             )
             return (bool(health.get("protection_established")) and proven_mode
                     and health.get("status") in {"healthy", "degraded"})
@@ -4267,6 +4278,7 @@ def _immediate_morning_sideways_due(
 
 
 def main():
+    _require_credentials()
     log.info("=" * 64)
     log.info("Delta MV Straddle Bot")
     # A mode switch governs new entries only. Existing real exposure and paper

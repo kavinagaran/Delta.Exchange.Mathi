@@ -133,6 +133,32 @@ def test_dry_run_snapshot_uses_only_closed_candles_and_no_live_account(tmp_path)
                    for url, _, _ in calls)
 
 
+def test_dry_run_snapshot_prefers_current_trend_score_capital_setting(tmp_path):
+    now = datetime(2026, 7, 22, 6, 0, 7, tzinfo=timezone.utc)
+    dry_dir = tmp_path / "dry_run"
+    dry_dir.mkdir()
+    (dry_dir / "trade_history.json").write_text("[]", encoding="utf-8")
+
+    snapshot = collect_delta_trend_snapshot(
+        http_get=_market_router(now, []),
+        api_base="https://example.test",
+        sign=lambda *_args, **_kwargs: {},
+        user_dir=tmp_path,
+        dry_run=True,
+        mode_revision="rev-1",
+        strategy_config={
+            "TREND_DRY_RUN_CAPITAL_USD": "1250",
+            # Existing accounts may retain this legacy value, but it must not
+            # override the current score-zone setting.
+            "MOVE_DRY_RUN_CAPITAL_USD": "1000",
+        },
+        now=now,
+    )
+
+    assert snapshot["account"]["equity"] == 1250
+    assert snapshot["account"]["available_funds"] == 1250
+
+
 def test_explicit_event_status_distinguishes_clear_from_unknown(tmp_path):
     now = datetime(2026, 7, 22, 6, 0, 7, tzinfo=timezone.utc)
     dry_dir = tmp_path / "dry_run"
@@ -217,6 +243,46 @@ def test_malformed_trade_history_blocks_risk_approval(tmp_path):
             strategy_config={"MOVE_DRY_RUN_CAPITAL_USD": "1000"},
             now=now,
         )
+
+
+def test_operator_protected_external_row_with_unknown_pnl_is_excluded_not_fatal(
+    tmp_path,
+):
+    """A position closed outside the bot's visibility has no observed exit
+    price -- ``pnl_usd: null`` is an honest "unknown", not corrupt data, for
+    a row explicitly marked as an operator-authorized external-protection
+    hand-off. It must be excluded from the daily/consecutive-loss
+    aggregate rather than blocking every later risk evaluation (and every
+    score cycle with it) the way a genuinely malformed row still does, per
+    ``test_malformed_trade_history_blocks_risk_approval`` above.
+    """
+    now = datetime(2026, 7, 22, 6, 0, 7, tzinfo=timezone.utc)
+    dry_dir = tmp_path / "dry_run"
+    dry_dir.mkdir()
+    (dry_dir / "trade_history.json").write_text(
+        json.dumps([{
+            "exit_date": "2026-07-22",
+            "exit_time_utc": "05:00:00",
+            "pnl_usd": None,
+            "ownership": "external_protection_only",
+            "operator_authorized_protection_only": True,
+        }]),
+        encoding="utf-8",
+    )
+
+    snapshot = collect_delta_trend_snapshot(
+        http_get=_market_router(now, []),
+        api_base="https://example.test",
+        sign=lambda *_args, **_kwargs: {},
+        user_dir=tmp_path,
+        dry_run=True,
+        mode_revision="rev-1",
+        strategy_config={"MOVE_DRY_RUN_CAPITAL_USD": "1000"},
+        now=now,
+    )
+
+    assert snapshot["account"]["daily_pnl"] == 0.0
+    assert snapshot["account"]["trades_today"] == 0
 
 
 def test_live_position_state_mismatch_is_explicit_and_account_risk_is_unknown(

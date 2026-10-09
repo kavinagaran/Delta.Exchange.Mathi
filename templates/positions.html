@@ -1,76 +1,222 @@
 {% extends "base.html" %}
 
 {% block content %}
-<div class="grid cols-2">
-  <div class="card">
-    <div class="card-hd">Account Value</div>
-    <div class="card-bd">
-      <div class="stats" style="margin:0">
-        <div class="stat"><div class="lbl">Balance (USD)</div><div class="val" id="w-usd">—</div><div class="sub" id="w-avail">Available: —</div></div>
-        <div class="stat"><div class="lbl">Balance (INR)</div><div class="val" id="w-inr">—</div><div class="sub" id="w-rate">USD/INR: —</div></div>
-      </div>
+<div class="exposure-page">
+  <div class="stats exposure-summary" aria-label="Live account snapshot">
+    <div class="stat performance-stat accent" id="card-balance">
+      <div class="lbl">Account balance</div>
+      <div class="val" id="w-usd">—</div>
+      <div class="sub">Delta wallet · USD</div>
+    </div>
+    <div class="stat performance-stat accent" id="card-available">
+      <div class="lbl">Available funds</div>
+      <div class="val" id="w-avail">—</div>
+      <div class="sub">Ready to use</div>
+    </div>
+    <div class="stat performance-stat neutral" id="card-inr">
+      <div class="lbl">Approx. INR value</div>
+      <div class="val" id="w-inr">—</div>
+      <div class="sub" id="w-rate">USD/INR: —</div>
+    </div>
+    <div class="stat performance-stat neutral" id="card-count">
+      <div class="lbl">Open positions</div>
+      <div class="val" id="x-count">—</div>
+      <div class="sub">Across this account</div>
+    </div>
+    <div class="stat performance-stat neutral" id="card-pnl">
+      <div class="lbl">Unrealized P&amp;L</div>
+      <div class="val" id="x-pnl">—</div>
+      <div class="sub">Marked to current price</div>
+    </div>
+    <div class="stat performance-stat neutral" id="card-margin">
+      <div class="lbl">Margin used</div>
+      <div class="val" id="x-margin">—</div>
+      <div class="sub" id="x-margin-note">Reported by Delta</div>
     </div>
   </div>
-  <div class="card">
-    <div class="card-hd">Open Exposure</div>
-    <div class="card-bd">
-      <div class="stats" style="margin:0">
-        <div class="stat"><div class="lbl">Open positions</div><div class="val" id="x-count">—</div></div>
-        <div class="stat"><div class="lbl">Unrealized P&L</div><div class="val" id="x-pnl">—</div></div>
-      </div>
-    </div>
-  </div>
-</div>
 
-<div class="card">
-  <div class="card-hd">All Open Positions <span class="spacer"></span><span class="hint">Everything on this Delta account — bot-tracked or not</span></div>
-  <div class="tbl-wrap">
-    <table>
-      <thead><tr>
-        <th>Contract</th><th>Side</th><th>Size</th><th>Entry</th><th>Mark</th><th>Live P&L</th>
-      </tr></thead>
-      <tbody id="pos-body"><tr class="empty-row"><td colspan="6">Loading…</td></tr></tbody>
-    </table>
+  <div class="card exposure-positions-card">
+    <div class="card-hd">
+      Open Positions
+      <span class="badge neutral exposure-count" id="position-count">—</span>
+      <span class="spacer"></span>
+      <span class="hint exposure-updated" id="exposure-updated" aria-live="polite">Loading…</span>
+      <button class="btn secondary sm" id="exposure-refresh" type="button" onclick="load(true)">Refresh</button>
+    </div>
+    <div class="tbl-wrap">
+      <table class="exposure-positions-table">
+        <thead><tr>
+          <th>Contract</th><th>Ownership</th><th>Side</th><th>Size</th><th>Entry</th><th>Mark</th>
+          <th>Live P&amp;L</th><th>Margin</th><th>Liq. price</th><th>Distance to liq.</th>
+        </tr></thead>
+        <tbody id="pos-body"><tr class="empty-row"><td colspan="10">Loading open positions…</td></tr></tbody>
+      </table>
+    </div>
   </div>
 </div>
 {% endblock %}
 
 {% block scripts %}
 <script>
-async function load() {
-  try {
-    const w = await jget('/api/wallet');
-    if (w.usd_balance != null) {
-      document.getElementById('w-usd').textContent  = '$' + fN(w.usd_balance, 2);
-      document.getElementById('w-avail').textContent = 'Available: $' + fN(w.usd_available, 2);
-      document.getElementById('w-inr').textContent  = w.inr_balance != null ? '₹' + fN(w.inr_balance) : '—';
-      document.getElementById('w-rate').textContent = 'USD/INR: ' + fN(w.usd_inr_rate, 2);
-    }
-  } catch (e) {}
+/* Distance-to-liquidation colour bands are a display heuristic for at-a-glance
+ * scanning, not a risk-management gate. */
+function liqDistancePct(position) {
+  const { side, mark_price: mark, liquidation_price: liq } = position;
+  if (!Number.isFinite(+liq) || !liq || !Number.isFinite(+mark) || !mark) return null;
+  const pct = side === 'LONG' ? (mark - liq) / mark : (liq - mark) / mark;
+  return Number.isFinite(pct) ? pct : null;
+}
 
-  const rows = await jget('/api/all-positions');
+function liqDistanceCls(pct) {
+  if (pct == null) return 'c-muted';
+  if (pct < 0.10) return 'c-neg';
+  if (pct < 0.20) return 'c-warn';
+  return 'c-pos';
+}
+
+function botOwnedProductIds(displaySlots) {
+  const ids = new Set();
+  for (const slot of Object.values(displaySlots || {})) {
+    if (slot && slot.status === 'OPEN' && slot.product_id != null) {
+      ids.add(Number(slot.product_id));
+    }
+  }
+  return ids;
+}
+
+function setExposureCardTone(id, tone) {
+  const card = document.getElementById(id);
+  if (card) card.className = `stat performance-stat ${tone}`;
+}
+
+function setRefreshTime(message = '') {
+  const stamp = new Intl.DateTimeFormat('en-IN', {
+    timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', second: '2-digit',
+  }).format(new Date());
+  document.getElementById('exposure-updated').textContent = message || `Updated ${stamp} IST`;
+}
+
+function renderPositionSummary(rows) {
+  const totalPnl = rows.reduce((total, position) => total + (+position.live_pnl || 0), 0);
+  const knownMargins = rows.filter(position => position.margin != null && Number.isFinite(+position.margin));
+  const totalMargin = knownMargins.reduce((total, position) => total + (+position.margin || 0), 0);
+
+  document.getElementById('x-count').textContent = fN(rows.length);
+  document.getElementById('position-count').textContent = `${rows.length} open`;
+  setExposureCardTone('card-count', rows.length ? 'warning' : 'positive');
+
+  const pnl = document.getElementById('x-pnl');
+  pnl.textContent = rows.length ? f$(totalPnl) : '$0.00';
+  pnl.className = `val ${pnlCls(totalPnl)}`;
+  setExposureCardTone('card-pnl', totalPnl > 0 ? 'positive' : totalPnl < 0 ? 'negative' : 'neutral');
+
+  const margin = document.getElementById('x-margin');
+  const marginNote = document.getElementById('x-margin-note');
+  if (!rows.length) {
+    margin.textContent = '$0.00';
+    marginNote.textContent = 'No open exposure';
+    setExposureCardTone('card-margin', 'neutral');
+  } else if (knownMargins.length) {
+    margin.textContent = '$' + fN(totalMargin, 2);
+    marginNote.textContent = knownMargins.length < rows.length
+      ? `${rows.length - knownMargins.length} position${rows.length - knownMargins.length === 1 ? '' : 's'} not reported`
+      : 'Reported by Delta';
+    setExposureCardTone('card-margin', 'warning');
+  } else {
+    margin.textContent = '—';
+    marginNote.textContent = 'Not reported by Delta';
+    setExposureCardTone('card-margin', 'neutral');
+  }
+}
+
+function renderPositions(rows, displaySlots) {
   const body = document.getElementById('pos-body');
-  if (!Array.isArray(rows) || !rows.length) {
-    body.innerHTML = '<tr class="empty-row"><td colspan="6">No open positions</td></tr>';
-    document.getElementById('x-count').textContent = '0';
-    document.getElementById('x-pnl').textContent = '—';
+  renderPositionSummary(rows);
+  if (!rows.length) {
+    body.innerHTML = `<tr class="empty-row"><td colspan="10">
+      <div class="exposure-empty"><strong>No open exposure</strong>
+      <span>Delta Exchange currently reports no open positions for this account.</span></div>
+    </td></tr>`;
     return;
   }
-  const total = rows.reduce((a, p) => a + (+p.live_pnl || 0), 0);
-  document.getElementById('x-count').textContent = rows.length;
-  const xp = document.getElementById('x-pnl');
-  xp.textContent = f$(total);
-  xp.className = 'val ' + pnlCls(total);
-  body.innerHTML = rows.map(p => `
-    <tr>
-      <td>${esc(p.symbol)}</td>
-      <td><span class="badge ${p.side === 'LONG' ? 'long' : 'short'}">${esc(p.side)}</span></td>
-      <td>${fN(p.size)}</td>
-      <td>$${fN(p.entry_price, 4)}</td>
-      <td>$${fN(p.mark_price, 4)}</td>
-      <td class="${pnlCls(p.live_pnl)}">${f$(p.live_pnl)}</td>
-    </tr>`).join('');
+
+  const botIds = botOwnedProductIds(displaySlots);
+  body.innerHTML = rows.map(position => {
+    const pct = liqDistancePct(position);
+    const owned = botIds.has(Number(position.product_id));
+    return `<tr>
+      <td class="contract">${esc(position.symbol)}</td>
+      <td>${owned ? '<span class="badge live">BOT</span>' : '<span class="badge sim">EXTERNAL</span>'}</td>
+      <td><span class="badge ${position.side === 'LONG' ? 'long' : 'short'}">${esc(position.side)}</span></td>
+      <td class="numeric">${fN(position.size)}</td>
+      <td class="numeric">$${fN(position.entry_price, 4)}</td>
+      <td class="numeric">$${fN(position.mark_price, 4)}</td>
+      <td class="numeric ${pnlCls(position.live_pnl)}">${f$(position.live_pnl)}</td>
+      <td class="numeric">${position.margin != null ? '$' + fN(position.margin, 2) : '—'}</td>
+      <td class="numeric">${position.liquidation_price != null ? '$' + fN(position.liquidation_price, 2) : '—'}</td>
+      <td class="numeric ${liqDistanceCls(pct)}">${pct != null ? fN(pct * 100, 1) + '%' : '—'}</td>
+    </tr>`;
+  }).join('');
 }
+
+let exposureLoadPending = false;
+async function load(manual = false) {
+  if (exposureLoadPending) return;
+  exposureLoadPending = true;
+  const refresh = document.getElementById('exposure-refresh');
+  refresh.disabled = true;
+  if (manual) document.getElementById('exposure-updated').textContent = 'Refreshing…';
+
+  try {
+    try {
+      const wallet = await jget('/api/wallet');
+      if (wallet.error) throw new Error(wallet.error);
+      document.getElementById('w-usd').textContent = '$' + fN(wallet.usd_balance, 2);
+      document.getElementById('w-avail').textContent = '$' + fN(wallet.usd_available, 2);
+      document.getElementById('w-inr').textContent = wallet.inr_balance != null ? '₹' + fN(wallet.inr_balance) : '—';
+      document.getElementById('w-rate').textContent = wallet.usd_inr_rate != null
+        ? 'USD/INR: ' + fN(wallet.usd_inr_rate, 2)
+        : 'Conversion unavailable';
+    } catch (_error) {
+      document.getElementById('w-usd').textContent = 'Unavailable';
+      document.getElementById('w-avail').textContent = 'Unavailable';
+      document.getElementById('w-inr').textContent = 'Unavailable';
+      document.getElementById('w-rate').textContent = 'Wallet could not be reached';
+      setExposureCardTone('card-balance', 'negative');
+      setExposureCardTone('card-available', 'negative');
+      setExposureCardTone('card-inr', 'negative');
+    }
+
+    const [positionsResult, status] = await Promise.all([
+      jget('/api/all-positions'),
+      jget('/api/status').catch(() => ({})),
+    ]);
+    if (!Array.isArray(positionsResult)) {
+      throw new Error(positionsResult?.error || 'Open positions could not be loaded');
+    }
+    renderPositions(positionsResult, status.display_slots || {});
+    setRefreshTime();
+    if (manual) toast('Exposure refreshed');
+  } catch (error) {
+    document.getElementById('pos-body').innerHTML = `<tr class="empty-row"><td colspan="10">
+      <div class="exposure-empty error"><strong>Exposure unavailable</strong>
+      <span>${esc(error.message || 'The exchange could not be reached. Try again shortly.')}</span></div>
+    </td></tr>`;
+    document.getElementById('x-count').textContent = '—';
+    document.getElementById('x-pnl').textContent = '—';
+    document.getElementById('x-margin').textContent = '—';
+    document.getElementById('position-count').textContent = 'Unavailable';
+    setExposureCardTone('card-count', 'negative');
+    setExposureCardTone('card-pnl', 'negative');
+    setExposureCardTone('card-margin', 'negative');
+    setRefreshTime('Update failed');
+    if (manual) toast('Could not refresh exposure', 'err');
+  } finally {
+    exposureLoadPending = false;
+    refresh.disabled = false;
+  }
+}
+
 load();
 setInterval(load, 15_000);
 </script>

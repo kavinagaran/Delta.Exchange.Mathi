@@ -40,6 +40,13 @@ def test_score_auto_accepts_explicit_mode_matching_trading_mode(
     assert dashboard._validate_config_update(config, config) is None
 
 
+def test_live_score_move_is_default_on_when_stop_and_risk_caps_are_valid():
+    config = _score_config("live", dry_run="false")
+    config["ALLOW_SHORT_MOVE"] = "false"
+
+    assert dashboard._trend_score_auto_config_error(config) is None
+
+
 @pytest.mark.parametrize(
     ("mode", "dry_run", "message"),
     (

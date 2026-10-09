@@ -1,0 +1,40 @@
+# Tooling configuration only — deliberately NO [project] / [build-system].
+# The repo is not installed as a package; production starts `python dashboard.py`
+# and `python -m btc_trend_engine.api.app` with the repo root on sys.path.
+# Making it installable would change how a live trading system starts, for no
+# benefit (ADR 0001 / plan §Packaging).
+
+[tool.pytest.ini_options]
+# First pytest config in this repo. Collection covered exactly the legacy
+# tests/ tree before; btc_trend_engine/tests is added alongside. Verified by
+# comparing pass counts before/after introduction.
+testpaths = ["tests", "btc_trend_engine/tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+# Scoped to the new package; the legacy flat modules are working trading code
+# and are not reformatted retroactively.
+include = [
+    "btc_trend_engine/**/*.py",
+    "scripts/probe_venue.py",
+    "scripts/prune_data.py",
+]
+line-length = 96
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+ignore = ["SIM108"]  # ternary-vs-if is a readability call, not a defect
+
+[tool.mypy]
+# Strict typing for the engine only. dashboard.py (11.6k lines of working
+# trading code) is deliberately out of scope — typing it retroactively risks
+# behaviour changes for zero payoff.
+strict = true
+files = ["btc_trend_engine"]
+exclude = ["btc_trend_engine/tests"]
+python_version = "3.14"
+
+[[tool.mypy.overrides]]
+module = ["websockets.*", "uvicorn.*"]
+ignore_missing_imports = true
