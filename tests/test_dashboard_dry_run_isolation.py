@@ -66,6 +66,25 @@ def _dry_state(slot: str = "evening", **updates) -> dict:
     return state
 
 
+def test_dry_peak_trail_view_exposes_dynamic_tsl_to_both_clients():
+    state = _dry_state("trend", dry_peak_pnl_usd=44.21,
+                       dry_tsl_armed=True, dry_tsl_floor_usd=-274.79)
+    state["protection_config"].update({
+        "protection_mode": "filled_premium_percent_peak_trail_v2",
+        "tsl_arm_pnl": 0, "tsl_pct": 50,
+    })
+    view = dashboard._dry_protection_view(state)
+    assert view["nimmathi_tsl"] is True
+    assert view["tsl_armed"] is True
+    assert view["peak_pnl_usd"] == 44.21
+    assert view["tsl_floor_usd"] == -274.79
+    state.update(dry_peak_pnl_usd=400, dry_tsl_floor_usd=200)
+    refreshed = dashboard._dry_protection_view(state)
+    assert refreshed["peak_pnl_usd"] == 400
+    assert refreshed["tsl_floor_usd"] == 200
+    assert refreshed["peak_pnl_usd"] - refreshed["tsl_floor_usd"] == 200
+
+
 @pytest.fixture
 def isolated_dashboard(tmp_path, monkeypatch):
     users = tmp_path / "users"

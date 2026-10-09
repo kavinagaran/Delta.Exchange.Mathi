@@ -620,6 +620,47 @@ void main() {
     expect(find.text('TP / SL / TSL Monitor'), findsOneWidget);
     expect(find.text('WATCHDOG · 10s'), findsOneWidget);
   });
+
+  testWidgets('paper peak trail values refresh without the legacy mode flag', (tester) async {
+    tester.view.physicalSize = const Size(390, 1400);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final api = _DryPeakProtectionApi();
+    await tester.pumpWidget(MaterialApp(theme: buildAppTheme(blue: true),
+      home: Scaffold(body: TodayScreen(api: api, onUnauthorised: () {}, onBtcPrice: (_) {}))));
+    await tester.pumpAndSettle();
+    expect(find.text('PEAK P&L'), findsOneWidget);
+    expect(find.text('TSL GIVEBACK'), findsOneWidget);
+    expect(find.text('TSL FLOOR'), findsOneWidget);
+    expect(find.text('\$44.21'), findsOneWidget);
+    expect(find.text('\$319.00'), findsOneWidget);
+    expect(find.text('\$-274.79'), findsOneWidget);
+    expect(find.text('TSL ARMED'), findsOneWidget);
+    api.peak = 400;
+    api.floor = 200;
+    await tester.widget<RefreshIndicator>(find.byType(RefreshIndicator)).onRefresh();
+    await tester.pumpAndSettle();
+    expect(find.text('\$400.00'), findsOneWidget);
+    expect(find.text('\$200.00'), findsNWidgets(2));
+    expect(find.text('TSL ARM'), findsNothing);
+  });
+}
+
+class _DryPeakProtectionApi extends _TodayApi {
+  double peak = 44.21;
+  double floor = -274.79;
+  @override
+  Future<ApiResult<List<dynamic>>> todayTrades() async {
+    final result = await super.todayTrades();
+    final trade = Map<String, dynamic>.from(result.data!.first as Map);
+    trade['dry_protection'] = <String, dynamic>{
+      'running': true, 'protection_mode': 'filled_premium_percent_peak_trail_v2',
+      'tsl_armed': true, 'tsl_arm_pnl': 0, 'peak_pnl_usd': peak,
+      'tsl_floor_usd': floor, 'poll_secs': 10,
+    };
+    return ApiResult.ok([trade]);
+  }
 }
 
 class _TodayApi extends DashboardApi {

@@ -244,7 +244,9 @@ function todayInlineProtectionHtml(protection) {
     ? Number(protection.stream_tsl_peak)
     : todayKnownNumber(health.peak_pnl) ? Number(health.peak_pnl) : null;
   const tslArm = Number(protection.tsl_arm_pnl || 0);
-  const armed = protection.nimmathi_tsl === true
+  const nimmathiTsl = protection.nimmathi_tsl === true ||
+    protection.protection_mode === 'filled_premium_percent_peak_trail_v2';
+  const armed = nimmathiTsl
     ? rawArmed
     : (rawArmed && tslArm > 0 && (peakValue ?? 0) >= tslArm);
   const status = armed ? 'TSL ARMED' : running ? 'RUNNING' : 'NOT RUNNING';
@@ -275,7 +277,6 @@ function todayInlineProtectionHtml(protection) {
   const coverageHtml = coverage
     ? ` · <strong class="today-telemetry-coverage">${esc(coverage)}</strong>`
     : '';
-  const nimmathiTsl = protection.nimmathi_tsl === true;
   const peakCard = peakValue !== null ? esc(f$(peakValue)) : '—';
   const floorCard = armed && todayKnownNumber(floorValue)
     ? esc(f$(Number(floorValue))) : '—';

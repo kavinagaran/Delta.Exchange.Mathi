@@ -4681,7 +4681,7 @@ def download_apk():
     response = send_file(
         str(apk),
         as_attachment=True,
-        download_name="btc-bot-6.3.18-54.apk",
+        download_name="btc-bot-6.3.19-55.apk",
         max_age=0,
     )
     # The download URL is intentionally stable. Prevent browsers and Android
@@ -5865,6 +5865,9 @@ def _dry_protection_view(
         status = "starting"
     return {
         **policy,
+        "nimmathi_tsl": (
+            policy["protection_mode"] == "filled_premium_percent_peak_trail_v2"
+        ),
         "running": is_open,
         "status": status,
         "last_check_utc": (

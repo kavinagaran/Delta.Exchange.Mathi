@@ -839,7 +839,8 @@ class _ProtectionPanel extends StatelessWidget {
         : <String, dynamic>{'peak_pnl': protection['peak_pnl_usd']};
     final peak =
         _number(protection['stream_tsl_peak']) ?? _number(health['peak_pnl']);
-    final nimmathiTsl = protection['nimmathi_tsl'] == true;
+    final nimmathiTsl = protection['nimmathi_tsl'] == true ||
+        protection['protection_mode'] == 'filled_premium_percent_peak_trail_v2';
     final rawArmed =
         protection['stream_tsl_armed'] == true ||
         protection['tsl_armed'] == true;
