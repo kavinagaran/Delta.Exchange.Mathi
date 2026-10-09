@@ -32,6 +32,27 @@ class ConfigApi extends DashboardApi {
 }
 
 void main() {
+  for (final enabled in [true, false]) {
+    testWidgets('switching to Dry Run aligns automation; enabled=$enabled', (tester) async {
+      final api = ConfigApi(mode: enabled ? 'live' : 'disabled');
+      await tester.pumpWidget(MaterialApp(home: Scaffold(body: ConfigScreen(
+        api: api, onUnauthorised: () {}, displayName: 'Test',
+      ))));
+      await tester.pumpAndSettle();
+      final mode = find.byType(DropdownButtonFormField<String>).first;
+      await tester.ensureVisible(mode);
+      await tester.tap(mode);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('DRY RUN').last);
+      await tester.pumpAndSettle();
+      final save = find.text('Save configuration');
+      await tester.scrollUntilVisible(save, 500, scrollable: find.byType(Scrollable).first);
+      await tester.tap(save);
+      await tester.pumpAndSettle();
+      expect(api.posted?['DRY_RUN'], 'true');
+      expect(api.posted?['TREND_ENGINE_SCORE_AUTO_MODE'], enabled ? 'dry_run' : 'disabled');
+    });
+  }
   testWidgets('large BTC pill fits narrow toolbar with 24h change', (
     tester,
   ) async {

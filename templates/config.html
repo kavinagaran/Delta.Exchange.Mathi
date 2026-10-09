@@ -298,6 +298,10 @@ async function configBotToggleChanged(checked) {
 function modeSelectionChanged() {
   const select = document.getElementById('c-DRY_RUN');
   modeDirty = select.value !== loadedDryRun;
+  const controller = document.getElementById('c-TREND_ENGINE_SCORE_AUTO_MODE');
+  if (controller.value !== 'disabled') {
+    controller.value = select.value === 'true' ? 'dry_run' : 'live';
+  }
   controllerSummary();
 }
 

@@ -53,6 +53,24 @@ def _mode_availability_endpoint() -> tuple[dict, int]:
         return _response(view())
 
 
+@pytest.mark.parametrize("controller,expected", [("live", "dry_run"), ("disabled", "disabled")])
+def test_old_android_mode_switch_aligns_enabled_controller(
+        isolated_account, monkeypatch, controller, expected):
+    _write_json(isolated_account / "config.json", {
+        "DRY_RUN": "false", "TREND_ENGINE_SCORE_AUTO_MODE": controller,
+        "ALLOW_SHORT_MOVE": "false",
+    })
+    monkeypatch.setattr(dashboard, "_trading_mode_change_status",
+                        lambda: {"mode_change_allowed": True})
+    payload, status = _post_config({
+        "DRY_RUN": "true", "TREND_ENGINE_SCORE_AUTO_MODE": controller,
+    })
+    assert status == 200, payload
+    saved = json.loads((isolated_account / "config.json").read_text(encoding="utf-8"))
+    assert saved["DRY_RUN"] == "true"
+    assert saved["TREND_ENGINE_SCORE_AUTO_MODE"] == expected
+
+
 def test_environment_or_legacy_flag_cannot_default_account_to_live(
         isolated_account, monkeypatch):
     monkeypatch.setenv("TREND_AUTO_ENTRY_MODE", "live")

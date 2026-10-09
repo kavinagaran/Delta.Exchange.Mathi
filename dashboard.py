@@ -4681,7 +4681,7 @@ def download_apk():
     response = send_file(
         str(apk),
         as_attachment=True,
-        download_name="btc-bot-6.3.17-53.apk",
+        download_name="btc-bot-6.3.18-54.apk",
         max_age=0,
     )
     # The download URL is intentionally stable. Prevent browsers and Android
@@ -17634,6 +17634,20 @@ def _save_config_data(data: dict):
                 "config_saved": False,
                 "error": str(exc),
             }), 409
+        # Older clients submit the previously selected controller mode when
+        # changing account mode. Keep an enabled controller in that account's
+        # namespace; an explicitly disabled controller stays disabled.
+        if "DRY_RUN" in data:
+            previous_mode = _trend_score_auto_mode(current)
+            requested_mode = _trend_score_auto_mode({**current, **data})
+            if (
+                _config_truthy(data["DRY_RUN"]) != _config_truthy(current.get("DRY_RUN"))
+                and previous_mode in {"live", "dry_run"}
+                and requested_mode == previous_mode
+            ):
+                data["TREND_ENGINE_SCORE_AUTO_MODE"] = (
+                    "dry_run" if _config_truthy(data["DRY_RUN"]) else "live"
+                )
         error = _validate_config_update(data, current)
         if error:
             return jsonify({"ok": False, "config_saved": False,

@@ -337,7 +337,12 @@ class _ConfigScreenState extends State<ConfigScreen> {
                     DropdownMenuItem(value: 'false', child: Text('LIVE')),
                   ],
                   onChanged: modeAllowed
-                      ? (value) => setState(() => _accountMode = value!)
+                      ? (value) => setState(() {
+                          _accountMode = value!;
+                          if (_automation != 'disabled') {
+                            _automation = _accountMode == 'true' ? 'dry_run' : 'live';
+                          }
+                        })
                       : null,
                 ),
                 if (!modeAllowed) ...[
